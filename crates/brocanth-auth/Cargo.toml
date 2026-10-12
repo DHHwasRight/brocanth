@@ -1,0 +1,80 @@
+[package]
+name = "brocanth-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Authentication for brocanth: OAuth 2.0 and OIDC with mandatory PKCE, providers as data, argon2id local accounts, database-backed sessions and explicit identity linking — a plugin, because an application with no accounts should link none of it."
+
+[dependencies]
+# The arrow points plugin -> core, always. The core does not know this crate
+# exists and nothing here is reachable from it.
+brocanth.workspace = true
+
+# --- crypto we do not write ------------------------------------------------
+#
+# `argon2` (RustCrypto): the reference Rust Argon2 implementation, used by the
+# PHC string format's own reference crate, so a stored hash is a portable
+# `$argon2id$...` string rather than a bespoke encoding. We take argon2id and
+# offer no alternative.
+argon2 = "0.6"
+# `jsonwebtoken`: the maintained Rust JWT crate, and the only one that both
+# verifies RS256/ES256 id_tokens and *signs* ES256, which Apple's client-secret
+# JWT requires. `rust_crypto` keeps the backend pure Rust: no aws-lc-rs C build
+# in a plugin an application may not even use.
+jsonwebtoken = { version = "11", default-features = false, features = [
+    "use_pem",
+    "rust_crypto",
+] }
+# HMAC-SHA256 for the session cookie signature and for hashing the verifier
+# half of a single-use token. RustCrypto again, same reason.
+hmac = "0.13"
+sha2 = "0.11"
+# Constant-time equality. `==` on a byte slice short-circuits and leaks the
+# length of the common prefix, which is enough to forge a MAC one byte at a
+# time.
+subtle = "2.6"
+# The OS CSPRNG, directly. Session ids, state, nonce, PKCE verifiers and
+# single-use tokens are all "give me N unpredictable bytes" and nothing else.
+getrandom = "0.4"
+
+# --- plumbing ---------------------------------------------------------------
+base64 = "0.23"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+# The storage trait and the HTTP client trait are both async and both
+# object-safe, which `async fn` in a trait still is not.
+async-trait = "0.1"
+
+# `reqwest` is the default HTTP client because it is what the ecosystem
+# already has in the tree, and rustls keeps it off the system TLS stack. It is
+# a feature, and the trait is the contract: an application already holding a
+# hyper or ureq client sets `default-features = false` and implements
+# `HttpClient` itself, and reqwest then appears nowhere in its lock file.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+    "charset",
+    "form",
+], optional = true }
+
+[dev-dependencies]
+# The only thing the tests need that the library does not already provide: a
+# runtime to drive the async store and HTTP traits.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[features]
+# Empty by default, and that is the §8 rule rather than an oversight. The plan
+# puts sessions, cookies and argon2id in v1 and cuts OAuth from it, so the
+# common case here is an application with local accounts and no provider at
+# all — and that application must not link an HTTP client, a TLS stack and an
+# async runtime to hash a password. Turn the feature on to get
+# `ReqwestClient`; leave it off and implement `HttpClient` over whatever the
+# application already holds.
+default = []
+reqwest-client = ["dep:reqwest"]
+
+[lints.rust]
+missing_docs = "warn"
