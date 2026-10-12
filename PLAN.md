@@ -234,3 +234,69 @@ tracking, which `ActiveValue` already mostly provides. Counter caches.
 
 On Diesel the same list is ten to fourteen months, and some of it stays
 permanently leaky.
+
+## 8. Modularity: nothing ships unless it is asked for
+
+The governing constraint, and it outranks convenience everywhere it applies.
+
+**The core is a router handing a request and a context to a controller.** That
+is the whole of it. No logger, no database, no sessions, no templating, no
+TOML — the Crystal original does not even assume a log layer, and neither does
+this.
+
+Everything else is a **plugin that must be named in `main`**. A plugin that is
+not imported is not compiled, not linked, and contributes nothing: no
+dependency in the tree, no column in the config, no field on the context, no
+bytes in the binary. "Convention over configuration" is Rails' good idea;
+"the framework decided for you and you cannot see where" is its bad one, and
+the line between them is whether the decision is written in your `main`.
+
+### What this means concretely
+
+1. **Each capability is its own crate**, and the core depends on none of them.
+   The dependency arrow points from the plugin to the core, always. A plugin
+   that needs another plugin depends on it directly, in the open.
+2. **Feature flags gate compilation, not behaviour.** A feature that is off
+   must mean the code is absent, not that a branch returns early. If turning a
+   feature off leaves its dependencies in `Cargo.lock`, the split is wrong.
+3. **The context is built from what was imported.** Its provider set lives in
+   the application's *type*, so a handler asking for a value whose plugin was
+   never registered does not compile. This is already built, and it is the
+   mechanism that makes the rest safe: modularity enforced by the type system
+   rather than by discipline.
+4. **The ORM is recommended and absent.** SeaORM is the recommendation in §7;
+   it is not a dependency of the core and never will be. The model layer is a
+   plugin that registers hooks like any other, and an application that stores
+   nothing pays nothing for it. A different ORM is a different plugin against
+   the same extension points.
+5. **Config is a plugin too.** The core takes already-parsed values. TOML, the
+   environment-scoped file resolution, and the merge order are a crate an
+   application opts into — a service configured entirely from its environment
+   should not link a TOML parser.
+
+### The extension points the core owns
+
+The core cannot know what plugins exist, so it publishes seams rather than
+features:
+
+- **Context providers** — a plugin contributes typed values to the context.
+- **Middleware offers** — a plugin *offers* a layer; only the application
+  mounts it, at a pattern the application chooses. This was the Crystal
+  author's explicit instruction and it survives: *"I do not want plugins to
+  register middleware themselves."*
+- **Lifecycle hooks** — `configure`, `register`, `after_config`,
+  `configure_router`, `before_start`, in that order.
+- **Request hooks** — before dispatch and after the response, which is what a
+  logger, a metrics plugin and an ORM's connection-per-request all need.
+- **Shutdown hooks** — so a connection pool can drain.
+
+That list is the whole contract. Anything a plugin cannot do through it is a
+gap in the core, to be fixed by widening the seam rather than by special-casing
+the plugin.
+
+### The test that keeps it honest
+
+A build of the core alone, with every feature off, that asserts the dependency
+tree contains no TOML parser, no SQL driver, no logging framework and no async
+runtime. Modularity claimed in a README rots; modularity asserted in CI does
+not.
