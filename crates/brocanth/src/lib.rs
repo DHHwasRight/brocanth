@@ -14,4 +14,13 @@
 //! than documents them.
 
 pub mod config;
+pub mod plugin_api;
+pub mod plugin_app;
+pub mod plugin_context;
 pub mod routing;
+pub mod routing_codegen;
+pub mod routing_middleware;
+pub mod routing_params;
+pub mod routing_path;
+pub mod routing_pattern;
+pub mod routing_verb;
