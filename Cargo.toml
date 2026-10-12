@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/brocanth-openapi", "crates/brocanth", "crates/brocanth-admin", "crates/brocanth-config", "crates/brocanth-cli", "crates/brocanth-model", "crates/brocanth-auth", "crates/brocanth-schema", "crates/brocanth-jobs"]
+members = ["crates/brocanth-openapi", "crates/brocanth", "crates/brocanth-admin", "crates/brocanth-config", "crates/brocanth-cli", "crates/brocanth-model", "crates/brocanth-auth", "crates/brocanth-schema", "crates/brocanth-jobs", "crates/brocanth-server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,3 +9,4 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 brocanth = { path = "crates/brocanth", version = "0.1.0" }
+brocanth-server = { path = "crates/brocanth-server", version = "0.1.0" }

@@ -1,0 +1,32 @@
+[package]
+name = "brocanth-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An HTTP entrypoint for a brocanth application, on Tokio."
+
+# Tokio rather than a thread pool, for M:N: a connection costs a task, not an
+# OS thread, so idle keep-alives are nearly free and the work-stealing
+# scheduler spreads handlers across cores on its own.
+#
+# It is also the only choice that leaves one concurrency model in the binary.
+# brocanth-model is sqlx on runtime-tokio-rustls and brocanth-jobs is Tokio
+# directly, so a blocking server would have meant a thread pool calling into an
+# async pool -- two schedulers, each unaware of the other's backpressure.
+[dependencies]
+brocanth.workspace = true
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = [
+    "tokio",
+    "server",
+    "server-auto",
+    "server-graceful",
+    "http1",
+    "http2",
+] }
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
