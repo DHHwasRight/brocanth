@@ -276,3 +276,207 @@ impl<C, O> core::fmt::Debug for MiddlewareStack<C, O> {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A context that records what ran, so order and short-circuiting are
+    /// observed rather than inferred from a return value.
+    type Trace = Arc<Mutex<Vec<String>>>;
+
+    fn note(trace: &Trace, what: &str) {
+        trace.lock().expect("trace").push(what.to_string());
+    }
+
+    /// A layer that records its name and continues.
+    fn pass(name: &'static str) -> impl Layer<Trace, ()> {
+        move |ctx: &mut Trace, next: Next<'_, Trace, ()>| {
+            note(ctx, &format!("{name}:in"));
+            next.run(ctx);
+            note(ctx, &format!("{name}:out"));
+        }
+    }
+
+    /// A layer that records its name and does not continue.
+    fn stop(name: &'static str) -> impl Layer<Trace, ()> {
+        move |ctx: &mut Trace, _next: Next<'_, Trace, ()>| {
+            note(ctx, &format!("{name}:stop"));
+        }
+    }
+
+    fn run(stack: &MiddlewareStack<Trace, ()>, path: &str) -> Vec<String> {
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = Arc::clone(&trace);
+        stack.run(path, &mut ctx, |c| note(c, "handler"));
+        let out = trace.lock().expect("trace").clone();
+        out
+    }
+
+    #[test]
+    fn chains_run_in_registration_order_and_unwind_in_reverse() {
+        // Rule 1. The first layer registered is the outermost, so it is
+        // entered first and left last -- which is what makes a timing or
+        // logging layer able to wrap everything inside it.
+        let mut stack = MiddlewareStack::new();
+        stack.use_at("/{*rest}", pass("a")).expect("pattern");
+        stack.use_at("/{*rest}", pass("b")).expect("pattern");
+
+        assert_eq!(
+            run(&stack, "/anything"),
+            ["a:in", "b:in", "handler", "b:out", "a:out"]
+        );
+    }
+
+    #[test]
+    fn a_layer_that_does_not_continue_stops_everything_after_it() {
+        // Rule 2. Neither the later layers nor the handler run -- which is
+        // the whole point of an authentication layer.
+        let mut stack = MiddlewareStack::new();
+        stack.use_at("/{*rest}", pass("outer")).expect("pattern");
+        stack.use_at("/{*rest}", stop("guard")).expect("pattern");
+        stack.use_at("/{*rest}", pass("never")).expect("pattern");
+
+        let trace = run(&stack, "/admin");
+        assert_eq!(trace, ["outer:in", "guard:stop", "outer:out"]);
+        assert!(
+            !trace.iter().any(|s| s == "handler"),
+            "handler ran: {trace:?}"
+        );
+        assert!(!trace.iter().any(|s| s.starts_with("never")), "{trace:?}");
+    }
+
+    #[test]
+    fn except_wins_over_the_pattern_and_only_for_that_layer() {
+        // Rule 3. The excluded layer is skipped; every other layer matching
+        // the same path still runs. Getting this wrong by skipping the whole
+        // chain is the obvious implementation and is silently wrong.
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_scoped(Scope::all().except("/health"), pass("auth"))
+            .expect("pattern");
+        stack.use_at("/{*rest}", pass("log")).expect("pattern");
+
+        assert_eq!(
+            run(&stack, "/admin"),
+            ["auth:in", "log:in", "handler", "log:out", "auth:out"]
+        );
+        assert_eq!(run(&stack, "/health"), ["log:in", "handler", "log:out"]);
+    }
+
+    #[test]
+    fn a_path_outside_every_pattern_reaches_the_handler_alone() {
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_at("/admin/{*rest}", pass("auth"))
+            .expect("pattern");
+        assert_eq!(run(&stack, "/public"), ["handler"]);
+    }
+
+    #[test]
+    fn an_empty_stack_still_runs_the_handler() {
+        let stack: MiddlewareStack<Trace, ()> = MiddlewareStack::new();
+        assert!(stack.is_empty());
+        assert_eq!(run(&stack, "/"), ["handler"]);
+    }
+
+    #[test]
+    fn scopes_select_by_prefix() {
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_at("/admin/{*rest}", pass("admin"))
+            .expect("pattern");
+        stack.use_at("/api/{*rest}", pass("api")).expect("pattern");
+
+        assert_eq!(stack.patterns_for("/admin/users"), ["/admin/{*rest}"]);
+        assert_eq!(stack.patterns_for("/api/v1"), ["/api/{*rest}"]);
+        assert!(stack.patterns_for("/other").is_empty());
+    }
+
+    #[test]
+    fn a_catch_all_covers_the_bare_prefix_too() {
+        // `/admin/{*rest}` must cover `/admin`, or a layer guarding a section
+        // leaves its own index page unguarded -- an authorisation hole that
+        // looks like a routing detail.
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_at("/admin/{*rest}", pass("auth"))
+            .expect("pattern");
+        assert_eq!(stack.patterns_for("/admin"), ["/admin/{*rest}"]);
+        assert_eq!(run(&stack, "/admin"), ["auth:in", "handler", "auth:out"]);
+    }
+
+    #[test]
+    fn several_exclusions_are_all_honoured() {
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_scoped(
+                Scope::all().except_all(["/health", "/metrics"]),
+                pass("auth"),
+            )
+            .expect("pattern");
+
+        assert_eq!(run(&stack, "/health"), ["handler"]);
+        assert_eq!(run(&stack, "/metrics"), ["handler"]);
+        assert_eq!(run(&stack, "/x"), ["auth:in", "handler", "auth:out"]);
+    }
+
+    #[test]
+    fn a_layer_can_change_the_context_before_and_after_the_handler() {
+        let mut stack = MiddlewareStack::new();
+        stack
+            .use_at(
+                "/{*rest}",
+                |ctx: &mut Vec<u8>, next: Next<'_, Vec<u8>, ()>| {
+                    ctx.push(1);
+                    next.run(ctx);
+                    ctx.push(3);
+                },
+            )
+            .expect("pattern");
+
+        let mut ctx: Vec<u8> = Vec::new();
+        stack.run("/x", &mut ctx, |c| c.push(2));
+        assert_eq!(ctx, [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_terminal_value_is_returned_through_the_chain() {
+        let mut stack: MiddlewareStack<(), u32> = MiddlewareStack::new();
+        stack
+            .use_at("/{*rest}", |ctx: &mut (), next: Next<'_, (), u32>| {
+                next.run(ctx) + 1
+            })
+            .expect("pattern");
+        assert_eq!(stack.run("/x", &mut (), |_| 41), 42);
+    }
+
+    #[test]
+    fn a_short_circuiting_layer_chooses_the_returned_value() {
+        let mut stack: MiddlewareStack<(), u32> = MiddlewareStack::new();
+        stack
+            .use_at("/{*rest}", |_ctx: &mut (), _next: Next<'_, (), u32>| 403)
+            .expect("pattern");
+        assert_eq!(stack.run("/x", &mut (), |_| 200), 403);
+    }
+
+    #[test]
+    fn a_malformed_pattern_is_refused_rather_than_matching_nothing() {
+        // Silently never matching is how an authorisation layer goes missing.
+        let mut stack: MiddlewareStack<Trace, ()> = MiddlewareStack::new();
+        assert!(stack.use_at("/{*rest}/after", pass("x")).is_err());
+        assert!(stack.is_empty(), "a refused pattern must not register");
+    }
+
+    #[test]
+    fn registering_returns_the_stack_so_calls_chain() {
+        let mut stack: MiddlewareStack<Trace, ()> = MiddlewareStack::new();
+        stack
+            .use_at("/{*rest}", pass("a"))
+            .expect("pattern")
+            .use_at("/{*rest}", pass("b"))
+            .expect("pattern");
+        assert_eq!(stack.len(), 2);
+    }
+}
