@@ -1,0 +1,54 @@
+[package]
+name = "brocanth-jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Background jobs for brocanth: a database-backed queue with retries, a dead letter, scheduling and a worker pool — a plugin, because an application that enqueues nothing should pay nothing."
+
+# The core has three dependencies and a test that fails the build if a fourth
+# kind arrives. This crate is where the async runtime and the SQL driver
+# actually land, and that is the point: the arrow points from the plugin to the
+# core, never back. An application that never writes `JobsPlugin` in its `main`
+# links none of this.
+#
+# `sqlx` is version 0.9, which is the version `sea-orm` 2.0.4 already resolves
+# to in this workspace, so an application running both the model layer and the
+# queue links one SQL driver and one connection pool implementation, not two.
+[dependencies]
+brocanth.workspace = true
+
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"
+
+[features]
+# The backend is a compile-time choice made in `Cargo.toml`, which is the whole
+# answer to the Rails trap: Rails configures Solid Queue in `production.rb`
+# only, so development and test run a different queue and a job that works
+# locally fails in production. A Cargo feature cannot vary by `RAILS_ENV`. The
+# queue you build is the queue you run, in every environment.
+#
+# `sqlite` is the default because the framework's own tests, a `cargo test` on
+# a laptop and a small single-machine deployment all want a backend that needs
+# no server. A Postgres deployment writes:
+#
+# ```toml
+# brocanth-jobs = { version = "0.1", default-features = false, features = ["postgres"] }
+# ```
+#
+# and gets no `libsqlite3-sys`. Leaving `default-features` on and adding
+# `postgres` compiles both drivers, which works and is almost never what you
+# meant.
+default = ["sqlite"]
+postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring"]
+sqlite = ["sqlx/sqlite-bundled"]
+
+[lints.rust]
+missing_docs = "warn"

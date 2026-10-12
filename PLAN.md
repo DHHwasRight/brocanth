@@ -103,9 +103,17 @@ image upload and a welcome email, and never leaves the documentation.**
 11. **The cheap finish.** `routes`, `/up`, graceful shutdown, Dockerfile,
     seeds, pagination, rate limiting, encrypted secrets, query console.
 
-**Cut from v1, explicitly:** WebSockets, SSE, i18n, OAuth, JWT, multi-tenancy,
-soft delete, metrics, tracing, cron, pubsub, notifications, factories,
-fixtures, debug toolbar, S3, and any deployment tooling beyond a Dockerfile.
+**Cut from v1, explicitly:** WebSockets, SSE, i18n, multi-tenancy, soft
+delete, metrics, tracing, pubsub, notifications, factories, fixtures, debug
+toolbar, S3, and any deployment tooling beyond a Dockerfile.
+
+**Three things on that list shipped anyway, and the list is wrong rather than
+the work.** OAuth and JWT arrived with `brocanth-auth`, because a framework
+whose first real application needs a login cannot cut the login. Cron arrived
+with `brocanth-jobs`, where a recurring schedule is a few hundred lines beside
+a queue that already exists and a separate crate later would duplicate the
+worker. Each carries its dependency in the plugin rather than the core, which
+is the test that matters.
 
 ## 5. What dp-swap leaves for the server
 
