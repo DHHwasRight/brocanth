@@ -1,0 +1,30 @@
+[package]
+name = "brocanth-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A Django-admin-shaped backoffice for brocanth, with every screen configured through rsx templates."
+
+# Four dependencies, and three of them are small. There is no SQL driver and no
+# ORM here: PLAN.md §8.4 says the ORM is recommended and absent, so this crate
+# takes a `dyn AdminData` the application supplies and never learns what is
+# behind it. There is no authentication scheme either, for the same reason —
+# §8 forbids assuming one, so the admin takes a policy instead (and denies
+# everything until it is given one).
+[features]
+# On by default: a brocanth plugin should be a brocanth plugin out of the box.
+# It is a feature rather than a plain dependency because the admin is useful
+# behind any server — `Admin::dispatch` takes a method, a path and form pairs —
+# and §8.2 says a feature that is off means the code is absent. With `plugin`
+# off, `brocanth` is not in the tree at all.
+default = ["plugin"]
+plugin = ["dep:brocanth"]
+
+[dependencies]
+brocanth = { workspace = true, optional = true }
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
+async-trait = "0.1"
+thiserror = "2"
+
+[lints.rust]
+missing_docs = "warn"

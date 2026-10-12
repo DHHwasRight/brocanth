@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/brocanth", "crates/brocanth-config", "crates/brocanth-cli", "crates/brocanth-model"]
+members = ["crates/brocanth-openapi", "crates/brocanth", "crates/brocanth-admin", "crates/brocanth-config", "crates/brocanth-cli", "crates/brocanth-model", "crates/brocanth-auth", "crates/brocanth-schema", "crates/brocanth-jobs"]
 
 [workspace.package]
 version = "0.1.0"
