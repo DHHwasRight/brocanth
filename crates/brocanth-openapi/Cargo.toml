@@ -1,0 +1,16 @@
+[package]
+name = "brocanth-openapi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An OpenAPI 3.1 document derived from a brocanth route table, plus a drift check that turns `the spec is out of date` into a build failure."
+
+# Three dependencies, and two of them are the core's own. There is no serde
+# here and no YAML crate: the document is built as an ordered value and
+# written by hand, so key order is ours to fix and a drift diff compares
+# structure rather than whitespace. An application that does not name this
+# plugin in `main` links none of it.
+[dependencies]
+brocanth.workspace = true
+http = "1"
+thiserror = "2"
