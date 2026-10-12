@@ -284,11 +284,36 @@ features:
   mounts it, at a pattern the application chooses. This was the Crystal
   author's explicit instruction and it survives: *"I do not want plugins to
   register middleware themselves."*
-- **Lifecycle hooks** — `configure`, `register`, `after_config`,
-  `configure_router`, `before_start`, in that order.
+- **Application hooks** — `configure`, `register`, `after_config`,
+  `configure_router`, `before_start`, then `start` once the socket is open,
+  then `begin_shutdown` and `shutdown`. Two shutdown phases, because a
+  connection pool and a job runner need different things from the word "stop";
+  ADR 2.
+- **Router contributions** — a plugin describes a *bundle* of routes relative
+  to a prefix it does not choose, and the application mounts the bundle in one
+  line at a prefix it does. Twelve admin screens, one decision, still the
+  application's; ADR 3.
 - **Request hooks** — before dispatch and after the response, which is what a
   logger, a metrics plugin and an ORM's connection-per-request all need.
-- **Shutdown hooks** — so a connection pool can drain.
+- **Response hooks** — rewriting headers and body, in reverse declared order,
+  which is what compression, partial-navigation headers and ETag need.
+- **Model hooks** — the ORM declares an event *kind* and what it carries; the
+  core forwards a value it never looks inside, so the seam exists without the
+  core knowing an ORM does.
+- **Error hooks** — a plugin recognises its own error type and renders it, so a
+  validation failure re-renders the form and an auth failure redirects, with
+  the core knowing neither concept.
+
+Order between two plugins at one point is **declared, not accidental**: a hook
+says `after("session")` or `before("compression")`, registration order is only
+the tie-break, a missing required dependency is a build error with a
+suggestion, and a cycle is a build error naming both ends.
+
+A hook nobody registered costs nothing — no allocation, no dynamic dispatch, no
+branch on an empty list — because the set of installed hook families lives in
+the application's *type*, exactly as the provider set does. The price is one
+explicit builder call per hooking plugin, and ADR 1 is why that price is the
+right one.
 
 That list is the whole contract. Anything a plugin cannot do through it is a
 gap in the core, to be fixed by widening the seam rather than by special-casing
@@ -492,3 +517,141 @@ top of the five to seven months §7 already budgets for the model layer.
 `brocanth-resource` with no policy registered must not compile.**
 Authorization claimed in a README rots. Authorization asserted by the type
 checker does not.
+
+## 13. Decision records
+
+Numbered, dated by the commit that introduced them, and written at the moment
+the decision was contested rather than afterwards. An ADR is here because the
+obvious answer was wrong and the reason is not obvious.
+
+### ADR 1 — Hooks are registered explicitly. No distributed slice.
+
+**Status:** accepted. **Supersedes:** nothing. **Touches:** §8, all of it.
+
+**The question.** The core publishes seams; plugins fill them. Rust's standard
+mechanism for compile-time registration is the distributed slice — `inventory`
+(1.0, `ctor`-based) or `linkme` (link-section based). Both let a plugin
+*anywhere in the dependency graph* submit an entry that the binary collects,
+with nothing written in `main`. That is the ergonomic answer, and §8 says the
+opposite: **a plugin must be named in `main`**, because *"what your binary
+contains is written where you can read it."*
+
+**The argument that the two are compatible, and why it is not enough.** A
+distributed slice only collects from crates that are actually linked, and a
+crate is only linked because something imported it, so — the argument runs —
+the submissions in your binary are exactly the ones your imports asked for, and
+`main` is still the manifest.
+
+It is not enough, for three reasons.
+
+1. **The import need not be yours.** Linking follows the *transitive* graph. A
+   plugin three levels down that depends on `brocanth-metrics` links it, and
+   `brocanth-metrics`' submissions land in your binary. Your `main` names a
+   blog engine; your request pipeline grows a hook you never asked for and
+   cannot see. That is precisely the Rails failure §8 names — *"the framework
+   decided for you and you cannot see where"* — reached through the back door.
+2. **The registry is invisible to the compiler.** A distributed slice is a
+   run-time array. §6's entire premise is route generation that is *total*: a
+   link to a route that does not exist must not compile. Routes collected into
+   a slice can only be validated at startup, which turns the one guarantee this
+   project exists for back into a boot-time panic. The same applies to the
+   context provider list, which is already a type-level list precisely so a
+   handler asking for an uninstalled value does not build.
+3. **It is fragile exactly where we ship.** The failure modes are documented
+   and real: `linkme` needs `-C link-dead-code` or `#[used(linker)]` to survive
+   section garbage collection on some linkers; neither crate collects across a
+   `dylib`/`cdylib`/`staticlib` boundary, because the section belongs to the
+   linkage unit; `ctor` ordering is unspecified relative to other static
+   initialisers; and under incremental compilation a crate that only *submits*
+   does not always force the consumer's collection site to be regenerated, so a
+   stale slice survives a rebuild. Each of those is a bug that reproduces on
+   one machine and not the next, in a framework whose selling point is that the
+   compiler checks the wiring.
+
+**The decision.** Explicit registration, everywhere, with the type system
+carrying what the compiler needs to know:
+
+* `AppBuilder<E, H>` carries two type-level records — `E`, the installed
+  context providers, and `H`, the installed hook families. Both widen only
+  through a call the application wrote.
+* A plugin that hooks is registered with `.plugin_hooking(p)` rather than
+  `.plugin(p)`. That call, and nothing else, is what puts a hook family in `H`.
+* A plugin that contributes routes is mounted with
+  `app.mount_routes::<P>(prefix)`. Nothing mounts itself.
+
+**What it costs, stated plainly.**
+
+1. **One extra line per hooking plugin, and a wrong call that is silent in
+   principle.** `.plugin(p)` on a hooking plugin would install nothing. Rust
+   has no negative bounds and no way to ask "does `P` also implement
+   `HookSource`", so the plugin declares `const INSTALLS_HOOKS: bool = true`
+   and `build()` fails with the call to write instead. A const, not a type,
+   because associated type *defaults* are still unstable (`#29661`) and adding
+   a required associated type to `Plugin` would break every plugin already
+   written against it.
+2. **Two builder methods where one would read better.** `plugin` and
+   `plugin_hooking`, plus `_as`/`_named` variants of each. The alternative —
+   one method that always widens `H` — would make every application pay the
+   branch, which is the thing the record exists to remove.
+3. **The ORM must enumerate its own models.** §7.2 counts SeaORM's
+   `entity-registry` — which *is* an `inventory::submit!` — as a reason to
+   choose it. That stays true and is not a contradiction: the submission
+   happens inside the ORM plugin's own crate, collected by the ORM plugin's own
+   code, for a list the application already opted into by naming the ORM plugin
+   in `main`. The rule is about the *core's* seams. A plugin may use whatever
+   it likes inside itself; what it may not do is reach into the application's
+   pipeline without the application's call.
+4. **A plugin generic over the provider list cannot require a context item at
+   compile time.** `E: Has<T, I>` needs the position index `I`, which is
+   unconstrained in an impl that does not mention it (E0207). A plugin written
+   against one application's concrete list can use `Context::get`; a plugin
+   generic over `E` uses `Context::try_get`, or declares the dependency at
+   build time with `Lifecycle::require_service` / `require_instance`, which
+   fails the build naming the plugin to add. Build-time rather than
+   compile-time, and the message says what to do.
+
+**The fallback, if this is ever wrong.** If explicit registration proves
+intolerable at scale, the escape is a *generated* registration list — a build
+script or a macro that reads `Cargo.toml` and emits the `.plugin(..)` calls
+into a file the developer can open and read — not a slice the compiler cannot
+see. The property to preserve is readability of the manifest, not the manual
+typing of it.
+
+### ADR 2 — Shutdown is two phases, in reverse registration order.
+
+**Status:** accepted.
+
+One phase cannot serve both a connection pool and a job runner. Told "stop"
+once, a runner that blocks until its queue drains blocks while the queue is
+still being filled, and a pool that closes at once takes the connection the
+in-flight job is holding. So `begin_shutdown` closes the gate and returns, and
+`shutdown` drains inside a grace period shared by every plugin and readable as
+`ShutdownCx::remaining`.
+
+Reverse registration order, because registration order *is* dependency order:
+the ORM is registered after the pool because it needs the pool, so it must be
+finished with the pool before the pool closes. And one failure does not cancel
+the rest — a shutdown that stops at the first error leaks exactly the resources
+it was called to release. `App::shutdown` returns a `ShutdownReport`, never an
+`Err`.
+
+### ADR 3 — The unit of a route decision is the bundle, not the route.
+
+**Status:** accepted. **Tension with:** §3, *"Plugins never autowire."*
+
+The middleware rule — *"I do not want plugins to register middleware
+themselves"* — is right and does not transfer unchanged to routes. An admin
+plugin has twelve screens. Making the application write twelve `mount` lines
+turns a principle into a chore, a chore gets a macro wrapped round it, and then
+the principle is gone.
+
+So a plugin describes its routes *relative to a prefix it does not choose*, and
+the application takes the whole bundle in one line at a prefix it does:
+`app.mount_routes::<AdminPlugin>("/backoffice")?`. Three properties keep this
+on the right side of the rule: nothing mounts itself and
+`App::unmounted_route_sources()` lists what was offered and not taken; the
+prefix is always the application's, and `RouteSource::PREFIX` is only a
+suggestion; and a subset is still one line, through `mount_routes_where`, with
+no cooperation needed from the plugin. Two plugins claiming one path and verb
+is an error naming both — never last-one-wins, which is registration order
+deciding behaviour, which is the thing all of this is against.

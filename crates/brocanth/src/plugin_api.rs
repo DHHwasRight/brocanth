@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::plugin_context::{ContextBuilder, Provided};
+use crate::plugin_shutdown::ShutdownCx;
 
 /// Anything a hook can go wrong with.
 #[derive(Debug, Error)]
@@ -61,6 +62,7 @@ pub enum Stage {
     ConfigureRouter,
     BeforeStart,
     Listen,
+    Start,
 }
 
 impl Stage {
@@ -73,6 +75,7 @@ impl Stage {
             Stage::ConfigureRouter => "configure_router",
             Stage::BeforeStart => "before_start",
             Stage::Listen => "listen",
+            Stage::Start => "start",
         }
     }
 }
@@ -202,6 +205,55 @@ impl<'a> Lifecycle<'a> {
     pub fn services_mut(&mut self) -> &mut Services {
         self.services
     }
+
+    /// A service another plugin must have published, or an error that names
+    /// what is missing.
+    ///
+    /// This is how a plugin says "I need the pool plugin" without the core
+    /// learning what a pool is, and without a `panic!` at request time. Call
+    /// it from [`Plugin::after_config`] or later: before that, the plugin that
+    /// publishes it may not have run `register` yet.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] naming the type and the instance that asked.
+    pub fn require_service<T: Send + Sync + 'static>(&self) -> Result<&T, PluginError> {
+        self.services.get::<T>().ok_or_else(|| {
+            PluginError::new(format!(
+                "`{}` needs `{}` in the application's services, and no registered plugin \
+                 published one; the plugin that provides it has to be named in `main` too",
+                self.instance,
+                type_name::<T>(),
+            ))
+        })
+    }
+
+    /// Another instance that must be registered, or an error naming it.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] naming the instance that is missing, the instance that
+    /// asked, and what is registered.
+    pub fn require_instance(&self, name: &str) -> Result<(), PluginError> {
+        if self.instances.iter().any(|n| n == name) {
+            return Ok(());
+        }
+        let hint = match crate::suggest::nearest_name(name, self.instances) {
+            Some(near) => format!("; did you mean `{near}`?"),
+            None => String::new(),
+        };
+        Err(PluginError::new(format!(
+            "`{}` needs the instance `{}`, which is not registered{}; registered: {}",
+            self.instance,
+            name,
+            hint,
+            if self.instances.is_empty() {
+                "nothing".to_string()
+            } else {
+                self.instances.join(", ")
+            },
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +339,31 @@ pub trait Plugin: Sized + Send + Sync + 'static {
     /// Default instance name.
     const NAME: &'static str;
 
+    /// Whether this plugin also implements
+    /// [`HookSource`](crate::plugin_hooks::HookSource).
+    ///
+    /// A plugin that hooks must be registered with
+    /// [`AppBuilder::plugin_hooking`], because that is the call that widens
+    /// the application's hook-family record and so the call that makes the
+    /// hot path include the hook at all. Rust has no way to ask "does `P`
+    /// implement this other trait", so the plugin says, and
+    /// [`AppBuilder::build`] fails with the line to write instead rather than
+    /// letting the hooks go quiet.
+    ///
+    /// [`AppBuilder::plugin_hooking`]: crate::plugin_app::AppBuilder::plugin_hooking
+    /// [`AppBuilder::build`]: crate::plugin_app::AppBuilder::build
+    const INSTALLS_HOOKS: bool = false;
+
+    /// Whether this plugin also implements
+    /// [`RouteSource`](crate::plugin_routes::RouteSource).
+    ///
+    /// Routes are not mounted by registering: the application mounts them, at
+    /// a prefix it chooses. This flag is what lets
+    /// [`App::unmounted_route_sources`] answer "where did the admin go".
+    ///
+    /// [`App::unmounted_route_sources`]: crate::plugin_app::App::unmounted_route_sources
+    const CONTRIBUTES_ROUTES: bool = false;
+
     /// Builds the plugin from its configuration.
     ///
     /// The application calls this itself — `LoggerPlugin::new(LoggerConfig {
@@ -330,6 +407,41 @@ pub trait Plugin: Sized + Send + Sync + 'static {
         Ok(())
     }
 
+    /// The application is up and the socket is open.
+    ///
+    /// `before_start` is the last point at which failing is cheap;
+    /// [`Plugin::start`] is the first point at which the application is
+    /// serving. A job runner spawns its workers here, not earlier, so a build
+    /// that fails never leaves a worker behind. Run by
+    /// [`App::start`](crate::plugin_app::App::start), in registration order.
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// Stop accepting new work, and return.
+    ///
+    /// First of the two shutdown phases, run in reverse registration order.
+    /// Close the gate and nothing else: draining happens in
+    /// [`Plugin::shutdown`], after every other plugin has also stopped
+    /// accepting. See [`crate::plugin_shutdown`] for why one phase is not
+    /// enough.
+    fn begin_shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// Finish what is in hand, within [`ShutdownCx::remaining`].
+    ///
+    /// Second phase, reverse registration order, so a plugin is finished with
+    /// what it depends on before that dependency closes. An error here is
+    /// recorded in the [`ShutdownReport`] and the remaining plugins are still
+    /// asked: a shutdown that stops at the first failure leaks exactly the
+    /// resources it was called to release.
+    ///
+    /// [`ShutdownReport`]: crate::plugin_shutdown::ShutdownReport
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     /// Fill the per-request context.
     ///
     /// Called once per context, and only for the instance whose registration
@@ -357,6 +469,11 @@ pub(crate) trait AnyInstance: Send + Sync + 'static {
     fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
     fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError>;
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
+    fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError>;
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError>;
+    fn installs_hooks(&self) -> bool;
+    fn contributes_routes(&self) -> bool;
     fn provide(&self, cx: &mut ContextBuilder);
     fn plugin_any(&self) -> &dyn Any;
     fn plugin_any_mut(&mut self) -> &mut dyn Any;
@@ -393,6 +510,26 @@ impl<P: Plugin> AnyInstance for Instance<P> {
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         self.plugin.before_start(lc)
+    }
+
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        self.plugin.start(lc)
+    }
+
+    fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        self.plugin.begin_shutdown(sd)
+    }
+
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        self.plugin.shutdown(sd)
+    }
+
+    fn installs_hooks(&self) -> bool {
+        P::INSTALLS_HOOKS
+    }
+
+    fn contributes_routes(&self) -> bool {
+        P::CONTRIBUTES_ROUTES
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {

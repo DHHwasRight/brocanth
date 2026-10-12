@@ -17,13 +17,21 @@
 //! 3. `after_config` — every instance, cross-plugin lookups now valid
 //! 4. the application's own setup block
 //! 5. `configure_router` — every instance offers middleware
-//! 6. `before_start` — every instance
-//! 7. `listen` — not here; the HTTP server consumes the finished [`App`]
+//! 6. hook installation — every instance registered with
+//!    [`AppBuilder::plugin_hooking`] fills the request, response, error and
+//!    model chains, which are then sorted into their declared order
+//! 7. `before_start` — every instance
+//! 8. `listen` — not here; the HTTP server consumes the finished [`App`]
+//! 9. `start` — [`App::start`], once the socket is open
+//! 10. `begin_shutdown`, then `shutdown` — [`App::shutdown`], both in reverse
+//!     registration order
 //!
 //! Each stage completes for all instances before the next one starts.
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -32,6 +40,14 @@ use crate::plugin_api::{
     Services, Stage,
 };
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
+use crate::plugin_hooks::{
+    ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline, Request,
+    RequestHook, RequestState, Response, ResponseHook,
+};
+use crate::plugin_model::{ModelDispatch, ModelHooks};
+use crate::plugin_order::{sort, OrderError, Ordered};
+use crate::plugin_routes::{no_such_plugin, RouteBundle, RouteError, RoutePlan, RouteSource};
+use crate::plugin_shutdown::{ShutdownCx, ShutdownPhase, ShutdownReason, ShutdownReport};
 use crate::suggest::nearest_name;
 
 // ---------------------------------------------------------------------------
@@ -68,6 +84,29 @@ pub enum BuildError {
         suggestion: Option<String>,
         offered: Vec<String>,
     },
+
+    #[error(
+        "`{instance}` ({plugin}) installs hooks, and `plugin(..)` does not install them. \
+         Register it with `plugin_hooking(..)`: that is the call that widens the \
+         application's hook-family record, and the record is what decides whether the hot \
+         path contains a hook at all"
+    )]
+    HooksNotInstalled { instance: String, plugin: String },
+
+    #[error(
+        "`{instance}` ({plugin}) was registered with `plugin_hooking(..)` but leaves \
+         `const INSTALLS_HOOKS` at its default of `false`. Set it to `true` in its \
+         `impl Plugin`, so that registering it with plain `plugin(..)` one day fails the \
+         build instead of silently dropping its hooks"
+    )]
+    HooksNotDeclared { instance: String, plugin: String },
+
+    #[error("the hook order does not resolve: {0}")]
+    Order(
+        #[from]
+        #[source]
+        OrderError,
+    ),
 }
 
 #[doc(hidden)]
@@ -183,22 +222,45 @@ struct Registered {
     /// This registration widened the provider list, so this instance is the
     /// one that fills the context.
     provides_context: bool,
+    /// Set by `plugin_hooking`, which is the only call that knows the instance
+    /// implements [`HookSource`]. A plain function pointer, so an instance
+    /// that hooks nothing carries one null-sized `Option` and no closure.
+    installer: Option<HookInstaller>,
+}
+
+/// Re-entry into a `HookSource` from a type-erased instance.
+type HookInstaller = fn(&dyn Any, &mut HookRegistrar<'_>) -> Result<(), PluginError>;
+
+fn install_hooks_of<P: HookSource>(
+    plugin: &dyn Any,
+    registrar: &mut HookRegistrar<'_>,
+) -> Result<(), PluginError> {
+    plugin
+        .downcast_ref::<P>()
+        .expect("the installer is stored beside the instance it was made for")
+        .install_hooks(registrar)
 }
 
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
 
-/// Builds an [`App`]. `E` is the type-level list of installed context
-/// providers; it grows as provider plugins are registered.
-pub struct AppBuilder<E = Base> {
+/// Builds an [`App`].
+///
+/// `E` is the type-level list of installed context providers; it grows as
+/// provider plugins are registered. `H` is the type-level record of installed
+/// hook families; it grows as hooking plugins are registered with
+/// [`AppBuilder::plugin_hooking`], and it is what makes a hook nobody
+/// registered cost nothing — see [`crate::plugin_hooks`].
+pub struct AppBuilder<E = Base, H = NoHooks> {
     instances: Vec<Registered>,
     services: Services,
     setup: Option<SetupBlock>,
     _providers: PhantomData<fn() -> E>,
+    _families: PhantomData<fn() -> H>,
 }
 
-impl<E> std::fmt::Debug for AppBuilder<E> {
+impl<E, H> std::fmt::Debug for AppBuilder<E, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let plugins: Vec<&str> = self.instances.iter().map(|r| r.inner.name()).collect();
         f.debug_struct("AppBuilder")
@@ -208,7 +270,7 @@ impl<E> std::fmt::Debug for AppBuilder<E> {
     }
 }
 
-impl AppBuilder<Base> {
+impl AppBuilder<Base, NoHooks> {
     /// Starts an application with no plugins installed.
     ///
     /// There is no configuration argument, and that is the point: the core
@@ -221,17 +283,18 @@ impl AppBuilder<Base> {
             services: Services::new(),
             setup: None,
             _providers: PhantomData,
+            _families: PhantomData,
         }
     }
 }
 
-impl Default for AppBuilder<Base> {
+impl Default for AppBuilder<Base, NoHooks> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<E> AppBuilder<E> {
+impl<E, H> AppBuilder<E, H> {
     /// Registers a plugin under its default name, `P::NAME`.
     ///
     /// The plugin arrives built, which means it arrives configured:
@@ -242,8 +305,11 @@ impl<E> AppBuilder<E> {
     /// call exists. Register the same provider plugin twice this way and the
     /// list holds its item twice, which makes extraction ambiguous; use
     /// [`AppBuilder::plugin_as`] for extra instances.
-    pub fn plugin<P: Plugin>(self, plugin: P) -> AppBuilder<<P::Provides as Provided>::Install<E>> {
-        self.add(P::NAME.to_string(), plugin, true).retype()
+    pub fn plugin<P: Plugin>(
+        self,
+        plugin: P,
+    ) -> AppBuilder<<P::Provides as Provided>::Install<E>, H> {
+        self.add(P::NAME.to_string(), plugin, true, None).retype()
     }
 
     /// Registers a plugin under a name of the application's choosing, widening
@@ -256,8 +322,8 @@ impl<E> AppBuilder<E> {
         self,
         name: impl Into<String>,
         plugin: P,
-    ) -> AppBuilder<<P::Provides as Provided>::Install<E>> {
-        self.add(name.into(), plugin, true).retype()
+    ) -> AppBuilder<<P::Provides as Provided>::Install<E>, H> {
+        self.add(name.into(), plugin, true, None).retype()
     }
 
     /// Registers another instance of a plugin under `name`.
@@ -265,8 +331,65 @@ impl<E> AppBuilder<E> {
     /// So `logger` and `db_log` can both be the logging plugin at different
     /// levels. The provider list is not widened: a context item is one value,
     /// and two instances would only fight over it.
-    pub fn plugin_as<P: Plugin>(self, name: impl Into<String>, plugin: P) -> AppBuilder<E> {
-        self.add(name.into(), plugin, false)
+    pub fn plugin_as<P: Plugin>(self, name: impl Into<String>, plugin: P) -> AppBuilder<E, H> {
+        self.add(name.into(), plugin, false, None)
+    }
+
+    /// Registers a plugin **and installs its hooks**.
+    ///
+    /// The one extra call the hook system costs, and the reason it costs it:
+    /// `H` is the application's type-level record of which hook families are
+    /// installed, and the hot path is generic over it. A request hook nobody
+    /// installed is not an empty `Vec` that still has to be looked at — it is
+    /// `H::REQUEST == false`, which is a constant, and the loop over it does
+    /// not survive compilation. See ADR 1 in PLAN.md, and
+    /// `tests/hooks_cost_nothing.rs` for the generated code.
+    ///
+    /// Everything [`AppBuilder::plugin`] does, this does too: the default
+    /// name, the context provider list, the lifecycle.
+    pub fn plugin_hooking<P: HookSource>(
+        self,
+        plugin: P,
+    ) -> AppBuilder<
+        <P::Provides as Provided>::Install<E>,
+        crate::plugin_hooks::Both<P::Families, H>,
+    > {
+        self.add(
+            P::NAME.to_string(),
+            plugin,
+            true,
+            Some(install_hooks_of::<P>),
+        )
+        .retype()
+    }
+
+    /// [`AppBuilder::plugin_hooking`], under a name of the application's
+    /// choosing.
+    pub fn plugin_hooking_named<P: HookSource>(
+        self,
+        name: impl Into<String>,
+        plugin: P,
+    ) -> AppBuilder<
+        <P::Provides as Provided>::Install<E>,
+        crate::plugin_hooks::Both<P::Families, H>,
+    > {
+        self.add(name.into(), plugin, true, Some(install_hooks_of::<P>))
+            .retype()
+    }
+
+    /// Another instance of a hooking plugin, which installs its hooks too.
+    ///
+    /// The provider list is not widened, for the reason given on
+    /// [`AppBuilder::plugin_as`]; the hook chains are, because two instances
+    /// of a logger really are two hooks, and their ids differ by the instance
+    /// name so they can be ordered against each other.
+    pub fn plugin_hooking_as<P: HookSource>(
+        self,
+        name: impl Into<String>,
+        plugin: P,
+    ) -> AppBuilder<E, crate::plugin_hooks::Both<P::Families, H>> {
+        self.add(name.into(), plugin, false, Some(install_hooks_of::<P>))
+            .retype()
     }
 
     /// The services the plugins will share, before any of them runs.
@@ -297,7 +420,13 @@ impl<E> AppBuilder<E> {
         self
     }
 
-    fn add<P: Plugin>(mut self, name: String, plugin: P, provides_context: bool) -> Self {
+    fn add<P: Plugin>(
+        mut self,
+        name: String,
+        plugin: P,
+        provides_context: bool,
+        installer: Option<HookInstaller>,
+    ) -> Self {
         let primary = !self
             .instances
             .iter()
@@ -306,21 +435,23 @@ impl<E> AppBuilder<E> {
             inner: Box::new(Instance { name, plugin }),
             primary,
             provides_context,
+            installer,
         });
         self
     }
 
-    fn retype<F>(self) -> AppBuilder<F> {
+    fn retype<F, G>(self) -> AppBuilder<F, G> {
         AppBuilder {
             instances: self.instances,
             services: self.services,
             setup: self.setup,
             _providers: PhantomData,
+            _families: PhantomData,
         }
     }
 
     /// Runs the lifecycle and returns the finished application.
-    pub fn build(mut self) -> Result<App<E>, BuildError> {
+    pub fn build(mut self) -> Result<App<E, H>, BuildError> {
         // A name identifies one instance, so it must identify only one.
         let names: Vec<String> = self
             .instances
@@ -379,6 +510,11 @@ impl<E> AppBuilder<E> {
 
         router.resolve()?;
 
+        // Hooks, after every plugin is configured and the router plan is
+        // settled, and before `before_start`, so a plugin's last word is
+        // spoken with its hooks already in place.
+        let (pipeline, model) = self.install_hooks()?;
+
         run_stage(
             Stage::BeforeStart,
             &mut self.instances,
@@ -391,8 +527,53 @@ impl<E> AppBuilder<E> {
             instances: self.instances,
             services: self.services,
             router,
+            pipeline,
+            model: Arc::new(model),
+            routes: RoutePlan::new(),
             _providers: PhantomData,
+            _families: PhantomData,
         })
+    }
+
+    /// Collects every installed hook and sorts it into declared order.
+    fn install_hooks(&self) -> Result<(Pipeline, ModelHooks), BuildError> {
+        let mut request: Vec<Ordered<Box<dyn RequestHook>>> = Vec::new();
+        let mut response: Vec<Ordered<Box<dyn ResponseHook>>> = Vec::new();
+        let mut error: Vec<Ordered<Box<dyn ErrorHook>>> = Vec::new();
+        let mut model = ModelHooks::new();
+
+        for reg in &self.instances {
+            let instance = reg.inner.name().to_string();
+            let plugin = reg.inner.plugin_type_name().to_string();
+            match (reg.installer, reg.inner.installs_hooks()) {
+                // Registered with `plugin(..)`, but it hooks. The hooks would
+                // go quiet, so the build stops and says what to write.
+                (None, true) => return Err(BuildError::HooksNotInstalled { instance, plugin }),
+                // Registered with `plugin_hooking(..)`, but the const that
+                // makes the opposite mistake detectable is missing.
+                (Some(_), false) => return Err(BuildError::HooksNotDeclared { instance, plugin }),
+                (None, false) => {}
+                (Some(install), true) => {
+                    let mut registrar = HookRegistrar::new(
+                        &instance,
+                        &mut request,
+                        &mut response,
+                        &mut error,
+                        &mut model,
+                    );
+                    install(reg.inner.plugin_any(), &mut registrar).map_err(|source| {
+                        BuildError::Hook {
+                            instance: instance.clone(),
+                            stage: Stage::ConfigureRouter,
+                            source,
+                        }
+                    })?;
+                }
+            }
+        }
+
+        let pipeline = Pipeline::from_parts(sort(request)?, sort(response)?, sort(error)?);
+        Ok((pipeline, model.finish()?))
     }
 }
 
@@ -427,14 +608,18 @@ where
 /// `E` is the list of installed context providers, carried in the type so that
 /// [`App::context`] produces a [`Context`] a handler can extract from without
 /// a run-time check.
-pub struct App<E = Base> {
+pub struct App<E = Base, H = NoHooks> {
     instances: Vec<Registered>,
     services: Services,
     router: RouterPlan,
+    pipeline: Pipeline,
+    model: Arc<ModelHooks>,
+    routes: RoutePlan<E>,
     _providers: PhantomData<fn() -> E>,
+    _families: PhantomData<fn() -> H>,
 }
 
-impl<E> std::fmt::Debug for App<E> {
+impl<E, H> std::fmt::Debug for App<E, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let plugins: Vec<String> = self
             .instances
@@ -445,11 +630,13 @@ impl<E> std::fmt::Debug for App<E> {
             .field("plugins", &plugins)
             .field("offers", &self.router.offers.len())
             .field("mounts", &self.router.mounts.len())
+            .field("hooks", &self.pipeline)
+            .field("routes", &self.routes)
             .finish()
     }
 }
 
-impl<E> App<E> {
+impl<E, H> App<E, H> {
     pub fn services(&self) -> &Services {
         &self.services
     }
@@ -514,6 +701,133 @@ impl<E> App<E> {
         builder.build::<E>()
     }
 
+    /// The sorted hooks this application installed.
+    pub fn pipeline(&self) -> &Pipeline {
+        &self.pipeline
+    }
+
+    /// The model hooks, for a caller that wants to look rather than emit.
+    pub fn model_hooks(&self) -> &ModelHooks {
+        &self.model
+    }
+
+    /// Every route the application accepted from a plugin.
+    pub fn route_plan(&self) -> &RoutePlan<E> {
+        &self.routes
+    }
+
+    /// Plugins that contribute routes and whose routes were never mounted.
+    ///
+    /// Not an error — an application that does not mount the admin in
+    /// production is the whole point of the seam — but it is the answer to
+    /// "where did the admin go", and what `brocanth routes` prints under
+    /// *offered, not mounted*.
+    pub fn unmounted_route_sources(&self) -> Vec<&str> {
+        self.instances
+            .iter()
+            .filter(|r| r.inner.contributes_routes())
+            .filter(|r| {
+                !self
+                    .routes
+                    .mounted_sources()
+                    .iter()
+                    .any(|m| m == r.inner.name())
+            })
+            .map(|r| r.inner.name())
+            .collect()
+    }
+
+    /// Mounts every route the primary instance of `P` offers, under `prefix`.
+    ///
+    /// One line for a plugin with twelve screens, and the prefix is still the
+    /// application's. Returns how many routes were taken.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteError::NoSuchPlugin`] when `P` is not registered,
+    /// [`RouteError::Conflict`] when a path and verb are already taken —
+    /// naming both plugins — and [`RouteError::BadPath`] when a contributed
+    /// path does not parse.
+    pub fn mount_routes<P: RouteSource<E>>(&mut self, prefix: &str) -> Result<usize, RouteError> {
+        self.mount_routes_where::<P>(prefix, |_| true)
+    }
+
+    /// [`App::mount_routes`] at the prefix the plugin suggests,
+    /// [`RouteSource::PREFIX`].
+    ///
+    /// # Errors
+    ///
+    /// As [`App::mount_routes`].
+    pub fn mount_routes_default<P: RouteSource<E>>(&mut self) -> Result<usize, RouteError> {
+        self.mount_routes_where::<P>(P::PREFIX, |_| true)
+    }
+
+    /// [`App::mount_routes`], taking only the routes whose qualified name the
+    /// filter accepts.
+    ///
+    /// "The admin, but not the destructive screens" in one line, with no
+    /// cooperation needed from the plugin.
+    ///
+    /// # Errors
+    ///
+    /// As [`App::mount_routes`].
+    pub fn mount_routes_where<P: RouteSource<E>>(
+        &mut self,
+        prefix: &str,
+        filter: impl Fn(&str) -> bool,
+    ) -> Result<usize, RouteError> {
+        self.mount_instance_routes::<P>(None, prefix, &filter)
+    }
+
+    /// [`App::mount_routes`] for one named instance, so two instances of one
+    /// plugin can live at two prefixes.
+    ///
+    /// # Errors
+    ///
+    /// As [`App::mount_routes`].
+    pub fn mount_routes_of<P: RouteSource<E>>(
+        &mut self,
+        instance: &str,
+        prefix: &str,
+    ) -> Result<usize, RouteError> {
+        self.mount_instance_routes::<P>(Some(instance), prefix, &|_| true)
+    }
+
+    fn mount_instance_routes<P: RouteSource<E>>(
+        &mut self,
+        instance: Option<&str>,
+        prefix: &str,
+        filter: &dyn Fn(&str) -> bool,
+    ) -> Result<usize, RouteError> {
+        let wanted = instance.unwrap_or(P::NAME);
+        let Some(index) = self.index_of::<P>(instance) else {
+            let registered: Vec<String> =
+                self.instances.iter().map(|r| r.inner.name().into()).collect();
+            return Err(no_such_plugin(wanted, &registered));
+        };
+
+        let name = self.instances[index].inner.name().to_string();
+        let plugin = self.instances[index]
+            .inner
+            .plugin_any()
+            .downcast_ref::<P>()
+            .expect("the index came from a type match");
+
+        let mut taken = Vec::new();
+        let mut bundle = RouteBundle::new(prefix, &name, filter, &mut taken);
+        let described = plugin.routes(&mut bundle);
+        let bad = bundle.into_errors();
+        described.map_err(|error| RouteError::Source {
+            plugin: name.clone(),
+            error,
+        })?;
+        if let Some(first) = bad.into_iter().next() {
+            return Err(first);
+        }
+
+        self.routes.accept(&name, taken)
+    }
+
     fn find<P: Plugin>(&self, name: Option<&str>) -> Option<&Registered> {
         self.index_of::<P>(name).map(|i| &self.instances[i])
     }
@@ -522,6 +836,107 @@ impl<E> App<E> {
         self.instances.iter().position(|r| {
             r.inner.plugin_type() == TypeId::of::<P>() && name.is_none_or(|n| r.inner.name() == n)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Running, starting and stopping
+// ---------------------------------------------------------------------------
+
+impl<E, H: HookFamilies> App<E, H> {
+    /// One request, through the installed hooks and the handler.
+    ///
+    /// The server layer calls this. With no hook installed, `H` is
+    /// [`NoHooks`] and the whole of it folds down to `dispatch(..)` plus the
+    /// bare 500 for an error nobody claimed: no allocation, no dynamic
+    /// dispatch, no branch on an empty list.
+    pub fn run<F>(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+        dispatch: F,
+    ) -> Response
+    where
+        F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
+    {
+        self.pipeline.run::<H, F>(request, state, dispatch)
+    }
+
+    /// A handle an ORM keeps so its write path can emit model events.
+    ///
+    /// Cloning is an `Arc` bump, and
+    /// [`emit`](crate::plugin_model::ModelDispatch::emit) is compiled away
+    /// when no plugin installed a model hook.
+    pub fn model_dispatch(&self) -> ModelDispatch<H> {
+        ModelDispatch::new(Arc::clone(&self.model))
+    }
+
+    /// The application is serving: run [`Plugin::start`] for every instance,
+    /// in registration order.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError::Hook`] naming the instance that failed. The instances
+    /// before it have already started, so the caller's next move is
+    /// [`App::shutdown`].
+    pub fn start(&mut self) -> Result<(), BuildError> {
+        let names: Vec<String> = self
+            .instances
+            .iter()
+            .map(|r| r.inner.name().to_string())
+            .collect();
+        run_stage(
+            Stage::Start,
+            &mut self.instances,
+            &names,
+            &mut self.services,
+            |inst, lc| inst.start(lc),
+        )
+    }
+
+    /// Stops the application: `begin_shutdown` for every instance, then
+    /// `shutdown` for every instance, both in reverse registration order.
+    ///
+    /// `grace` is the budget for the whole shutdown, shared by every plugin
+    /// and readable as [`ShutdownCx::remaining`]. [`None`] means no budget.
+    ///
+    /// Never returns an error, because a shutdown is a report: one plugin
+    /// failing to drain must not stop the next one from closing. Read
+    /// [`ShutdownReport::failures`].
+    pub fn shutdown(
+        &mut self,
+        reason: ShutdownReason,
+        grace: Option<Duration>,
+    ) -> ShutdownReport {
+        let started = Instant::now();
+        let mut report = ShutdownReport::new(reason, grace);
+
+        for phase in [ShutdownPhase::Begin, ShutdownPhase::Drain] {
+            for reg in self.instances.iter_mut().rev() {
+                let name = reg.inner.name().to_string();
+                let outcome = {
+                    let mut sd = ShutdownCx::new(
+                        reason,
+                        phase,
+                        grace,
+                        started,
+                        &name,
+                        &mut self.services,
+                    );
+                    match phase {
+                        ShutdownPhase::Begin => reg.inner.begin_shutdown(&mut sd),
+                        ShutdownPhase::Drain => reg.inner.shutdown(&mut sd),
+                    }
+                };
+                report.record(&name);
+                if let Err(error) = outcome {
+                    report.fail(&name, phase, error);
+                }
+            }
+        }
+
+        report.finish(started.elapsed());
+        report
     }
 }
 
