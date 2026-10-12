@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/brocanth", "crates/brocanth-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+
+[workspace.dependencies]
+brocanth = { path = "crates/brocanth", version = "0.1.0" }

@@ -1,0 +1,13 @@
+[tools]
+# Matches the depoth ecosystem: rsx's proc-macro artifacts are not compatible
+# across patch releases.
+rust = "1.98"
+
+[tasks.build]
+run = "cargo build --workspace"
+[tasks.test]
+run = "cargo test --workspace"
+[tasks.lint]
+run = "cargo clippy --all-targets -- -D warnings"
+[tasks.ci]
+depends = ["build", "lint", "test"]

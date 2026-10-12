@@ -1,0 +1,14 @@
+[package]
+name = "brocanth-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "brocanth"
+path = "src/main.rs"
+
+[dependencies]
+brocanth.workspace = true
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
