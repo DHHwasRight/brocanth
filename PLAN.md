@@ -300,3 +300,195 @@ A build of the core alone, with every feature off, that asserts the dependency
 tree contains no TOML parser, no SQL driver, no logging framework and no async
 runtime. Modularity claimed in a README rots; modularity asserted in CI does
 not.
+
+## 9. Authorization: a predicate and a witness, not one or the other
+
+From a study of PocketBase, whose API rules are the feature people love it for.
+
+**The universal description of those rules is wrong, and the error matters.**
+They are not "an expression language evaluated per request". There is no
+evaluator: `tools/search/filter.go` **compiles the string to SQL** and the
+database evaluates it. That one fact is why a rule can occupy four positions
+at once — a filter `AND`ed into the list query, a guard `AND`ed into the
+by-id select, an admission test against a synthesised one-row CTE, and a
+visibility re-check per realtime subscriber.
+
+### Why §6's typed witness is not enough on its own
+
+A witness is a proof about **one value you already hold**. To produce
+`Vec<Verified<P, Post>>` you must load `Vec<Post>` and filter — and then
+pagination is broken: you asked for thirty, got thirty, filtered to eleven,
+page two overlaps page one and the total is a lie. The only honest repairs are
+unbounded fetch-until-full, or pushing the predicate into the `WHERE` clause.
+
+**List authorization is not a per-object property. It is a set
+comprehension.** Any design that ignores this ships a paginator that silently
+lies.
+
+### The resolution
+
+They are not alternatives. **A rule is a predicate; a witness is a proof that
+a predicate was evaluated.** PocketBase ships only the first, §6 shipped only
+the second. `brocanth-policy` ships both: a typed predicate over the entity's
+column enum, with two interpretations — `condition()` into SQL for lists, and
+`eval()` for a row you hold.
+
+Three obligations fall out, each recorded because each is easy to get wrong:
+
+1. **The two interpretations can disagree**, and PocketBase cannot have this
+   bug because it has only one. Default to `condition()` only, implemented as
+   a one-row select — literally what PocketBase's `CanAccessRecord` does.
+   `eval()` is opt-in, and opting in generates a proptest asserting
+   `eval(row) == (row ∈ query(condition))`. The obligation moves from review
+   to CI.
+2. **`Verified` must carry its condition**, not merely mark a type. Check-then-
+   write has a TOCTOU window; the write must be `UPDATE … WHERE id = ? AND
+   <condition>`, and zero rows affected is an authorization failure rather
+   than a no-op.
+3. **`Verified` must be consumed, not produced.** `#[must_use]` is not enough —
+   you can construct one and drop it. The write API takes it.
+
+### The vulnerability class this deletes
+
+PocketBase validates a rule with an **empty request object**, and an
+unresolvable `@request.*` path logs a debug line and becomes `NULL`. Its `!=`
+compiles to `IS NOT` over `COALESCE`. So:
+
+```
+@request.auth.rolee != "banned"              ← a typo
+→ COALESCE(NULL,'') IS NOT COALESCE('banned','')
+→ '' IS NOT 'banned'
+→ TRUE                                        ← access granted
+```
+
+**A misspelled field in a negated rule grants access, silently, forever.** It
+is structural, not a bug. A typed predicate over `Option<T>` forces the author
+to say what absence means, which is a decision PocketBase makes for them in
+the dangerous direction.
+
+### Steal `:changed`
+
+`@request.body.status:changed = false || @request.auth.role = "admin"` is
+*field-level* write authorization in the same language as row-level. Pundit
+keeps `permitted_attributes` as a separate concept; Django uses form fields.
+Here it becomes `Policy::writable() -> FieldMask`, checked against the dirty
+tracking the model layer already has. Nearly free, and almost nobody has it.
+
+### The honest scoreboard
+
+PocketBase's rules attach to the **data**, so they are unforgettable on the
+generated CRUD path and **entirely absent everywhere else** — the moment a hook
+calls `app.Save()` you are outside the rule system, and its own documentation
+says so. The most-praised feature stops applying exactly when an application
+stops being CRUD.
+
+A witness attaches to the **function signature**, so it is unforgettable
+everywhere and must be written everywhere. Attaching the policy to the entity
+gives us the first; expressing the result as a witness gives us the second.
+That is a tie where PocketBase is strongest and a win where it is weakest.
+
+What we lose, and cannot get back: **rules editable at runtime.** PocketBase
+lets you fix a production authorization bug in a browser in ten seconds. We
+never will.
+
+## 10. Realtime, and the reason the typed predicate pays for itself
+
+PocketBase broadcasts to **all** connected clients in chunks — there is no
+topic index — and for each client runs `SELECT (1) FROM t WHERE id = ? AND
+<rule>`. At a thousand connections with six hundred subscribers, one write is
+six hundred point queries: 1.2–6 ms on in-process SQLite, and **about 180 ms
+on Postgres**, which does not work at all.
+
+The fix is the strongest practical argument for the whole typed design:
+
+> **A predicate you can inspect can be inverted into an audience. A string you
+> can only execute.**
+
+Most policies partition an audience coarsely — public, any authenticated user,
+the owner, members of a team. Because a policy is a *value*, its shape can be
+matched to derive an audience key, and broadcast becomes a map lookup with
+zero queries. Only an opaque policy falls back to per-subscriber evaluation.
+Two to three orders of magnitude, and it is what makes realtime on Postgres
+possible rather than merely slow.
+
+Three further corrections to the cost model: index by topic rather than by
+client (PocketBase's own source carries a `@todo` about this); bound the
+per-client queue with an explicit overflow policy, because an unbuffered
+channel lets one slow reader block the broadcaster; and cap the client count,
+which PocketBase does not do at all.
+
+**Ownership.** The core stays at three dependencies and no async runtime, and
+does not need widening: `Layer<C, O>` is generic over the output, so the core
+has no opinion about what a response is and therefore none about streaming.
+A tiny `brocanth-events` crate carries `Change` and `ChangeSink`; the model
+layer publishes, realtime subscribes, and neither depends on the other. The
+same trait over `LISTEN/NOTIFY` buys multi-process realtime — which PocketBase
+cannot have at any price, its broker being in-memory beside an embedded
+database.
+
+**The payload should be a fragment, not JSON.** PocketBase pushes records
+because it has no renderer. We have one, and §5.4 already makes `DP-Partial` a
+rendering mode. The native payload here is an HTML fragment addressed at a
+dp-swap target, arriving out of band over SSE — and the fragment emitter caches
+one render per audience class, so the two ideas pay for each other.
+
+## 11. Renames: the limit §6 called uncrossable is crossable
+
+§6 records that "a struct diff cannot tell a rename from a drop-plus-add".
+PocketBase can, and the mechanism is worth taking.
+
+**Its fields carry a persisted `id`, and the collection diff is by id rather
+than by name.** The id is seeded from the name but stored, and the editor
+round-trips it, so a rename arrives as "field `text1234567` changed its name"
+rather than as a drop and an add.
+
+Our editor is a text editor, so the identity has to live in the text:
+`#[brocanth(id = "01J…")]`, written once by the scaffolder and never edited by
+hand. Then `migrate make` diffs by id and can emit a rename. Same idea,
+adapted to the fact that a human is doing the editing.
+
+## 12. What we decline from PocketBase, and the price of §8
+
+**Declined outright.** Dynamic collections — runtime schema and compile-time
+types cannot both be the source of truth, and this is a refusal rather than a
+deferral. The JavaScript hook VM — a framework whose thesis is compile-time
+checking does not ship an interpreter. Database-stored settings. Backups,
+where `pg_dump` plus an object store is the operator's job and a worse wrapper
+is negative value.
+
+**The headline demo is impossible and the README must not pretend otherwise.**
+"Open a browser, create a collection, store data, thirty seconds" cannot be
+matched when the schema is Rust types. The best version is ten to sixty
+seconds and a rebuild.
+
+**The price of modularity, stated rather than discovered.** A PocketBase-shaped
+surface is about ten plugins with roughly fifteen real contact points between
+them — realtime×model, admin×policy, openapi×schema, auth×model, and so on.
+Each is an interface somebody designs, documents and versions. At a week
+apiece that is **a quarter of the total engineering spent purely on seams
+PocketBase does not pay for.** It is worth paying. It should be budgeted.
+
+**Estimated size of the PocketBase-shaped surface: 38–42 engineer-weeks**, on
+top of the five to seven months §7 already budgets for the model layer.
+
+### Build order
+
+1. The core's missing request and shutdown hooks — §8 promises both and the
+   `Plugin` trait has neither.
+2. `brocanth-policy` tier one: the predicate algebra, `condition()`,
+   `Verified` carrying its condition, `FieldMask`.
+3. `brocanth-events`: `Change` and `ChangeSink`, about a hundred lines, which
+   unblocks realtime, audit and cache invalidation at once.
+4. `brocanth-storage`, independent of the above and parallelisable.
+5. `brocanth-resource`: typed CRUD routes from an entity and a policy.
+6. `brocanth-realtime`.
+7. Auth completion: OTP, MFA as a factor set, impersonation, login alerts.
+8. Stable field identity and a rename-aware `migrate make` (§11).
+9. The admin against row-level policies — **the item that always overruns**.
+10. The `policy!` macro, deliberately late, after a real application has used
+    the algebra, so the syntax is informed rather than imitated.
+
+**And one more assertion in the same spirit as the dependency test: a build of
+`brocanth-resource` with no policy registered must not compile.**
+Authorization claimed in a README rots. Authorization asserted by the type
+checker does not.
