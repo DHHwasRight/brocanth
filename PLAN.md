@@ -160,12 +160,77 @@ compile time.
 from a drop-plus-add, and cannot express a backfill. Django asks, and lets you
 edit the file. Do the same. The generator proposes; the developer commits.
 
-## 7. Open
+## 7. The ORM: SeaORM 2.0.4
 
-The ORM. The instruction is a full-fledged ORM rather than a query builder,
-which abandons the Crystal plan of building models on `sq`. The constraint on
-record from the earlier analysis: *"Don't rebuild sq as an ORM-that-hydrates-
-everything. You have the chance to make the model layer stream rows into
-structs without SeaORM's intermediate `Vec<(String, Value)>` step."* The
-survey is still running; nothing in §4 steps 3–4 should be written until it
-lands, because the model layer gates jobs, auth, generators and scaffolding.
+Decided, against Diesel, sqlx, Toasty, cornucopia, ormlite, rbatis and welds.
+Three reasons, in order of weight.
+
+**1. It is the only candidate with lifecycle hooks.** A Rails-like framework
+without `before_save` is not Rails-like. On any of the others we would build a
+hook system over a library with no concept of one, which means every write
+must route through our wrapper and any direct call silently bypasses the
+framework. That is a leak that can never be fully closed. SeaORM's hooks live
+inside the write path, and in 2.0 they are natively async and take a
+connection, so a hook can query. Diesel has nothing here, by deliberate design
+rather than by omission.
+
+**2. The entity registry makes generators and an admin UI tractable.** With
+the `entity-registry` feature the derive emits an `inventory::submit!`, so
+every model in the binary can be enumerated at runtime, and
+`Schema::json_schema_from_entity` emits names, types, nullability, uniqueness
+and primary key per entity. That is a scaffold generator's input and an admin
+form builder, handed over. Diesel structurally cannot provide it: `table!`
+emits independent modules with no registry, and `all_columns` returns a
+heterogeneous tuple rather than a collection, so "walk this table's columns"
+is trait gymnastics rather than a loop. Building generators on Diesel means
+parsing `schema.rs` with `syn` ourselves, forever.
+
+**3. Market evidence.** Loco 1.2.0 depends on `sea-orm ^2.0`; `cot` 0.7.0
+depends on `sea-query ^1.0`, so it built its own ORM on SeaORM's query-builder
+foundation. SeaQL is a team, not one person.
+
+**Measured compile cost**, since the folklore is usually asserted rather than
+checked: SeaORM costs about 6 seconds and 145 more crates on a cold build. But
+incremental `cargo check` of the schema crosses over at roughly fifty tables —
+at a hundred, Diesel is 4.93 s against SeaORM's 3.02 s, because Diesel emits
+pairwise `TableNotEqual` impls and is quadratic in table pairs. Join depth is
+the real cliff: five six-table joins took a Diesel crate from 1.05 s to
+3.44 s, and compile time is not on the Diesel 2.4 roadmap.
+
+**The honest counter-argument.** SeaORM 2.0 is three months old, shipped after
+43 release candidates, and its MSRV jumped to 1.94. `schema-sync` is
+self-described as "experimental and exempt from semver". The risk is schedule,
+not ceiling — Diesel's missing pieces are design positions, not unshipped
+features. Mitigation: pin the version, wrap `schema-sync` behind our own
+interface so a breaking change costs one adapter, and keep migrations
+hand-written until it stabilises.
+
+### Four traps to design around from day one
+
+1. **`.limit(n).find_with_related()` limits joined rows, not parents**, so
+   "ten users with their posts" silently returns fewer than ten users. Rails'
+   `includes` splits the query; ours must route limited eager loads through
+   the two-query Loader automatically. A silent wrong answer, and not
+   prominently documented.
+2. **Hooks are bypassed by `update_many`, `delete_many` and `insert_many`.**
+   Rails has the same split with `update_all`, so the semantics are familiar,
+   but the framework must either forbid them or document it loudly.
+3. **`schema-sync` only adds.** It never drops or alters, and merely logs a
+   warning when a column's type differs. It is Django's `migrate` for the
+   additive eighty per cent and nothing for the destructive twenty.
+4. **Hooks need `#[async_trait]` on the impl.** A bare `async fn` fails with a
+   lifetime error that does not explain itself.
+
+### What we must build on top — about five to seven engineer-months
+
+Declarative validations, since hooks are the enforcement point and not the
+vocabulary — Loco pulls in `validator` for exactly this. Migration generation
+from a model diff. Polymorphic associations. Factories, because **no
+maintained factory crate exists for any Rust ORM**. N+1 detection in
+development, which nobody has; Toasty's `Deferred<T>`, where reading an
+unloaded relation panics rather than quietly querying, is the idea worth
+stealing. Scopes and soft delete. The eager-load correctness fix. Dirty
+tracking, which `ActiveValue` already mostly provides. Counter caches.
+
+On Diesel the same list is ten to fourteen months, and some of it stays
+permanently leaky.
