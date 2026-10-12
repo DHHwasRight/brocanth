@@ -1,0 +1,15 @@
+[package]
+name = "brocanth-schema-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "`#[derive(Validate)]` for brocanth-schema: attaches the vocabulary to a struct, and refuses to compile a constraint that cannot mean anything for the field's type."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+regex = "1"

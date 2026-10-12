@@ -1,0 +1,1639 @@
+//! `brocanth new` -- scaffold an application.
+//!
+//! Interactive when a person is watching and an answer is missing. **Every
+//! answer is also a flag**, so the prompt is a convenience and never the only
+//! route: the same application can be produced by a script, a Dockerfile or a
+//! CI job with no terminal attached. With no terminal and no name, the command
+//! fails naming the argument rather than blocking on a read that will never
+//! return.
+//!
+//! # This command is where §8 becomes visible
+//!
+//! The governing constraint is that nothing ships unless it is asked for, and
+//! the first page a user reads is the one this command writes. So three things
+//! are true of the output, and they are the whole design of this file:
+//!
+//! 1. **Every plugin is named in `main`.** Not a feature flag, not a
+//!    convention, not a builder that "sets up the usual things" -- a line a
+//!    reader can delete. The generated `main` is a numbered list of what the
+//!    binary contains, and the middleware mounts sit beside it, because the
+//!    pattern is a decision and the decision is the application's.
+//! 2. **The generated `Cargo.toml` holds exactly what was chosen**, and says in
+//!    a comment what it does *not* hold and why. A scaffold that quietly pulled
+//!    in an ORM nobody asked for would contradict the framework's central claim
+//!    before the user had read a line of it.
+//! 3. **Choosing the config plugin changes the source, not a flag.** With it,
+//!    a plugin's settings struct derives `Deserialize` and `main` reads a TOML
+//!    file. Without it, the struct derives nothing, `main` writes a literal,
+//!    and no parser is linked. "A feature that is off must mean the code is
+//!    absent" is a sentence in §8; here it is two scaffolds.
+
+use std::path::Path;
+use std::process::{Command, ExitCode, Stdio};
+
+use clap::{Args, ValueEnum};
+use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
+use inquire::{Confirm, MultiSelect, Text};
+
+use crate::commands::Outcome;
+use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
+
+/// Where the generated `Cargo.toml` points for the framework itself.
+const REPOSITORY: &str = "https://github.com/DHHwasRight/brocanth.git";
+
+#[derive(Args)]
+pub struct NewArgs {
+    /// Directory to create, and the cargo package name
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+    /// Human name of the application, used in `[app] name` and on the pages
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+    /// Plugins to include; repeat the flag or separate with commas
+    #[arg(
+        long = "with",
+        value_enum,
+        value_name = "PLUGIN",
+        value_delimiter = ',',
+        conflicts_with = "core_only"
+    )]
+    pub with: Vec<Pick>,
+    /// The core alone: a router, a context, and nothing else
+    #[arg(long)]
+    pub core_only: bool,
+    /// Depend on a brocanth checkout at this path instead of the repository
+    #[arg(long, value_name = "DIR")]
+    pub brocanth_path: Option<String>,
+    /// Initialise a git repository
+    #[arg(long)]
+    pub git: bool,
+    /// Do not initialise a git repository
+    #[arg(long, conflicts_with = "git")]
+    pub no_git: bool,
+    /// Write into a directory that already exists
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// The plugin set on offer.
+///
+/// Each one is a capability the core deliberately does not have. The core is a
+/// router handing a request and a context to a handler, with three
+/// dependencies; everything below is something an application opts into by
+/// naming it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum Pick {
+    /// A request logger. The core assumes no log layer at all
+    Logging,
+    /// TOML configuration: four sources, merged, typed per section
+    Config,
+    /// Cookie sessions, and a `Session` on the context
+    Sessions,
+    /// The model layer: SeaORM, validations and migrations
+    Model,
+}
+
+impl Pick {
+    const ALL: [Pick; 4] = [Pick::Logging, Pick::Config, Pick::Sessions, Pick::Model];
+    /// What a non-interactive run gets when no flag chose. Stated rather than
+    /// guessed at: the command prints the flag that overrides it.
+    const DEFAULT: [Pick; 2] = [Pick::Logging, Pick::Config];
+
+    fn key(self) -> &'static str {
+        match self {
+            Pick::Logging => "logging",
+            Pick::Config => "config",
+            Pick::Sessions => "sessions",
+            Pick::Model => "model",
+        }
+    }
+
+    /// The one line a reader needs to decide. The right-hand half is what the
+    /// binary pays, because that is the question §8 says to keep asking.
+    fn gist(self) -> &'static str {
+        match self {
+            Pick::Logging => "a line per request; the core assumes no log layer",
+            Pick::Config => "config/<env>.toml, merged; without it nothing links a TOML parser",
+            Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
+            Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
+        }
+    }
+
+    /// The crate a choice puts in the tree, if any.
+    fn crate_name(self) -> Option<&'static str> {
+        match self {
+            Pick::Config => Some("brocanth-config"),
+            Pick::Model => Some("brocanth-model"),
+            Pick::Logging | Pick::Sessions => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:<9}-- {}", self.key(), self.gist())
+    }
+}
+
+/// The answers, however they arrived.
+struct Answers {
+    /// The cargo package name, and the directory.
+    name: String,
+    /// The human name.
+    title: String,
+    picks: Vec<Pick>,
+    /// A local checkout to depend on, instead of the repository.
+    local: Option<String>,
+    git: bool,
+}
+
+impl Answers {
+    fn has(&self, pick: Pick) -> bool {
+        self.picks.contains(&pick)
+    }
+
+    /// `my-blog` -> `my_blog`. The crate identifier, and the prefix of every
+    /// environment variable the generated binary reads.
+    fn ident(&self) -> String {
+        self.name.replace('-', "_")
+    }
+
+    /// Plugins that write a file under `src/plugins/`.
+    fn plugins(&self) -> Vec<Pick> {
+        self.picks
+            .iter()
+            .copied()
+            .filter(|p| *p != Pick::Config)
+            .collect()
+    }
+
+    /// Whether anything deserialises.
+    ///
+    /// Only the config plugin makes that true: `Plugin::Config` carries no
+    /// bounds the core imposes, so a plugin built from a literal in `main`
+    /// needs no deserialiser and the scaffold derives none.
+    fn needs_serde(&self) -> bool {
+        self.has(Pick::Config) && !self.plugins().is_empty()
+    }
+}
+
+pub fn run(ui: &Ui, dir: Option<&Path>, args: NewArgs) -> Outcome {
+    let answers = ask(ui, &args)?;
+    // `-C` is where to create it. Everywhere else it means "the package root",
+    // and here there is no package yet, so it is the directory to put one in.
+    let root = dir.unwrap_or(Path::new(".")).join(&answers.name);
+    if root.exists() && !args.force {
+        return Err(vec![Diagnostic::error(
+            "exists",
+            format!("{} already exists", root.display()),
+        )
+        .help("pass --force to write into it anyway, or choose another name")]);
+    }
+
+    ui.heading("new", &answers.name);
+
+    let files = scaffold(&answers);
+    let mut table = Table::new();
+    for (path, contents) in &files {
+        let full = root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
+        }
+        std::fs::write(&full, contents).map_err(|e| io_error(&full, &e))?;
+        table.row(vec![
+            Cell::styled(format!("{}/{path}", answers.name), ACCENT),
+            Cell::styled(format!("{} bytes", contents.len()), DIM).right(),
+        ]);
+    }
+    ui.table_note(&table);
+
+    if answers.git {
+        let ok = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            ui.note(format!("  {}", crate::ui::paint(DIM, "git repository")));
+        } else {
+            ui.warn("git init did not run; the files are written either way");
+        }
+    }
+
+    // The §8 receipt: what the binary contains, and what it therefore does
+    // not. The same list, read from both ends.
+    ui.gap();
+    let mut contents = Table::new().indent(4);
+    contents.row(vec![
+        Cell::styled("core", STRONG),
+        Cell::styled("a router handing a request and a context to a handler", DIM),
+    ]);
+    for pick in &answers.picks {
+        contents.row(vec![
+            Cell::styled(pick.key(), ACCENT),
+            Cell::styled(pick.gist(), DIM),
+        ]);
+    }
+    for pick in Pick::ALL.iter().filter(|p| !answers.has(**p)) {
+        contents.row(vec![
+            Cell::styled(pick.key(), DIM),
+            Cell::styled(
+                "not asked for: absent from the source, the binary and the lock file",
+                DIM,
+            ),
+        ]);
+    }
+    ui.table_note(&contents);
+
+    ui.gap();
+    ui.done(format!(
+        "{} {}",
+        crate::ui::paint(crate::ui::PLAIN, "created"),
+        crate::ui::paint(ACCENT, root.display())
+    ));
+    ui.gap();
+    let mut next = Table::new().indent(4);
+    next.row(vec![
+        Cell::styled(format!("cd {}", answers.name), STRONG),
+        Cell::new(""),
+    ]);
+    next.row(vec![
+        Cell::styled("brocanth routes", STRONG),
+        Cell::styled("the table, and which middleware covers each row", DIM),
+    ]);
+    next.row(vec![
+        Cell::styled("brocanth check", STRONG),
+        Cell::styled("the mounts, the offers, then cargo", DIM),
+    ]);
+    next.row(vec![
+        Cell::styled("brocanth build", STRONG),
+        Cell::styled("compile, and report the budget it spent", DIM),
+    ]);
+    ui.table_note(&next);
+    Ok(ExitCode::SUCCESS)
+}
+
+// -- the answers ------------------------------------------------------------
+
+fn ask(ui: &Ui, args: &NewArgs) -> Result<Answers, Vec<Diagnostic>> {
+    if ui.interactive() {
+        inquire::set_global_render_config(prompt_style());
+    }
+
+    let name = match &args.name {
+        Some(name) => name.clone(),
+        None if ui.interactive() => prompt(
+            Text::new("Directory name")
+                .with_help_message("lowercase, digits, - and _; also the cargo package name")
+                .prompt(),
+        )?,
+        // The whole reason every answer is also a flag. A prompt here would
+        // block forever in CI, which is worse than any error message.
+        None => {
+            return Err(vec![Diagnostic::error(
+                "missing-argument",
+                "no name, and no terminal to ask for one",
+            )
+            .help("pass it: `brocanth new <NAME>`")
+            .note(
+                "every prompt this command would show has a flag: --title, --with, \
+                 --core-only, --git/--no-git",
+            )])
+        }
+    };
+    check_name(&name)?;
+
+    let default_title = title_case(&name);
+    let title = match &args.title {
+        Some(title) => title.clone(),
+        None if ui.interactive() => prompt(
+            Text::new("Application name")
+                .with_default(&default_title)
+                .with_help_message("shown on the pages and written to `[app] name`")
+                .prompt(),
+        )?,
+        None => default_title,
+    };
+
+    let picks = if args.core_only {
+        Vec::new()
+    } else if !args.with.is_empty() {
+        let mut picks = args.with.clone();
+        picks.sort();
+        picks.dedup();
+        picks
+    } else if ui.interactive() {
+        let defaults: Vec<usize> = Pick::ALL
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| Pick::DEFAULT.contains(p))
+            .map(|(i, _)| i)
+            .collect();
+        let mut picks = prompt(
+            MultiSelect::new("What goes in the binary", Pick::ALL.to_vec())
+                .with_default(&defaults)
+                .with_help_message(
+                    "space to toggle, enter to accept. Nothing unticked is compiled, \
+                     linked, or in the lock file",
+                )
+                .prompt(),
+        )?;
+        picks.sort();
+        picks
+    } else {
+        Pick::DEFAULT.to_vec()
+    };
+
+    let git = if args.git {
+        true
+    } else if args.no_git {
+        false
+    } else if ui.interactive() {
+        prompt(
+            Confirm::new("Initialise a git repository?")
+                .with_default(true)
+                .prompt(),
+        )?
+    } else {
+        false
+    };
+
+    // A relative `--brocanth-path` is relative to the directory the user typed
+    // it in, and the generated manifest sits one deeper, so it is resolved here
+    // rather than copied through.
+    let local = match &args.brocanth_path {
+        Some(path) => Some(
+            std::fs::canonicalize(path)
+                .map_err(|e| {
+                    vec![Diagnostic::error("brocanth-path", format!("{path}: {e}"))
+                        .help("--brocanth-path takes a directory holding brocanth's Cargo.toml")]
+                })?
+                .display()
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    Ok(Answers {
+        name,
+        title,
+        picks,
+        local,
+        git,
+    })
+}
+
+/// Ctrl-C at a prompt is an answer, not a crash.
+fn prompt<T>(result: inquire::error::InquireResult<T>) -> Result<T, Vec<Diagnostic>> {
+    result.map_err(|e| match e {
+        inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
+            vec![Diagnostic::warning("cancelled", "nothing was written")]
+        }
+        other => vec![Diagnostic::error("prompt", other.to_string())
+            .help("pass the answers as flags instead; every prompt has one")],
+    })
+}
+
+/// inquire, in the same vocabulary as everything else: the accent on what the
+/// reader is acting on, dim on the help, and no second colour.
+fn prompt_style() -> RenderConfig<'static> {
+    RenderConfig::default_colored()
+        .with_prompt_prefix(Styled::new("?").with_fg(Color::LightCyan))
+        .with_answered_prompt_prefix(Styled::new("\u{2713}").with_fg(Color::LightGreen))
+        .with_highlighted_option_prefix(Styled::new("\u{203a}").with_fg(Color::LightCyan))
+        .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey))
+        .with_answer(StyleSheet::new().with_fg(Color::LightCyan))
+}
+
+/// A cargo package name and a directory name at once, so the rules are the
+/// stricter of the two.
+fn check_name(name: &str) -> Result<(), Vec<Diagnostic>> {
+    let bad = |why: &str| {
+        Err(vec![Diagnostic::error("name", format!("{name:?} {why}"))
+            .help("lowercase letters, digits, - and _, starting with a letter")])
+    };
+    if name.is_empty() {
+        return bad("is empty");
+    }
+    if name.contains(['/', '\\', ' ']) {
+        return bad("is a path, not a name");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return bad("is not a cargo package name");
+    }
+    if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return bad("does not start with a letter");
+    }
+    Ok(())
+}
+
+/// `my-blog` -> `My Blog`. A starting point, not a decision: it is offered as
+/// the default of a prompt the author can overwrite.
+fn title_case(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
+    vec![Diagnostic::error("write", format!("{e}")).at(path.display().to_string())]
+}
+
+// -- the files --------------------------------------------------------------
+
+fn scaffold(a: &Answers) -> Vec<(String, String)> {
+    let mut files = vec![
+        ("Cargo.toml".to_string(), cargo_toml(a)),
+        (".gitignore".to_string(), "/target\n".to_string()),
+        // Without a pin, a generated application picks whatever rustc is on
+        // PATH, and brocanth's proc-macro artifacts are not compatible across
+        // patch releases: the failure is E0514, which names a crate the user
+        // has never heard of and says nothing about toolchains.
+        (
+            "rust-toolchain.toml".to_string(),
+            "[toolchain]\nchannel = \"1.98\"\n".to_string(),
+        ),
+        // And again for mise, which the rest of this ecosystem pins with and
+        // whose shim does not read rust-toolchain.toml. Two files because two
+        // tools, not because one is a fallback.
+        (
+            "mise.toml".to_string(),
+            "[tools]\n# Must match the toolchain brocanth's proc-macro artifacts\n             # were built with: they are not compatible across patch releases.\n             rust = \"1.98\"\n\n             [tasks.run]\nrun = \"cargo run\"\n\n             [tasks.test]\nrun = \"cargo test\"\n"
+                .to_string(),
+        ),
+        ("src/main.rs".to_string(), main_rs(a)),
+        ("src/pages/mod.rs".to_string(), PAGES_MOD_RS.to_string()),
+        ("src/pages/index.rs".to_string(), index_rs(a)),
+        ("src/pages/about.rs".to_string(), about_rs(a)),
+        ("src/pages/users/[id].rs".to_string(), USER_RS.to_string()),
+    ];
+    if !a.plugins().is_empty() {
+        files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a)));
+    }
+    if a.has(Pick::Logging) {
+        files.push(("src/plugins/logging.rs".to_string(), logging_rs(a)));
+    }
+    if a.has(Pick::Sessions) {
+        files.push(("src/plugins/sessions.rs".to_string(), sessions_rs(a)));
+    }
+    if a.has(Pick::Model) {
+        files.push(("src/plugins/model.rs".to_string(), model_rs(a)));
+    }
+    if a.has(Pick::Config) {
+        files.push((
+            format!("config/{}.toml", brocanth_config::DEFAULT_ENV),
+            config_toml(a),
+        ));
+    }
+    files
+}
+
+/// Where a brocanth crate comes from: a local checkout when one was named, the
+/// repository otherwise.
+fn source_of(a: &Answers, crate_name: &str) -> String {
+    match &a.local {
+        // `--brocanth-path` points at `crates/brocanth`; its siblings are the
+        // other crates of the same checkout.
+        Some(path) => {
+            let dir = if crate_name == "brocanth" {
+                Path::new(path).to_path_buf()
+            } else {
+                Path::new(path)
+                    .parent()
+                    .map(|p| p.join(crate_name))
+                    .unwrap_or_else(|| Path::new(path).to_path_buf())
+            };
+            format!("{crate_name} = {{ path = {:?} }}", dir.display().to_string())
+        }
+        None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}"),
+    }
+}
+
+/// The manifest, and the comment that makes it a statement rather than a list.
+fn cargo_toml(a: &Answers) -> String {
+    let mut deps = vec![source_of(a, "brocanth")];
+    for pick in &a.picks {
+        if let Some(name) = pick.crate_name() {
+            deps.push(source_of(a, name));
+        }
+    }
+    if a.needs_serde() {
+        deps.push(
+            "serde = { version = \"1\", features = [\"derive\"] }  # the config plugin reads typed sections"
+                .to_string(),
+        );
+    }
+
+    let mut absent: Vec<String> = Vec::new();
+    if !a.has(Pick::Model) {
+        absent.push(
+            "#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file"
+                .to_string(),
+        );
+    }
+    if !a.has(Pick::Config) {
+        absent.push(
+            "#   brocanth-config  no TOML parser; main builds each plugin from a literal"
+                .to_string(),
+        );
+    }
+    if !a.needs_serde() {
+        absent.push("#   serde            nothing here is deserialised".to_string());
+    }
+    let absent = format!(
+        "#\n# Not here, because nothing asked for it:\n{}\n",
+        absent.join("\n")
+    );
+
+    format!(
+        "[package]\n\
+         name = {name:?}\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         # Exactly what was chosen when this application was scaffolded.\n\
+         #\n\
+         # The core is a router handing a request and a context to a handler, and it\n\
+         # depends on none of the rest. A capability that is not listed below is not\n\
+         # compiled, not linked, and contributes nothing: no section in the config, no\n\
+         # field on the context, no bytes in the binary.\n\
+         {absent}\
+         [dependencies]\n\
+         {deps}\n",
+        name = a.name,
+        deps = deps.join("\n"),
+        absent = if absent.contains("#   ") { absent } else { String::new() },
+    )
+}
+
+/// `main`, which is the modularity claim written out as a numbered list.
+fn main_rs(a: &Answers) -> String {
+    let upper = a.ident().to_uppercase();
+    let plugins = a.plugins();
+    let layered = a.has(Pick::Logging) || a.has(Pick::Sessions);
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "//! {title} -- a brocanth application.\n\
+         //!\n\
+         //! Everything this binary contains is named in `run` below, in the order it\n\
+         //! happens. That is the point rather than a style: a plugin that is not named\n\
+         //! here is not registered, and a plugin that is not in `Cargo.toml` is not\n\
+         //! compiled at all. \"The framework decided for you and you cannot see where\"\n\
+         //! is the thing this layout exists to make impossible.\n\
+         \n\
+         mod pages;\n",
+        title = a.title
+    ));
+    if !plugins.is_empty() {
+        out.push_str("mod plugins;\n");
+    }
+    out.push_str("\nuse std::process::ExitCode;\n\nuse brocanth::plugin_app::AppBuilder;\n");
+    out.push_str(if layered {
+        "use brocanth::routing::{Dispatch, MiddlewareStack, Next, Router, Verb};\n"
+    } else {
+        "use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};\n"
+    });
+    if a.has(Pick::Config) {
+        out.push_str("use brocanth_config::{AppBuilderConfigExt, Loader};\n");
+    }
+    out.push_str("\nuse pages::{Ctx, Handler, Page};\n\n");
+
+    out.push_str(&format!(
+        "/// The application name. Every environment variable this binary reads is\n\
+         /// `{upper}_<SUFFIX>`: one convention, derived once, whatever spelling the\n\
+         /// name arrived in.\n\
+         const APP: &str = {name:?};\n\
+         \n\
+         fn main() -> ExitCode {{\n\
+        \x20   match run() {{\n\
+        \x20       Ok(()) => ExitCode::SUCCESS,\n\
+        \x20       Err(message) => {{\n\
+        \x20           eprintln!(\"error: {{message}}\");\n\
+        \x20           ExitCode::FAILURE\n\
+        \x20       }}\n\
+        \x20   }}\n\
+         }}\n\
+         \n\
+         fn run() -> Result<(), String> {{\n",
+        name = a.name
+    ));
+
+    // 1 and 2: the application and every plugin in it.
+    if a.has(Pick::Config) {
+        out.push_str(&format!(
+            "    // 1. Configuration. The core takes already-built values; finding the\n\
+            \x20   //    files, layering them and typing each section is `brocanth-config`'s\n\
+            \x20   //    job, and it is the only reason a TOML parser is in the tree.\n\
+            \x20   //    `${upper}_ENV` picks the environment, `${upper}_CONFIG` overrides\n\
+            \x20   //    the file outright.\n\
+            \x20   let config = Loader::new(APP).load().map_err(|e| e.to_string())?;\n\
+             \n\
+            \x20   // 2. The application, and every plugin it contains. Each line is a line\n\
+            \x20   //    a reader can delete; nothing registers itself. A section no\n\
+            \x20   //    registered instance claims stops the build rather than being\n\
+            \x20   //    silently ignored.\n\
+            \x20   let app = AppBuilder::new()\n\
+            \x20       .with_config(config)\n",
+        ));
+        for pick in &plugins {
+            out.push_str(&format!(
+                "        .plugin_from_config::<plugins::{key}::{ty}>({key:?})\n\
+                \x20       .map_err(|e| e.to_string())?\n",
+                key = pick.key(),
+                ty = type_of(*pick),
+            ));
+        }
+    } else {
+        out.push_str(
+            "    // 1. Configuration. No file lookup, no merge order, no TOML parser: the\n\
+            \x20   //    core takes values that are already built, so each plugin below is\n\
+            \x20   //    handed a literal the compiler checks. Add the config plugin when a\n\
+            \x20   //    file is wanted; nothing else changes.\n\
+             \n\
+            \x20   // 2. The application, and every plugin it contains. Each line is a line\n\
+            \x20   //    a reader can delete; nothing registers itself.\n\
+            \x20   let app = AppBuilder::new()\n",
+        );
+        for pick in &plugins {
+            out.push_str(&format!(
+                "        .plugin(plugins::{key}::{ty}::new(plugins::{key}::Settings::default()))\n",
+                key = pick.key(),
+                ty = type_of(*pick),
+            ));
+        }
+    }
+
+    out.push_str(
+        "        .setup(|setup| {\n\
+        \x20           // A plugin *offers* middleware and cannot mount it: a\n\
+        \x20           // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the\n\
+        \x20           // pattern is a decision, and the decision is the application's.\n",
+    );
+    if a.has(Pick::Logging) {
+        out.push_str("            setup.router().mount(\"/{*rest}\", \"request_log\");\n");
+    }
+    if a.has(Pick::Sessions) {
+        out.push_str("            setup.router().mount(\"/users/{*rest}\", \"session\");\n");
+    }
+    if !layered {
+        out.push_str(
+            "            // Nothing in this binary offers middleware, so nothing is mounted.\n\
+            \x20           let _ = setup.router();\n",
+        );
+    }
+    out.push_str(
+        "            Ok(())\n\
+        \x20       })\n\
+        \x20       .build()\n\
+        \x20       .map_err(|e| e.to_string())?;\n\
+         \n\
+        \x20   // 3. The route table: the shape of src/pages and nothing else. A file is\n\
+        \x20   //    a route, and `pages::router` is the only place that says so.\n\
+        \x20   let router = pages::router().map_err(|e| e.to_string())?;\n\
+         \n",
+    );
+
+    // 4: the chain.
+    if layered {
+        out.push_str(
+            "    // 4. The chain, from exactly what step 2 mounted. The match is\n\
+            \x20   //    exhaustive on purpose: a name this binary has no layer for stops\n\
+            \x20   //    the application rather than silently not running.\n\
+            \x20   let mut stack: MiddlewareStack<Ctx, Page> = MiddlewareStack::new();\n\
+            \x20   for mount in app.router_plan().mounts() {\n\
+            \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Page>) -> Page =\n\
+            \x20           match mount.middleware.as_str() {\n",
+        );
+        if a.has(Pick::Logging) {
+            out.push_str("                \"request_log\" => plugins::logging::layer,\n");
+        }
+        if a.has(Pick::Sessions) {
+            out.push_str("                \"session\" => plugins::sessions::layer,\n");
+        }
+        out.push_str(
+            "                other => {\n\
+            \x20                   return Err(format!(\"`{other}` is mounted, but this binary has no layer for it\"))\n\
+            \x20               }\n\
+            \x20           };\n\
+            \x20       stack.use_at(&mount.pattern, layer).map_err(|e| e.to_string())?;\n\
+            \x20   }\n\
+             \n",
+        );
+    } else {
+        out.push_str(
+            "    // 4. The chain. Nothing offered middleware, so the stack is empty --\n\
+            \x20   //    and an empty stack costs nothing: `run` allocates only when a\n\
+            \x20   //    layer matches the path.\n\
+            \x20   let stack: MiddlewareStack<Ctx, Page> = MiddlewareStack::new();\n\
+             \n",
+        );
+    }
+
+    // 5: the roster and the context.
+    out.push_str(
+        "    // 5. What this binary contains, as the application itself sees it.\n\
+        \x20   eprintln!(\n\
+        \x20       \"{APP}: plugins: [{}]\",\n\
+        \x20       app.instance_names().collect::<Vec<_>>().join(\", \")\n\
+        \x20   );\n",
+    );
+    if a.has(Pick::Sessions) || a.has(Pick::Model) {
+        out.push_str(
+            "\n    // The per-request context. These lines compile only because the\n\
+            \x20   // plugins that provide the values were registered in step 2: the\n\
+            \x20   // installed provider set lives in the application's *type*. Delete a\n\
+            \x20   // registration above and this stops compiling, which is the whole\n\
+            \x20   // mechanism -- modularity enforced rather than documented.\n\
+            \x20   let cx = app.context();\n",
+        );
+        if a.has(Pick::Sessions) {
+            out.push_str(
+                "    let session: &plugins::sessions::Session = cx.extract();\n\
+                \x20   eprintln!(\"session cookie: {}\", session.cookie);\n",
+            );
+        }
+        if a.has(Pick::Model) {
+            out.push_str(
+                "    let db: &plugins::model::Db = cx.extract();\n\
+                \x20   eprintln!(\"database: {}\", db.url);\n",
+            );
+        }
+    }
+
+    out.push_str(
+        "\n    // 6. There is no HTTP server yet. Until there is, four in-process\n\
+        \x20   //    requests show the table, the chain and the status rules wired\n\
+        \x20   //    together -- a path that exists with a verb that does not is a 405\n\
+        \x20   //    carrying an `Allow` list, never a 404.\n\
+        \x20   for (verb, path) in [\n\
+        \x20       (Verb::Get, \"/\"),\n\
+        \x20       (Verb::Get, \"/users/7\"),\n\
+        \x20       (Verb::Delete, \"/about\"),\n\
+        \x20       (Verb::Get, \"/nowhere\"),\n\
+        \x20   ] {\n\
+        \x20       let page = dispatch(&router, &stack, verb, path);\n\
+        \x20       println!(\n\
+        \x20           \"{:<7}{:<12}{} {}\",\n\
+        \x20           verb.as_str(),\n\
+        \x20           path,\n\
+        \x20           page.status,\n\
+        \x20           page.body.chars().take(48).collect::<String>()\n\
+        \x20       );\n\
+        \x20   }\n\
+        \x20   Ok(())\n\
+         }\n\
+         \n\
+         /// One request: the table, then the chain, then the handler.\n\
+         ///\n\
+         /// The chain runs only for a route that matched. A 404 has no route and\n\
+         /// therefore no context, which is also why the request hooks the plan\n\
+         /// reserves for a logger are the core's job and not a layer's.\n\
+         fn dispatch(\n\
+        \x20   router: &Router<Handler>,\n\
+        \x20   stack: &MiddlewareStack<Ctx, Page>,\n\
+        \x20   verb: Verb,\n\
+        \x20   path: &str,\n\
+         ) -> Page {\n\
+        \x20   match router.dispatch(verb, path) {\n\
+        \x20       Dispatch::Found { handler, matched } => {\n\
+        \x20           let handler = *handler;\n\
+        \x20           let mut ctx = Ctx::new(verb, path, matched.params());\n\
+        \x20           stack.run(path, &mut ctx, handler)\n\
+        \x20       }\n\
+        \x20       Dispatch::MethodNotAllowed { allow, .. } => {\n\
+        \x20           Page::new(405, format!(\"Allow: {allow}\"))\n\
+        \x20       }\n\
+        \x20       Dispatch::NotFound => Page::new(404, \"Not Found\"),\n\
+        \x20   }\n\
+         }\n",
+    );
+    out
+}
+
+fn type_of(pick: Pick) -> &'static str {
+    match pick {
+        Pick::Logging => "Logging",
+        Pick::Sessions => "Sessions",
+        Pick::Model => "Model",
+        Pick::Config => "ConfigPlugin",
+    }
+}
+
+const PAGES_MOD_RS: &str = r##"//! The route table.
+//!
+//! One file is one route, and the path on disk is the URL: `index.rs` is `/`,
+//! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`. The framework does
+//! the conversion -- see [`router`] -- so the table and the filesystem cannot
+//! drift apart, and renaming a file renames a route.
+
+pub mod about;
+pub mod index;
+
+pub mod users {
+    // `[id].rs` is not a Rust identifier, so the module says where to look.
+    // The typed-route-table macro emits this; until it lands it is written
+    // once, here.
+    #[path = "[id].rs"]
+    pub mod id;
+}
+
+use brocanth::routing::{BuildError, Params, Router, Verb};
+
+/// What a handler returns.
+///
+/// The framework owns rendering: a handler returns a value and never writes a
+/// response itself, so a half-written body on an error is not something that
+/// can happen.
+pub struct Page {
+    pub status: u16,
+    pub body: String,
+}
+
+impl Page {
+    pub fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+
+    pub fn ok(body: impl Into<String>) -> Self {
+        Self::new(200, body)
+    }
+}
+
+/// What a handler is given. Middleware sees it too, and may change it before
+/// the handler runs or after it returns.
+pub struct Ctx {
+    pub verb: Verb,
+    pub path: String,
+    params: Vec<(String, String)>,
+}
+
+impl Ctx {
+    pub fn new(verb: Verb, path: &str, params: Params<'_>) -> Self {
+        Self {
+            verb,
+            path: path.to_string(),
+            params: params
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    /// A route parameter, or `None`.
+    ///
+    /// Never `""`. The Crystal prototype returned an empty string for a name
+    /// nobody declared, so a typo read as a present-but-blank value and went
+    /// unnoticed; `Option` is that bug deleted rather than documented.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// A handler. One per verb a page answers.
+pub type Handler = fn(&mut Ctx) -> Page;
+
+/// The table.
+///
+/// Each line names the *file* and the framework derives the route from it, so
+/// there is no second list to keep in step. Registering the same file and verb
+/// twice is an error rather than a silent overwrite.
+pub fn router() -> Result<Router<Handler>, BuildError> {
+    let mut routes = Router::builder();
+    routes.file("index.rs", "", Verb::Get, index::handle as Handler)?;
+    routes.file("about.rs", "", Verb::Get, about::handle as Handler)?;
+    routes.file("users/[id].rs", "", Verb::Get, users::id::handle as Handler)?;
+    routes.file(
+        "users/[id].rs",
+        "",
+        Verb::Post,
+        users::id::handle_post as Handler,
+    )?;
+    routes.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_is_the_shape_of_the_directory() {
+        let router = router().expect("the pages produce a table");
+        let mut patterns: Vec<&str> = router
+            .routes()
+            .iter()
+            .map(|(template, _)| template.pattern())
+            .collect();
+        patterns.sort();
+        assert_eq!(patterns, ["/", "/about", "/users/{id}"]);
+    }
+
+    #[test]
+    fn a_path_that_exists_with_a_verb_that_does_not_is_a_405() {
+        let router = router().expect("the pages produce a table");
+        let allow = router.allow_for("/about").expect("/about is a route");
+        assert_eq!(allow.to_string(), "GET, HEAD");
+    }
+}
+"##;
+
+fn index_rs(a: &Answers) -> String {
+    format!(
+        r##"//! `/` -- because the file is called `index.rs`.
+
+use crate::pages::{{Ctx, Page}};
+
+/// GET. The framework reads the verb off the function name: `handle` is GET,
+/// `handle_post` is POST, and `handle_json` would be a content-negotiation hook
+/// rather than a verb.
+pub fn handle(_ctx: &mut Ctx) -> Page {{
+    Page::ok(
+        "<!doctype html><title>{title}</title>\
+         <h1>{title}</h1>\
+         <p>This file is <code>src/pages/index.rs</code>. Rename it and the route \
+         moves with it.</p>\
+         <ul><li><a href=\"/about\">/about</a></li>\
+         <li><a href=\"/users/7\">/users/7</a></li></ul>",
+    )
+}}
+"##,
+        title = a.title
+    )
+}
+
+fn about_rs(a: &Answers) -> String {
+    format!(
+        r##"//! `/about` -- one file, one route.
+
+use crate::pages::{{Ctx, Page}};
+
+pub fn handle(ctx: &mut Ctx) -> Page {{
+    // The context is the request. The framework owns the response, so a
+    // handler returns a value and never writes one itself -- which is what
+    // makes a half-written body on an error impossible rather than unlikely.
+    Page::ok(format!(
+        "<!doctype html><title>About \u{{b7}} {title}</title>\
+         <h1>About</h1>\
+         <p>You asked for <code>{{}} {{}}</code>. This page answers GET and \
+         nothing else, so a DELETE to it is a 405 carrying an \
+         <code>Allow</code> header rather than a 404.</p>",
+        ctx.verb, ctx.path
+    ))
+}}
+"##,
+        title = a.title
+    )
+}
+
+const USER_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are the parameter.
+//!
+//! There is no ceiling on how many a route may have. The Crystal prototype had
+//! `MAX_PARAMS = 4` and dropped the fifth without saying so, because its
+//! collector could not prove a captured parameter does not outlive the request.
+//! Here the parameters borrow the path, so the question does not arise.
+
+use crate::pages::{Ctx, Page};
+
+pub fn handle(ctx: &mut Ctx) -> Page {
+    match ctx.param("id") {
+        Some(id) => Page::ok(format!(
+            "<!doctype html><title>User {id}</title><h1>User {id}</h1>"
+        )),
+        // Unreachable while the file is called `[id].rs`: the matcher cannot
+        // arrive here without one. It is written out anyway, because `param`
+        // answering `None` rather than `""` is the point of this file.
+        None => Page::new(400, "no id"),
+    }
+}
+
+/// POST to the same path. One file, one route, one handler per verb.
+pub fn handle_post(ctx: &mut Ctx) -> Page {
+    match ctx.param("id") {
+        Some(id) => Page::new(303, format!("Location: /users/{id}")),
+        None => Page::new(400, "no id"),
+    }
+}
+"##;
+
+fn plugins_mod_rs(a: &Answers) -> String {
+    let mut out = String::from(
+        "//! The plugins this application contains.\n\
+         //!\n\
+         //! Each one is also named in `main`: being here makes it compile, being named\n\
+         //! there makes it run. The core depends on none of them, and the dependency\n\
+         //! arrow points this way and never back.\n\
+         \n",
+    );
+    for pick in [Pick::Logging, Pick::Model, Pick::Sessions] {
+        if a.has(pick) {
+            out.push_str(&format!("pub mod {};\n", pick.key()));
+        }
+    }
+    out
+}
+
+/// The derive a settings struct carries, and the sentence that explains it.
+///
+/// This is the §8 claim at its sharpest: with the config plugin the struct is
+/// deserialised and derives for it; without, nothing deserialises anything and
+/// the derive is not there to be compiled.
+fn settings_derive(a: &Answers, section: &str) -> (String, String) {
+    if a.has(Pick::Config) {
+        (
+            "#[derive(Debug, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
+                .to_string(),
+            format!(
+                "It derives `Deserialize` because this application reads it from\n\
+                 /// `[{section}]` in a TOML file. Drop the config plugin and the derive goes\n\
+                 /// with it: `Plugin::Config` carries no bounds the core imposes."
+            ),
+        )
+    } else {
+        (
+            "#[derive(Debug)]".to_string(),
+            "Nothing deserialises it: `main` builds it from a literal, and the\n\
+             /// compiler checks that literal. `Plugin::Config` carries no bounds the\n\
+             /// core imposes, so there is no deserialiser here to link."
+                .to_string(),
+        )
+    }
+}
+
+fn logging_rs(a: &Answers) -> String {
+    let (derive, note) = settings_derive(a, "logging");
+    format!(
+        r##"//! Request logging.
+//!
+//! The core assumes no log layer at all -- not `log`, not `tracing`, not a
+//! trait with a no-op default. This file is the whole of logging in this
+//! binary: delete the registration in `main` and nothing logs, delete this file
+//! and nothing about logging is compiled.
+
+use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
+use brocanth::plugin_context::NoContext;
+use brocanth::routing::Next;
+
+use crate::pages::{{Ctx, Page}};
+
+/// What this plugin is built from.
+///
+/// {note}
+{derive}
+pub struct Settings {{
+    /// `error`, `warn`, `info` or `debug`.
+    pub level: String,
+}}
+
+impl Default for Settings {{
+    fn default() -> Self {{
+        Self {{
+            level: "info".to_string(),
+        }}
+    }}
+}}
+
+pub struct Logging {{
+    level: String,
+}}
+
+impl Plugin for Logging {{
+    type Config = Settings;
+    /// Nothing on the context: a logger writes, it does not hand values out.
+    type Provides = NoContext;
+    const NAME: &'static str = "logging";
+
+    fn new(config: Settings) -> Self {{
+        Self {{
+            level: config.level,
+        }}
+    }}
+
+    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {{
+        // Offered, not mounted. Where it runs is the application's call, made
+        // in `main`, at a pattern this file never sees.
+        catalog.offer("request_log", "one line per request: verb, path, status");
+        Ok(())
+    }}
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        eprintln!("[{{}}] level {{}}", lc.instance(), self.level);
+        Ok(())
+    }}
+}}
+
+/// The layer `request_log` mounts.
+///
+/// A plain function is a layer: `Layer` is implemented for anything callable
+/// with a context and the rest of the chain. Not calling `next.run` is how a
+/// layer short-circuits, and dropping it is all that takes.
+pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Page>) -> Page {{
+    let verb = ctx.verb;
+    let path = ctx.path.clone();
+    let page = next.run(ctx);
+    eprintln!("{{verb}} {{path}} -> {{}}", page.status);
+    page
+}}
+"##
+    )
+}
+
+fn sessions_rs(a: &Answers) -> String {
+    let (derive, note) = settings_derive(a, "sessions");
+    format!(
+        r##"//! Cookie sessions, and the one value they put on the context.
+
+use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
+use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
+use brocanth::routing::Next;
+
+use crate::pages::{{Ctx, Page}};
+
+/// What this plugin is built from.
+///
+/// {note}
+{derive}
+pub struct Settings {{
+    pub cookie: String,
+    /// `Secure`, so the cookie never leaves over plain HTTP. False in
+    /// development and nowhere else.
+    pub secure: bool,
+}}
+
+impl Default for Settings {{
+    fn default() -> Self {{
+        Self {{
+            cookie: "_{ident}_session".to_string(),
+            secure: true,
+        }}
+    }}
+}}
+
+/// What this plugin puts on the context.
+///
+/// One provider owns one type, so there is no string name to misspell and no
+/// `responds_to?` guard to forget. A handler that asks for a `Session` in an
+/// application that never registered this plugin does not compile.
+#[derive(Debug, Default)]
+pub struct Session {{
+    pub cookie: String,
+}}
+
+impl ContextItem for Session {{}}
+
+pub struct Sessions {{
+    cookie: String,
+    secure: bool,
+}}
+
+impl Plugin for Sessions {{
+    type Config = Settings;
+    type Provides = ProvidesContext<Session>;
+    const NAME: &'static str = "sessions";
+
+    fn new(config: Settings) -> Self {{
+        Self {{
+            cookie: config.cookie,
+            secure: config.secure,
+        }}
+    }}
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        if self.cookie.is_empty() {{
+            // A missing or ill-typed key fails at startup, not at first use,
+            // and the plugin never quietly chooses a name the operator did not.
+            return Err(PluginError::new("[sessions] cookie must not be empty"));
+        }}
+        Ok(())
+    }}
+
+    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {{
+        catalog.offer(
+            "session",
+            "reads the cookie and puts a Session on the context",
+        );
+        Ok(())
+    }}
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        if !self.secure {{
+            eprintln!("[sessions] Secure is off: development only");
+        }}
+        Ok(())
+    }}
+
+    fn provide(&self, cx: &mut ContextBuilder) {{
+        cx.insert(Session {{
+            cookie: self.cookie.clone(),
+        }});
+    }}
+}}
+
+/// The layer `session` mounts. Reading the cookie off the request and writing
+/// `Set-Cookie` on the way out both need the request type that arrives with the
+/// HTTP server; the seam is here and it is already the right shape.
+pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Page>) -> Page {{
+    next.run(ctx)
+}}
+"##,
+        ident = a.ident()
+    )
+}
+
+fn model_rs(a: &Answers) -> String {
+    let (derive, note) = settings_derive(a, "model");
+    format!(
+        r##"//! The model layer.
+//!
+//! The ORM is recommended and absent. SeaORM is the recommendation, it is not a
+//! dependency of the core and never will be, and it arrives through
+//! `brocanth-model` -- which is in `Cargo.toml` because this file is here and
+//! through no other route. An application that stores nothing pays nothing for
+//! it: not a crate in the lock file, not a section in the config, not a byte.
+//!
+//! The entity modules go under `src/models/`, from `brocanth generate model`.
+
+use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
+use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
+use brocanth_model::ModelRegistry;
+
+/// What this plugin is built from.
+///
+/// {note}
+{derive}
+pub struct Settings {{
+    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
+    pub url: String,
+}}
+
+impl Default for Settings {{
+    fn default() -> Self {{
+        Self {{
+            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
+        }}
+    }}
+}}
+
+/// The handle a handler asks the context for.
+pub struct Db {{
+    pub url: String,
+}}
+
+impl ContextItem for Db {{}}
+
+pub struct Model {{
+    url: String,
+}}
+
+impl Plugin for Model {{
+    type Config = Settings;
+    type Provides = ProvidesContext<Db>;
+    const NAME: &'static str = "model";
+
+    fn new(config: Settings) -> Self {{
+        Self {{ url: config.url }}
+    }}
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        if self.url.is_empty() {{
+            return Err(PluginError::new(
+                "[model] url is required; there is no default database",
+            ));
+        }}
+        Ok(())
+    }}
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        // The pool opens here, at the last hook before the server is handed the
+        // application, and drains on the matching shutdown hook.
+        //
+        // The registry below is what makes the generators and an admin UI
+        // tractable: every entity compiled into this binary can be enumerated,
+        // with its columns, nullability and keys. It is empty until the first
+        // `brocanth generate model`, and the line is here so it is not a
+        // surprise when it fills.
+        let registry = ModelRegistry::new();
+        eprintln!("[model] {{}} entities registered", registry.names().len());
+        Ok(())
+    }}
+
+    fn provide(&self, cx: &mut ContextBuilder) {{
+        cx.insert(Db {{
+            url: self.url.clone(),
+        }});
+    }}
+}}
+"##
+    )
+}
+
+fn config_toml(a: &Answers) -> String {
+    let mut out = format!(
+        "# The configuration of this environment.\n\
+         #\n\
+         # The framework owns `[app]` and `[server]`. Every other section is claimed by\n\
+         # the plugin instance registered under that name in src/main.rs, and a section\n\
+         # nothing claims stops the build rather than being silently ignored -- a\n\
+         # misspelt section must never build clean.\n\
+         #\n\
+         # Layered, highest precedence first: ${upper}_CONFIG, /etc/{ident}/{env}.toml,\n\
+         # ./{ident}_{env}.toml, ./config/{env}.toml. ${upper}_ENV picks the\n\
+         # environment; without it, {env}.\n\
+         \n\
+         [app]\n\
+         name = {title:?}\n",
+        upper = a.ident().to_uppercase(),
+        ident = a.ident(),
+        env = brocanth_config::DEFAULT_ENV,
+        title = a.title,
+    );
+    if a.has(Pick::Logging) {
+        out.push_str("\n[logging]\nlevel = \"debug\"\n");
+    }
+    if a.has(Pick::Sessions) {
+        out.push_str(&format!(
+            "\n[sessions]\ncookie = \"_{ident}_session\"\n\
+             # Development only. Anywhere a browser reaches over HTTPS, this is true.\n\
+             secure = false\n",
+            ident = a.ident()
+        ));
+    }
+    if a.has(Pick::Model) {
+        out.push_str("\n[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answers(picks: &[Pick]) -> Answers {
+        Answers {
+            name: "my-blog".into(),
+            title: "My Blog".into(),
+            picks: picks.to_vec(),
+            local: None,
+            git: false,
+        }
+    }
+
+    fn paths(picks: &[Pick]) -> Vec<String> {
+        scaffold(&answers(picks))
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    #[test]
+    fn a_name_is_a_cargo_package_name() {
+        assert!(check_name("my-blog").is_ok());
+        assert!(check_name("blog_2").is_ok());
+        assert!(check_name("").is_err());
+        assert!(check_name("My Blog").is_err());
+        assert!(check_name("../escape").is_err());
+        assert!(check_name("2blog").is_err());
+    }
+
+    #[test]
+    fn the_default_title_is_a_starting_point() {
+        assert_eq!(title_case("my-blog"), "My Blog");
+        assert_eq!(title_case("brocanth"), "Brocanth");
+        assert_eq!(title_case("a_b-c"), "A B C");
+    }
+
+    #[test]
+    fn the_core_alone_writes_no_plugin_and_no_config() {
+        let paths = paths(&[]);
+        assert!(
+            !paths.iter().any(|p| p.starts_with("src/plugins")),
+            "{paths:?}"
+        );
+        assert!(!paths.iter().any(|p| p.starts_with("config/")), "{paths:?}");
+        // The route table is not optional: it is the core.
+        assert!(paths.contains(&"src/pages/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn a_plugin_writes_its_file_and_nobody_elses() {
+        let paths = paths(&[Pick::Logging]);
+        assert!(paths.contains(&"src/plugins/logging.rs".to_string()));
+        assert!(!paths.contains(&"src/plugins/sessions.rs".to_string()));
+        assert!(!paths.contains(&"src/plugins/model.rs".to_string()));
+    }
+
+    #[test]
+    fn the_manifest_holds_exactly_what_was_chosen() {
+        // The §8 claim, as an assertion rather than a sentence in a README.
+        // Dependency *lines*, not mentions: the comment above `[dependencies]`
+        // names every crate that is absent, which is the point of it.
+        let core = cargo_toml(&answers(&[]));
+        let declared = |manifest: &str, name: &str| {
+            manifest
+                .lines()
+                .any(|l| l.starts_with(&format!("{name} = ")))
+        };
+        assert!(declared(&core, "brocanth"), "{core}");
+        assert!(!declared(&core, "serde"), "{core}");
+        assert!(!declared(&core, "brocanth-config"), "{core}");
+        assert!(
+            !declared(&core, "brocanth-model"),
+            "an ORM nobody asked for: {core}"
+        );
+
+        // Logging alone still links nothing new: its settings are a literal.
+        let logging = cargo_toml(&answers(&[Pick::Logging]));
+        assert!(!declared(&logging, "serde"), "{logging}");
+        assert!(!declared(&logging, "brocanth-config"), "{logging}");
+
+        let configured = cargo_toml(&answers(&[Pick::Logging, Pick::Config]));
+        assert!(declared(&configured, "brocanth-config"), "{configured}");
+        assert!(declared(&configured, "serde"), "{configured}");
+
+        let with_model = cargo_toml(&answers(&[Pick::Model]));
+        assert!(declared(&with_model, "brocanth-model"), "{with_model}");
+    }
+
+    #[test]
+    fn the_manifest_says_what_is_absent_and_why() {
+        let core = cargo_toml(&answers(&[]));
+        assert!(
+            core.contains("Not here, because nothing asked for it"),
+            "{core}"
+        );
+        assert!(core.contains("no sea-orm anywhere in the lock file"), "{core}");
+        let everything = cargo_toml(&answers(&Pick::ALL));
+        assert!(
+            !everything.contains("Not here, because"),
+            "nothing is absent, so nothing is listed: {everything}"
+        );
+    }
+
+    #[test]
+    fn the_config_plugin_is_what_puts_a_deserialiser_in_the_source() {
+        // "A feature that is off must mean the code is absent, not that a
+        // branch returns early." Two scaffolds, and the difference is a derive.
+        let configured = logging_rs(&answers(&[Pick::Logging, Pick::Config]));
+        assert!(configured.contains("serde::Deserialize"), "{configured}");
+        assert!(configured.contains("deny_unknown_fields"), "{configured}");
+
+        let literal = logging_rs(&answers(&[Pick::Logging]));
+        assert!(!literal.contains("serde"), "{literal}");
+    }
+
+    #[test]
+    fn main_names_every_plugin_and_mounts_what_no_plugin_may() {
+        let main = main_rs(&answers(&[Pick::Logging, Pick::Sessions, Pick::Config]));
+        assert!(
+            main.contains(".plugin_from_config::<plugins::logging::Logging>(\"logging\")"),
+            "{main}"
+        );
+        assert!(
+            main.contains(".plugin_from_config::<plugins::sessions::Sessions>(\"sessions\")"),
+            "{main}"
+        );
+        // The mount is in the application's setup block, never in the plugin.
+        assert!(
+            main.contains("setup.router().mount(\"/{*rest}\", \"request_log\")"),
+            "{main}"
+        );
+        let plugin = logging_rs(&answers(&[Pick::Logging]));
+        assert!(!plugin.contains(".mount("), "a plugin must not mount: {plugin}");
+        assert!(plugin.contains("catalog.offer("), "{plugin}");
+    }
+
+    #[test]
+    fn a_core_only_main_reads_no_file_and_registers_nothing() {
+        let main = main_rs(&answers(&[]));
+        assert!(!main.contains("Loader::new"), "{main}");
+        assert!(!main.contains(".plugin"), "{main}");
+        assert!(!main.contains("mod plugins;"), "{main}");
+        assert!(!main.contains("brocanth_config"), "{main}");
+    }
+
+    #[test]
+    fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
+        let main = main_rs(&answers(&[Pick::Logging]));
+        assert!(
+            main.contains(".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"),
+            "{main}"
+        );
+        assert!(!main.contains("plugin_from_config"), "{main}");
+    }
+
+    #[test]
+    fn the_generated_config_names_only_sections_a_plugin_claims() {
+        // `validate_sections` rejects a section nothing claims, so a scaffold
+        // that wrote `[sessions]` without the sessions plugin would fail on its
+        // own first run. The real crate is asked, not a reimplementation.
+        for picks in [
+            vec![Pick::Config],
+            vec![Pick::Config, Pick::Logging],
+            Pick::ALL.to_vec(),
+        ] {
+            let a = answers(&picks);
+            let toml = config_toml(&a);
+            let config = brocanth_config::Config::from_toml(a.name.as_str(), "development", &toml)
+                .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
+            // The instances the generated `main` registers: one per plugin,
+            // plus `config` itself, which `with_config` adds.
+            let mut claimed: Vec<String> =
+                a.plugins().iter().map(|p| p.key().to_string()).collect();
+            claimed.push("config".to_string());
+            config
+                .validate_sections(&claimed)
+                .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
+        }
+    }
+
+    #[test]
+    fn every_page_the_table_names_is_a_file_the_scaffold_writes() {
+        // The generated `router()` names three files. If one were not written
+        // the application would not compile, which is a worse way to find out
+        // than this test.
+        let files = scaffold(&answers(&Pick::ALL));
+        for page in ["index.rs", "about.rs", "users/[id].rs"] {
+            assert!(PAGES_MOD_RS.contains(&format!("\"{page}\"")), "{page}");
+            assert!(
+                files.iter().any(|(p, _)| p == &format!("src/pages/{page}")),
+                "the table names {page} but nothing writes it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_route_of_every_generated_page_is_what_the_framework_says_it_is() {
+        use brocanth::routing::route_for_file;
+        for (file, expected) in [
+            ("index.rs", "/"),
+            ("about.rs", "/about"),
+            ("users/[id].rs", "/users/{id}"),
+        ] {
+            assert_eq!(route_for_file(file, "").unwrap().pattern(), expected);
+        }
+    }
+
+    /// The scaffold, built for real.
+    ///
+    /// Ignored because it runs cargo and wants the registry; it is the test
+    /// that matters most all the same, so it is a command rather than a
+    /// paragraph: `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    fn the_scaffold_compiles() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-scaffold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            name: "scaffold-test".into(),
+            title: "Scaffold Test".into(),
+            picks: vec![Pick::Logging, Pick::Config, Pick::Sessions],
+            local: Some(brocanth.display().to_string()),
+            git: false,
+        };
+        for (path, contents) in scaffold(&a) {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("build")
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the scaffold did not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

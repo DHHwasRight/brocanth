@@ -1,0 +1,34 @@
+[package]
+name = "brocanth-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The brocanth validation vocabulary: schemas whose shape is checked by the compiler and whose data is checked at run time, with one introspectable description both an OpenAPI emitter and a form builder can read."
+
+# Dependencies are all optional and all gated. Turn every feature off and this
+# crate is the vocabulary, the issue report and `SchemaNode` with nothing
+# underneath it — which is what `brocanth-openapi` and `brocanth-admin` want,
+# since neither of them needs the framework or a regex engine to read a
+# description.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+brocanth-schema-derive = { path = "derive", version = "=0.1.0", optional = true }
+regex = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = ["derive", "pattern", "plugin"]
+# `#[derive(Validate)]`.
+derive = ["dep:brocanth-schema-derive"]
+# `StringSchema::pattern`, which needs a regex engine. Off, and the method does
+# not exist; the `pattern` field of `StringNode` is always there, so an OpenAPI
+# emitter never needs this feature.
+pattern = ["dep:regex"]
+# The brocanth plugin and the `Valid<T>` extraction point.
+plugin = ["dep:brocanth"]
+# `Serialize`/`Deserialize` on `SchemaNode`, `Issue` and `Issues`. The JSON
+# rendering in `Issues::to_json` does not need it.
+serde = ["dep:serde"]
+
+[lints.rust]
+missing_docs = "deny"

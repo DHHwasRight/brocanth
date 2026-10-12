@@ -1,1 +1,105 @@
-fn main() { println!("brocanth"); }
+//! `brocanth` -- the command line over the framework.
+//!
+//! Six commands, one output layer. The layer is the interesting part and lives
+//! in [`ui`]: whether a person is watching is decided once, in
+//! [`ui::Face::decide`], and every byte any command writes goes through a
+//! [`ui::Ui`] carrying that answer. No command calls `println!`, checks
+//! `is_terminal`, or reads `NO_COLOR`.
+
+mod commands;
+mod project;
+mod ui;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Args, Parser, Subcommand};
+
+use ui::{Face, Ui};
+
+/// clap's own help, in the same five styles as everything else. A tool whose
+/// `--help` looks like a different program is a tool with two designs.
+fn help_styles() -> clap::builder::Styles {
+    use anstyle::Style;
+    clap::builder::Styles::styled()
+        .header(ui::STRONG)
+        .usage(ui::STRONG)
+        .literal(ui::ACCENT)
+        .placeholder(ui::DIM)
+        .valid(ui::OK)
+        .invalid(ui::WARN)
+        .error(ui::BAD.bold())
+        .context(Style::new())
+}
+
+#[derive(Parser)]
+#[command(
+    name = "brocanth",
+    version,
+    about = "A server framework for HTML-first applications. Nothing ships unless it is asked for.",
+    styles = help_styles(),
+    max_term_width = 100,
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+    #[command(flatten)]
+    global: Global,
+}
+
+/// The flags that feed the one decision, plus where the application is.
+#[derive(Args)]
+struct Global {
+    /// Package root [default: the nearest directory holding a Cargo.toml and src/pages]
+    #[arg(long, short = 'C', global = true, value_name = "DIR")]
+    dir: Option<PathBuf>,
+    /// Never colour the output, even on a terminal
+    #[arg(long, global = true)]
+    no_color: bool,
+    /// Print only the result and anything wrong with it
+    #[arg(long, short, global = true)]
+    quiet: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Scaffold an application
+    New(commands::new::NewArgs),
+    /// Print the resolved route table
+    Routes(commands::routes::RoutesArgs),
+    /// Compile the application
+    Build(commands::build::BuildArgs),
+    /// Check the route table, the mounts and the plugins, then compile
+    Check(commands::check::CheckArgs),
+    /// Generate a page, a plugin or a model
+    Generate(commands::generate::GenerateArgs),
+    /// Serve the application and rebuild as it changes
+    Dev(commands::dev::DevArgs),
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    // Asked once. Everything downstream reads the answer off the `Ui`.
+    let face = Face::decide(cli.global.no_color, cli.global.quiet);
+    let ui = Ui::new(face, cli.global.quiet);
+    let dir = cli.global.dir.as_deref();
+
+    let result = match cli.command {
+        Command::New(args) => commands::new::run(&ui, dir, args),
+        Command::Routes(args) => commands::routes::run(&ui, dir, args),
+        Command::Build(args) => commands::build::run(&ui, dir, args),
+        Command::Check(args) => commands::check::run(&ui, dir, args),
+        Command::Generate(args) => commands::generate::run(&ui, dir, args),
+        Command::Dev(args) => commands::dev::run(&ui, dir, args),
+    };
+
+    match result {
+        Ok(code) => code,
+        Err(diagnostics) => {
+            for d in &diagnostics {
+                ui.diagnostic(d);
+            }
+            ExitCode::FAILURE
+        }
+    }
+}

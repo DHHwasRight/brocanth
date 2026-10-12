@@ -3,6 +3,7 @@ name = "brocanth-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "The brocanth command line."
 
 [[bin]]
 name = "brocanth"
@@ -10,5 +11,22 @@ path = "src/main.rs"
 
 [dependencies]
 brocanth.workspace = true
+# The configuration plugin, because `brocanth new` writes a config/<env>.toml
+# and a scaffold whose own loader would reject its own file must not ship: the
+# generated document is parsed and validated by the real crate in a test. The
+# core's no-hidden-dependencies rule is the core's; this is the tool.
+brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
+
 clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+# Colour, decided once in src/ui.rs. anstyle is the vocabulary and anstream is
+# the stream that strips it when nobody is watching. Not `colored`: MPL-2.0
+# would be the only copyleft licence in the tree.
+anstyle = "1"
+anstream = "1"
+# Progress. Hides itself when piped, so CI needs no flag.
+indicatif = "0.18"
+# Prompts, for `brocanth new`. Every answer it asks for is also a flag.
+inquire = "0.9"
+# Display width, so a wide character does not shear a column. Zero new crates:
+# indicatif already depends on it.
+unicode-width = "0.2"
