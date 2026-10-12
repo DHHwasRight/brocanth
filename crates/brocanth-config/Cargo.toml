@@ -1,0 +1,15 @@
+[package]
+name = "brocanth-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Configuration for brocanth: four sources, deep merge, typed sections — a plugin, because an application configured from its environment should not link a TOML parser."
+
+[dependencies]
+brocanth.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -254,7 +254,9 @@ mod tests {
         let error = params().parse::<u64>("slug").unwrap_err();
         assert_eq!(error.status(), http::StatusCode::BAD_REQUEST);
         match error.kind() {
-            ParamErrorKind::Invalid { value, expected, .. } => {
+            ParamErrorKind::Invalid {
+                value, expected, ..
+            } => {
                 assert_eq!(value, "hello-world");
                 assert_eq!(*expected, "u64");
             }

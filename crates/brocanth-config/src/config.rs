@@ -1,5 +1,12 @@
 //! Configuration: find it, layer it, and hand typed sections to plugins.
 //!
+//! None of this is in the core, and that is the point. PLAN.md §8: *"Config is
+//! a plugin too. The core takes already-parsed values. TOML, the
+//! environment-scoped file resolution, and the merge order are a crate an
+//! application opts into — a service configured entirely from its environment
+//! should not link a TOML parser."* So `serde` and `toml` are dependencies of
+//! this crate and of nothing below it.
+//!
 //! Two decisions from the Crystal original survive the port, and one bug does
 //! not.
 //!
@@ -30,6 +37,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use brocanth::suggest::nearest_name;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use toml::{Table, Value};
@@ -171,6 +179,12 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    #[error(
+        "`[{name}]` was asked for before a configuration was installed; call \
+         `.with_config(Loader::new(\"my_app\").load()?)` on the builder first"
+    )]
+    NoConfigInstalled { name: String },
 }
 
 fn suggestion_hint(suggestion: &Option<String>) -> String {
@@ -463,12 +477,14 @@ impl Config {
     pub fn section<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, ConfigError> {
         match self.table.get(name) {
             None => Ok(T::default()),
-            Some(Value::Table(t)) => Value::Table(t.clone())
-                .try_into::<T>()
-                .map_err(|source| ConfigError::Section {
-                    name: name.to_string(),
-                    source,
-                }),
+            Some(Value::Table(t)) => {
+                Value::Table(t.clone())
+                    .try_into::<T>()
+                    .map_err(|source| ConfigError::Section {
+                        name: name.to_string(),
+                        source,
+                    })
+            }
             Some(_) => Err(ConfigError::NotASection {
                 name: name.to_string(),
             }),
@@ -487,59 +503,20 @@ impl Config {
 
         for (name, value) in &self.table {
             if !value.is_table() {
-                return Err(ConfigError::NotASection {
-                    name: name.clone(),
-                });
+                return Err(ConfigError::NotASection { name: name.clone() });
             }
             if known.contains(name) {
                 continue;
             }
+            let known: Vec<String> = known.into_iter().collect();
             return Err(ConfigError::UnknownSection {
                 name: name.clone(),
-                suggestion: nearest(name, &known),
-                known: known.into_iter().collect(),
+                suggestion: nearest_name(name, &known),
+                known,
             });
         }
         Ok(())
     }
-}
-
-/// The closest known name, when it is close enough to be a plausible typo.
-///
-/// Shared with the plugin layer, which needs the same courtesy for a misspelt
-/// middleware name.
-pub(crate) fn nearest_name<S: AsRef<str>>(name: &str, known: &[S]) -> Option<String> {
-    let set: BTreeSet<String> = known.iter().map(|s| s.as_ref().to_string()).collect();
-    nearest(name, &set)
-}
-
-fn nearest(name: &str, known: &BTreeSet<String>) -> Option<String> {
-    let budget = (name.chars().count() / 3).max(2);
-    known
-        .iter()
-        .map(|k| (levenshtein(name, k), k))
-        .filter(|(d, _)| *d <= budget)
-        .min_by_key(|(d, k)| (*d, (*k).clone()))
-        .map(|(_, k)| k.clone())
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }
 
 // ---------------------------------------------------------------------------
@@ -865,7 +842,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("`[loggr]`"), "names the section: {msg}");
         assert!(msg.contains("did you mean `[logger]`?"), "suggests: {msg}");
-        assert!(msg.contains("known sections:"), "lists what is valid: {msg}");
+        assert!(
+            msg.contains("known sections:"),
+            "lists what is valid: {msg}"
+        );
     }
 
     #[test]

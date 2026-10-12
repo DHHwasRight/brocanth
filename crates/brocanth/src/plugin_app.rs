@@ -1,5 +1,5 @@
-//! The application: an explicit value that owns its configuration, its plugin
-//! instances, its services and its router plan.
+//! The application: an explicit value that owns its plugin instances, its
+//! services and its router plan.
 //!
 //! There is no global registry here, and that is the point. The Crystal
 //! original kept plugin instances in class variables, so two applications in
@@ -12,7 +12,7 @@
 //!
 //! `build()` runs the recorded lifecycle:
 //!
-//! 1. `configure` — every instance, with its typed section
+//! 1. `configure` — every instance settles its own state
 //! 2. `register` — every instance publishes its services
 //! 3. `after_config` — every instance, cross-plugin lookups now valid
 //! 4. the application's own setup block
@@ -27,12 +27,12 @@ use std::marker::PhantomData;
 
 use thiserror::Error;
 
-use crate::config::{nearest_name, Config, ConfigError};
 use crate::plugin_api::{
     AnyInstance, Instance, Lifecycle, MiddlewareCatalog, MiddlewareOffer, Plugin, PluginError,
     Services, Stage,
 };
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
+use crate::suggest::nearest_name;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -40,9 +40,6 @@ use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
 
 #[derive(Debug, Error)]
 pub enum BuildError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-
     #[error("plugin `{instance}` failed during `{stage}`: {source}")]
     Hook {
         instance: String,
@@ -56,7 +53,7 @@ pub enum BuildError {
 
     #[error(
         "two plugin instances are registered as `{name}`; instance names must be unique because \
-         each one claims the configuration section of the same name"
+         a name is how the application and every other plugin refer to one instance"
     )]
     DuplicateInstance { name: String },
 
@@ -152,16 +149,11 @@ impl RouterPlan {
 
 /// What the application's own setup block can reach.
 pub struct Setup<'a> {
-    config: &'a Config,
     services: &'a mut Services,
     router: &'a mut RouterPlan,
 }
 
 impl Setup<'_> {
-    pub fn config(&self) -> &Config {
-        self.config
-    }
-
     pub fn services(&self) -> &Services {
         self.services
     }
@@ -200,7 +192,6 @@ struct Registered {
 /// Builds an [`App`]. `E` is the type-level list of installed context
 /// providers; it grows as provider plugins are registered.
 pub struct AppBuilder<E = Base> {
-    config: Config,
     instances: Vec<Registered>,
     services: Services,
     setup: Option<SetupBlock>,
@@ -211,8 +202,6 @@ impl<E> std::fmt::Debug for AppBuilder<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let plugins: Vec<&str> = self.instances.iter().map(|r| r.inner.name()).collect();
         f.debug_struct("AppBuilder")
-            .field("app", &self.config.app().as_str())
-            .field("env", &self.config.env())
             .field("plugins", &plugins)
             .field("has_setup_block", &self.setup.is_some())
             .finish()
@@ -220,10 +209,14 @@ impl<E> std::fmt::Debug for AppBuilder<E> {
 }
 
 impl AppBuilder<Base> {
-    /// Starts an application from a loaded configuration.
-    pub fn new(config: Config) -> Self {
+    /// Starts an application with no plugins installed.
+    ///
+    /// There is no configuration argument, and that is the point: the core
+    /// takes already-constructed values, so an application that configures
+    /// itself from its environment links no parser. `brocanth-config` adds
+    /// `.plugin_from_config::<P>("section")` for applications that want files.
+    pub fn new() -> Self {
         Self {
-            config,
             instances: Vec::new(),
             services: Services::new(),
             setup: None,
@@ -232,9 +225,17 @@ impl AppBuilder<Base> {
     }
 }
 
+impl Default for AppBuilder<Base> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E> AppBuilder<E> {
-    /// Registers a plugin under its default name, `P::NAME`, which is also the
-    /// configuration section it reads.
+    /// Registers a plugin under its default name, `P::NAME`.
+    ///
+    /// The plugin arrives built, which means it arrives configured:
+    /// `app.plugin(LoggerPlugin::new(LoggerConfig { level: Level::Warn }))`.
     ///
     /// This is the registration that widens the context provider list, so a
     /// handler that asks for what the plugin provides compiles only after this
@@ -245,14 +246,45 @@ impl<E> AppBuilder<E> {
         self.add(P::NAME.to_string(), plugin, true).retype()
     }
 
-    /// Registers another instance of a plugin under `name`, which is also the
-    /// configuration section it reads.
+    /// Registers a plugin under a name of the application's choosing, widening
+    /// the context provider list exactly as [`AppBuilder::plugin`] does.
     ///
-    /// So `[logger]` and `[db_log]` can both be the logging plugin at
-    /// different levels. The provider list is not widened: a context item is
-    /// one value, and two instances would only fight over it.
+    /// For the first instance of a plugin that should not carry its default
+    /// name. Extra instances go through [`AppBuilder::plugin_as`], for the
+    /// reason given there.
+    pub fn plugin_named<P: Plugin>(
+        self,
+        name: impl Into<String>,
+        plugin: P,
+    ) -> AppBuilder<<P::Provides as Provided>::Install<E>> {
+        self.add(name.into(), plugin, true).retype()
+    }
+
+    /// Registers another instance of a plugin under `name`.
+    ///
+    /// So `logger` and `db_log` can both be the logging plugin at different
+    /// levels. The provider list is not widened: a context item is one value,
+    /// and two instances would only fight over it.
     pub fn plugin_as<P: Plugin>(self, name: impl Into<String>, plugin: P) -> AppBuilder<E> {
         self.add(name.into(), plugin, false)
+    }
+
+    /// The services the plugins will share, before any of them runs.
+    ///
+    /// An application seeds a value here that plugins read in their hooks, and
+    /// a crate extending the builder stores its own state here rather than in
+    /// the core. `brocanth-config` keeps the loaded configuration in it.
+    pub fn services(&self) -> &Services {
+        &self.services
+    }
+
+    pub fn services_mut(&mut self) -> &mut Services {
+        &mut self.services
+    }
+
+    /// Every instance name registered so far, in registration order.
+    pub fn instance_names(&self) -> impl Iterator<Item = &str> {
+        self.instances.iter().map(|r| r.inner.name())
     }
 
     /// The application's own setup block, run after `after_config` and before
@@ -271,11 +303,7 @@ impl<E> AppBuilder<E> {
             .iter()
             .any(|r| r.inner.plugin_type() == TypeId::of::<P>());
         self.instances.push(Registered {
-            inner: Box::new(Instance {
-                name,
-                plugin,
-                config: P::Config::default(),
-            }),
+            inner: Box::new(Instance { name, plugin }),
             primary,
             provides_context,
         });
@@ -284,7 +312,6 @@ impl<E> AppBuilder<E> {
 
     fn retype<F>(self) -> AppBuilder<F> {
         AppBuilder {
-            config: self.config,
             instances: self.instances,
             services: self.services,
             setup: self.setup,
@@ -294,20 +321,16 @@ impl<E> AppBuilder<E> {
 
     /// Runs the lifecycle and returns the finished application.
     pub fn build(mut self) -> Result<App<E>, BuildError> {
-        // Names are section names, so they must be unique.
-        let names: Vec<String> = self.instances.iter().map(|r| r.inner.name().to_string()).collect();
+        // A name identifies one instance, so it must identify only one.
+        let names: Vec<String> = self
+            .instances
+            .iter()
+            .map(|r| r.inner.name().to_string())
+            .collect();
         for (i, name) in names.iter().enumerate() {
             if names[..i].contains(name) {
                 return Err(BuildError::DuplicateInstance { name: name.clone() });
             }
-        }
-
-        // A section nobody claimed is a typo, and a typo must never build
-        // clean. This is the check that Hugo does not make.
-        self.config.validate_sections(&names)?;
-
-        for reg in &mut self.instances {
-            reg.inner.load_config(&self.config)?;
         }
 
         let mut router = RouterPlan::default();
@@ -315,28 +338,27 @@ impl<E> AppBuilder<E> {
         run_stage(
             Stage::Configure,
             &mut self.instances,
-            &self.config,
+            &names,
             &mut self.services,
             |inst, lc| inst.configure(lc),
         )?;
         run_stage(
             Stage::Register,
             &mut self.instances,
-            &self.config,
+            &names,
             &mut self.services,
             |inst, lc| inst.register(lc),
         )?;
         run_stage(
             Stage::AfterConfig,
             &mut self.instances,
-            &self.config,
+            &names,
             &mut self.services,
             |inst, lc| inst.after_config(lc),
         )?;
 
         if let Some(setup) = self.setup.take() {
             let mut cx = Setup {
-                config: &self.config,
                 services: &mut self.services,
                 router: &mut router,
             };
@@ -360,13 +382,12 @@ impl<E> AppBuilder<E> {
         run_stage(
             Stage::BeforeStart,
             &mut self.instances,
-            &self.config,
+            &names,
             &mut self.services,
             |inst, lc| inst.before_start(lc),
         )?;
 
         Ok(App {
-            config: self.config,
             instances: self.instances,
             services: self.services,
             router,
@@ -378,7 +399,7 @@ impl<E> AppBuilder<E> {
 fn run_stage<F>(
     stage: Stage,
     instances: &mut [Registered],
-    config: &Config,
+    names: &[String],
     services: &mut Services,
     mut hook: F,
 ) -> Result<(), BuildError>
@@ -387,7 +408,7 @@ where
 {
     for reg in instances.iter_mut() {
         let name = reg.inner.name().to_string();
-        let mut lc = Lifecycle::new(stage, &name, reg.primary, config, services);
+        let mut lc = Lifecycle::new(stage, &name, reg.primary, names, services);
         hook(reg.inner.as_mut(), &mut lc).map_err(|source| BuildError::Hook {
             instance: name,
             stage,
@@ -407,7 +428,6 @@ where
 /// [`App::context`] produces a [`Context`] a handler can extract from without
 /// a run-time check.
 pub struct App<E = Base> {
-    config: Config,
     instances: Vec<Registered>,
     services: Services,
     router: RouterPlan,
@@ -422,8 +442,6 @@ impl<E> std::fmt::Debug for App<E> {
             .map(|r| format!("{} ({})", r.inner.name(), r.inner.plugin_type_name()))
             .collect();
         f.debug_struct("App")
-            .field("app", &self.config.app().as_str())
-            .field("env", &self.config.env())
             .field("plugins", &plugins)
             .field("offers", &self.router.offers.len())
             .field("mounts", &self.router.mounts.len())
@@ -432,10 +450,6 @@ impl<E> std::fmt::Debug for App<E> {
 }
 
 impl<E> App<E> {
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
     pub fn services(&self) -> &Services {
         &self.services
     }
@@ -465,30 +479,22 @@ impl<E> App<E> {
 
     /// The primary instance of `P`: the first one registered.
     pub fn plugin<P: Plugin>(&self) -> Option<&P> {
-        self.find::<P>(None).and_then(|r| r.inner.plugin_any().downcast_ref::<P>())
+        self.find::<P>(None)
+            .and_then(|r| r.inner.plugin_any().downcast_ref::<P>())
     }
 
     pub fn plugin_mut<P: Plugin>(&mut self) -> Option<&mut P> {
         let idx = self.index_of::<P>(None)?;
-        self.instances[idx].inner.plugin_any_mut().downcast_mut::<P>()
+        self.instances[idx]
+            .inner
+            .plugin_any_mut()
+            .downcast_mut::<P>()
     }
 
     /// One named instance of `P`.
     pub fn plugin_named<P: Plugin>(&self, name: &str) -> Option<&P> {
         self.find::<P>(Some(name))
             .and_then(|r| r.inner.plugin_any().downcast_ref::<P>())
-    }
-
-    /// The typed configuration the primary instance of `P` was built from.
-    pub fn plugin_config<P: Plugin>(&self) -> Option<&P::Config> {
-        self.find::<P>(None)
-            .and_then(|r| r.inner.config_any().downcast_ref::<P::Config>())
-    }
-
-    /// The typed configuration of one named instance of `P`.
-    pub fn plugin_config_named<P: Plugin>(&self, name: &str) -> Option<&P::Config> {
-        self.find::<P>(Some(name))
-            .and_then(|r| r.inner.config_any().downcast_ref::<P::Config>())
     }
 
     /// Whether `name` is the primary instance of its plugin type.
@@ -514,8 +520,7 @@ impl<E> App<E> {
 
     fn index_of<P: Plugin>(&self, name: Option<&str>) -> Option<usize> {
         self.instances.iter().position(|r| {
-            r.inner.plugin_type() == TypeId::of::<P>()
-                && name.is_none_or(|n| r.inner.name() == n)
+            r.inner.plugin_type() == TypeId::of::<P>() && name.is_none_or(|n| r.inner.name() == n)
         })
     }
 }
@@ -528,7 +533,6 @@ impl<E> App<E> {
 mod tests {
     use super::*;
     use crate::plugin_context::{ContextItem, NoContext, ProvidesContext, With};
-    use serde::Deserialize;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -546,20 +550,25 @@ mod tests {
         }
     }
 
-    // -- a plugin with a typed section --------------------------------------
+    // -- a plugin with a typed configuration --------------------------------
+    //
+    // `Plugin::Config` carries no bounds, so the value the application builds
+    // can hold anything — here a level, a flag, and the test's own recorder.
+    // Nothing in the core looks inside it.
 
-    #[derive(Clone, Debug, Deserialize, PartialEq)]
-    #[serde(default, deny_unknown_fields)]
+    #[derive(Clone)]
     struct LoggerConfig {
         level: String,
         json: bool,
+        rec: Recorder,
     }
 
-    impl Default for LoggerConfig {
-        fn default() -> Self {
+    impl LoggerConfig {
+        fn new(level: &str, rec: &Recorder) -> Self {
             Self {
-                level: "info".into(),
+                level: level.into(),
                 json: false,
+                rec: rec.clone(),
             }
         }
     }
@@ -567,17 +576,8 @@ mod tests {
     struct LoggerPlugin {
         rec: Recorder,
         level: String,
+        json: bool,
         services_seen: usize,
-    }
-
-    impl LoggerPlugin {
-        fn new(rec: &Recorder) -> Self {
-            Self {
-                rec: rec.clone(),
-                level: String::new(),
-                services_seen: 0,
-            }
-        }
     }
 
     struct LogSink(String);
@@ -587,12 +587,16 @@ mod tests {
         type Provides = NoContext;
         const NAME: &'static str = "logger";
 
-        fn configure(
-            &mut self,
-            config: &Self::Config,
-            lc: &mut Lifecycle<'_>,
-        ) -> Result<(), PluginError> {
-            self.level = config.level.clone();
+        fn new(config: Self::Config) -> Self {
+            Self {
+                rec: config.rec,
+                level: config.level,
+                json: config.json,
+                services_seen: 0,
+            }
+        }
+
+        fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
             self.rec.push(format!("{}:{}", lc.instance(), lc.stage()));
             Ok(())
         }
@@ -631,10 +635,12 @@ mod tests {
         }
     }
 
+    fn logger(level: &str, rec: &Recorder) -> LoggerPlugin {
+        LoggerPlugin::new(LoggerConfig::new(level, rec))
+    }
+
     // -- a plugin that extends the context ----------------------------------
 
-    #[derive(Clone, Debug, Deserialize, PartialEq)]
-    #[serde(default)]
     struct RequestIdConfig {
         prefix: String,
     }
@@ -651,10 +657,15 @@ mod tests {
     struct RequestId(String);
     impl ContextItem for RequestId {}
 
-    #[derive(Default)]
     struct RequestIdPlugin {
         prefix: String,
         counter: AtomicU64,
+    }
+
+    impl Default for RequestIdPlugin {
+        fn default() -> Self {
+            Self::new(RequestIdConfig::default())
+        }
     }
 
     impl Plugin for RequestIdPlugin {
@@ -662,13 +673,11 @@ mod tests {
         type Provides = ProvidesContext<RequestId>;
         const NAME: &'static str = "request_id";
 
-        fn configure(
-            &mut self,
-            config: &Self::Config,
-            _lc: &mut Lifecycle<'_>,
-        ) -> Result<(), PluginError> {
-            self.prefix = config.prefix.clone();
-            Ok(())
+        fn new(config: Self::Config) -> Self {
+            Self {
+                prefix: config.prefix,
+                counter: AtomicU64::new(0),
+            }
         }
 
         fn provide(&self, cx: &mut ContextBuilder) {
@@ -684,13 +693,13 @@ mod tests {
         type Provides = NoContext;
         const NAME: &'static str = "failing";
 
+        fn new(_config: ()) -> Self {
+            Self
+        }
+
         fn after_config(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
             Err(PluginError::new("no database reachable"))
         }
-    }
-
-    fn config(text: &str) -> Config {
-        Config::from_toml("my_app", "test", text).unwrap()
     }
 
     // -- lifecycle order ----------------------------------------------------
@@ -700,23 +709,16 @@ mod tests {
         let rec = Recorder::default();
         let block_rec = rec.clone();
 
-        let app = AppBuilder::new(config(
-            r#"
-            [logger]
-            level = "warn"
-            [db_log]
-            level = "debug"
-            "#,
-        ))
-        .plugin(LoggerPlugin::new(&rec))
-        .plugin_as("db_log", LoggerPlugin::new(&rec))
-        .setup(move |setup| {
-            block_rec.push(format!("app:{}", Stage::UserBlock));
-            setup.router().mount("/admin", "logger.request_log");
-            Ok(())
-        })
-        .build()
-        .unwrap();
+        let app = AppBuilder::new()
+            .plugin(logger("warn", &rec))
+            .plugin_as("db_log", logger("debug", &rec))
+            .setup(move |setup| {
+                block_rec.push(format!("app:{}", Stage::UserBlock));
+                setup.router().mount("/admin", "logger.request_log");
+                Ok(())
+            })
+            .build()
+            .unwrap();
 
         // The sequence is the assertion, not an inspection of final state.
         assert_eq!(
@@ -741,8 +743,8 @@ mod tests {
 
     #[test]
     fn a_hook_that_fails_names_the_instance_and_the_stage() {
-        let err = AppBuilder::new(config(""))
-            .plugin(FailingPlugin)
+        let err = AppBuilder::new()
+            .plugin(FailingPlugin::new(()))
             .build()
             .unwrap_err();
         let msg = err.to_string();
@@ -751,57 +753,80 @@ mod tests {
         assert!(msg.contains("no database reachable"), "{msg}");
     }
 
-    // -- typed sections through the plugin ----------------------------------
+    // -- a plugin arrives already configured --------------------------------
 
     #[test]
-    fn each_instance_reads_the_section_named_after_it() {
+    fn each_instance_keeps_the_configuration_it_was_built_with() {
+        // No file, no parser, no section lookup: the application built two
+        // configuration values and handed one to each instance.
         let rec = Recorder::default();
-        let app = AppBuilder::new(config(
-            r#"
-            [logger]
-            level = "warn"
-            [db_log]
-            level = "debug"
-            json = true
-            "#,
-        ))
-        .plugin(LoggerPlugin::new(&rec))
-        .plugin_as("db_log", LoggerPlugin::new(&rec))
-        .build()
-        .unwrap();
+        let app = AppBuilder::new()
+            .plugin(logger("warn", &rec))
+            .plugin_as(
+                "db_log",
+                LoggerPlugin::new(LoggerConfig {
+                    level: "debug".into(),
+                    json: true,
+                    rec: rec.clone(),
+                }),
+            )
+            .build()
+            .unwrap();
 
-        assert_eq!(app.plugin_config::<LoggerPlugin>().unwrap().level, "warn");
-        assert_eq!(
-            app.plugin_config_named::<LoggerPlugin>("db_log").unwrap(),
-            &LoggerConfig {
-                level: "debug".into(),
-                json: true
+        let primary = app.plugin::<LoggerPlugin>().unwrap();
+        assert_eq!(primary.level, "warn");
+        assert!(!primary.json);
+
+        let second = app.plugin_named::<LoggerPlugin>("db_log").unwrap();
+        assert_eq!(second.level, "debug");
+        assert!(second.json);
+    }
+
+    #[test]
+    fn a_plugin_can_be_registered_under_a_name_of_the_applications_choosing() {
+        let app = AppBuilder::new()
+            .plugin_named(
+                "primary_logger",
+                LoggerPlugin::new(LoggerConfig::new("warn", &Recorder::default())),
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(app.instances_of::<LoggerPlugin>(), vec!["primary_logger"]);
+        assert!(app.is_primary("primary_logger"));
+    }
+
+    #[test]
+    fn a_plugin_can_read_the_roster_of_registered_instances() {
+        // The seam `brocanth-config` uses to reject a section that no instance
+        // claims. A plugin sees the names, never the other plugins.
+        struct Roster(Arc<Mutex<Vec<String>>>);
+
+        impl Plugin for Roster {
+            type Config = Arc<Mutex<Vec<String>>>;
+            type Provides = NoContext;
+            const NAME: &'static str = "roster";
+
+            fn new(config: Self::Config) -> Self {
+                Self(config)
             }
-        );
-    }
 
-    #[test]
-    fn an_unknown_key_inside_a_plugin_section_is_that_plugins_business() {
-        // LoggerConfig opted into deny_unknown_fields, so it rejects. The core
-        // never looked.
-        let rec = Recorder::default();
-        let err = AppBuilder::new(config("[logger]\nlevel = \"warn\"\nverbose = true\n"))
-            .plugin(LoggerPlugin::new(&rec))
-            .build()
-            .unwrap_err();
-        assert!(matches!(err, BuildError::Config(ConfigError::Section { .. })), "{err:?}");
-    }
+            fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+                *self.0.lock().unwrap() = lc.instance_names().to_vec();
+                Ok(())
+            }
+        }
 
-    #[test]
-    fn an_unclaimed_top_level_section_stops_the_build() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let rec = Recorder::default();
-        let err = AppBuilder::new(config("[loggr]\nlevel = \"warn\"\n"))
-            .plugin(LoggerPlugin::new(&rec))
+        AppBuilder::new()
+            .plugin(Roster::new(seen.clone()))
+            .plugin(logger("warn", &rec))
+            .plugin_as("db_log", logger("debug", &rec))
             .build()
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("`[loggr]`"), "{msg}");
-        assert!(msg.contains("did you mean `[logger]`?"), "{msg}");
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec!["roster", "logger", "db_log"]);
     }
 
     // -- multiple instances -------------------------------------------------
@@ -809,18 +834,11 @@ mod tests {
     #[test]
     fn two_instances_of_one_plugin_coexist_and_the_first_is_primary() {
         let rec = Recorder::default();
-        let app = AppBuilder::new(config(
-            r#"
-            [logger]
-            level = "warn"
-            [db_log]
-            level = "debug"
-            "#,
-        ))
-        .plugin(LoggerPlugin::new(&rec))
-        .plugin_as("db_log", LoggerPlugin::new(&rec))
-        .build()
-        .unwrap();
+        let app = AppBuilder::new()
+            .plugin(logger("warn", &rec))
+            .plugin_as("db_log", logger("debug", &rec))
+            .build()
+            .unwrap();
 
         assert_eq!(app.instances_of::<LoggerPlugin>(), vec!["logger", "db_log"]);
         assert!(app.is_primary("logger"));
@@ -838,18 +856,24 @@ mod tests {
 
         // Both are real instances with their own state.
         assert_eq!(app.router_plan().offers().len(), 2);
-        assert!(app.router_plan().offer_named("db_log.request_log").is_some());
+        assert!(app
+            .router_plan()
+            .offer_named("db_log.request_log")
+            .is_some());
     }
 
     #[test]
     fn registering_two_instances_under_one_name_is_an_error() {
         let rec = Recorder::default();
-        let err = AppBuilder::new(config("[logger]\nlevel = \"warn\"\n"))
-            .plugin(LoggerPlugin::new(&rec))
-            .plugin_as("logger", LoggerPlugin::new(&rec))
+        let err = AppBuilder::new()
+            .plugin(logger("warn", &rec))
+            .plugin_as("logger", logger("warn", &rec))
             .build()
             .unwrap_err();
-        assert!(matches!(err, BuildError::DuplicateInstance { .. }), "{err:?}");
+        assert!(
+            matches!(err, BuildError::DuplicateInstance { .. }),
+            "{err:?}"
+        );
     }
 
     // -- middleware is offered, never autowired -----------------------------
@@ -857,8 +881,8 @@ mod tests {
     #[test]
     fn a_plugin_offers_middleware_and_only_the_application_mounts_it() {
         let rec = Recorder::default();
-        let app = AppBuilder::new(config("[logger]\nlevel = \"warn\"\n"))
-            .plugin(LoggerPlugin::new(&rec))
+        let app = AppBuilder::new()
+            .plugin(logger("warn", &rec))
             .setup(|setup| {
                 setup.router().mount("/admin/*rest", "logger.request_log");
                 Ok(())
@@ -881,8 +905,8 @@ mod tests {
     #[test]
     fn mounting_middleware_nobody_offers_is_an_error() {
         let rec = Recorder::default();
-        let err = AppBuilder::new(config("[logger]\nlevel = \"warn\"\n"))
-            .plugin(LoggerPlugin::new(&rec))
+        let err = AppBuilder::new()
+            .plugin(logger("warn", &rec))
             .setup(|setup| {
                 setup.router().mount("/admin", "logger.request_logs");
                 Ok(())
@@ -898,8 +922,10 @@ mod tests {
 
     #[test]
     fn a_handler_extracts_what_a_registered_plugin_provides() {
-        let app = AppBuilder::new(config("[request_id]\nprefix = \"web\"\n"))
-            .plugin(RequestIdPlugin::default())
+        let app = AppBuilder::new()
+            .plugin(RequestIdPlugin::new(RequestIdConfig {
+                prefix: "web".into(),
+            }))
             .build()
             .unwrap();
 
@@ -924,42 +950,34 @@ mod tests {
         let rec_a = Recorder::default();
         let rec_b = Recorder::default();
 
-        let mut app_a = AppBuilder::new(
-            Config::from_toml("my_app", "production", "[logger]\nlevel = \"warn\"\n").unwrap(),
-        )
-        .plugin(LoggerPlugin::new(&rec_a))
-        .plugin(RequestIdPlugin::default())
-        .build()
-        .unwrap();
+        let mut app_a = AppBuilder::new()
+            .plugin(logger("warn", &rec_a))
+            .plugin(RequestIdPlugin::default())
+            .build()
+            .unwrap();
 
-        let app_b = AppBuilder::new(
-            Config::from_toml(
-                "other_app",
-                "development",
-                "[logger]\nlevel = \"debug\"\n[db_log]\nlevel = \"trace\"\n[request_id]\nprefix = \"b\"\n",
-            )
-            .unwrap(),
-        )
-        .plugin(LoggerPlugin::new(&rec_b))
-        .plugin_as("db_log", LoggerPlugin::new(&rec_b))
-        .plugin(RequestIdPlugin::default())
-        .build()
-        .unwrap();
+        let app_b = AppBuilder::new()
+            .plugin(logger("debug", &rec_b))
+            .plugin_as("db_log", logger("trace", &rec_b))
+            .plugin(RequestIdPlugin::new(RequestIdConfig { prefix: "b".into() }))
+            .build()
+            .unwrap();
 
-        // 1. Configuration does not leak.
-        assert_eq!(app_a.config().env(), "production");
-        assert_eq!(app_b.config().env(), "development");
-        assert_eq!(app_a.config().app().as_str(), "my_app");
-        assert_eq!(app_b.config().app().as_str(), "other_app");
-
-        // 2. Plugin instance state does not leak.
+        // 1. Configuration does not leak: each instance kept the value its own
+        //    application built.
         assert_eq!(app_a.plugin::<LoggerPlugin>().unwrap().level, "warn");
         assert_eq!(app_b.plugin::<LoggerPlugin>().unwrap().level, "debug");
 
-        // 3. The instance lists differ; a section claimed by B is unknown to
-        //    A, which is why A would have rejected it.
+        // 2. Plugin instance state does not leak.
+        assert_eq!(app_a.plugin::<RequestIdPlugin>().unwrap().prefix, "req");
+        assert_eq!(app_b.plugin::<RequestIdPlugin>().unwrap().prefix, "b");
+
+        // 3. The instance lists differ.
         assert_eq!(app_a.instances_of::<LoggerPlugin>(), vec!["logger"]);
-        assert_eq!(app_b.instances_of::<LoggerPlugin>(), vec!["logger", "db_log"]);
+        assert_eq!(
+            app_b.instances_of::<LoggerPlugin>(),
+            vec!["logger", "db_log"]
+        );
 
         // 4. Services are per application.
         assert_eq!(app_a.services().get::<LogSink>().unwrap().0, "warn");

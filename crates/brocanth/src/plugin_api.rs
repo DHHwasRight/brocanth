@@ -1,4 +1,4 @@
-//! The plugin contract: five lifecycle hooks, one typed configuration section,
+//! The plugin contract: five lifecycle hooks, one typed configuration value,
 //! and nothing that happens behind the application's back.
 //!
 //! Two rules shape this file, both inherited from the Crystal original's
@@ -10,18 +10,19 @@
 //! ([`MiddlewareCatalog`]) and cannot mount it. Mounting takes a pattern, the
 //! pattern is a decision, and the decision belongs to the application.
 //!
-//! **Configuration is enriched, not pre-declared.** A plugin names the type its
-//! section deserialises into. The core `Config` never learns that the plugin
-//! exists; the application collects the claimed section names and rejects
-//! anything else.
+//! **A plugin arrives already configured.** A plugin names the type it is built
+//! from ([`Plugin::Config`]) and the application constructs that value and
+//! hands it over: `app.plugin(LoggerPlugin::new(LoggerConfig { .. }))`. The
+//! core never parses anything, never reads a file and never looks a section up
+//! by name — a service configured entirely from its environment does not link
+//! a TOML parser to say so. Reading those values out of a file is
+//! `brocanth-config`, which is a plugin like any other.
 
 use std::any::{type_name, Any, TypeId};
 use std::collections::HashMap;
 
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::config::{Config, ConfigError};
 use crate::plugin_context::{ContextBuilder, Provided};
 
 /// Anything a hook can go wrong with.
@@ -131,7 +132,9 @@ impl Services {
 
 impl std::fmt::Debug for Services {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Services").field("len", &self.len()).finish()
+        f.debug_struct("Services")
+            .field("len", &self.len())
+            .finish()
     }
 }
 
@@ -147,7 +150,7 @@ pub struct Lifecycle<'a> {
     stage: Stage,
     instance: &'a str,
     primary: bool,
-    config: &'a Config,
+    instances: &'a [String],
     services: &'a mut Services,
 }
 
@@ -156,14 +159,14 @@ impl<'a> Lifecycle<'a> {
         stage: Stage,
         instance: &'a str,
         primary: bool,
-        config: &'a Config,
+        instances: &'a [String],
         services: &'a mut Services,
     ) -> Self {
         Self {
             stage,
             instance,
             primary,
-            config,
+            instances,
             services,
         }
     }
@@ -173,8 +176,7 @@ impl<'a> Lifecycle<'a> {
         self.stage
     }
 
-    /// The name this instance was registered under, which is also the name of
-    /// the TOML section it reads.
+    /// The name this instance was registered under.
     pub fn instance(&self) -> &str {
         self.instance
     }
@@ -184,10 +186,13 @@ impl<'a> Lifecycle<'a> {
         self.primary
     }
 
-    /// The whole application configuration, for plugins that need to read
-    /// beyond their own section.
-    pub fn config(&self) -> &Config {
-        self.config
+    /// Every registered instance name, in registration order.
+    ///
+    /// A plugin that polices the application as a whole needs the roster:
+    /// `brocanth-config` reads it to reject a configuration section that no
+    /// instance claims.
+    pub fn instance_names(&self) -> &[String] {
+        self.instances
     }
 
     pub fn services(&self) -> &Services {
@@ -256,7 +261,7 @@ impl<'a> MiddlewareCatalog<'a> {
 /// A plugin.
 ///
 /// Registration is explicit and typed: the application names the plugin type,
-/// so the compiler knows the configuration struct and the context item before
+/// so the compiler knows the configuration type and the context item before
 /// anything runs.
 ///
 /// Hooks run in the recorded order — `configure`, `register`, `after_config`,
@@ -264,11 +269,13 @@ impl<'a> MiddlewareCatalog<'a> {
 /// `before_start` — and every hook runs for every instance before the next
 /// hook starts.
 pub trait Plugin: Sized + Send + Sync + 'static {
-    /// The plugin's own configuration section.
+    /// The value this plugin is built from.
     ///
-    /// Unknown keys inside it are the plugin's business: add
-    /// `#[serde(deny_unknown_fields)]` to reject them.
-    type Config: DeserializeOwned + Default + Send + Sync + 'static;
+    /// A plain value with no bounds on it: the core neither parses it nor
+    /// stores it, so it is free to be an enum, a connection pool or `()`. Where
+    /// it comes from is the application's business — a literal in `main`, the
+    /// environment, or a TOML section read by `brocanth-config`.
+    type Config;
 
     /// What this plugin puts in the per-request context: [`NoContext`], or
     /// [`ProvidesContext<T>`].
@@ -277,15 +284,24 @@ pub trait Plugin: Sized + Send + Sync + 'static {
     /// [`ProvidesContext<T>`]: crate::plugin_context::ProvidesContext
     type Provides: Provided;
 
-    /// Default instance name, and so the default TOML section name.
+    /// Default instance name.
     const NAME: &'static str;
 
-    /// The typed section has been read. Settle internal state from it.
-    fn configure(
-        &mut self,
-        _config: &Self::Config,
-        _lc: &mut Lifecycle<'_>,
-    ) -> Result<(), PluginError> {
+    /// Builds the plugin from its configuration.
+    ///
+    /// The application calls this itself — `LoggerPlugin::new(LoggerConfig {
+    /// level: Level::Warn })` — and so does any crate that resolves
+    /// configuration on the application's behalf. It is the only way a
+    /// configuration value reaches a plugin, which is what lets the core know
+    /// nothing about configuration at all.
+    fn new(config: Self::Config) -> Self;
+
+    /// The application is building. Settle internal state before any other
+    /// plugin can look.
+    ///
+    /// The configuration is not a parameter here: the plugin was constructed
+    /// from it and already holds whatever it kept.
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -302,7 +318,10 @@ pub trait Plugin: Sized + Send + Sync + 'static {
 
     /// Offer middleware. Mounting it is the application's decision, taken with
     /// a pattern, in its own setup block.
-    fn configure_router(&mut self, _catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
+    fn configure_router(
+        &mut self,
+        _catalog: &mut MiddlewareCatalog<'_>,
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -326,7 +345,6 @@ pub trait Plugin: Sized + Send + Sync + 'static {
 pub(crate) struct Instance<P: Plugin> {
     pub(crate) name: String,
     pub(crate) plugin: P,
-    pub(crate) config: P::Config,
 }
 
 /// Object-safe view of one registered instance.
@@ -334,7 +352,6 @@ pub(crate) trait AnyInstance: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn plugin_type(&self) -> TypeId;
     fn plugin_type_name(&self) -> &'static str;
-    fn load_config(&mut self, config: &Config) -> Result<(), ConfigError>;
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
     fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError>;
@@ -343,7 +360,6 @@ pub(crate) trait AnyInstance: Send + Sync + 'static {
     fn provide(&self, cx: &mut ContextBuilder);
     fn plugin_any(&self) -> &dyn Any;
     fn plugin_any_mut(&mut self) -> &mut dyn Any;
-    fn config_any(&self) -> &dyn Any;
 }
 
 impl<P: Plugin> AnyInstance for Instance<P> {
@@ -359,13 +375,8 @@ impl<P: Plugin> AnyInstance for Instance<P> {
         type_name::<P>()
     }
 
-    fn load_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        self.config = config.section::<P::Config>(&self.name)?;
-        Ok(())
-    }
-
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.plugin.configure(&self.config, lc)
+        self.plugin.configure(lc)
     }
 
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
@@ -394,9 +405,5 @@ impl<P: Plugin> AnyInstance for Instance<P> {
 
     fn plugin_any_mut(&mut self) -> &mut dyn Any {
         &mut self.plugin
-    }
-
-    fn config_any(&self) -> &dyn Any {
-        &self.config
     }
 }

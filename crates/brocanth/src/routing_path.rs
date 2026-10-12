@@ -682,8 +682,18 @@ mod tests {
 
     #[test]
     fn the_extension_does_not_matter() {
-        assert_eq!(route_for_file("pages/about.crx", "pages").unwrap().pattern(), "/about");
-        assert_eq!(route_for_file("pages/about.html", "pages").unwrap().pattern(), "/about");
+        assert_eq!(
+            route_for_file("pages/about.crx", "pages")
+                .unwrap()
+                .pattern(),
+            "/about"
+        );
+        assert_eq!(
+            route_for_file("pages/about.html", "pages")
+                .unwrap()
+                .pattern(),
+            "/about"
+        );
     }
 
     #[test]
@@ -698,13 +708,18 @@ mod tests {
 
     #[test]
     fn an_empty_base_means_the_path_is_already_relative() {
-        assert_eq!(route_for_file("users/[id].rs", "").unwrap().pattern(), "/users/{id}");
+        assert_eq!(
+            route_for_file("users/[id].rs", "").unwrap().pattern(),
+            "/users/{id}"
+        );
     }
 
     #[test]
     fn a_trailing_slash_on_the_base_is_ignored() {
         assert_eq!(
-            route_for_file("src/pages/about.rs", "src/pages/").unwrap().pattern(),
+            route_for_file("src/pages/about.rs", "src/pages/")
+                .unwrap()
+                .pattern(),
             "/about"
         );
     }
@@ -712,7 +727,9 @@ mod tests {
     #[test]
     fn windows_separators_are_accepted() {
         assert_eq!(
-            route_for_file(r"src\pages\users\[id].rs", r"src\pages").unwrap().pattern(),
+            route_for_file(r"src\pages\users\[id].rs", r"src\pages")
+                .unwrap()
+                .pattern(),
             "/users/{id}"
         );
     }
@@ -745,36 +762,56 @@ mod tests {
     #[test]
     fn a_dot_dot_segment_is_refused() {
         let error = route_for_file("src/pages/../secret.rs", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::InvalidSegment { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::InvalidSegment { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn a_doubled_slash_is_refused() {
         let error = route_for_file("src/pages//about.rs", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::InvalidSegment { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::InvalidSegment { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn a_dotfile_is_refused() {
         let error = route_for_file("src/pages/.gitkeep", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::EmptyFileStem { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::EmptyFileStem { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn an_empty_bracket_is_refused() {
         let error = route_for_file("src/pages/[].rs", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::MalformedParamSegment { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::MalformedParamSegment { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn an_empty_catch_all_is_refused() {
         let error = route_for_file("src/pages/[...].rs", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::MalformedParamSegment { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::MalformedParamSegment { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn a_half_written_param_is_refused_rather_than_taken_as_a_literal() {
-        for bad in ["src/pages/[id.rs", "src/pages/id].rs", "src/pages/x[id].rs", "src/pages/[a][b].rs"] {
+        for bad in [
+            "src/pages/[id.rs",
+            "src/pages/id].rs",
+            "src/pages/x[id].rs",
+            "src/pages/[a][b].rs",
+        ] {
             let error = route_for_file(bad, "src/pages").unwrap_err();
             assert!(
                 matches!(error, PathError::MalformedParamSegment { .. }),
@@ -786,7 +823,10 @@ mod tests {
     #[test]
     fn a_catch_all_that_is_not_last_is_refused() {
         let error = route_for_file("src/pages/[...rest]/edit.rs", "src/pages").unwrap_err();
-        assert!(matches!(error, PathError::CatchAllNotLast { .. }), "{error:?}");
+        assert!(
+            matches!(error, PathError::CatchAllNotLast { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -836,8 +876,7 @@ mod tests {
     #[test]
     fn templates_parse_their_params_in_order() {
         let t = RouteTemplate::parse("/a/{one}/b/{two}/{*three}").unwrap();
-        let got: Vec<(&str, ParamKind)> =
-            t.params().iter().map(|p| (p.name(), p.kind())).collect();
+        let got: Vec<(&str, ParamKind)> = t.params().iter().map(|p| (p.name(), p.kind())).collect();
         assert_eq!(
             got,
             [
@@ -858,7 +897,10 @@ mod tests {
 
     #[test]
     fn an_empty_template_is_refused() {
-        assert!(matches!(RouteTemplate::parse(""), Err(TemplateError::Empty)));
+        assert!(matches!(
+            RouteTemplate::parse(""),
+            Err(TemplateError::Empty)
+        ));
     }
 
     #[test]

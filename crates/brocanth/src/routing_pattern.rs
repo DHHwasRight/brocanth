@@ -66,20 +66,21 @@ impl ScopePattern {
             let raw: Vec<&str> = body.split('/').collect();
             for (index, part) in raw.iter().enumerate() {
                 let is_last = index + 1 == raw.len();
-                let segment = if let Some(inner) = part.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
-                    if let Some(name) = inner.strip_prefix('*') {
-                        if !is_last {
-                            return Err(TemplateError::InvalidParamName {
-                                name: format!("*{name}"),
-                            });
+                let segment =
+                    if let Some(inner) = part.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
+                        if let Some(name) = inner.strip_prefix('*') {
+                            if !is_last {
+                                return Err(TemplateError::InvalidParamName {
+                                    name: format!("*{name}"),
+                                });
+                            }
+                            Segment::CatchAll
+                        } else {
+                            Segment::Dynamic
                         }
-                        Segment::CatchAll
                     } else {
-                        Segment::Dynamic
-                    }
-                } else {
-                    Segment::Literal((*part).to_owned())
-                };
+                        Segment::Literal((*part).to_owned())
+                    };
                 segments.push(segment);
             }
         }

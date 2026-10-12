@@ -266,10 +266,7 @@ fn emit_leaf(out: &mut String, route: &RouteHelper, depth: usize, pad: &str) {
     let args = signature(params);
     let _ = writeln!(out, "{pad}/// Build the path for `{template}`.");
     let _ = writeln!(out, "{pad}#[must_use]");
-    let _ = writeln!(
-        out,
-        "{pad}pub fn path({args}) -> ::std::string::String {{"
-    );
+    let _ = writeln!(out, "{pad}pub fn path({args}) -> ::std::string::String {{");
     if params.is_empty() {
         let _ = writeln!(
             out,
@@ -277,10 +274,7 @@ fn emit_leaf(out: &mut String, route: &RouteHelper, depth: usize, pad: &str) {
             escape(template)
         );
     } else {
-        let _ = writeln!(
-            out,
-            "{pad}    let mut out = ::std::string::String::new();"
-        );
+        let _ = writeln!(out, "{pad}    let mut out = ::std::string::String::new();");
         for piece in pieces(template, params) {
             match piece {
                 Piece::Literal(text) => {
@@ -319,15 +313,8 @@ fn emit_leaf(out: &mut String, route: &RouteHelper, depth: usize, pad: &str) {
         "{pad}pub fn url({url_args}) -> ::std::string::String {{"
     );
     let _ = writeln!(out, "{pad}    let mut out = base.to_string();");
-    let _ = writeln!(
-        out,
-        "{pad}    while out.ends_with('/') {{ out.pop(); }}"
-    );
-    let _ = writeln!(
-        out,
-        "{pad}    out.push_str(&path({}));",
-        forward.join(", ")
-    );
+    let _ = writeln!(out, "{pad}    while out.ends_with('/') {{ out.pop(); }}");
+    let _ = writeln!(out, "{pad}    out.push_str(&path({}));", forward.join(", "));
     let _ = writeln!(out, "{pad}    out");
     let _ = writeln!(out, "{pad}}}");
 }
@@ -367,11 +354,9 @@ fn pieces<'a>(template: &'a str, params: &'a [ParamSpec]) -> Vec<Piece<'a>> {
         let close = after
             .find('}')
             .expect("the template was validated, so every brace closes");
-        out.push(Piece::Param(
-            params
-                .get(next)
-                .expect("the template was validated, so parameters are in order"),
-        ));
+        out.push(Piece::Param(params.get(next).expect(
+            "the template was validated, so parameters are in order",
+        )));
         next += 1;
         rest = &after[close + 1..];
     }

@@ -3,13 +3,16 @@ name = "brocanth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "The brocanth core: a router handing a request and a context to a controller, and the plugin seams around it."
 
+# Three dependencies, and `tests/no_hidden_dependencies.rs` fails the build if a
+# fourth kind arrives. No serde, no TOML, no SQL driver, no logging framework
+# and no async runtime: every one of those is a plugin an application asks for.
 [dependencies]
 wayfind = "1.1"
 http = "1"
-serde = { version = "1", features = ["derive"] }
-toml = "0.9"
 thiserror = "2"
 
-[dev-dependencies]
-tempfile = "3"
+# No dev-dependencies either. A dev-dependency does not reach a consumer's
+# binary, but it does appear in `cargo tree -p brocanth`, and a claim that needs
+# a footnote is not the claim we want to make.
