@@ -6,7 +6,7 @@
 //! like -- and prove that nothing downstream of the decision reintroduces an
 //! escape sequence or changes a single character of layout.
 //!
-//! The fixture is built by `brocanth new`, so the scaffold is exercised end to
+//! The fixture is built by `brocanth create`, so the scaffold is exercised end to
 //! end on every run: the commands below read an application this tool wrote.
 //! Only commands that need no compiler are used, so the suite stays in
 //! milliseconds -- `cargo check` over the fixture is the `#[ignore]`d test in
@@ -70,14 +70,14 @@ fn checkout() -> String {
         .to_string()
 }
 
-/// An application on disk, written by `brocanth new` itself.
+/// An application on disk, written by `brocanth create` itself.
 fn fixture(name: &str) -> PathBuf {
     let parent = temp(name);
     let checkout = checkout();
     let run = run_in(
         &parent,
         &[
-            "new",
+            "create",
             "app",
             "--title",
             "Fixture",
@@ -179,7 +179,7 @@ fn the_scaffold_writes_the_same_transcript_coloured_and_plain() {
     let parent = temp("scaffold-face");
     let checkout = checkout();
     let args = [
-        "new",
+        "create",
         "app",
         "--title",
         "Fixture",
@@ -348,7 +348,7 @@ fn a_missing_name_names_the_argument_rather_than_waiting_for_one() {
     // The whole reason every prompt has a flag. With no terminal this must fail
     // immediately; a prompt here would hang a CI job until it timed out.
     let dir = temp("noname");
-    let run = run_in(&dir, &["new"], &[]);
+    let run = run_in(&dir, &["create"], &[]);
     assert_eq!(run.code, 1);
     assert!(
         run.stderr
@@ -357,13 +357,57 @@ fn a_missing_name_names_the_argument_rather_than_waiting_for_one() {
         run.stderr
     );
     assert!(
-        run.stderr.contains("= help: pass it: `brocanth new <NAME>`"),
+        run.stderr
+            .contains("= help: pass it: `brocanth create <NAME>`"),
         "{}",
         run.stderr
     );
     assert!(run.stderr.contains("--with"), "{}", run.stderr);
     assert!(!run.stderr.contains('\u{1b}'), "{:?}", run.stderr);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn colour_alone_does_not_buy_a_chooser() {
+    // The rung the two-way decision could not express. CLICOLOR_FORCE says
+    // paint, and painting is a property of stdout; asking is a property of
+    // stdin. A tool that conflated them would open a full-screen view onto a
+    // descriptor that can never answer it, and wait there.
+    let dir = temp("forced");
+    let run = run_in(&dir, &["create"], &[("CLICOLOR_FORCE", "1")]);
+    assert_eq!(run.code, 1, "it must fail rather than wait for a key");
+    assert!(
+        run.stderr
+            .contains("no name, and no terminal to ask for one"),
+        "{}",
+        run.stderr
+    );
+    // And it is still the coloured transcript, because colour was asked for.
+    assert!(run.stderr.contains('\u{1b}'), "{:?}", run.stderr);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn new_still_reaches_create() {
+    // The command was renamed, not replaced. An alias costs one line and saves
+    // every script and every pair of hands that learned the old name.
+    let parent = temp("alias");
+    let checkout = checkout();
+    let run = run_in(
+        &parent,
+        &[
+            "new",
+            "aliased",
+            "--core-only",
+            "--no-git",
+            "--brocanth-path",
+            &checkout,
+        ],
+        &[],
+    );
+    assert_eq!(run.code, 0, "{}", run.whole());
+    assert!(parent.join("aliased/Cargo.toml").exists());
+    std::fs::remove_dir_all(&parent).unwrap();
 }
 
 #[test]
@@ -375,7 +419,7 @@ fn the_core_alone_is_one_dependency_and_no_plugin_directory() {
     let run = run_in(
         &parent,
         &[
-            "new",
+            "create",
             "bare",
             "--core-only",
             "--no-git",
@@ -411,7 +455,7 @@ fn the_model_layer_is_the_only_thing_that_puts_an_orm_in_the_manifest() {
     let run = run_in(
         &parent,
         &[
-            "new",
+            "create",
             "shop",
             "--with",
             "model,config",
@@ -435,13 +479,9 @@ fn a_directory_that_is_not_an_application_says_which_flag_to_pass() {
     let dir = temp("notanapp");
     let run = run_in(&dir, &["routes"], &[]);
     assert_eq!(run.code, 1);
+    assert!(run.stderr.contains("error[no-package]:"), "{}", run.stderr);
     assert!(
-        run.stderr.contains("error[no-package]:"),
-        "{}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("run `brocanth new <NAME>` to make one"),
+        run.stderr.contains("run `brocanth create <NAME>` to make one"),
         "{}",
         run.stderr
     );

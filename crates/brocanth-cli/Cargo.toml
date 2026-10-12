@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 brocanth.workspace = true
-# The configuration plugin, because `brocanth new` writes a config/<env>.toml
+# The configuration plugin, because `brocanth create` writes a config/<env>.toml
 # and a scaffold whose own loader would reject its own file must not ship: the
 # generated document is parsed and validated by the real crate in a test. The
 # core's no-hidden-dependencies rule is the core's; this is the tool.
@@ -25,8 +25,15 @@ anstyle = "1"
 anstream = "1"
 # Progress. Hides itself when piped, so CI needs no flag.
 indicatif = "0.18"
-# Prompts, for `brocanth new`. Every answer it asks for is also a flag.
-inquire = "0.9"
 # Display width, so a wide character does not shear a column. Zero new crates:
 # indicatif already depends on it.
 unicode-width = "0.2"
+# The chooser `brocanth create` opens when an answer is missing. Default
+# features off: they pull in every widget plus three backends we never build
+# against. Four widgets and the crossterm backend is the whole of it.
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "crossterm",
+    "crossterm_0_29",
+    "layout-cache",
+    "underline-color",
+] }

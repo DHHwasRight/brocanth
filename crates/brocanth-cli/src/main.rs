@@ -8,6 +8,7 @@
 
 mod commands;
 mod project;
+mod tui;
 mod ui;
 
 use std::path::PathBuf;
@@ -64,7 +65,12 @@ struct Global {
 #[derive(Subcommand)]
 enum Command {
     /// Scaffold an application
-    New(commands::new::NewArgs),
+    ///
+    /// With no NAME and a terminal on both descriptors this opens a chooser.
+    /// With a NAME it runs straight through, because every other answer has a
+    /// default this command will tell you about.
+    #[command(alias = "new")]
+    Create(commands::create::CreateArgs),
     /// Print the resolved route table
     Routes(commands::routes::RoutesArgs),
     /// Compile the application
@@ -85,7 +91,7 @@ fn main() -> ExitCode {
     let dir = cli.global.dir.as_deref();
 
     let result = match cli.command {
-        Command::New(args) => commands::new::run(&ui, dir, args),
+        Command::Create(args) => commands::create::run(&ui, dir, args),
         Command::Routes(args) => commands::routes::run(&ui, dir, args),
         Command::Build(args) => commands::build::run(&ui, dir, args),
         Command::Check(args) => commands::check::run(&ui, dir, args),

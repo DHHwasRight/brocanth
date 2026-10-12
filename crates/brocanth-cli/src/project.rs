@@ -181,12 +181,12 @@ impl Project {
             )
             .at(manifest.display().to_string())
             .note("in brocanth the filesystem is the route table: one file is one route")
-            .help("run `brocanth new <NAME>` to get the layout, or pass `--pages <DIR>`"),
+            .help("run `brocanth create <NAME>` to get the layout, or pass `--pages <DIR>`"),
             None => Diagnostic::error(
                 "no-package",
                 format!("no Cargo.toml in {} or any parent", start.display()),
             )
-            .help("run `brocanth new <NAME>` to make one, or pass `--dir <DIR>`"),
+            .help("run `brocanth create <NAME>` to make one, or pass `--dir <DIR>`"),
         }])
     }
 
@@ -660,7 +660,8 @@ mod tests {
 
     #[test]
     fn a_mount_is_read_with_both_arguments_and_a_caret_on_each() {
-        let source = "fn setup() {\n        s.router().mount(\"/admin/{*rest}\", \"session\");\n}\n";
+        let source =
+            "fn setup() {\n        s.router().mount(\"/admin/{*rest}\", \"session\");\n}\n";
         let site = call(source, ".mount(", Shape::Literals);
         assert_eq!(site.first.value, "/admin/{*rest}");
         assert_eq!(site.name(), "session");
@@ -698,7 +699,10 @@ mod tests {
     fn an_escaped_quote_does_not_end_a_literal() {
         let source = "catalog.offer(\"session\", \"the \\\"session\\\" cookie\");\n";
         let site = call(source, ".offer(", Shape::Literals);
-        assert_eq!(site.second.as_ref().unwrap().value, "the \"session\" cookie");
+        assert_eq!(
+            site.second.as_ref().unwrap().value,
+            "the \"session\" cookie"
+        );
     }
 
     #[test]

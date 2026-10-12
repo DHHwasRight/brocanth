@@ -7,9 +7,9 @@
 
 pub mod build;
 pub mod check;
+pub mod create;
 pub mod dev;
 pub mod generate;
-pub mod new;
 pub mod routes;
 
 /// What every command returns.

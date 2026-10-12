@@ -1,4 +1,4 @@
-//! `brocanth new` -- scaffold an application.
+//! `brocanth create` -- scaffold an application.
 //!
 //! Interactive when a person is watching and an answer is missing. **Every
 //! answer is also a flag**, so the prompt is a convenience and never the only
@@ -32,8 +32,8 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, ValueEnum};
-use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
-use inquire::{Confirm, MultiSelect, Text};
+
+use crate::tui::{Choice, Draft};
 
 use crate::commands::Outcome;
 use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
@@ -42,7 +42,7 @@ use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 const REPOSITORY: &str = "https://github.com/DHHwasRight/brocanth.git";
 
 #[derive(Args)]
-pub struct NewArgs {
+pub struct CreateArgs {
     /// Directory to create, and the cargo package name
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
@@ -177,7 +177,7 @@ impl Answers {
     }
 }
 
-pub fn run(ui: &Ui, dir: Option<&Path>, args: NewArgs) -> Outcome {
+pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
     let answers = ask(ui, &args)?;
     // `-C` is where to create it. Everywhere else it means "the package root",
     // and here there is no package yet, so it is the directory to put one in.
@@ -190,7 +190,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: NewArgs) -> Outcome {
         .help("pass --force to write into it anyway, or choose another name")]);
     }
 
-    ui.heading("new", &answers.name);
+    ui.heading("create", &answers.name);
 
     let files = scaffold(&answers);
     let mut table = Table::new();
@@ -280,94 +280,127 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: NewArgs) -> Outcome {
 
 // -- the answers ------------------------------------------------------------
 
-fn ask(ui: &Ui, args: &NewArgs) -> Result<Answers, Vec<Diagnostic>> {
-    if ui.interactive() {
-        inquire::set_global_render_config(prompt_style());
-    }
+fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
+    let local = local_checkout(args)?;
 
-    let name = match &args.name {
-        Some(name) => name.clone(),
-        None if ui.interactive() => prompt(
-            Text::new("Directory name")
-                .with_help_message("lowercase, digits, - and _; also the cargo package name")
-                .prompt(),
-        )?,
-        // The whole reason every answer is also a flag. A prompt here would
-        // block forever in CI, which is worse than any error message.
-        None => {
+    // The chooser is reached on one condition, and the condition is the single
+    // answer that has no default. Everything else falls back to something this
+    // command can state out loud, so supplying a name is what distinguishes
+    // being *driven* from being *asked*.
+    if args.name.is_none() {
+        if !ui.interactive() {
+            // The whole reason every answer is also a flag. A chooser here
+            // would block a CI job until it timed out.
             return Err(vec![Diagnostic::error(
                 "missing-argument",
                 "no name, and no terminal to ask for one",
             )
-            .help("pass it: `brocanth new <NAME>`")
+            .help("pass it: `brocanth create <NAME>`")
             .note(
-                "every prompt this command would show has a flag: --title, --with, \
+                "every answer the chooser collects has a flag: --title, --with, \
                  --core-only, --git/--no-git",
-            )])
+            )]);
         }
-    };
+        return chooser(args, local);
+    }
+
+    let name = args.name.clone().expect("the None arm returned above");
     check_name(&name)?;
+    let title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| crate::ui::title_case(&name));
 
-    let default_title = title_case(&name);
-    let title = match &args.title {
-        Some(title) => title.clone(),
-        None if ui.interactive() => prompt(
-            Text::new("Application name")
-                .with_default(&default_title)
-                .with_help_message("shown on the pages and written to `[app] name`")
-                .prompt(),
-        )?,
-        None => default_title,
-    };
+    Ok(Answers {
+        name,
+        title,
+        picks: picked(args),
+        local,
+        // Neither flag means no repository. Stated, not guessed: the receipt
+        // this command prints names `--git` as the way to change it.
+        git: args.git,
+    })
+}
 
-    let picks = if args.core_only {
+/// What the flags alone say goes in the binary.
+///
+/// Shared by both routes, so the chooser opens with its tick-boxes already
+/// matching what `--with` or `--core-only` asked for.
+fn picked(args: &CreateArgs) -> Vec<Pick> {
+    if args.core_only {
         Vec::new()
     } else if !args.with.is_empty() {
         let mut picks = args.with.clone();
         picks.sort();
         picks.dedup();
         picks
-    } else if ui.interactive() {
-        let defaults: Vec<usize> = Pick::ALL
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| Pick::DEFAULT.contains(p))
-            .map(|(i, _)| i)
-            .collect();
-        let mut picks = prompt(
-            MultiSelect::new("What goes in the binary", Pick::ALL.to_vec())
-                .with_default(&defaults)
-                .with_help_message(
-                    "space to toggle, enter to accept. Nothing unticked is compiled, \
-                     linked, or in the lock file",
-                )
-                .prompt(),
-        )?;
-        picks.sort();
-        picks
     } else {
         Pick::DEFAULT.to_vec()
+    }
+}
+
+/// The full-screen route. Returns the same [`Answers`] the flags produce.
+fn chooser(args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
+    let preset = picked(args);
+    let draft = Draft {
+        name: String::new(),
+        title: args.title.clone().unwrap_or_default(),
+        choices: Pick::ALL
+            .iter()
+            .map(|pick| Choice {
+                label: pick.key().to_string(),
+                blurb: pick.gist().to_string(),
+                on: preset.contains(pick),
+            })
+            .collect(),
+        // The chooser offers a repository and the flag route does not, and the
+        // asymmetry is deliberate: a person starting a project in a terminal
+        // nearly always wants one, and a script that wanted one would have
+        // said `--git`. `--no-git` still wins here, because it was explicit.
+        git: !args.no_git,
     };
 
-    let git = if args.git {
-        true
-    } else if args.no_git {
-        false
-    } else if ui.interactive() {
-        prompt(
-            Confirm::new("Initialise a git repository?")
-                .with_default(true)
-                .prompt(),
-        )?
-    } else {
-        false
+    let chosen = crate::tui::choose(draft, name_problem).map_err(|e| {
+        vec![Diagnostic::error("chooser", e.to_string()).help(
+            "this terminal would not take a full-screen view; pass the answers as \
+             flags instead, every one of them has a flag",
+        )]
+    })?;
+
+    // Escape is an answer, and it is not "accepted the defaults". The next act
+    // of this command is to create a directory.
+    let Some(draft) = chosen else {
+        return Err(vec![Diagnostic::warning(
+            "cancelled",
+            "nothing was written",
+        )]);
     };
 
-    // A relative `--brocanth-path` is relative to the directory the user typed
-    // it in, and the generated manifest sits one deeper, so it is resolved here
-    // rather than copied through.
-    let local = match &args.brocanth_path {
-        Some(path) => Some(
+    let picks = Pick::ALL
+        .iter()
+        .zip(&draft.choices)
+        .filter(|(_, choice)| choice.on)
+        .map(|(pick, _)| *pick)
+        .collect();
+
+    Ok(Answers {
+        title: if draft.title.is_empty() {
+            crate::ui::title_case(&draft.name)
+        } else {
+            draft.title
+        },
+        name: draft.name,
+        picks,
+        local,
+        git: draft.git,
+    })
+}
+
+/// A relative `--brocanth-path` is relative to the directory the user typed it
+/// in, and the generated manifest sits one deeper, so it is resolved here.
+fn local_checkout(args: &CreateArgs) -> Result<Option<String>, Vec<Diagnostic>> {
+    match &args.brocanth_path {
+        Some(path) => Ok(Some(
             std::fs::canonicalize(path)
                 .map_err(|e| {
                     vec![Diagnostic::error("brocanth-path", format!("{path}: {e}"))
@@ -375,80 +408,42 @@ fn ask(ui: &Ui, args: &NewArgs) -> Result<Answers, Vec<Diagnostic>> {
                 })?
                 .display()
                 .to_string(),
-        ),
-        None => None,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Why `name` is not a usable package name, in a few words, or `None`.
+///
+/// Split out from [`check_name`] because the chooser needs the reason as text
+/// to show under the field as it is typed, and a diagnostic is the wrong shape
+/// for that. One rule, two presentations.
+fn name_problem(name: &str) -> Option<String> {
+    let why = if name.is_empty() {
+        "is empty"
+    } else if name.contains(['/', '\\', ' ']) {
+        "is a path, not a name"
+    } else if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        "is not a cargo package name"
+    } else if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        "does not start with a letter"
+    } else {
+        return None;
     };
-
-    Ok(Answers {
-        name,
-        title,
-        picks,
-        local,
-        git,
-    })
-}
-
-/// Ctrl-C at a prompt is an answer, not a crash.
-fn prompt<T>(result: inquire::error::InquireResult<T>) -> Result<T, Vec<Diagnostic>> {
-    result.map_err(|e| match e {
-        inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
-            vec![Diagnostic::warning("cancelled", "nothing was written")]
-        }
-        other => vec![Diagnostic::error("prompt", other.to_string())
-            .help("pass the answers as flags instead; every prompt has one")],
-    })
-}
-
-/// inquire, in the same vocabulary as everything else: the accent on what the
-/// reader is acting on, dim on the help, and no second colour.
-fn prompt_style() -> RenderConfig<'static> {
-    RenderConfig::default_colored()
-        .with_prompt_prefix(Styled::new("?").with_fg(Color::LightCyan))
-        .with_answered_prompt_prefix(Styled::new("\u{2713}").with_fg(Color::LightGreen))
-        .with_highlighted_option_prefix(Styled::new("\u{203a}").with_fg(Color::LightCyan))
-        .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey))
-        .with_answer(StyleSheet::new().with_fg(Color::LightCyan))
+    Some(why.to_string())
 }
 
 /// A cargo package name and a directory name at once, so the rules are the
 /// stricter of the two.
 fn check_name(name: &str) -> Result<(), Vec<Diagnostic>> {
-    let bad = |why: &str| {
-        Err(vec![Diagnostic::error("name", format!("{name:?} {why}"))
-            .help("lowercase letters, digits, - and _, starting with a letter")])
-    };
-    if name.is_empty() {
-        return bad("is empty");
+    match name_problem(name) {
+        Some(why) => Err(vec![Diagnostic::error("name", format!("{name:?} {why}"))
+            .help("lowercase letters, digits, - and _, starting with a letter")]),
+        None => Ok(()),
     }
-    if name.contains(['/', '\\', ' ']) {
-        return bad("is a path, not a name");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
-        return bad("is not a cargo package name");
-    }
-    if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
-        return bad("does not start with a letter");
-    }
-    Ok(())
-}
-
-/// `my-blog` -> `My Blog`. A starting point, not a decision: it is offered as
-/// the default of a prompt the author can overwrite.
-fn title_case(name: &str) -> String {
-    name.split(['-', '_'])
-        .filter(|w| !w.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
@@ -519,7 +514,10 @@ fn source_of(a: &Answers, crate_name: &str) -> String {
                     .map(|p| p.join(crate_name))
                     .unwrap_or_else(|| Path::new(path).to_path_buf())
             };
-            format!("{crate_name} = {{ path = {:?} }}", dir.display().to_string())
+            format!(
+                "{crate_name} = {{ path = {:?} }}",
+                dir.display().to_string()
+            )
         }
         None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}"),
     }
@@ -578,7 +576,11 @@ fn cargo_toml(a: &Answers) -> String {
          {deps}\n",
         name = a.name,
         deps = deps.join("\n"),
-        absent = if absent.contains("#   ") { absent } else { String::new() },
+        absent = if absent.contains("#   ") {
+            absent
+        } else {
+            String::new()
+        },
     )
 }
 
@@ -1418,9 +1420,9 @@ mod tests {
 
     #[test]
     fn the_default_title_is_a_starting_point() {
-        assert_eq!(title_case("my-blog"), "My Blog");
-        assert_eq!(title_case("brocanth"), "Brocanth");
-        assert_eq!(title_case("a_b-c"), "A B C");
+        assert_eq!(crate::ui::title_case("my-blog"), "My Blog");
+        assert_eq!(crate::ui::title_case("brocanth"), "Brocanth");
+        assert_eq!(crate::ui::title_case("a_b-c"), "A B C");
     }
 
     #[test]
@@ -1482,7 +1484,10 @@ mod tests {
             core.contains("Not here, because nothing asked for it"),
             "{core}"
         );
-        assert!(core.contains("no sea-orm anywhere in the lock file"), "{core}");
+        assert!(
+            core.contains("no sea-orm anywhere in the lock file"),
+            "{core}"
+        );
         let everything = cargo_toml(&answers(&Pick::ALL));
         assert!(
             !everything.contains("Not here, because"),
@@ -1519,7 +1524,10 @@ mod tests {
             "{main}"
         );
         let plugin = logging_rs(&answers(&[Pick::Logging]));
-        assert!(!plugin.contains(".mount("), "a plugin must not mount: {plugin}");
+        assert!(
+            !plugin.contains(".mount("),
+            "a plugin must not mount: {plugin}"
+        );
         assert!(plugin.contains("catalog.offer("), "{plugin}");
     }
 
@@ -1536,7 +1544,9 @@ mod tests {
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
         let main = main_rs(&answers(&[Pick::Logging]));
         assert!(
-            main.contains(".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"),
+            main.contains(
+                ".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"
+            ),
             "{main}"
         );
         assert!(!main.contains("plugin_from_config"), "{main}");

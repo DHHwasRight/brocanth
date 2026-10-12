@@ -67,11 +67,19 @@ pub fn paint(style: Style, text: impl Display) -> String {
     format!("{style}{text}{}", style.render_reset())
 }
 
-/// Who is on the other end.
+/// Who is on the other end, as a ladder: each rung does everything the rung
+/// below it does, and one thing more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Face {
-    /// A person is watching. Colour, a live spinner, and prompts when an
-    /// answer is missing.
+    /// Both descriptors are a terminal. Everything [`Face::Terminal`] can do,
+    /// and one thing more -- the alternate screen and a key at a time -- so a
+    /// missing answer can be asked as a full-screen chooser rather than as a
+    /// line of prompts.
+    Tui,
+    /// Stdout is a terminal: colour, and a line that can be rewritten in place
+    /// so a spinner stays on one row. Stdin is *not*, so nothing may be asked.
+    /// `echo "" | brocanth create` lands here and must fail naming the flag
+    /// rather than block on a read that will never return.
     Terminal,
     /// A pipe, a file, CI, `NO_COLOR`, `--no-color` or `--quiet`. Plain text,
     /// no animation, and a missing answer is an error rather than a question.
@@ -96,22 +104,43 @@ impl Face {
         }
         // The matching opt-in, for someone piping into a pager that renders
         // ANSI. Checked before the terminal test, which is the whole point.
+        // It forces colour and nothing else: a pager cannot answer a question,
+        // so this rung is `Terminal` and never `Tui`.
         if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
             return Face::Terminal;
         }
         // Stdout, not stderr: a command's output is the thing being captured,
         // and a split decision would colour half a transcript.
-        if std::io::stdout().is_terminal() {
-            Face::Terminal
+        if !std::io::stdout().is_terminal() {
+            return Face::Plain;
+        }
+        // Stdin decides the top rung, and only stdin: reading a key needs a
+        // terminal on the *input* side, and the two descriptors are redirected
+        // separately. This is the distinction the two-rung version could not
+        // make, which is why `echo "" | brocanth new` used to reach a prompt.
+        if std::io::stdin().is_terminal() {
+            Face::Tui
         } else {
-            Face::Plain
+            Face::Terminal
         }
     }
 
+    /// Whether an escape sequence survives to the other end.
+    pub fn can_paint(self) -> bool {
+        matches!(self, Face::Tui | Face::Terminal)
+    }
+
+    /// Whether a question may be asked at all. False means every answer has to
+    /// arrive as a flag, and a missing one is an error naming that flag.
+    pub fn can_ask(self) -> bool {
+        self == Face::Tui
+    }
+
     fn choice(self) -> ColorChoice {
-        match self {
-            Face::Terminal => ColorChoice::Always,
-            Face::Plain => ColorChoice::Never,
+        if self.can_paint() {
+            ColorChoice::Always
+        } else {
+            ColorChoice::Never
         }
     }
 }
@@ -197,7 +226,7 @@ impl Ui {
     /// Whether a prompt may be shown. False means every answer has to arrive
     /// as a flag, and a missing one is an error naming that flag.
     pub fn interactive(&self) -> bool {
-        self.face == Face::Terminal
+        self.face.can_ask()
     }
 
     // -- the raw writes -----------------------------------------------------
@@ -299,7 +328,7 @@ impl Ui {
     /// lines appear with no animation and no cursor movement.
     pub fn steps(&self, labels: &[&str]) -> Steps<'_> {
         let width = labels.iter().copied().map(width_of).max().unwrap_or(0);
-        let bar = (self.face == Face::Terminal && !self.quiet).then(|| {
+        let bar = (self.face.can_paint() && !self.quiet).then(|| {
             let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
             bar.set_style(
                 ProgressStyle::with_template("  {spinner:.cyan} {wide_msg}")
@@ -677,6 +706,25 @@ pub fn plural(n: usize, noun: &str) -> String {
     }
 }
 
+/// `my-blog` -> `My Blog`.
+///
+/// Here rather than beside either caller because both need it and they must
+/// agree: the chooser mirrors it into the name field as you type, and the flag
+/// route uses it as the default title. Two copies would drift.
+pub fn title_case(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,7 +791,10 @@ mod tests {
             .iter()
             .map(|l| anstream::adapter::strip_str(l).to_string())
             .collect();
-        assert_eq!(lines, ["/users/{id}           x", "/a-much-longer-route  y"]);
+        assert_eq!(
+            lines,
+            ["/users/{id}           x", "/a-much-longer-route  y"]
+        );
     }
 
     #[test]

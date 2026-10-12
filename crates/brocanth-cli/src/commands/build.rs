@@ -18,7 +18,7 @@ use clap::Args;
 
 use crate::commands::Outcome;
 use crate::project::Project;
-use crate::ui::{self, Cell, Diagnostic, Face, Table, Ui, ACCENT, DIM, STRONG};
+use crate::ui::{self, Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -119,9 +119,12 @@ pub fn cargo(
         // the rest of the transcript rather than guessing on their own.
         .env(
             "CARGO_TERM_COLOR",
-            match ui.face() {
-                Face::Terminal => "always",
-                Face::Plain => "never",
+            // Cargo has two rungs where we have three: it can colour or not,
+            // and knows nothing of an alternate screen.
+            if ui.face().can_paint() {
+                "always"
+            } else {
+                "never"
             },
         )
         .current_dir(&project.root)
