@@ -1053,3 +1053,388 @@ mod images {
         !crc
     }
 }
+
+/// The Postgres backend, against a real server.
+///
+/// # The test story, stated plainly
+///
+/// These cannot run with no server, and this crate's other fifty-three tests
+/// must keep running on a laptop with nothing installed. So the suite is
+/// compiled only with `--features postgres` and runs only when
+/// `BROCANTH_TEST_DATABASE_URL` names a database it may create two tables in:
+///
+/// ```sh
+/// BROCANTH_TEST_DATABASE_URL=postgres://localhost/brocanth_storage_test \
+///   cargo test -p brocanth-storage --features postgres
+/// ```
+///
+/// Not a testcontainer. That would put `testcontainers`, `bollard`, `hyper`
+/// and a Docker daemon between `cargo test` and an answer, in the one crate
+/// whose whole argument is that a feature which is off means the code is
+/// absent — and it would still fail, less legibly, on a machine with no
+/// Docker. An environment variable costs nothing and `brocanth-jobs` already
+/// skips its Postgres suite the same way, so there is one convention to learn.
+///
+/// **A skip is loud.** [`announce_skip`] writes a banner straight to the
+/// standard error handle, going round libtest's capture, because libtest
+/// throws away what a *passing* test printed and a passing test is exactly the
+/// case this message is about. A suite that passes by running nothing is worse
+/// than one that is honestly empty.
+///
+/// What runs without a server is the statement-text suite in
+/// [`crate::postgres::sql`]: that the primary key is `bytea`, that `size` is a
+/// column rather than a detoast, that the foreign key cascades, and that no
+/// insert in this backend can ever rewrite a row. Those are the properties the
+/// design rests on, and they are checked on every `cargo test --all-features`
+/// whether or not a database was named.
+///
+/// One database serves every test here and they run in parallel, so nothing
+/// truncates anything. Each test works on its own addresses instead, which is
+/// also what two applications sharing a database would do.
+#[cfg(feature = "postgres")]
+mod pg {
+    use super::*;
+    use crate::postgres::{Postgres, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
+
+    /// Says, once and where it cannot be swallowed, that the suite did not
+    /// run.
+    fn announce_skip() {
+        use std::io::Write as _;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // Not `eprintln!`. libtest redirects that macro and discards what
+            // a passing test wrote; writing to the handle itself does not go
+            // through the redirect.
+            let _ = std::io::stderr().write_all(
+                b"\n\
+                  ============================================================\n\
+                  SKIPPED: the brocanth-storage Postgres tests did not run.\n\
+                  Nothing below was checked against a server.\n\
+                  Set BROCANTH_TEST_DATABASE_URL to a database this suite may\n\
+                  create tables in, for example:\n\
+                    BROCANTH_TEST_DATABASE_URL=postgres://localhost/brocanth_storage_test\n\
+                  ============================================================\n\n",
+            );
+        });
+    }
+
+    /// A reactor. `crate::rt::block_on` drives a future on the calling thread
+    /// and has no I/O driver, so it cannot drive a socket.
+    fn reactor() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a reactor")
+    }
+
+    /// Runs `body` against a migrated store, or announces a skip and does
+    /// nothing.
+    fn with_store<F>(body: F)
+    where
+        F: AsyncFnOnce(Postgres),
+    {
+        let Ok(url) = std::env::var("BROCANTH_TEST_DATABASE_URL") else {
+            announce_skip();
+            return;
+        };
+        reactor().block_on(async move {
+            let store = Postgres::connect(&url).await.expect("connecting");
+            store.migrate().await.expect("creating the tables");
+            body(store).await;
+        });
+    }
+
+    /// Bytes no other test in this file will store, so one database serves
+    /// them all with no truncation and no ordering.
+    fn unique(what: &str) -> Vec<u8> {
+        let key = ObjectKey::random().expect("randomness");
+        format!("brocanth-storage test {what} {key}").into_bytes()
+    }
+
+    #[test]
+    fn an_object_round_trips_and_delete_is_idempotent() {
+        with_store(async |store| {
+            let body = unique("round trip");
+            let about = ObjectInfo::new()
+                .with_filename("contract.pdf")
+                .with_declared_type("application/pdf");
+            let key = store.put(&body, &about).await.expect("put");
+
+            assert!(store.exists(&key).await.expect("exists"));
+            assert_eq!(store.get(&key).await.expect("get"), body);
+
+            let meta = store.meta(&key).await.expect("meta");
+            assert_eq!(meta.key, key);
+            assert_eq!(meta.size, body.len() as u64);
+            // These bytes sniff as nothing, so the declared type is what is
+            // left — and `is_safe_to_inline` still answers `false`, which is
+            // the bit the serving half needs.
+            assert_eq!(meta.content_type.as_str(), "application/pdf");
+            assert!(!meta.content_type.is_safe_to_inline());
+            assert_eq!(meta.filename.unwrap().as_str(), "contract.pdf");
+
+            store.delete(&key).await.expect("delete");
+            assert!(!store.exists(&key).await.expect("exists"));
+            assert!(matches!(store.get(&key).await, Err(StorageError::NotFound)));
+            assert!(matches!(
+                store.meta(&key).await,
+                Err(StorageError::NotFound)
+            ));
+            // Idempotent, because a delete retried after a timeout must not
+            // fail the second time.
+            store.delete(&key).await.expect("delete again");
+            store.delete(&key).await.expect("delete a third time");
+        });
+    }
+
+    #[test]
+    fn the_content_decides_the_media_type() {
+        with_store(async |store| {
+            let mut body = b"\x89PNG\r\n\x1a\n".to_vec();
+            body.extend_from_slice(&unique("sniffing"));
+            let about = ObjectInfo::new().with_declared_type("text/html");
+            let key = store.put(&body, &about).await.expect("put");
+            let meta = store.meta(&key).await.expect("meta");
+            assert_eq!(meta.content_type.as_str(), "image/png");
+            assert!(meta.content_type.is_safe_to_inline());
+            store.delete(&key).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn identical_content_is_stored_once_and_keeps_the_first_metadata() {
+        with_store(async |store| {
+            let body = unique("the metadata rewrite attack");
+            let mine = ObjectInfo::new()
+                .with_filename("mine.pdf")
+                .with_declared_type("application/pdf");
+            let yours = ObjectInfo::new()
+                .with_filename("yours.html")
+                .with_declared_type("text/html");
+
+            let a = store.put(&body, &mine).await.expect("first put");
+            let b = store.put(&body, &yours).await.expect("second put");
+            assert_eq!(a, b, "the same bytes must get the same address");
+
+            // The attack: uploading a copy of somebody else's file must not
+            // change what their file is served as. `ON CONFLICT DO NOTHING`
+            // left the first row alone, so it does not.
+            let meta = store.meta(&a).await.expect("meta");
+            assert_eq!(meta.content_type.as_str(), "application/pdf");
+            assert_eq!(meta.filename.unwrap().as_str(), "mine.pdf");
+
+            store.delete(&a).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn concurrent_puts_of_one_file_agree_and_still_refuse_the_rewrite() {
+        with_store(async |store| {
+            let body = std::sync::Arc::new(unique("concurrent puts"));
+            let store = std::sync::Arc::new(store);
+            let mine = ObjectInfo::new()
+                .with_filename("mine.pdf")
+                .with_declared_type("application/pdf");
+
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let store = std::sync::Arc::clone(&store);
+                let body = std::sync::Arc::clone(&body);
+                let about = mine.clone();
+                tasks.push(tokio::spawn(async move { store.put(&body, &about).await }));
+            }
+            let mut keys = Vec::new();
+            for task in tasks {
+                keys.push(task.await.expect("a task").expect("put"));
+            }
+            assert!(keys.windows(2).all(|pair| pair[0] == pair[1]));
+
+            // Eight racing inserts, one row, no unique violation and nobody's
+            // metadata overwritten — including by the late arrival below.
+            let yours = ObjectInfo::new()
+                .with_filename("yours.html")
+                .with_declared_type("text/html");
+            store.put(&body, &yours).await.expect("a late put");
+
+            let meta = store.meta(&keys[0]).await.expect("meta");
+            assert_eq!(meta.content_type.as_str(), "application/pdf");
+            assert_eq!(meta.filename.unwrap().as_str(), "mine.pdf");
+            assert_eq!(store.get(&keys[0]).await.expect("get"), *body);
+
+            store.delete(&keys[0]).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn an_existing_address_is_never_overwritten() {
+        with_store(async |store| {
+            let key = ObjectKey::random().expect("randomness");
+            let first = unique("first");
+            let second = unique("second");
+            store
+                .put_at(&key, &first, &ObjectInfo::new())
+                .await
+                .expect("first");
+            store
+                .put_at(&key, &second, &ObjectInfo::new())
+                .await
+                .expect("second");
+            assert_eq!(store.get(&key).await.expect("get"), first);
+            store.delete(&key).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn a_keyed_store_addresses_differently_but_behaves_the_same() {
+        with_store(async |store| {
+            let body = unique("keyed addressing");
+            let plain = store.address_of(&body);
+            let keyed = Postgres::with_pool(store.pool().clone())
+                .with_hash_key(HashKey::from_secret(b"deployment secret"));
+            let key = keyed.put(&body, &ObjectInfo::new()).await.expect("put");
+            assert_ne!(key, plain, "the key must change the address");
+            assert_eq!(
+                key,
+                ObjectKey::keyed(&HashKey::from_secret(b"deployment secret"), &body)
+            );
+            assert_eq!(keyed.get(&key).await.expect("get"), body);
+            // Dedupe still works under the key.
+            assert_eq!(
+                keyed.put(&body, &ObjectInfo::new()).await.expect("put"),
+                key
+            );
+            keyed.delete(&key).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn a_variant_round_trips_and_dies_with_its_parent() {
+        with_store(async |store| {
+            let body = unique("a variant");
+            let key = store.put(&body, &ObjectInfo::new()).await.expect("put");
+            let spec: VariantSpec = "50x50t".parse().expect("a spec");
+
+            assert_eq!(
+                store.get_variant(&key, spec).await.expect("miss"),
+                None,
+                "a miss is ordinary control flow, not an error"
+            );
+            store
+                .put_variant(&key, spec, b"thumb")
+                .await
+                .expect("put a variant");
+            assert_eq!(
+                store.get_variant(&key, spec).await.expect("hit"),
+                Some(b"thumb".to_vec())
+            );
+            // Writing it twice is safe and leaves the cached bytes alone.
+            store
+                .put_variant(&key, spec, b"thumb")
+                .await
+                .expect("put it again");
+            assert_eq!(
+                store.get_variant(&key, spec).await.expect("hit"),
+                Some(b"thumb".to_vec())
+            );
+
+            // A thumbnail of a deleted document is still the document, so the
+            // foreign key cascades.
+            store.delete(&key).await.expect("delete");
+            assert_eq!(store.get_variant(&key, spec).await.expect("gone"), None);
+        });
+    }
+
+    #[test]
+    fn a_variant_of_an_object_that_is_not_there_is_refused() {
+        with_store(async |store| {
+            let key = ObjectKey::random().expect("randomness");
+            let spec: VariantSpec = "10x10f".parse().expect("a spec");
+            // The foreign key makes an orphan unrepresentable rather than
+            // merely unlikely, so the honest answer is that the parent is
+            // missing.
+            assert!(matches!(
+                store.put_variant(&key, spec, b"orphan").await,
+                Err(StorageError::NotFound)
+            ));
+            assert_eq!(store.get_variant(&key, spec).await.expect("none"), None);
+        });
+    }
+
+    #[test]
+    fn an_object_past_the_limit_is_refused_before_it_is_sent() {
+        with_store(async |store| {
+            let small = Postgres::with_pool(store.pool().clone())
+                .with_max_object_bytes(64)
+                .expect("a limit");
+            let body = vec![b'x'; 65];
+            let key = small.address_of(&body);
+            assert!(matches!(
+                small.put(&body, &ObjectInfo::new()).await,
+                Err(StorageError::TooLarge {
+                    size: 65,
+                    limit: 64
+                })
+            ));
+            // Refused, not half-stored.
+            assert!(!small.exists(&key).await.expect("exists"));
+
+            // Exactly at the limit is stored.
+            let fits = vec![b'y'; 64];
+            let key = small.put(&fits, &ObjectInfo::new()).await.expect("put");
+            assert_eq!(small.meta(&key).await.expect("meta").size, 64);
+
+            // A variant is capped too.
+            let spec: VariantSpec = "10x10f".parse().expect("a spec");
+            assert!(matches!(
+                small.put_variant(&key, spec, &[b'z'; 65]).await,
+                Err(StorageError::TooLarge { .. })
+            ));
+            small.delete(&key).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn the_trait_works_through_a_trait_object() {
+        with_store(async |store| {
+            let store: std::sync::Arc<dyn Storage> = std::sync::Arc::new(store);
+            let body = unique("a trait object");
+            let key = store.put(&body, &ObjectInfo::new()).await.expect("put");
+            assert_eq!(store.get(&key).await.expect("get"), body);
+            store.delete(&key).await.expect("delete");
+        });
+    }
+
+    #[test]
+    fn migrating_twice_is_a_no_op() {
+        with_store(async |store| {
+            store.migrate().await.expect("again");
+            store.migrate().await.expect("and again");
+        });
+    }
+
+    // -- these need no server ----------------------------------------------
+
+    #[test]
+    fn the_size_limit_refuses_a_nonsense_setting() {
+        // `connect_lazy` opens no connection, so this needs no server. It does
+        // need a reactor: `sqlx` builds its pool's idle reaper on construction
+        // and panics outside a Tokio context.
+        reactor().block_on(async {
+            let configure = |bytes| {
+                let pool = sqlx::postgres::PgPool::connect_lazy("postgres://localhost/unused")
+                    .expect("a lazy pool");
+                Postgres::with_pool(pool).with_max_object_bytes(bytes)
+            };
+            assert!(configure(0).is_err(), "a limit of zero stores nothing");
+            assert!(configure(OBJECT_SIZE_CEILING + 1).is_err());
+            assert!(configure(OBJECT_SIZE_CEILING).is_ok());
+            assert!(configure(1).is_ok());
+            assert_eq!(
+                configure(DEFAULT_MAX_OBJECT_BYTES)
+                    .expect("the default is within the ceiling")
+                    .max_object_bytes(),
+                DEFAULT_MAX_OBJECT_BYTES
+            );
+        });
+    }
+}

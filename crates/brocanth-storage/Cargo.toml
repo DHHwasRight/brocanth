@@ -42,12 +42,40 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ], optional = true }
 
+# The Postgres backend, optional for the same reason the codecs are. A SQL
+# driver, a connection pool, a TLS stack and a reactor is the largest tree in
+# this crate by a wide margin, and §8.2 asks that a feature which is off means
+# the code is absent rather than branched around. With `postgres` off there is
+# no `sqlx` and no `tokio` here: `cargo tree -p brocanth-storage -e normal
+# --depth 1` lists seven crates, exactly as it did before this backend existed.
+#
+# Version 0.9, with no default features, because that is the version `sea-orm`
+# 2.0.4 and `brocanth-jobs` already resolve to in this workspace. A second
+# minor version of `sqlx` in one workspace is a second `libpq`-free driver, a
+# second pool and — with the TLS features — a second native library, which is
+# how a resolution failure reaches crates that never asked for a database.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+], optional = true }
+
+# Named here only so the Postgres tests can build a reactor to drive `sqlx`
+# on: `src/rt.rs` runs a future on the calling thread and has no I/O driver, so
+# it cannot drive a socket. This adds nothing to the tree that
+# `sqlx/runtime-tokio` has not already put there, and it is optional so that a
+# build without `postgres` has neither.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+], optional = true }
+
 [dev-dependencies]
 # A real directory for the disk tests, removed when the test ends. Nothing
 # else: the tests drive the async trait through a twenty-line executor in
 # `src/rt.rs`, because a runtime that exists only to make a test compile is
 # still a runtime in the tree (PLAN §8.2, and `brocanth-admin` set the
-# precedent).
+# precedent). The Postgres tests need a real reactor and get it from the
+# optional `tokio` above, which the `postgres` feature turns on — a
+# dev-dependency cannot be optional, and one declared here would be compiled by
+# every `cargo test` in a tree that asked for no database.
 tempfile = "3"
 
 [features]
@@ -56,6 +84,14 @@ tempfile = "3"
 # the feature off; only the pixels need `image`.
 default = []
 variants = ["dep:image"]
+
+# Objects in Postgres rather than on a disk, in `bytea` columns. See
+# [`crate::postgres`] for the schema and for why it is `bytea` and not a large
+# object. `tls-rustls-ring` rather than a native TLS stack, because a native
+# one is the other half of the resolution failure the comment above is about:
+# two crates in one workspace asking for two different OpenSSL bindings is a
+# link error nobody can fix from their own `Cargo.toml`.
+postgres = ["dep:sqlx", "dep:tokio", "sqlx/postgres", "sqlx/tls-rustls-ring"]
 
 [lints.rust]
 missing_docs = "warn"

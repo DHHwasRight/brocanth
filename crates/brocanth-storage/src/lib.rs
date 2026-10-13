@@ -3,11 +3,16 @@
 //!
 //! # Shape
 //!
-//! [`Storage`] is the whole public contract. [`LocalDisk`] implements it. An
-//! S3 backend is a later, separate crate that implements the same trait —
-//! PLAN §4 cuts object stores from v1 by name, so there is no `s3` feature
-//! here, no unimplemented arm and no AWS SDK in the lock file. Nothing above
-//! the trait changes when that crate arrives.
+//! [`Storage`] is the whole public contract. [`LocalDisk`] implements it, and
+//! so does [`Postgres`] behind the `postgres` feature — objects in `bytea`
+//! columns, for a deployment that already runs Postgres for its queues and
+//! would rather not also run a shared filesystem. An S3 backend is a later,
+//! separate crate that implements the same trait — PLAN §4 cuts object stores
+//! from v1 by name, so there is no `s3` feature here, no unimplemented arm and
+//! no AWS SDK in the lock file. Nothing above the trait changes when that
+//! crate arrives.
+//!
+//! [`Postgres`]: postgres::Postgres
 //!
 //! This crate does not depend on `brocanth`. It has no routes, parses no
 //! multipart body and knows nothing about HTTP. The upload route, the download
@@ -57,6 +62,13 @@
 //! decoders pointed at stranger-supplied bytes is the clearest case of it in
 //! this workspace.
 //!
+//! `postgres` pulls in `sqlx` and the reactor it runs on, which is the largest
+//! tree in this crate by a wide margin. Same rule: with the feature off the
+//! module does not exist, and `cargo tree -p brocanth-storage -e normal
+//! --depth 1` lists the same seven crates it listed before that backend was
+//! written. A build with neither feature has no SQL driver, no TLS stack, no
+//! async runtime and no image codec.
+//!
 //! # Example
 //!
 //! ```
@@ -95,6 +107,9 @@ pub mod spec;
 pub mod storage;
 pub mod token;
 
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 #[cfg(feature = "variants")]
 pub mod variants;
 
@@ -109,6 +124,9 @@ pub use key::{HashKey, ObjectKey, KEY_BYTES, KEY_HEX_LEN};
 pub use local::LocalDisk;
 pub use meta::{ContentType, Filename, ObjectInfo, ObjectMeta, MAX_FILENAME_LEN};
 pub use spec::{CropAnchor, VariantMode, VariantSpec, MAX_VARIANT_DIM};
+
+#[cfg(feature = "postgres")]
+pub use postgres::{Postgres, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
 pub use storage::Storage;
 pub use token::{FileToken, FileTokenKey, FileTokens, UnixTime, DEFAULT_TTL};
 

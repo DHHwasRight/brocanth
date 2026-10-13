@@ -52,6 +52,20 @@ pub enum StorageError {
     #[error("the image could not be processed: {0}")]
     Image(String),
 
+    /// The object is bigger than the backend will store.
+    ///
+    /// Distinct from [`StorageError::Backend`] because it is the one backend
+    /// refusal a caller can act on: it is a 413, it is the client's fault, and
+    /// retrying it is pointless. Both numbers are the backend's own, so
+    /// nothing a client sent reaches a log through here.
+    #[error("the object is {size} bytes, past this backend's limit of {limit}")]
+    TooLarge {
+        /// How many bytes the caller tried to store.
+        size: u64,
+        /// The most this backend stores in one object.
+        limit: u64,
+    },
+
     /// Anything the backend failed at.
     ///
     /// A string because this crate cannot usefully tell a full disk from a
