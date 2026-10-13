@@ -1,0 +1,63 @@
+[package]
+name = "brocanth-resource"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Typed CRUD routes derived from an entity and its policy. A build with no policy registered does not compile."
+
+# Three dependencies, and the two that matter are the seams this crate joins.
+#
+# * `brocanth-policy` is the argument of PLAN.md §9, as a value: a predicate
+#   with two interpretations, a witness that carries its condition, and a field
+#   mask. This crate consumes all three and adds none of them.
+# * `brocanth-events` is the realtime seam. A write publishes a `RowChange` and
+#   never learns who listens.
+# * `brocanth` is the router. It is optional, because the authorisation flow in
+#   `flow` is a set of plain functions over `ResourceData`, and a server that
+#   is not brocanth can drive them. With `plugin` off, the core is not in the
+#   tree and `routes` is not compiled — PLAN.md §8.2: a feature that is off
+#   means the code is absent.
+#
+# Not here, and the refusals are the design: no `sea-orm`, no `sqlx`, no
+# driver, no pool, no async runtime, no `serde`. The rows belong to the
+# application, so the application encodes them; see `Resource::encode_row`.
+# What this crate writes is the envelope around them, which is forty lines of
+# `String::push_str` and not a reason to link a serialiser.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+# Only with `plugin`: a response is an `http::Response`, and the core's
+# `Response` alias is one. Same major version as the core, so there is one copy.
+http = { version = "1", optional = true }
+brocanth-events = { workspace = true }
+brocanth-policy = { workspace = true }
+thiserror = "2"
+
+# trybuild compiles the cases under tests/ui and compares the compiler's own
+# output against a recorded snapshot. It is how `a build with no policy
+# registered must not compile` becomes an assertion rather than a sentence in a
+# README. `brocanth-task` set the precedent in this workspace.
+[dev-dependencies]
+trybuild = "1"
+
+# The claim under test is that the policy filters **in the query**. A fixture
+# that filtered in Rust would prove only that this crate and that fixture agree
+# about a predicate neither of them sent to a database, so the tests run against
+# a real engine, exactly as `brocanth-policy`'s agreement tests do.
+#
+# The version is not a preference. `libsqlite3-sys` sets `links = "sqlite3"`, so
+# cargo permits one copy of it in the whole graph; `brocanth-jobs` pins
+# `sqlx 0.9` and `brocanth-policy` already resolves to it. Taking anything else
+# here would fail resolution for the workspace rather than for this crate.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite-bundled",
+] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[features]
+default = ["plugin"]
+# The route bundle: `RouteSource`, the status codes and the JSON envelope.
+plugin = ["dep:brocanth", "dep:http"]
+
+[lints.rust]
+missing_docs = "warn"

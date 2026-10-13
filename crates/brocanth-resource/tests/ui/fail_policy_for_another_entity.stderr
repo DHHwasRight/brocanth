@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<CommentPolicy as Policy>::Entity == Post`
+  --> tests/ui/fail_policy_for_another_entity.rs:14:19
+   |
+14 |     type Policy = CommentPolicy;
+   |                   ^^^^^^^^^^^^^ type mismatch resolving `<CommentPolicy as Policy>::Entity == Post`
+   |
+note: expected this to be `Post`
+  --> tests/ui/support.rs
+   |
+   |     type Entity = Comment;
+   |                   ^^^^^^^
+note: required by a bound in `brocanth_resource::Resource::Policy`
+  --> src/resource.rs
+   |
+   |     type Policy: Policy<Entity = Self::Entity, Subject = Self::Subject>;
+   |                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Resource::Policy`

@@ -1,0 +1,24 @@
+error[E0277]: the trait bound `Whatever: Policy` is not satisfied
+  --> tests/ui/fail_not_a_policy.rs:13:19
+   |
+13 |     type Policy = Whatever;
+   |                   ^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `Policy` is not implemented for `Whatever`
+  --> tests/ui/support.rs
+   |
+   | pub struct Whatever;
+   | ^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `Policy`
+  --> tests/ui/support.rs
+   |
+   | impl Policy for PostPolicy {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `PostPolicy`
+...
+   | impl Policy for CommentPolicy {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CommentPolicy`
+note: required by a bound in `brocanth_resource::Resource::Policy`
+  --> src/resource.rs
+   |
+   |     type Policy: Policy<Entity = Self::Entity, Subject = Self::Subject>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Resource::Policy`
