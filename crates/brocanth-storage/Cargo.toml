@@ -1,0 +1,61 @@
+[package]
+name = "brocanth-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "File storage for brocanth: one trait, a local-disk backend, content-addressed names and derived image variants."
+
+[dependencies]
+# No `brocanth` here. §8 points the arrow from a plugin to the core, and this
+# crate does not even reach the core: it is a storage contract, so the HTTP
+# half that mounts it depends on both and this depends on neither.
+
+# The trait is async and object-safe. `async fn` in a trait is still not
+# object-safe, and an application holding one backend behind `Arc<dyn Storage>`
+# is the normal case, so `async-trait` it is — the same choice `brocanth-auth`
+# made for `AuthStore`.
+async-trait = "0.1"
+
+# SHA-256 addresses an object and HMAC-SHA256 signs a file token. Same
+# RustCrypto crates `brocanth-auth` already uses, so an application that links
+# both links one copy.
+sha2 = "0.11"
+hmac = "0.13"
+# Constant-time equality. `==` on a MAC short-circuits on the first differing
+# byte, which is enough to forge one byte at a time.
+subtle = "2.6"
+# The OS CSPRNG, for a token key, a random address and a temporary file name.
+getrandom = "0.4"
+base64 = "0.23"
+thiserror = "2"
+
+# The image codecs, and the reason they are optional is §8.2: a feature that is
+# off must mean the code is absent. `image` pulls png, jpeg, gif and webp
+# decoders — hundreds of kilobytes and a wide parsing surface — and an
+# application that stores PDFs must not link a PNG decoder. Default features
+# are off for the same reason: we take four formats, not twelve, and no rayon,
+# because a storage plugin must not start a thread pool.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+], optional = true }
+
+[dev-dependencies]
+# A real directory for the disk tests, removed when the test ends. Nothing
+# else: the tests drive the async trait through a twenty-line executor in
+# `src/rt.rs`, because a runtime that exists only to make a test compile is
+# still a runtime in the tree (PLAN §8.2, and `brocanth-admin` set the
+# precedent).
+tempfile = "3"
+
+[features]
+# Empty, and that is the rule rather than an oversight. Parsing a size
+# specification, caching a derived variant and serving one are all here with
+# the feature off; only the pixels need `image`.
+default = []
+variants = ["dep:image"]
+
+[lints.rust]
+missing_docs = "warn"

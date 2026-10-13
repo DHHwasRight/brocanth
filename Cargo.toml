@@ -12,6 +12,7 @@ members = [
     "crates/brocanth-openapi",
     "crates/brocanth-schema",
     "crates/brocanth-server",
+    "crates/brocanth-storage",
     "crates/brocanth-task",
     "crates/brocanth-task-macros",
     "examples/demo-app",
@@ -27,3 +28,4 @@ brocanth = { path = "crates/brocanth", version = "0.1.0" }
 brocanth-server = { path = "crates/brocanth-server", version = "0.1.0" }
 brocanth-task = { path = "crates/brocanth-task", version = "0.1.0" }
 brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
+brocanth-storage = { path = "crates/brocanth-storage", version = "0.1.0" }
