@@ -4,17 +4,19 @@
 //! a plugin too. The core takes already-parsed values. TOML, the
 //! environment-scoped file resolution, and the merge order are a crate an
 //! application opts into — a service configured entirely from its environment
-//! should not link a TOML parser."* So `serde` and `toml` are dependencies of
-//! this crate and of nothing below it.
+//! should not link a TOML parser."* So `serde` and the parsers are dependencies
+//! of this crate and of nothing below it — and, since this crate grew a second
+//! and a third format, each parser is a feature of *this* crate too, so an
+//! application that reads YAML links no TOML parser either.
 //!
 //! Two decisions from the Crystal original survive the port, and one bug does
 //! not.
 //!
 //! Survives: configuration is *enriched by plugins*, not pre-declared by the
-//! framework. [`Config`] keeps every section as raw TOML and knows the name of
-//! none of them. A plugin declares a `Deserialize` struct and the framework
-//! routes the table whose name matches the plugin instance into it. So
-//! `[logger] level = "warn"` becomes a `LoggerConfig` without this file ever
+//! framework. [`Config`] keeps every section as a raw [`Value`] and knows the
+//! name of none of them. A plugin declares a `Deserialize` struct and the
+//! framework routes the table whose name matches the plugin instance into it.
+//! So `[logger] level = "warn"` becomes a `LoggerConfig` without this file ever
 //! mentioning a logger.
 //!
 //! Survives also: a section that nothing claims is an **error**. The original
@@ -27,7 +29,9 @@
 //! `MYAPP_ENV` from the PascalCase class name and `MY_APP_CONFIG` from the
 //! snake_case one — while its README documented a third. [`AppName`] states the
 //! convention once: every variable is `<SNAKE_UPPER>_<SUFFIX>`, whatever
-//! spelling the application was named with.
+//! spelling the application was named with. The environment layer in
+//! [`crate::env`] follows the same rule, so `MY_APP_SERVER__PORT` is visibly
+//! the same family as `MY_APP_ENV`.
 //!
 //! Restored from the original's reference application, which its framework
 //! dropped: multi-file merge. A deployment layers a small file over the
@@ -36,11 +40,18 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use brocanth::suggest::nearest_name;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
-use toml::{Table, Value};
+
+use crate::de::{from_value, DeError};
+use crate::dump::Dump;
+use crate::env::EnvError;
+use crate::formats::{self, ParseError};
+use crate::plugin::SectionClaim;
+use crate::value::{self, Format, Provenance, Table, Value, ValueKind};
 
 /// The environment used when nothing names one.
 pub const DEFAULT_ENV: &str = "development";
@@ -77,7 +88,9 @@ impl AppName {
 
     /// The one environment-variable convention: `<SNAKE_UPPER>_<SUFFIX>`.
     ///
-    /// Stated here, used everywhere, tested once.
+    /// Stated here, used everywhere, tested once. The configuration layer
+    /// spells a key `<SNAKE_UPPER>_<SECTION>__<KEY>`, which is this rule with a
+    /// path for a suffix.
     pub fn env_var(&self, suffix: &str) -> String {
         format!("{}_{}", self.snake.to_ascii_uppercase(), suffix)
     }
@@ -137,54 +150,193 @@ fn to_snake_case(raw: &str) -> String {
 // Errors
 // ---------------------------------------------------------------------------
 
+/// Everything about one key that no registered plugin claims.
+///
+/// Its own type because [`ConfigError::UnknownKey`] boxes it, and its own
+/// `Display` because that is where the message lives.
+#[derive(Debug)]
+pub struct UnknownKey {
+    /// The section the key is in.
+    pub section: String,
+    /// The plugin that owns the section.
+    pub plugin: String,
+    /// The key's dotted path.
+    pub path: String,
+    /// Where the key was set.
+    pub from: Option<Provenance>,
+    /// The nearest key that does exist.
+    pub suggestion: Option<String>,
+    /// Every key the plugin has at that level.
+    pub known: Vec<String>,
+}
+
+impl fmt::Display for UnknownKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is set{}, and `{}`, which owns `[{}]`, has no such key{}; it has: {}",
+            self.path,
+            at_hint(&self.from),
+            self.plugin,
+            self.section,
+            suggestion_hint_key(&self.suggestion),
+            self.known.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownKey {}
+
 /// Everything that can go wrong between a file on disk and a typed section.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// `$<APP>_CONFIG` named a file that is not there. Never ignored: an
     /// operator who sets the variable means it.
     #[error("{var} is set to {} but that file does not exist", .path.display())]
-    MissingConfigFile { var: String, path: PathBuf },
+    MissingConfigFile {
+        /// The variable that named it.
+        var: String,
+        /// The path it named.
+        path: PathBuf,
+    },
 
+    /// `$<APP>_CONFIG` named a file this build has no parser for.
+    #[error(
+        "{var} is set to {}, and this build cannot read a `.{extension}` file; it reads: {}",
+        .path.display(),
+        .supported.join(", ")
+    )]
+    UnreadableConfigFile {
+        /// The variable that named it.
+        var: String,
+        /// The path it named.
+        path: PathBuf,
+        /// The extension that named no enabled format.
+        extension: String,
+        /// The extensions this build does read.
+        supported: Vec<String>,
+    },
+
+    /// Two files fill one slot, in two formats. Which one wins is not a
+    /// question this crate will answer silently.
+    #[error(
+        "`{}` and `{}` are the same source written twice; delete one",
+        .first.display(),
+        .second.display()
+    )]
+    AmbiguousSource {
+        /// The file found first, in probe order.
+        first: PathBuf,
+        /// The other one.
+        second: PathBuf,
+    },
+
+    /// A file that is there and cannot be read.
     #[error("cannot read {}: {source}", .path.display())]
     Io {
+        /// The file.
         path: PathBuf,
+        /// What the filesystem said.
         #[source]
         source: std::io::Error,
     },
 
-    #[error("cannot parse {}: {source}", .path.display())]
+    /// A file that is there and does not parse.
+    #[error("cannot parse {} as {format}: {source}", .path.display())]
     Parse {
+        /// The file.
         path: PathBuf,
+        /// The parser that was used.
+        format: Format,
+        /// What the parser said, with a line.
         #[source]
-        source: toml::de::Error,
+        source: ParseError,
     },
 
-    #[error("`{name}` is a top-level value, but only sections (TOML tables) are allowed there")]
-    NotASection { name: String },
+    /// A variable in the environment layer that cannot become a value.
+    #[error("{source}")]
+    Env {
+        /// Which variable, and why.
+        #[source]
+        source: EnvError,
+    },
 
+    /// A top-level key holding something that is not a section.
+    #[error("`{name}` is a top-level value, but only sections (tables) are allowed there")]
+    NotASection {
+        /// The offending key.
+        name: String,
+    },
+
+    /// A section no registered plugin claims.
     #[error(
         "unknown configuration section `[{name}]`{}; known sections: {}",
         suggestion_hint(.suggestion),
         .known.join(", ")
     )]
     UnknownSection {
+        /// The offending section.
         name: String,
+        /// The nearest claimed name, when there is one close enough.
         suggestion: Option<String>,
+        /// Every claimed name.
         known: Vec<String>,
     },
 
-    #[error("section `[{name}]` does not match the type the plugin declared: {source}")]
-    Section {
+    /// A key inside a claimed section that its plugin has not got. The same
+    /// failure class as an unknown section, one level down.
+    ///
+    /// Boxed: it carries six fields and it is the largest thing that can go
+    /// wrong here, so leaving it inline would make every `Result` in the crate
+    /// the size of this one error.
+    #[error("{0}")]
+    UnknownKey(Box<UnknownKey>),
+
+    /// Two plugins both claim one section name.
+    #[error(
+        "`{plugin}` claims the configuration section `[{name}]`, and `{first}` already claims it; \
+         one section belongs to one plugin, so register one of them under another name with \
+         `plugin_as_with_defaults`"
+    )]
+    DuplicateSection {
+        /// The contested section.
         name: String,
-        #[source]
-        source: toml::de::Error,
+        /// The plugin that claimed it first.
+        first: String,
+        /// The plugin that claimed it second.
+        plugin: String,
     },
 
+    /// A section that does not fit the type its plugin declared.
+    #[error("section `[{name}]` does not match the type the plugin declared: {source}")]
+    Section {
+        /// The section.
+        name: String,
+        /// What did not fit, and where that value came from.
+        #[source]
+        source: DeError,
+    },
+
+    /// A plugin's own defaults cannot be put in the model. A bug in that
+    /// plugin, caught before anything else runs.
+    #[error("the defaults of `{name}` cannot be read as configuration: {message}")]
+    Defaults {
+        /// The section the plugin claimed.
+        name: String,
+        /// What went wrong.
+        message: String,
+    },
+
+    /// A section was asked for with no configuration installed.
     #[error(
         "`[{name}]` was asked for before a configuration was installed; call \
          `.with_config(Loader::new(\"my_app\").load()?)` on the builder first"
     )]
-    NoConfigInstalled { name: String },
+    NoConfigInstalled {
+        /// The section that was asked for.
+        name: String,
+    },
 }
 
 fn suggestion_hint(suggestion: &Option<String>) -> String {
@@ -194,20 +346,37 @@ fn suggestion_hint(suggestion: &Option<String>) -> String {
     }
 }
 
+fn suggestion_hint_key(suggestion: &Option<String>) -> String {
+    match suggestion {
+        Some(s) => format!("; did you mean `{s}`?"),
+        None => String::new(),
+    }
+}
+
+fn at_hint(from: &Option<Provenance>) -> String {
+    match from {
+        Some(p) => format!(" at {p}"),
+        None => String::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sources
 // ---------------------------------------------------------------------------
 
 /// Where a layer of configuration came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The four file slots, in precedence order. The environment layer sits above
+/// all four and is not a file, so it is not one of these; see [`Provenance`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Origin {
     /// `$<APP>_CONFIG`.
     EnvVar,
-    /// `/etc/<app>/<env>.toml`.
+    /// `/etc/<app>/<env>.<ext>`.
     SystemDir,
-    /// `./<app>_<env>.toml`.
+    /// `./<app>_<env>.<ext>`.
     WorkingDir,
-    /// `./config/<env>.toml`.
+    /// `./config/<env>.<ext>`.
     ConfigDir,
 }
 
@@ -224,10 +393,14 @@ impl fmt::Display for Origin {
 }
 
 /// One file that contributed to the loaded configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Source {
+    /// Where the file is.
     pub path: PathBuf,
+    /// Which of the four slots it fills.
     pub origin: Origin,
+    /// Which parser read it.
+    pub format: Format,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +408,9 @@ pub struct Source {
 // ---------------------------------------------------------------------------
 
 type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type EnvVars = Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
-/// Finds and layers the configuration files of one application.
+/// Finds and layers the configuration of one application.
 ///
 /// The loader reads the process environment and the real filesystem by
 /// default, and both are injectable. Tests inject, which is why no test in this
@@ -247,6 +421,7 @@ pub struct Loader {
     root: PathBuf,
     cwd: PathBuf,
     env_lookup: EnvLookup,
+    env_vars: Option<EnvVars>,
 }
 
 impl Loader {
@@ -258,33 +433,61 @@ impl Loader {
             root: PathBuf::from("/"),
             cwd: PathBuf::from("."),
             env_lookup: Box::new(|k| std::env::var(k).ok()),
+            env_vars: None,
         }
     }
 
     /// Forces the environment, instead of reading `$<APP>_ENV`.
+    #[must_use]
     pub fn env(mut self, env: impl Into<String>) -> Self {
         self.env = Some(env.into());
         self
     }
 
     /// Replaces the filesystem root that `/etc/<app>/` resolves against.
+    #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = root.into();
         self
     }
 
     /// Replaces the working directory that `./` resolves against.
+    #[must_use]
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = cwd.into();
         self
     }
 
     /// Replaces the environment-variable lookup. Tests use this.
+    ///
+    /// It replaces the process environment *entirely*, so a loader given one
+    /// scans no variables for the configuration layer either until
+    /// [`Loader::env_vars`] supplies them. A test that injected a lookup and
+    /// then read the real `MY_APP_SERVER__PORT` of whoever ran it would not be
+    /// a test.
+    #[must_use]
     pub fn env_lookup<F>(mut self, f: F) -> Self
     where
         F: Fn(&str) -> Option<String> + Send + Sync + 'static,
     {
         self.env_lookup = Box::new(f);
+        if self.env_vars.is_none() {
+            self.env_vars = Some(Box::new(Vec::new));
+        }
+        self
+    }
+
+    /// Replaces the variables the configuration layer scans.
+    ///
+    /// The default is the process environment. [`Loader::env_lookup`] answers
+    /// the two variables the loader itself reads; this answers the many a
+    /// configuration can set.
+    #[must_use]
+    pub fn env_vars<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> Vec<(String, String)> + Send + Sync + 'static,
+    {
+        self.env_vars = Some(Box::new(f));
         self
     }
 
@@ -296,98 +499,203 @@ impl Loader {
             .unwrap_or_else(|| DEFAULT_ENV.to_string())
     }
 
-    /// The candidate files, highest precedence first.
+    /// The four file sources, highest precedence first, each spelled with the
+    /// preferred extension of this build.
     ///
-    /// Order: `$<APP>_CONFIG`, `/etc/<app>/<env>.toml`, `./<app>_<env>.toml`,
-    /// `./config/<env>.toml`.
+    /// Order: `$<APP>_CONFIG`, `/etc/<app>/<env>`, `./<app>_<env>`,
+    /// `./config/<env>`. [`Loader::candidate_files`] lists every spelling the
+    /// loader probes; this lists one per slot, which is what an error message
+    /// and a `--help` want.
     pub fn candidates(&self) -> Vec<Source> {
-        let env = self.resolved_env();
-        let app = self.app.as_str();
-        let mut out = Vec::with_capacity(4);
-        if let Some(p) = (self.env_lookup)(&self.app.env_var_for_config()) {
-            out.push(Source {
-                path: PathBuf::from(p),
-                origin: Origin::EnvVar,
-            });
+        let preferred = Format::enabled().first().copied().unwrap_or(Format::Toml);
+        self.slots()
+            .into_iter()
+            .map(|(path, origin, explicit)| match explicit {
+                Some(format) => Source {
+                    path,
+                    origin,
+                    format,
+                },
+                None => Source {
+                    path: with_extension(&path, preferred.extensions()[0]),
+                    origin,
+                    format: preferred,
+                },
+            })
+            .collect()
+    }
+
+    /// Every file this build probes, highest precedence first.
+    ///
+    /// One entry per slot and extension: with `toml` and `yaml` on, the config
+    /// directory contributes `config/<env>.toml`, `config/<env>.yaml` and
+    /// `config/<env>.yml`. Finding two of them is an error, not a precedence
+    /// question; see [`ConfigError::AmbiguousSource`].
+    pub fn candidate_files(&self) -> Vec<Source> {
+        let mut out = Vec::new();
+        for (path, origin, explicit) in self.slots() {
+            match explicit {
+                Some(format) => out.push(Source {
+                    path,
+                    origin,
+                    format,
+                }),
+                None => {
+                    for format in Format::enabled() {
+                        for ext in format.extensions() {
+                            out.push(Source {
+                                path: with_extension(&path, ext),
+                                origin,
+                                format,
+                            });
+                        }
+                    }
+                }
+            }
         }
-        out.push(Source {
-            path: self.root.join("etc").join(app).join(format!("{env}.toml")),
-            origin: Origin::SystemDir,
-        });
-        out.push(Source {
-            path: self.cwd.join(format!("{app}_{env}.toml")),
-            origin: Origin::WorkingDir,
-        });
-        out.push(Source {
-            path: self.cwd.join("config").join(format!("{env}.toml")),
-            origin: Origin::ConfigDir,
-        });
         out
     }
 
-    /// Loads and merges every candidate that exists.
+    /// The slots: a path without an extension, the slot, and the format when
+    /// the slot already names a whole path.
+    fn slots(&self) -> Vec<(PathBuf, Origin, Option<Format>)> {
+        let env = self.resolved_env();
+        let app = self.app.as_str();
+        let mut out: Vec<(PathBuf, Origin, Option<Format>)> = Vec::with_capacity(4);
+        if let Some(p) = (self.env_lookup)(&self.app.env_var_for_config()) {
+            let path = PathBuf::from(p);
+            let format = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(Format::from_extension)
+                .unwrap_or(Format::Toml);
+            out.push((path, Origin::EnvVar, Some(format)));
+        }
+        out.push((
+            self.root.join("etc").join(app).join(&env),
+            Origin::SystemDir,
+            None,
+        ));
+        out.push((
+            self.cwd.join(format!("{app}_{env}")),
+            Origin::WorkingDir,
+            None,
+        ));
+        out.push((self.cwd.join("config").join(&env), Origin::ConfigDir, None));
+        out
+    }
+
+    /// Loads and merges every source that exists.
     ///
-    /// Candidates are listed highest precedence first and merged lowest first,
-    /// so a key set in `$<APP>_CONFIG` wins over the same key in
-    /// `./config/<env>.toml`. Merging is deep for tables; scalars and arrays
-    /// are replaced whole. When no candidate exists the configuration is empty,
-    /// which is not an error — plugins fall back to their `Default`.
+    /// Sources are listed highest precedence first and merged lowest first, so
+    /// a key set in the environment wins over the same key in `$<APP>_CONFIG`,
+    /// which wins over the same key in `./config/<env>.toml`. Merging is deep
+    /// for tables; scalars and arrays are replaced whole. When no source exists
+    /// the configuration is empty, which is not an error — plugins fall back to
+    /// their defaults.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when a named file is missing, two files fill one slot, a
+    /// file does not parse, or a variable names an impossible path.
     pub fn load(&self) -> Result<Config, ConfigError> {
-        let candidates = self.candidates();
+        let present = self.resolve_files()?;
 
-        // An explicitly pointed-at file that is absent is always a mistake.
-        if let Some(s) = candidates.iter().find(|s| s.origin == Origin::EnvVar) {
-            if !s.path.is_file() {
-                return Err(ConfigError::MissingConfigFile {
-                    var: self.app.env_var_for_config(),
-                    path: s.path.clone(),
-                });
-            }
-        }
-
-        let present: Vec<Source> = candidates
-            .into_iter()
-            .filter(|s| s.path.is_file())
-            .collect();
-
-        let mut table = Table::new();
+        let mut root = Value::new(
+            ValueKind::Table(Table::open()),
+            Provenance::inline("nothing"),
+        );
         for source in present.iter().rev() {
-            let layer = read_table(&source.path)?;
-            merge_tables(&mut table, layer);
+            let file = Arc::new(source.clone());
+            let text = std::fs::read_to_string(&source.path).map_err(|e| ConfigError::Io {
+                path: source.path.clone(),
+                source: e,
+            })?;
+            let layer = formats::parse(&text, &file).map_err(|e| ConfigError::Parse {
+                path: source.path.clone(),
+                format: source.format,
+                source: e,
+            })?;
+            value::merge(&mut root, layer);
         }
+
+        let vars = match &self.env_vars {
+            Some(f) => f(),
+            None => std::env::vars().collect(),
+        };
+        let (env_layer, used) =
+            crate::env::layer(&self.app, &vars).map_err(|source| ConfigError::Env { source })?;
+        value::merge(&mut root, env_layer);
 
         Ok(Config {
             app: self.app.clone(),
             env: self.resolved_env(),
-            table,
+            root,
             sources: present,
+            env_vars: used,
         })
     }
-}
 
-fn read_table(path: &Path) -> Result<Table, ConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    text.parse::<Table>().map_err(|source| ConfigError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-/// Deep merge: `over` wins, table values recurse, everything else is replaced.
-fn merge_tables(base: &mut Table, over: Table) {
-    for (key, value) in over {
-        match (base.get_mut(&key), value) {
-            (Some(Value::Table(base_tbl)), Value::Table(over_tbl)) => {
-                merge_tables(base_tbl, over_tbl);
+    /// The files that exist, highest precedence first, at most one per slot.
+    fn resolve_files(&self) -> Result<Vec<Source>, ConfigError> {
+        // An explicitly pointed-at file that is absent is always a mistake, and
+        // it is reported before anything about its extension: an operator who
+        // mistyped the path wants to hear about the path.
+        if let Some(s) = self
+            .candidate_files()
+            .into_iter()
+            .find(|s| s.origin == Origin::EnvVar)
+        {
+            if !s.path.is_file() {
+                return Err(ConfigError::MissingConfigFile {
+                    var: self.app.env_var_for_config(),
+                    path: s.path,
+                });
             }
-            (_, value) => {
-                base.insert(key, value);
+            let extension = s
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if !Format::from_extension(&extension).is_some_and(Format::is_enabled) {
+                return Err(ConfigError::UnreadableConfigFile {
+                    var: self.app.env_var_for_config(),
+                    path: s.path,
+                    extension,
+                    supported: Format::enabled_extensions()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                });
             }
         }
+
+        let mut present: Vec<Source> = Vec::new();
+        for source in self.candidate_files() {
+            if !source.path.is_file() {
+                continue;
+            }
+            if let Some(already) = present.iter().find(|s| s.origin == source.origin) {
+                return Err(ConfigError::AmbiguousSource {
+                    first: already.path.clone(),
+                    second: source.path,
+                });
+            }
+            present.push(source);
+        }
+        Ok(present)
     }
+}
+
+fn with_extension(stem: &Path, ext: &str) -> PathBuf {
+    let mut name = stem
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.push('.');
+    name.push_str(ext);
+    stem.with_file_name(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,31 +707,69 @@ fn merge_tables(base: &mut Table, over: Table) {
 /// It holds raw sections and knows what none of them mean. Meaning arrives when
 /// a plugin instance claims a section name and declares the type it
 /// deserialises into.
+///
+/// Every value in it carries its [`Provenance`]. That is not a debugging extra:
+/// it is what lets [`Config::dump`] print the whole effective configuration
+/// with the origin of every key, which is the condition PLAN.md §8 puts on a
+/// framework supplying any default at all.
 #[derive(Clone, Debug)]
 pub struct Config {
     app: AppName,
     env: String,
-    table: Table,
+    root: Value,
     sources: Vec<Source>,
+    env_vars: Vec<String>,
 }
 
 impl Config {
     /// Builds a configuration straight from TOML text. Useful in tests and for
     /// applications that embed their configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`] when the text is not TOML.
+    #[cfg(feature = "toml")]
     pub fn from_toml(
         app: impl Into<AppName>,
         env: impl Into<String>,
         text: &str,
     ) -> Result<Self, ConfigError> {
-        let table = text.parse::<Table>().map_err(|source| ConfigError::Parse {
-            path: PathBuf::from("<inline>"),
+        Self::from_text(app, env, Format::Toml, text)
+    }
+
+    /// Builds a configuration from text in any format this build can read.
+    ///
+    /// Every value's provenance is the pseudo-file `<inline toml>` and the line
+    /// it was written on, so a dump of an embedded configuration is as useful
+    /// as a dump of one on disk.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`] when the text is not valid in `format`, or when
+    /// this build has no parser for it.
+    pub fn from_text(
+        app: impl Into<AppName>,
+        env: impl Into<String>,
+        format: Format,
+        text: &str,
+    ) -> Result<Self, ConfigError> {
+        let path = PathBuf::from(format!("<inline {}>", format.name()));
+        let file = Arc::new(Source {
+            path: path.clone(),
+            origin: Origin::WorkingDir,
+            format,
+        });
+        let root = formats::parse(text, &file).map_err(|source| ConfigError::Parse {
+            path,
+            format,
             source,
         })?;
         Ok(Self {
             app: app.into(),
             env: env.into(),
-            table,
+            root,
             sources: Vec::new(),
+            env_vars: Vec::new(),
         })
     }
 
@@ -432,15 +778,21 @@ impl Config {
         Self {
             app: app.into(),
             env: env.into(),
-            table: Table::new(),
+            root: Value::new(
+                ValueKind::Table(Table::open()),
+                Provenance::inline("nothing"),
+            ),
             sources: Vec::new(),
+            env_vars: Vec::new(),
         }
     }
 
+    /// The application this belongs to.
     pub fn app(&self) -> &AppName {
         &self.app
     }
 
+    /// The environment it was loaded for.
     pub fn env(&self) -> &str {
         &self.env
     }
@@ -450,45 +802,97 @@ impl Config {
         &self.sources
     }
 
-    /// Every top-level key, in TOML order.
+    /// The environment variables that contributed, in name order.
+    pub fn env_vars(&self) -> &[String] {
+        &self.env_vars
+    }
+
+    /// Every top-level key, in name order.
     pub fn section_names(&self) -> impl Iterator<Item = &str> {
-        self.table.keys().map(|k| k.as_str())
+        self.root.as_table().into_iter().flat_map(Table::keys)
     }
 
     /// The raw table of one section.
     pub fn raw_section(&self, name: &str) -> Option<&Table> {
-        match self.table.get(name) {
-            Some(Value::Table(t)) => Some(t),
-            _ => None,
-        }
+        self.root.as_table()?.get(name)?.as_table()
     }
 
     /// The whole document, for tooling.
     pub fn raw(&self) -> &Table {
-        &self.table
+        self.root.as_table().expect("the root is always a table")
+    }
+
+    /// The whole document as a value, so a caller can walk the provenance.
+    pub fn root(&self) -> &Value {
+        &self.root
+    }
+
+    /// Where one key came from. `cfg.provenance("server.pool.max_size")`.
+    pub fn provenance(&self, path: &str) -> Option<&Provenance> {
+        self.root.at(path).map(Value::provenance)
+    }
+
+    /// The configuration, printed for a human.
+    ///
+    /// This one has no plugin defaults in it, because a bare [`Config`] has met
+    /// no plugins. [`Effective::dump`](crate::Effective::dump) is the one an
+    /// application wants after `build()`.
+    pub fn dump(&self) -> Dump<'_> {
+        Dump {
+            config: self,
+            claims: &[],
+            history: true,
+        }
+    }
+
+    pub(crate) fn dump_with<'a>(&'a self, claims: &'a [SectionClaim]) -> Dump<'a> {
+        Dump {
+            config: self,
+            claims,
+            history: true,
+        }
+    }
+
+    /// Puts `lower` underneath everything already here, keeping provenance on
+    /// both sides. This is how a plugin's defaults become the bottom layer.
+    pub(crate) fn merge_under(&mut self, lower: Value) {
+        let mut base = lower;
+        value::merge(&mut base, self.root.clone());
+        self.root = base;
     }
 
     /// Deserialises one section into the type a plugin declared.
     ///
     /// A missing section gives `T::default()`, so `[logger]` stays optional.
-    /// Unknown keys *inside* the section are the plugin's business: declare
-    /// `#[serde(deny_unknown_fields)]` to reject them, or leave it off to
-    /// accept them.
+    /// Unknown keys *inside* the section are the plugin's business when the
+    /// plugin declared no defaults: declare `#[serde(deny_unknown_fields)]` to
+    /// reject them, or leave it off to accept them. A plugin registered through
+    /// [`plugin_with_defaults`](crate::AppBuilderConfigExt::plugin_with_defaults)
+    /// gets the check without the attribute, and with a better error.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Section`] when the section does not fit `T`, and
+    /// [`ConfigError::NotASection`] when the name holds a scalar.
     pub fn section<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, ConfigError> {
-        match self.table.get(name) {
+        match self.root.as_table().and_then(|t| t.get(name)) {
             None => Ok(T::default()),
-            Some(Value::Table(t)) => {
-                Value::Table(t.clone())
-                    .try_into::<T>()
-                    .map_err(|source| ConfigError::Section {
-                        name: name.to_string(),
-                        source,
-                    })
-            }
+            Some(v) if v.is_table() => self.deserialize_section(name, v.clone()),
             Some(_) => Err(ConfigError::NotASection {
                 name: name.to_string(),
             }),
         }
+    }
+
+    pub(crate) fn deserialize_section<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        value: Value,
+    ) -> Result<T, ConfigError> {
+        from_value(value).map_err(|source| ConfigError::Section {
+            name: name.to_string(),
+            source,
+        })
     }
 
     /// Rejects any top-level key that no plugin instance claimed.
@@ -497,11 +901,16 @@ impl Config {
     /// added automatically. The error names the offending section and suggests
     /// the nearest claimed one, because the overwhelmingly common cause is a
     /// typo and a silent build is the worst possible answer to it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::UnknownSection`] or [`ConfigError::NotASection`].
     pub fn validate_sections<S: AsRef<str>>(&self, claimed: &[S]) -> Result<(), ConfigError> {
         let mut known: BTreeSet<String> = CORE_SECTIONS.iter().map(|s| s.to_string()).collect();
         known.extend(claimed.iter().map(|s| s.as_ref().to_string()));
 
-        for (name, value) in &self.table {
+        let table = self.root.as_table().expect("the root is always a table");
+        for (name, value) in table.iter() {
             if !value.is_table() {
                 return Err(ConfigError::NotASection { name: name.clone() });
             }
@@ -517,6 +926,66 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Rejects any key inside a claimed section that the owning plugin has not
+    /// got.
+    ///
+    /// The key set comes from the plugin's own defaults, through serde's
+    /// distinction between a struct and a map; see [`crate::ser`]. A key inside
+    /// a map is never unclaimed, because a map exists to take keys the plugin
+    /// author did not write down.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::UnknownKey`], naming the key, the plugin, where the key
+    /// was set, and the nearest key that does exist.
+    pub fn validate_keys(&self, claims: &[SectionClaim]) -> Result<(), ConfigError> {
+        for claim in claims {
+            let Some(found) = self.raw_section(&claim.section) else {
+                continue;
+            };
+            let Some(declared) = claim.defaults.as_table() else {
+                continue;
+            };
+            check_keys(claim, &claim.section, found, declared)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_keys(
+    claim: &SectionClaim,
+    path: &str,
+    found: &Table,
+    declared: &Table,
+) -> Result<(), ConfigError> {
+    if declared.is_open() {
+        return Ok(());
+    }
+    for (key, value) in found.iter() {
+        let here = format!("{path}.{key}");
+        match declared.get(key) {
+            None => {
+                let known: Vec<String> = declared.keys().map(str::to_string).collect();
+                return Err(ConfigError::UnknownKey(Box::new(UnknownKey {
+                    section: claim.section.clone(),
+                    plugin: claim.plugin.clone(),
+                    path: here,
+                    from: Some(value.provenance().clone()),
+                    suggestion: nearest_name(key, &known),
+                    known,
+                })));
+            }
+            Some(declared_value) => {
+                if let (Some(found_table), Some(declared_table)) =
+                    (value.as_table(), declared_value.as_table())
+                {
+                    check_keys(claim, &here, found_table, declared_table)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -526,21 +995,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
-    use std::collections::HashMap;
-
-    fn write(path: &Path, text: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-
-    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + Send + Sync + 'static {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |k: &str| map.get(k).cloned()
-    }
 
     // -- one env-var convention ---------------------------------------------
 
@@ -566,6 +1020,26 @@ mod tests {
         assert_eq!(AppName::new("HTTPServer").as_str(), "http_server");
         assert_eq!(AppName::new("blog").as_str(), "blog");
         assert_eq!(AppName::new("Blog").env_var("CONFIG"), "BLOG_CONFIG");
+    }
+}
+
+#[cfg(all(test, feature = "toml"))]
+mod toml_tests {
+    use super::*;
+    use serde::Deserialize;
+    use std::collections::HashMap;
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + Send + Sync + 'static {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| map.get(k).cloned()
     }
 
     // -- resolution order ---------------------------------------------------

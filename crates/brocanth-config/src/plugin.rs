@@ -1,5 +1,4 @@
-//! Config as a plugin, and the one `use` that gives an application the
-//! ergonomic path back.
+//! Config as a plugin, and the seam a plugin contributes a section through.
 //!
 //! The core takes already-built values: `app.plugin(LoggerPlugin::new(
 //! LoggerConfig { level: Level::Warn }))`. That is honest and it is exactly
@@ -12,20 +11,41 @@
 //! The convenience survives; it is no longer in the core, and an application
 //! that never writes that `use` links no part of it.
 //!
-//! [`ConfigPlugin`] is what makes "config is a plugin too" literal rather than
-//! a slogan. It is registered like any other plugin, it runs the same
-//! `configure` hook as any other plugin, and the only thing it does there is
-//! read the roster of registered instances and refuse a configuration section
-//! that none of them claims.
+//! # The seam for a plugin's own defaults
+//!
+//! [`ConfiguredPlugin`] is the new half. A plugin implements it next to its
+//! `impl Plugin`, states the value every key takes when nothing sets it, and
+//! the application registers it with
+//! [`plugin_with_defaults`](AppBuilderConfigExt::plugin_with_defaults). Three
+//! things follow, and each is a §8 obligation rather than a convenience:
+//!
+//! 1. **The defaults become the lowest layer of the document**, with a
+//!    [`Provenance::Default`](crate::Provenance::Default) on every node, so
+//!    [`Effective::dump`] prints them attributed. A default nobody can see is
+//!    the half of Rails PLAN.md rejects; a default the dump names is the half
+//!    it keeps.
+//! 2. **The key set of the section is known**, because serde distinguishes a
+//!    struct from a map, so a key the plugin has not got is an error with the
+//!    nearest real key suggested. See [`crate::ser`].
+//! 3. **Two plugins claiming one section is an error naming both**, raised at
+//!    the second `plugin_with_defaults` call rather than resolved by
+//!    last-one-wins.
+//!
+//! A plugin that is not named in `main` does none of this, contributes no
+//! section, no default and no byte. §8.1 is untouched: the seam is a trait the
+//! plugin implements and the *application* calls.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::{NoContext, Provided};
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::config::{Config, ConfigError};
+use crate::ser::to_value;
+use crate::value::{self, Provenance, Value};
 
 /// The configuration, shared by the plugin that polices it and by every plugin
 /// that wants to read beyond its own section.
@@ -36,8 +56,127 @@ pub type SharedConfig = Arc<Config>;
 /// A plugin reads the whole document with
 /// `brocanth_config::config_of(lc.services())`. The core has no `config()`
 /// accessor to offer, because the core has no configuration.
+///
+/// This is the configuration as *found*: files and the environment, with no
+/// plugin defaults under it. [`effective_of`] is the one with the defaults, and
+/// it exists from `configure` onwards.
 pub fn config_of(services: &Services) -> Option<&Config> {
     services.get::<SharedConfig>().map(|c| c.as_ref())
+}
+
+/// The configuration an application actually runs with.
+///
+/// Available from the end of [`ConfigPlugin::configure`], which is the first
+/// hook of the first stage, so every plugin after that point can read it.
+pub fn effective_of(services: &Services) -> Option<&Effective> {
+    services.get::<Arc<Effective>>().map(|e| e.as_ref())
+}
+
+// ---------------------------------------------------------------------------
+// Section claims
+// ---------------------------------------------------------------------------
+
+/// One plugin's claim on one configuration section.
+#[derive(Clone, Debug)]
+pub struct SectionClaim {
+    /// The section name, which is also the plugin's instance name.
+    pub section: String,
+    /// The plugin's Rust type, so an error can name it unambiguously.
+    pub plugin: String,
+    /// The plugin's defaults, as a value tree. Closed tables in it are the key
+    /// set of the section.
+    pub defaults: Value,
+}
+
+/// Every claim made so far. Shared, because claims arrive one builder call at a
+/// time and the check that reads them runs later.
+pub(crate) type SharedClaims = Arc<Mutex<Vec<SectionClaim>>>;
+
+/// The configuration after every registered plugin's defaults are under it.
+pub struct Effective {
+    config: Config,
+    claims: Vec<SectionClaim>,
+}
+
+impl Effective {
+    /// The merged document: defaults, then files, then the environment.
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Every section a registered plugin claimed, in registration order.
+    #[must_use]
+    pub fn claims(&self) -> &[SectionClaim] {
+        &self.claims
+    }
+
+    /// Where one key came from. `eff.provenance("server.pool.max_size")`.
+    #[must_use]
+    pub fn provenance(&self, path: &str) -> Option<&Provenance> {
+        self.config.provenance(path)
+    }
+
+    /// The whole effective configuration, printed for a human.
+    ///
+    /// ```text
+    /// println!("{}", brocanth_config::effective_of(app.services()).unwrap().dump());
+    /// ```
+    #[must_use]
+    pub fn dump(&self) -> crate::dump::Dump<'_> {
+        self.config.dump_with(&self.claims)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The plugin seam
+// ---------------------------------------------------------------------------
+
+/// A plugin that owns a configuration section and knows what it defaults to.
+///
+/// Implemented beside `impl Plugin`, in the plugin's own crate:
+///
+/// ```
+/// # use brocanth::plugin_api::Plugin;
+/// # use brocanth::plugin_context::NoContext;
+/// use brocanth_config::ConfiguredPlugin;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct LoggerConfig {
+///     level: String,
+///     json: bool,
+/// }
+///
+/// struct LoggerPlugin { config: LoggerConfig }
+///
+/// impl Plugin for LoggerPlugin {
+///     type Config = LoggerConfig;
+///     type Provides = NoContext;
+///     const NAME: &'static str = "logger";
+///     fn new(config: LoggerConfig) -> Self { Self { config } }
+/// }
+///
+/// impl ConfiguredPlugin for LoggerPlugin {
+///     fn defaults() -> LoggerConfig {
+///         LoggerConfig { level: "info".into(), json: false }
+///     }
+/// }
+/// ```
+///
+/// `defaults()` and not `Default` on purpose: a plugin's *configuration*
+/// default and the Rust `Default` of its configuration type are allowed to
+/// differ, and tying them would make a plugin author choose between a sensible
+/// `Default` and a sensible configuration. It also makes the declaration
+/// visible: a reader of the plugin crate sees the word `defaults` and knows
+/// exactly what an unconfigured application will run with.
+///
+/// There is no `schema()`. The reason is written up in `lib.rs`: `Deserialize`
+/// is already the schema, it is checked by the compiler, and a second
+/// description beside it could drift from it.
+pub trait ConfiguredPlugin: Plugin {
+    /// Every key this plugin has, at the value it takes when nothing sets it.
+    fn defaults() -> Self::Config;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,39 +185,77 @@ pub fn config_of(services: &Services) -> Option<&Config> {
 
 /// Configuration, as a plugin.
 ///
-/// Registered by [`AppBuilderConfigExt::with_config`]. Its one job is the
-/// check the Crystal original did not make and Hugo still does not make: a
-/// top-level section that no registered instance claims stops the build and
-/// the error suggests the nearest claimed name. A misspelt section that builds
-/// clean, logs nothing and silently drops a feature is the failure this
-/// prevents.
+/// Registered by [`AppBuilderConfigExt::with_config`]. Its job is the pair of
+/// checks the Crystal original did not make and Hugo still does not make:
+///
+/// * a top-level section that no registered instance claims stops the build;
+/// * a key inside a claimed section that its plugin has not got stops the
+///   build.
+///
+/// Both suggest the nearest real name. A misspelt section or key that builds
+/// clean, logs nothing and silently drops a feature is the failure both
+/// prevent, and it is the same failure class PLAN.md §9 names for a misspelt
+/// rule field.
+///
+/// It then publishes the [`Effective`] configuration, so every plugin after it
+/// — and the application — can print the whole thing with the origin of every
+/// key.
 pub struct ConfigPlugin {
     config: SharedConfig,
+    claims: SharedClaims,
 }
 
 impl ConfigPlugin {
-    /// The configuration this plugin polices.
+    /// The configuration this plugin polices, as it was found.
     pub fn config(&self) -> &Config {
         &self.config
     }
 }
 
 impl Plugin for ConfigPlugin {
-    type Config = SharedConfig;
+    type Config = (SharedConfig, SharedClaims);
     type Provides = NoContext;
     const NAME: &'static str = "config";
 
-    fn new(config: SharedConfig) -> Self {
-        Self { config }
+    fn new((config, claims): (SharedConfig, SharedClaims)) -> Self {
+        Self { config, claims }
     }
 
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         // `configure` is the first hook of the first stage, so an unclaimed
-        // section is reported before any other plugin opens a socket.
+        // section or key is reported before any other plugin opens a socket.
+        let claims = self
+            .claims
+            .lock()
+            .map_err(|_| PluginError::new("the configuration claim list is poisoned"))?
+            .clone();
+
         self.config
             .validate_sections(lc.instance_names())
-            .map_err(|e| PluginError::new(e.to_string()))
+            .map_err(|e| PluginError::new(e.to_string()))?;
+        self.config
+            .validate_keys(&claims)
+            .map_err(|e| PluginError::new(e.to_string()))?;
+
+        let mut config = (*self.config).clone();
+        config.merge_under(defaults_layer(&claims));
+        lc.services_mut()
+            .insert(Arc::new(Effective { config, claims }));
+        Ok(())
     }
+}
+
+/// Every claim's defaults, as one table ready to go underneath the document.
+fn defaults_layer(claims: &[SectionClaim]) -> Value {
+    let mut root = Value::new(
+        crate::value::ValueKind::Table(crate::value::Table::open()),
+        Provenance::inline("defaults"),
+    );
+    let table = root.as_table_mut().expect("just built as a table");
+    for claim in claims {
+        table.insert(claim.section.clone(), claim.defaults.clone());
+    }
+    root
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +307,14 @@ pub trait AppBuilderConfigExt<E>: Sized {
     /// A missing section is not an error: the plugin's `Config::default()` is
     /// used, so `[logger]` stays optional. Unknown keys *inside* the section
     /// are the plugin's business — `#[serde(deny_unknown_fields)]` rejects
-    /// them, and leaving it off accepts them.
+    /// them, and leaving it off accepts them. Use
+    /// [`AppBuilderConfigExt::plugin_with_defaults`] to get that check, a
+    /// better error for it, and the plugin's defaults in the dump.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when no configuration is installed or the section does
+    /// not fit `P::Config`.
     fn plugin_from_config<P>(
         self,
         section: &str,
@@ -143,17 +327,62 @@ pub trait AppBuilderConfigExt<E>: Sized {
     ///
     /// The provider list is not widened: a context item is one value, and two
     /// instances would only fight over it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when no configuration is installed or the section does
+    /// not fit `P::Config`.
     fn plugin_as_from_config<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
     where
         P: Plugin,
         P::Config: DeserializeOwned + Default;
+
+    /// Registers `P` at the section named `section`, with `P`'s own defaults
+    /// underneath it.
+    ///
+    /// This is the Rails-shaped path, and the one that pays for itself: an
+    /// application that configures nothing still boots, and
+    /// [`Effective::dump`] still says, key by key, which plugin decided what.
+    ///
+    /// It also claims the section. A second plugin claiming the same name is
+    /// [`ConfigError::DuplicateSection`], naming both, here rather than at
+    /// `build()`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when no configuration is installed, the section is
+    /// already claimed, the plugin's defaults cannot be represented, or the
+    /// merged section does not fit `P::Config`.
+    fn plugin_with_defaults<P>(
+        self,
+        section: &str,
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    where
+        P: ConfiguredPlugin,
+        P::Config: Serialize + DeserializeOwned;
+
+    /// Registers another instance of `P` at `name`, with `P`'s defaults
+    /// underneath it.
+    ///
+    /// The provider list is not widened, for the reason
+    /// [`AppBuilderConfigExt::plugin_as_from_config`] gives.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`AppBuilderConfigExt::plugin_with_defaults`].
+    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    where
+        P: ConfiguredPlugin,
+        P::Config: Serialize + DeserializeOwned;
 }
 
 impl<E> AppBuilderConfigExt<E> for AppBuilder<E> {
     fn with_config(mut self, config: Config) -> AppBuilder<E> {
         let shared: SharedConfig = Arc::new(config);
+        let claims: SharedClaims = Arc::new(Mutex::new(Vec::new()));
         self.services_mut().insert(shared.clone());
-        self.plugin(ConfigPlugin::new(shared))
+        self.services_mut().insert(claims.clone());
+        self.plugin(ConfigPlugin::new((shared, claims)))
     }
 
     fn plugin_from_config<P>(
@@ -176,6 +405,27 @@ impl<E> AppBuilderConfigExt<E> for AppBuilder<E> {
         let config = section_of::<P>(&self, name)?;
         Ok(self.plugin_as(name, P::new(config)))
     }
+
+    fn plugin_with_defaults<P>(
+        self,
+        section: &str,
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    where
+        P: ConfiguredPlugin,
+        P::Config: Serialize + DeserializeOwned,
+    {
+        let config = claim_and_resolve::<P, E>(&self, section)?;
+        Ok(self.plugin_named(section, P::new(config)))
+    }
+
+    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    where
+        P: ConfiguredPlugin,
+        P::Config: Serialize + DeserializeOwned,
+    {
+        let config = claim_and_resolve::<P, E>(&self, name)?;
+        Ok(self.plugin_as(name, P::new(config)))
+    }
 }
 
 fn section_of<P>(builder: &AppBuilder<impl Sized>, name: &str) -> Result<P::Config, ConfigError>
@@ -193,11 +443,72 @@ where
     config.section::<P::Config>(name)
 }
 
+/// Records `P`'s claim on `name` and resolves its configuration: the plugin's
+/// defaults, with whatever the document says over the top.
+fn claim_and_resolve<P, E>(builder: &AppBuilder<E>, name: &str) -> Result<P::Config, ConfigError>
+where
+    P: ConfiguredPlugin,
+    P::Config: Serialize + DeserializeOwned,
+{
+    let config =
+        builder
+            .services()
+            .get::<SharedConfig>()
+            .ok_or_else(|| ConfigError::NoConfigInstalled {
+                name: name.to_string(),
+            })?;
+    let claims =
+        builder
+            .services()
+            .get::<SharedClaims>()
+            .ok_or_else(|| ConfigError::NoConfigInstalled {
+                name: name.to_string(),
+            })?;
+
+    let plugin = std::any::type_name::<P>().to_string();
+    let mut defaults = to_value(&P::defaults(), Provenance::default_of(name)).map_err(|e| {
+        ConfigError::Defaults {
+            name: name.to_string(),
+            message: e.to_string(),
+        }
+    })?;
+
+    {
+        let mut claimed = claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(first) = claimed.iter().find(|c| c.section == name) {
+            return Err(ConfigError::DuplicateSection {
+                name: name.to_string(),
+                first: first.plugin.clone(),
+                plugin,
+            });
+        }
+        claimed.push(SectionClaim {
+            section: name.to_string(),
+            plugin: plugin.clone(),
+            defaults: defaults.clone(),
+        });
+    }
+
+    // The plugin's defaults, with the document over the top. The merge rule is
+    // the crate's one rule and it is what makes a file that sets one key keep
+    // every other default in the section.
+    if let Some(found) = config.raw_section(name) {
+        let found = Value::new(
+            crate::value::ValueKind::Table(found.clone()),
+            Provenance::inline("found"),
+        );
+        value::merge(&mut defaults, found);
+    }
+    config.deserialize_section::<P::Config>(name, defaults)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "toml"))]
 mod tests {
     use super::*;
     use brocanth::plugin_app::BuildError;
@@ -205,7 +516,7 @@ mod tests {
     use serde::Deserialize;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // -- a plugin whose section is a TOML table -----------------------------
+    // -- a plugin whose section is a table -----------------------------------
 
     #[derive(Clone, Debug, Deserialize, PartialEq)]
     #[serde(default, deny_unknown_fields)]

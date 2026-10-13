@@ -3,13 +3,53 @@ name = "brocanth-config"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Configuration for brocanth: four sources, deep merge, typed sections — a plugin, because an application configured from its environment should not link a TOML parser."
+description = "Configuration for brocanth: TOML, JSON, YAML and the environment, deep merge, plugin-contributed defaults, and a provenance on every value — a plugin, because an application configured from its environment should not link a TOML parser."
 
+# PLAN.md §8.2: "Feature flags gate compilation, not behaviour. A feature that
+# is off must mean the code is absent, not that a branch returns early." Every
+# parser is therefore optional and every one is gated.
+#
+# Note what `toml` is taken with: `default-features = false`, so `parse` arrives
+# only through the `toml` feature below. The value model of this crate is its
+# own (`src/value.rs`), so an application that reads only YAML pulls neither
+# `toml_parser` nor `winnow`. That is the whole point of not building the model
+# on `toml::Value`, which the crate used to do.
 [dependencies]
 brocanth.workspace = true
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
 thiserror = "2"
+
+# TOML. `DeTable::parse` hands back every key and value in a `Spanned`, which is
+# what a provenance with a line number needs; `toml::Value` carries no position
+# and would not do.
+toml = { version = "1.1", default-features = false, features = [
+    "std",
+    "parse",
+], optional = true }
+serde_spanned = { version = "1.1", default-features = false, optional = true }
+
+# JSON. Chosen over `serde_json` because its AST carries a byte range on every
+# node, and `serde_json` reports a position only in an error.
+jsonc-parser = { version = "0.34", default-features = false, optional = true }
+
+# YAML. `serde_yaml` was deprecated by its author in March 2024, and
+# `serde_yaml_ng` (May 2024) and `serde_norway` (December 2024) have not
+# published since; none of the three reports the position of a value in any
+# case. `saphyr` is maintained, is YAML 1.2 compliant, and puts a `Span` on
+# every node.
+saphyr = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = ["toml"]
+# TOML, through `toml` 1.1.
+toml = ["dep:toml", "dep:serde_spanned"]
+# JSON, with comments and trailing commas, through `jsonc-parser` 0.34.
+json = ["dep:jsonc-parser"]
+# YAML 1.2, through `saphyr` 0.2.
+yaml = ["dep:saphyr"]
+
+[lints.rust]
+missing_docs = "warn"
