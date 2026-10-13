@@ -647,7 +647,7 @@ fn agents_md(a: &Answers) -> String {
          A route is a file. `src/pages/about.rs` is `/about`;\n\
          `src/pages/users/[id].rs` is `/users/{{id}}`. Two edits:\n\
          \n\
-         1. Write `src/pages/<name>.rs` with a `pub fn handle(ctx: &mut Ctx) -> Page`.\n\
+         1. Write `src/pages/<name>.rs` returning `Result<impl IntoResponse, Error>`.\n\
          2. In `src/pages/mod.rs`, add `pub mod <name>;` and a `routes.file(..)`\n\
          \x20  row. It names the **file**, not the URL, so the table and the\n\
          \x20  filesystem cannot drift apart.\n\
@@ -865,7 +865,7 @@ fn main_rs(a: &Answers) -> String {
     if a.has(Pick::Config) {
         out.push_str("use brocanth_config::{AppBuilderConfigExt, Loader};\n");
     }
-    out.push_str("\nuse pages::{Ctx, Handler, Page};\n\n");
+    out.push_str("\nuse pages::{Ctx, Handler, IntoResponse, Response};\n\n");
 
     out.push_str(&format!(
         "/// The application name. Every environment variable this binary reads is\n\
@@ -968,26 +968,27 @@ fn main_rs(a: &Answers) -> String {
             "    // 4. The chain, from exactly what step 2 mounted. The match is\n\
             \x20   //    exhaustive on purpose: a name this binary has no layer for stops\n\
             \x20   //    the application rather than silently not running.\n\
-            \x20   let mut stack: MiddlewareStack<Ctx, Page> = MiddlewareStack::new();\n\
+            \x20   let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();\n\
             \x20   for mount in app.router_plan().mounts() {\n\
-            \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Page>) -> Page = match mount.middleware.as_str() {\n",
+            \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response =\n\
+            \x20           match mount.middleware.as_str() {\n",
         );
         if a.has(Pick::Logging) {
-            out.push_str("            \"request_log\" => plugins::logging::layer,\n");
+            out.push_str("                \"request_log\" => plugins::logging::layer,\n");
         }
         if a.has(Pick::Sessions) {
-            out.push_str("            \"session\" => plugins::sessions::layer,\n");
+            out.push_str("                \"session\" => plugins::sessions::layer,\n");
         }
         // Wrapped the way rustfmt wants it. A scaffolded project should be
         // fmt-clean on its first `cargo fmt`, or the generator is handing the
         // developer a diff they did not write.
         out.push_str(
-            "            other => {\n\
-            \x20               return Err(format!(\n\
-            \x20                   \"`{other}` is mounted, but this binary has no layer for it\"\n\
-            \x20               ))\n\
-            \x20           }\n\
-            \x20       };\n\
+            "                other => {\n\
+            \x20                   return Err(format!(\n\
+            \x20                       \"`{other}` is mounted, but this binary has no layer for it\"\n\
+            \x20                   ))\n\
+            \x20               }\n\
+            \x20           };\n\
             \x20       stack\n\
             \x20           .use_at(&mount.pattern, layer)\n\
             \x20           .map_err(|e| e.to_string())?;\n\
@@ -999,7 +1000,7 @@ fn main_rs(a: &Answers) -> String {
             "    // 4. The chain. Nothing offered middleware, so the stack is empty --\n\
             \x20   //    and an empty stack costs nothing: `run` allocates only when a\n\
             \x20   //    layer matches the path.\n\
-            \x20   let stack: MiddlewareStack<Ctx, Page> = MiddlewareStack::new();\n\
+            \x20   let stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();\n\
              \n",
         );
     }
@@ -1046,13 +1047,22 @@ fn main_rs(a: &Answers) -> String {
         \x20       (Verb::Delete, \"/about\"),\n\
         \x20       (Verb::Get, \"/nowhere\"),\n\
         \x20   ] {\n\
-        \x20       let page = dispatch(&router, &stack, verb, path);\n\
+        \x20       let response = dispatch(&router, &stack, verb, path);\n\
+        \x20       // Headers are printed too, or the 405 below looks empty:\n\
+        \x20       // `Allow` is a header now rather than a body, which is\n\
+        \x20       // what it always should have been.\n\
+        \x20       let shown: String = response\n\
+        \x20           .headers\n\
+        \x20           .iter()\n\
+        \x20           .map(|(k, v)| format!(\"{k}: {v} \"))\n\
+        \x20           .collect();\n\
         \x20       println!(\n\
-        \x20           \"{:<7}{:<12}{} {}\",\n\
+        \x20           \"{:<7}{:<12}{} {}{}\",\n\
         \x20           verb.as_str(),\n\
         \x20           path,\n\
-        \x20           page.status,\n\
-        \x20           page.body.chars().take(48).collect::<String>()\n\
+        \x20           response.status,\n\
+        \x20           shown,\n\
+        \x20           response.body.chars().take(40).collect::<String>()\n\
         \x20       );\n\
         \x20   }\n\
         \x20   Ok(())\n\
@@ -1065,18 +1075,27 @@ fn main_rs(a: &Answers) -> String {
          /// reserves for a logger are the core's job and not a layer's.\n\
          fn dispatch(\n\
         \x20   router: &Router<Handler>,\n\
-        \x20   stack: &MiddlewareStack<Ctx, Page>,\n\
+        \x20   stack: &MiddlewareStack<Ctx, Response>,\n\
         \x20   verb: Verb,\n\
         \x20   path: &str,\n\
-         ) -> Page {\n\
+         ) -> Response {\n\
         \x20   match router.dispatch(verb, path) {\n\
         \x20       Dispatch::Found { handler, matched } => {\n\
-        \x20           let handler = *handler;\n\
         \x20           let mut ctx = Ctx::new(verb, path, matched.params());\n\
-        \x20           stack.run(path, &mut ctx, handler)\n\
+        \x20           // The one place a failed handler becomes a response --\n\
+        \x20           // what Echo calls an HTTPErrorHandler. It sits inside\n\
+        \x20           // the chain's terminal, so a layer still sees what the\n\
+        \x20           // error turned into and can rewrite it.\n\
+        \x20           stack.run(path, &mut ctx, |c| {\n\
+        \x20               handler(c).unwrap_or_else(IntoResponse::into_response)\n\
+        \x20           })\n\
         \x20       }\n\
-        \x20       Dispatch::MethodNotAllowed { allow, .. } => Page::new(405, format!(\"Allow: {allow}\")),\n\
-        \x20       Dispatch::NotFound => Page::new(404, \"Not Found\"),\n\
+        \x20       Dispatch::MethodNotAllowed { allow, .. } => Response {\n\
+        \x20           status: 405,\n\
+        \x20           headers: vec![(\"allow\".to_string(), allow.to_string())],\n\
+        \x20           ..Default::default()\n\
+        \x20       },\n\
+        \x20       Dispatch::NotFound => Response::new(404, \"Not Found\"),\n\
         \x20   }\n\
          }\n",
     );
@@ -1115,26 +1134,177 @@ pub mod users {
 
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
-/// What a handler returns.
+/// What a handler produces.
 ///
 /// The framework owns rendering: a handler returns a value and never writes a
 /// response itself, so a half-written body on an error is not something that
-/// can happen.
-pub struct Page {
+/// can happen. Echo and Gin hand the handler a writer and take an error back,
+/// and both carry the scar -- once a 200 has gone out, the central error
+/// handler cannot take it back. Here there is nothing to take back.
+pub struct Response {
     pub status: u16,
     pub body: String,
+    pub headers: Vec<(String, String)>,
 }
 
-impl Page {
+/// Written by hand rather than derived, and the difference matters.
+///
+/// A derived `Default` would give `status: 0`, which is not an HTTP status, so
+/// `Response { body: .., ..Default::default() }` would compile and be wrong.
+/// 200 is what "I did not say" means for a response.
+impl Default for Response {
+    fn default() -> Self {
+        Self {
+            status: 200,
+            body: String::new(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+impl Response {
     pub fn new(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
             body: body.into(),
+            ..Default::default()
         }
     }
 
     pub fn ok(body: impl Into<String>) -> Self {
         Self::new(200, body)
+    }
+
+    pub fn empty(status: u16) -> Self {
+        Self::new(status, "")
+    }
+
+    /// For what the struct literal does not cover: several headers, added one
+    /// at a time. Rust has no variadic generics, so a tuple return is
+    /// fixed-arity and this is the unbounded form.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+/// What a handler may return instead of building a [`Response`] by hand.
+///
+/// The Crystal brocanth overloads `write_response` on the handler's return
+/// type, so a page returns the simplest thing that says what it means. Rust
+/// spells the same idea as a trait: each handler still returns exactly one
+/// type, and this is what lets different handlers return different ones.
+pub trait IntoResponse {
+    fn into_response(self) -> Response;
+}
+
+impl IntoResponse for Response {
+    fn into_response(self) -> Response {
+        self
+    }
+}
+
+/// A body, answered 200.
+impl IntoResponse for String {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+impl IntoResponse for &str {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+/// Nothing: 200 with no body. Crystal's `Nil` return.
+impl IntoResponse for () {
+    fn into_response(self) -> Response {
+        Response::empty(200)
+    }
+}
+
+/// A status and nothing else -- `Ok(404)`.
+impl IntoResponse for u16 {
+    fn into_response(self) -> Response {
+        Response::empty(self)
+    }
+}
+
+/// A body and a status.
+impl<T: IntoResponse> IntoResponse for (T, u16) {
+    fn into_response(self) -> Response {
+        Response {
+            status: self.1,
+            ..self.0.into_response()
+        }
+    }
+}
+
+/// A body and headers.
+impl<T: IntoResponse> IntoResponse for (T, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.headers.extend(self.1);
+        response
+    }
+}
+
+/// A body, a status and headers.
+impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.status = self.1;
+        response.headers.extend(self.2);
+        response
+    }
+}
+
+/// What a handler may fail with.
+///
+/// Deliberately **not** an `impl std::error::Error`, which is what lets the
+/// blanket `From` below exist without colliding with the reflexive
+/// `impl<T> From<T> for T`. `anyhow::Error` is this shape for the same reason.
+/// The effect is that `?` works on anything in a handler.
+#[derive(Debug)]
+pub struct Error {
+    pub status: u16,
+    pub message: String,
+}
+
+impl Error {
+    pub fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    /// The default for a failure nobody classified: it is a bug here, not a
+    /// mistake by the caller.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(500, message)
+    }
+}
+
+impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
+    fn from(error: E) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        // Everything a client sees for a 5xx is the status. The message is for
+        // whoever is reading the logs, and putting it in the body is how an
+        // internal path ends up on a stranger's screen.
+        let body = if self.status < 500 {
+            self.message
+        } else {
+            String::from("Internal Server Error")
+        };
+        Response::new(self.status, body)
     }
 }
 
@@ -1169,10 +1339,37 @@ impl Ctx {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+
+    /// The same, for a parameter the route declares and so must be there.
+    ///
+    /// Returns `Result` rather than `Option` so it composes with `?`. A name
+    /// the route does not declare is this file disagreeing with its own
+    /// filename, which is a 500 and not a 400: nobody sent a bad request.
+    pub fn require(&self, name: &str) -> Result<&str, Error> {
+        self.param(name)
+            .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
 }
 
-/// A handler. One per verb a page answers.
-pub type Handler = fn(&mut Ctx) -> Page;
+/// A handler, as the table stores it. One per verb a page answers.
+///
+/// Boxed rather than a bare `fn` pointer, because every handler returns its
+/// own type and a `fn` pointer can only hold one of them. [`page`] is what
+/// unifies them, and it runs once per route at startup rather than per
+/// request.
+pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+
+/// Puts a handler in the table whatever it returns.
+///
+/// Generic over the return type, so `-> Result<impl IntoResponse, Error>` on
+/// the handler and one concrete `Handler` in the table are the same thing.
+pub fn page<H, T>(handler: H) -> Handler
+where
+    H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
+    T: IntoResponse,
+{
+    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+}
 
 /// The table.
 ///
@@ -1181,14 +1378,14 @@ pub type Handler = fn(&mut Ctx) -> Page;
 /// twice is an error rather than a silent overwrite.
 pub fn router() -> Result<Router<Handler>, BuildError> {
     let mut routes = Router::builder();
-    routes.file("index.rs", "", Verb::Get, index::handle as Handler)?;
-    routes.file("about.rs", "", Verb::Get, about::handle as Handler)?;
-    routes.file("users/[id].rs", "", Verb::Get, users::id::handle as Handler)?;
+    routes.file("index.rs", "", Verb::Get, page(index::handle))?;
+    routes.file("about.rs", "", Verb::Get, page(about::handle))?;
+    routes.file("users/[id].rs", "", Verb::Get, page(users::id::handle))?;
     routes.file(
         "users/[id].rs",
         "",
         Verb::Post,
-        users::id::handle_post as Handler,
+        page(users::id::handle_post),
     )?;
     routes.build()
 }
@@ -1222,20 +1419,21 @@ fn index_rs(a: &Answers) -> String {
     format!(
         r##"//! `/` -- because the file is called `index.rs`.
 
-use crate::pages::{{Ctx, Page}};
+use crate::pages::{{Ctx, Error, IntoResponse}};
 
 /// GET. The framework reads the verb off the function name: `handle` is GET,
 /// `handle_post` is POST, and `handle_json` would be a content-negotiation hook
 /// rather than a verb.
-pub fn handle(_ctx: &mut Ctx) -> Page {{
-    Page::ok(
-        "<!doctype html><title>{title}</title>\
+///
+/// The return type is the simplest thing that says what this page means. A
+/// `&str` is a 200 with that body; see `users/[id].rs` for the other shapes.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
+    Ok("<!doctype html><title>{title}</title>\
          <h1>{title}</h1>\
          <p>This file is <code>src/pages/index.rs</code>. Rename it and the route \
          moves with it.</p>\
          <ul><li><a href=\"/about\">/about</a></li>\
-         <li><a href=\"/users/7\">/users/7</a></li></ul>",
-    )
+         <li><a href=\"/users/7\">/users/7</a></li></ul>")
 }}
 "##,
         title = a.title
@@ -1246,20 +1444,27 @@ fn about_rs(a: &Answers) -> String {
     format!(
         r##"//! `/about` -- one file, one route.
 
-use crate::pages::{{Ctx, Page}};
+use crate::pages::{{Ctx, Error, IntoResponse, Response}};
 
-pub fn handle(ctx: &mut Ctx) -> Page {{
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
     // The context is the request. The framework owns the response, so a
     // handler returns a value and never writes one itself -- which is what
     // makes a half-written body on an error impossible rather than unlikely.
-    Page::ok(format!(
-        "<!doctype html><title>About \u{{b7}} {title}</title>\
-         <h1>About</h1>\
-         <p>You asked for <code>{{}} {{}}</code>. This page answers GET and \
-         nothing else, so a DELETE to it is a 405 carrying an \
-         <code>Allow</code> header rather than a 404.</p>",
-        ctx.verb, ctx.path
-    ))
+    //
+    // The struct literal is the form that scales: name the fields that differ
+    // and `..Default::default()` fills the rest. Rust will not let you omit a
+    // field without it, and there are no implicit zero values.
+    Ok(Response {{
+        body: format!(
+            "<!doctype html><title>About \u{{b7}} {title}</title>\
+             <h1>About</h1>\
+             <p>You asked for <code>{{}} {{}}</code>. This page answers GET and \
+             nothing else, so a DELETE to it is a 405 carrying an \
+             <code>Allow</code> header rather than a 404.</p>",
+            ctx.verb, ctx.path
+        ),
+        ..Default::default()
+    }})
 }}
 "##,
         title = a.title
@@ -1273,26 +1478,30 @@ const USER_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are
 //! collector could not prove a captured parameter does not outlive the request.
 //! Here the parameters borrow the path, so the question does not arise.
 
-use crate::pages::{Ctx, Page};
+use crate::pages::{Ctx, Error, IntoResponse, Response};
 
-pub fn handle(ctx: &mut Ctx) -> Page {
-    match ctx.param("id") {
-        Some(id) => Page::ok(format!(
-            "<!doctype html><title>User {id}</title><h1>User {id}</h1>"
-        )),
-        // Unreachable while the file is called `[id].rs`: the matcher cannot
-        // arrive here without one. It is written out anyway, because `param`
-        // answering `None` rather than `""` is the point of this file.
-        None => Page::new(400, "no id"),
-    }
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // `?` is why a handler returns `Result`. Anything that fails converts
+    // into `Error` through a blanket `From`, so a parse, a query or a file
+    // read is one character rather than a match arm.
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response {
+        body: format!("<!doctype html><title>User {id}</title><h1>User {id}</h1>"),
+        ..Default::default()
+    })
 }
 
 /// POST to the same path. One file, one route, one handler per verb.
-pub fn handle_post(ctx: &mut Ctx) -> Page {
-    match ctx.param("id") {
-        Some(id) => Page::new(303, format!("Location: /users/{id}")),
-        None => Page::new(400, "no id"),
-    }
+///
+/// A redirect is a status, one header and no body. The struct literal above is
+/// the other form; this one stays readable when there are several headers,
+/// because Rust has no variadic generics and a tuple return is therefore
+/// fixed-arity.
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
 }
 "##;
 
@@ -1354,7 +1563,7 @@ use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Next;
 
-use crate::pages::{{Ctx, Page}};
+use crate::pages::{{Ctx, Response}};
 
 /// What this plugin is built from.
 ///
@@ -1407,12 +1616,12 @@ impl Plugin for Logging {{
 /// A plain function is a layer: `Layer` is implemented for anything callable
 /// with a context and the rest of the chain. Not calling `next.run` is how a
 /// layer short-circuits, and dropping it is all that takes.
-pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Page>) -> Page {{
+pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {{
     let verb = ctx.verb;
     let path = ctx.path.clone();
-    let page = next.run(ctx);
-    eprintln!("{{verb}} {{path}} -> {{}}", page.status);
-    page
+    let response = next.run(ctx);
+    eprintln!("{{verb}} {{path}} -> {{}}", response.status);
+    response
 }}
 "##
     )
@@ -1427,7 +1636,7 @@ use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
 use brocanth::routing::Next;
 
-use crate::pages::{{Ctx, Page}};
+use crate::pages::{{Ctx, Response}};
 
 /// What this plugin is built from.
 ///
@@ -1512,7 +1721,7 @@ impl Plugin for Sessions {{
 /// The layer `session` mounts. Reading the cookie off the request and writing
 /// `Set-Cookie` on the way out both need the request type that arrives with the
 /// HTTP server; the seam is here and it is already the right shape.
-pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Page>) -> Page {{
+pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {{
     next.run(ctx)
 }}
 "##,

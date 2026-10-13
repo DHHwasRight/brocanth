@@ -185,10 +185,10 @@ error forty lines into a backtrace.
 ```rust
 //! `/contact` -- one file, one route.
 
-use crate::pages::{Ctx, Page};
+use crate::pages::{Ctx, Error, IntoResponse};
 
-pub fn handle(_ctx: &mut Ctx) -> Page {
-    Page::ok("<!doctype html><title>Contact</title><h1>Contact</h1>".to_string())
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    Ok("<!doctype html><title>Contact</title><h1>Contact</h1>")
 }
 ```
 
@@ -200,11 +200,12 @@ pub mod contact;
 ```
 
 ```rust
-routes.file("contact.rs", "", Verb::Get, contact::handle as Handler)?;
+routes.file("contact.rs", "", Verb::Get, page(contact::handle))?;
 ```
 
 `routes.file` names the *file* and the framework derives the URL from it, so
-the table and the filesystem cannot drift apart. Then:
+the table and the filesystem cannot drift apart. `page(..)` is what lets every
+handler return its own type — see *What a handler returns* below. Then:
 
 ```
 brocanth routes
@@ -216,6 +217,55 @@ brocanth routes
 
 A handler returns a value and never writes a response itself, which is what
 makes a half-written body on an error impossible rather than unlikely.
+
+## What a handler returns
+
+`Result<impl IntoResponse, Error>`. Two halves, and both earn their place.
+
+**The `Result`** is why `?` works. Anything that fails converts into `Error`
+through a blanket `From`, so a parse or a query is one character:
+
+```rust
+let id: u64 = ctx.require("id")?.parse()?;
+```
+
+One place turns a failed handler into a response — what Echo calls an
+`HTTPErrorHandler` — and it lives in `dispatch` in `src/main.rs`. The
+difference from Echo is that the handler has no writer, so there is no
+already-sent 200 for the error path to fail to take back.
+
+**The `impl IntoResponse`** is the Crystal original's idea: a page returns the
+simplest thing that says what it means. Each handler still returns exactly one
+type; the trait is what lets *different* handlers return *different* ones.
+
+| Return | Means |
+|---|---|
+| `Ok("<h1>Hi</h1>")` or `Ok(string)` | 200 with that body |
+| `Ok(())` | 200, no body |
+| `Ok(404u16)` | that status, no body |
+| `Ok((body, 201))` | body and status |
+| `Ok((body, 201, headers))` | body, status and headers |
+
+Past that, build the struct. Rust requires **every** field — there are no
+implicit zero values, so omitting one is a compile error, not a `0` — and `..`
+fills in the rest:
+
+```rust
+Ok(Response { status: 201, ..Default::default() })          // 201, no body
+Ok(Response { body: html, ..Default::default() })           // 200 with a body
+Ok(Response { status: 404, ..Response::ok(page) })          // from any value
+```
+
+`Default` is written by hand rather than derived, and that matters: a derived
+one would give `status: 0`, which is not an HTTP status, so
+`Response { body: .., ..Default::default() }` would compile and be wrong.
+
+For several headers, chain instead — Rust has no variadic generics, so a tuple
+return is fixed-arity and this is the unbounded form:
+
+```rust
+Ok(Response::empty(303).with_header("location", "/users/7"))
+```
 
 ## Add a task
 
