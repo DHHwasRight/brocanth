@@ -1,0 +1,61 @@
+[package]
+name = "brocanth-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A typed predicate over an entity's columns, with two interpretations: compiled to SQL for lists, evaluated for a row you already hold."
+
+[dependencies]
+# The only runtime dependency, and the only one this crate wants. Every other
+# candidate was refused on purpose, and the refusals are the design:
+#
+# * no `sea-orm` — PLAN.md §8 says the arrow points plugin -> core and a plugin
+#   that needs another depends on it in the open. A policy is an algebra over
+#   column names and bind values; it has no reason to know what an ORM is. The
+#   adapter that turns a `Query` into a `sea_orm::Condition` is a later crate
+#   that depends on both, and it is the only thing in the tree that has to.
+# * no `sqlx`, no driver, no pool — this crate emits SQL text and an ordered
+#   bind list. It never opens a connection, so it cannot have an opinion about
+#   runtimes, TLS or feature unification.
+# * no `brocanth` — the core has three dependencies and a test that fails the
+#   build when a fourth kind arrives. Nothing here is reachable from it.
+thiserror = "2"
+
+[dependencies.proptest]
+# Optional, and off. PLAN.md §9 obligation 1 says opting into `eval()`
+# generates a property test asserting `eval(row) == (row in query(condition))`.
+# Tier one has no macro, so what ships instead is the harness in
+# `agreement`: strategies over predicates and rows that an application drives
+# against its own database. An application that never calls `eval()` needs
+# none of it and links none of it.
+version = "1"
+optional = true
+
+[dev-dependencies]
+# The agreement tests need a real SQL engine, because the claim under test is
+# that this crate's SQL and this crate's evaluator answer the same question.
+# Checking that against a second implementation written here would only prove
+# the two agree with each other.
+#
+# `sqlx` rather than `rusqlite`, and the version is not a preference.
+# `libsqlite3-sys` sets `links = "sqlite3"`, so cargo permits exactly one copy
+# of it in the whole graph; `brocanth-jobs` already pins `sqlx 0.9`, which caps
+# it below 0.38, and every `rusqlite` recent enough to be worth taking wants
+# 0.38. Taking one here would fail resolution for the entire workspace, not
+# just for this crate. So: the version the workspace already resolves, with
+# `sqlite-bundled` so the test does not depend on what the machine has
+# installed. Dev only — nothing in `src/` knows a driver exists.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite-bundled",
+] }
+tokio = { version = "1", features = ["rt", "macros"] }
+proptest = "1"
+
+[features]
+default = []
+# The property-test harness of PLAN.md §9 obligation 1.
+agreement-proptest = ["dep:proptest"]
+
+[lints.rust]
+missing_docs = "warn"
