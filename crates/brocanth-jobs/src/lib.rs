@@ -25,8 +25,21 @@
 //! Here the backend is a **Cargo feature**, chosen once in `Cargo.toml`, and a
 //! Cargo feature cannot vary by environment. There is no in-memory mode, on
 //! purpose: an in-memory queue is a second implementation, and a second
-//! implementation is exactly the trap. Tests run on SQLite, which is a backend
-//! somebody actually deploys.
+//! implementation is exactly the trap.
+//!
+//! # Which backend
+//!
+//! **Postgres is the default**, because it is brocanth's base: the same
+//! database holds the models, the cache and the blobs, and `FOR UPDATE SKIP
+//! LOCKED` — the one mechanism this queue is built on — is a Postgres
+//! mechanism. **SQLite is supported** for a single-machine deployment that
+//! wants no server; it claims work under a whole-file write lock instead, so
+//! no job is ever claimed twice but claims serialise rather than overlap. The
+//! `store` module carries the two statements side by side.
+//!
+//! The crate's own tests run on SQLite with no server, through a
+//! dev-dependency on itself with the `sqlite` feature on, and on Postgres when
+//! `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names one.
 //!
 //! # The shape of it
 //!
@@ -135,10 +148,10 @@
 
 #[cfg(not(any(feature = "postgres", feature = "sqlite")))]
 compile_error!(
-    "brocanth-jobs needs a database to be a queue. Enable the `sqlite` feature \
-     (the default) or the `postgres` feature. There is no in-memory backend on \
-     purpose: a queue that is a different implementation in development is the \
-     trap this crate exists to avoid."
+    "brocanth-jobs needs a database to be a queue. Enable the `postgres` \
+     feature (the default) or the `sqlite` feature. There is no in-memory \
+     backend on purpose: a queue that is a different implementation in \
+     development is the trap this crate exists to avoid."
 );
 
 pub mod backoff;

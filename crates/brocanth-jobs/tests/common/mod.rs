@@ -6,8 +6,14 @@
 //! which is how one job type serves several tests running at once.
 //!
 //! SQLite rather than Postgres because `cargo test` must pass on a laptop with
-//! no server running. The Postgres path is exercised by the same tests when
-//! `BROCANTH_JOBS_TEST_POSTGRES` names a database; see `postgres.rs`.
+//! no server running, and it stays that way now that `postgres` is the default
+//! feature: the crate carries a dev-dependency on itself with `sqlite` on, so
+//! this harness is always compiled for tests whatever the library build picks.
+//!
+//! That means the backend this suite runs on is **not** the default one, which
+//! is a real cost rather than a detail. `postgres.rs` is what pays it back,
+//! and only when `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL`
+//! names a server. Every test there that does not run says so on stderr.
 
 #![allow(dead_code)]
 
@@ -34,6 +40,38 @@ pub async fn sqlite_queue() -> (Queue, tempfile::TempDir) {
         .expect("opening the queue");
     queue.migrate().await.expect("creating the tables");
     (queue, dir)
+}
+
+/// The Postgres test server's URL, or `None` when no variable names one.
+pub fn postgres_url() -> Option<String> {
+    ["BROCANTH_JOBS_TEST_POSTGRES", "BROCANTH_TEST_DATABASE_URL"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|url| !url.is_empty())
+}
+
+/// Announce that a test did not run, where the announcement cannot be
+/// swallowed.
+///
+/// `cargo test` captures `println!` and `eprintln!` and shows them only for a
+/// test that fails, so a skip announced that way is invisible — and a test
+/// that silently passes by running nothing is worse than one that is honestly
+/// skipped. This writes to file descriptor 2 directly, which the capture does
+/// not intercept, and names the test through its thread name.
+pub fn skipped(reason: &str) {
+    use std::io::Write;
+
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("a test");
+    let line = format!("!! SKIPPED {name}: {reason}\n");
+
+    if let Ok(mut fd2) = std::fs::OpenOptions::new().write(true).open("/dev/stderr") {
+        if fd2.write_all(line.as_bytes()).is_ok() {
+            let _ = fd2.flush();
+            return;
+        }
+    }
+    eprint!("{line}");
 }
 
 // ---------------------------------------------------------------------------
@@ -77,11 +115,19 @@ pub fn timings(token: &str) -> Vec<Instant> {
         .unwrap_or_default()
 }
 
-/// A token nothing else in the process will use.
+/// A token nothing else will use.
+///
+/// The process id is in it, not only a counter, because the Postgres tests
+/// share one server: two `cargo test` processes against the same database
+/// would otherwise both start at `name-0` and collide on a unique key.
 pub fn token(name: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    format!("{name}-{}", N.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{name}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Waits for `condition`, polling, up to `limit`. Panics with `what` on

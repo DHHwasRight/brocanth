@@ -10,16 +10,16 @@ brocanth-model-derive = { path = "derive", version = "=0.1.0" }
 
 # Pinned exactly. SeaORM 2.0 is three months old; a patch bump is a decision,
 # not a side effect.
+#
+# The driver is not listed here. It arrives through the `postgres` or `sqlite`
+# feature below, so that a build gets one driver and not both.
 sea-orm = { version = "=2.0.4", default-features = false, features = [
-    "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
     "with-chrono",
     "entity-registry",
-    "sqlite-use-returning-for-3_35",
 ] }
 sea-orm-migration = { version = "=2.0.4", default-features = false, features = [
-    "sqlx-sqlite",
     "runtime-tokio-rustls",
     "with-chrono",
     "entity-registry",
@@ -32,8 +32,51 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+[features]
+# Postgres is the base. brocanth stores queues, cache and blobs in the same
+# database as the models, and every one of those is better on Postgres: a real
+# `BOOLEAN`, `JSONB`, arrays, partial and expression indexes, transactional
+# DDL, `FOR UPDATE SKIP LOCKED` for the queue and `LISTEN/NOTIFY` for
+# multi-process realtime. The model layer is the thing that must not be
+# designed around the weaker of the two.
+#
+# SQLite stays supported, for a single-machine deployment that wants no server.
+# It is a smaller target, not the shape the design answers to.
+#
+# A build gets one driver. Leaving `default-features` on and adding `sqlite`
+# compiles both, which works and is almost never what you meant:
+#
+# ```toml
+# brocanth-model = { version = "0.1", default-features = false, features = ["sqlite"] }
+# ```
+default = ["postgres"]
+postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
+# `sqlite-use-returning-for-3_35` is SQLite-only, so it travels with the SQLite
+# feature rather than sitting in the dependency's base feature list.
+sqlite = [
+    "sea-orm/sqlx-sqlite",
+    "sea-orm/sqlite-use-returning-for-3_35",
+    "sea-orm-migration/sqlx-sqlite",
+]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# This crate, as a dev-dependency on itself, with SQLite on. It is the answer
+# to the question the default change raises: `cargo test -p brocanth-model` on
+# a laptop with no server still has to run the suite.
+#
+# The dev-dependency adds `sqlite` to whatever the test build already has, so
+# the in-memory harness is always available to tests, examples and benches,
+# and never to a library build. `cargo test` therefore runs the full SQLite
+# suite with no server, plus the Postgres suite, which skips loudly unless
+# `BROCANTH_MODEL_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names a
+# database.
+#
+# The cost is stated rather than hidden: with Postgres as the default, the
+# suite that runs unattended is the one for the backend that is *not* the
+# default. The Postgres half closes that gap only when a server is there.
+brocanth-model = { path = ".", default-features = false, features = ["sqlite"] }
 
 [lints.rust]
 missing_docs = "warn"

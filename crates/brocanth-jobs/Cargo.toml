@@ -28,25 +28,56 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
 
+# This crate, as a dev-dependency on itself, with SQLite on. It is the answer
+# to the question the default change raises: `cargo test -p brocanth-jobs` on a
+# laptop with no server running still has to run the suite.
+#
+# The dev-dependency adds `sqlite` to whatever the test build already has, so
+# the file-backed harness is always there for tests, examples and benches, and
+# never for a library build. The ordinary dependency tree is unaffected: a
+# published build of this crate links the Postgres driver and nothing else.
+brocanth-jobs = { path = ".", default-features = false, features = ["sqlite"] }
+
 [features]
 # The backend is a compile-time choice made in `Cargo.toml`, which is the whole
 # answer to the Rails trap: Rails configures Solid Queue in `production.rb`
 # only, so development and test run a different queue and a job that works
 # locally fails in production. A Cargo feature cannot vary by `RAILS_ENV`. The
-# queue you build is the queue you run, in every environment.
+# queue you build is the queue you run, in every environment. That reasoning is
+# unchanged and is the reason this is a feature at all.
 #
-# `sqlite` is the default because the framework's own tests, a `cargo test` on
-# a laptop and a small single-machine deployment all want a backend that needs
-# no server. A Postgres deployment writes:
+# What changed is which one is the default.
+#
+# `postgres` is the default, because Postgres is brocanth's base. The same
+# database holds the models, the cache and the blobs, and the queue's central
+# mechanism — `FOR UPDATE SKIP LOCKED` — is a Postgres mechanism that SQLite
+# answers with a whole-file write lock and serialised claims. Shipping a queue
+# whose default is the backend that cannot do the thing the queue is for was
+# the wrong way round.
+#
+# The cost is real and is stated rather than hidden. The previous default was
+# argued for on the grounds that the framework's own tests, a `cargo test` on a
+# laptop and a small single-machine deployment all want a backend that needs no
+# server. The last of those is still true, and `sqlite` is still supported for
+# exactly it. The first two are now paid for by `[dev-dependencies]`, where
+# this crate depends on itself with `sqlite` on, so `cargo test` keeps running
+# the whole suite with no server while a library build gets one driver.
+#
+# What is left unpaid: the default-built code path is now the one that a laptop
+# with no Postgres does not exercise. `tests/postgres.rs` closes that gap only
+# when `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names a
+# server, and it says loudly when it was skipped.
+#
+# A single-machine deployment writes:
 #
 # ```toml
-# brocanth-jobs = { version = "0.1", default-features = false, features = ["postgres"] }
+# brocanth-jobs = { version = "0.1", default-features = false, features = ["sqlite"] }
 # ```
 #
-# and gets no `libsqlite3-sys`. Leaving `default-features` on and adding
-# `postgres` compiles both drivers, which works and is almost never what you
+# and gets no Postgres driver. Leaving `default-features` on and adding
+# `sqlite` compiles both drivers, which works and is almost never what you
 # meant.
-default = ["sqlite"]
+default = ["postgres"]
 postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring"]
 sqlite = ["sqlx/sqlite-bundled"]
 

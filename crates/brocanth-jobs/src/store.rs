@@ -370,10 +370,36 @@ impl Store {
     /// tables. [`Queue::schema_sql`](crate::Queue::schema_sql) hands the same
     /// statements back as text, so an application that keeps every change in
     /// `migrations/` can paste them into one.
+    ///
+    /// On Postgres it runs under an advisory lock. `CREATE TABLE IF NOT
+    /// EXISTS` is **not** safe to run concurrently there: two of them pass the
+    /// existence check together and then collide in the catalogue with
+    /// `duplicate key value violates unique constraint
+    /// "pg_class_relname_nsp_index"`. Two workers booting at the same moment
+    /// is exactly that race, and so is a parallel test suite against one
+    /// server. `pg_advisory_xact_lock` serialises them, and Postgres rolls DDL
+    /// back, so a half-finished schema cannot be left behind. SQLite needs
+    /// none of this: it takes one write lock for the whole file anyway.
     pub(crate) async fn migrate(&self) -> Result<()> {
-        for statement in schema(self.backend.dialect()) {
-            let statement: &str = statement;
-            execute!(&self.backend, statement, statement);
+        match &self.backend {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                    .bind(MIGRATION_LOCK)
+                    .execute(&mut *tx)
+                    .await?;
+                for statement in schema(Dialect::Postgres) {
+                    sqlx::query(*statement).execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+            }
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(pool) => {
+                for statement in schema(Dialect::Sqlite) {
+                    sqlx::query(*statement).execute(pool).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -935,6 +961,11 @@ impl Store {
 }
 
 /// The DDL, which [`crate::Queue::schema_sql`] also hands out as text.
+/// The advisory-lock key [`Store::migrate`] holds on Postgres. Arbitrary, and
+/// fixed so that every process creating these tables picks the same one.
+#[cfg(feature = "postgres")]
+const MIGRATION_LOCK: i64 = 0x6272_6f6a_6f62; // "brojob"
+
 pub(crate) fn schema(dialect: Dialect) -> &'static [&'static str] {
     match dialect {
         #[cfg(feature = "postgres")]
