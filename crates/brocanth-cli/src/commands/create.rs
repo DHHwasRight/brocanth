@@ -61,7 +61,12 @@ pub struct CreateArgs {
     /// The core alone: a router, a context, and nothing else
     #[arg(long)]
     pub core_only: bool,
-    /// Depend on a brocanth checkout at this path instead of the repository
+    /// Depend on a local brocanth instead of the published one
+    ///
+    /// DIR is the core crate's own directory -- `crates/brocanth` inside a
+    /// checkout, not the checkout itself, which is a virtual manifest cargo
+    /// will refuse. Sibling crates are found next to it, so `brocanth-config`
+    /// is read from `crates/brocanth-config`.
     #[arg(long, value_name = "DIR")]
     pub brocanth_path: Option<String>,
     /// Initialise a git repository
@@ -414,17 +419,53 @@ fn chooser(args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diag
 /// in, and the generated manifest sits one deeper, so it is resolved here.
 fn local_checkout(args: &CreateArgs) -> Result<Option<String>, Vec<Diagnostic>> {
     match &args.brocanth_path {
-        Some(path) => Ok(Some(
-            std::fs::canonicalize(path)
-                .map_err(|e| {
-                    vec![Diagnostic::error("brocanth-path", format!("{path}: {e}"))
-                        .help("--brocanth-path takes a directory holding brocanth's Cargo.toml")]
-                })?
-                .display()
-                .to_string(),
-        )),
+        Some(path) => {
+            let dir = std::fs::canonicalize(path).map_err(|e| {
+                vec![Diagnostic::error("brocanth-path", format!("{path}: {e}"))
+                    .help("--brocanth-path takes a directory holding brocanth's Cargo.toml")]
+            })?;
+            virtual_manifest(&dir)?;
+            Ok(Some(dir.display().to_string()))
+        }
         None => Ok(None),
     }
+}
+
+/// Refuses a checkout root, which is the natural thing to type and the wrong
+/// thing to pass.
+///
+/// Cargo's own message for it names `virtual manifest` and says nothing about
+/// what to do instead, so the mistake is worth catching here while the word
+/// the user typed is still in hand.
+fn virtual_manifest(dir: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
+    let manifest = dir.join("Cargo.toml");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return Err(vec![Diagnostic::error(
+            "brocanth-path",
+            format!("{} has no Cargo.toml", dir.display()),
+        )
+        .help("pass the core crate's own directory, such as <checkout>/crates/brocanth")]);
+    };
+
+    // A manifest with a `[workspace]` and no `[package]` describes a workspace
+    // and not a crate, so nothing can depend on it by path.
+    let has_package = text.lines().any(|l| l.trim_start().starts_with("[package]"));
+    if has_package {
+        return Ok(());
+    }
+
+    let core = dir.join("crates/brocanth");
+    let mut error = Diagnostic::error(
+        "brocanth-path",
+        format!("{} is a workspace, not a crate", dir.display()),
+    )
+    .note("cargo cannot take a path dependency on a virtual manifest");
+    if core.join("Cargo.toml").is_file() {
+        error = error.help(format!("--brocanth-path {}", core.display()));
+    } else {
+        error = error.help("pass the core crate's own directory, such as <checkout>/crates/brocanth");
+    }
+    Err(vec![error])
 }
 
 /// Why `name` is not a usable package name, in a few words, or `None`.
@@ -531,48 +572,56 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
 
 /// The task runner binary: separate from the application, the way `bin/rails`
 /// is separate from the server. The application's `main` stays about serving.
-const MANAGE_RS: &str = "\
-//! The task runner. Every subcommand is a struct in `src/tasks/`.\n\
-//!\n\
-//! Nothing here lists them: `#[task]` registers each one at link time, so a\n\
-//! new file under `src/tasks/` is a new subcommand and this file never\n\
-//! changes.\n\
-//!\n\
-//! A task living in a *third-party* crate needs that crate referenced here --\n\
-//! `use their_crate as _;` -- or the linker drops it and the task silently\n\
-//! never appears.\n\
-\n\
-#[path = \"../tasks/mod.rs\"]\n\
-mod tasks;\n\
-\n\
-fn main() -> brocanth_task::anyhow::Result<()> {\n\
-    brocanth_task::main(brocanth_task::Context::boot()?)\n\
-}\n";
+// Raw, for the reason given on TASKS_MOD_RS: `\n\` strips the next line's
+// indentation, which flattened the one indented line in this file.
+const MANAGE_RS: &str = r#"//! The task runner. Every subcommand is a struct in `src/tasks/`.
+//!
+//! Nothing here lists them: `#[task]` registers each one at link time, so a
+//! new file under `src/tasks/` is a new subcommand and this file never
+//! changes.
+//!
+//! A task living in a *third-party* crate needs that crate referenced here --
+//! `use their_crate as _;` -- or the linker drops it and the task silently
+//! never appears.
+
+#[path = "../tasks/mod.rs"]
+mod tasks;
+
+fn main() -> brocanth_task::anyhow::Result<()> {
+    brocanth_task::main(brocanth_task::Context::boot()?)
+}
+"#;
 
 /// One task, as an example to copy.
-const TASKS_MOD_RS: &str = "\
-//! Every task in this project.\n\
-//!\n\
-//! A task is a `clap::Args` struct with a `run` method. Put one in its own\n\
-//! file, add a `mod` line here, and it is a subcommand of `manage`.\n\
-\n\
-use brocanth_task::{anyhow, clap, task, Context, Task};\n\
-\n\
-/// Say hello, to prove the wiring works.\n\
-#[task]\n\
-#[derive(clap::Args)]\n\
-pub struct Greet {\n\
-    /// Who to greet.\n\
-    #[arg(long, default_value = \"world\")]\n\
-    pub name: String,\n\
-}\n\
-\n\
-impl Task for Greet {\n\
-    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {\n\
-        println!(\"hello, {} (env: {})\", self.name, ctx.env());\n\
-        Ok(())\n\
-    }\n\
-}\n";
+// A raw string, and deliberately: the `\n\` continuation used elsewhere in
+// this file eats the newline *and every leading space on the next line*, so an
+// indented template written that way is emitted flat. This one was, until a
+// scaffolded project was run through rustfmt. PLAN.md §4.8 -- "if scaffolding
+// produces code you would not write by hand, the framework below it is wrong"
+// -- and nobody writes an unindented struct body.
+const TASKS_MOD_RS: &str = r#"//! Every task in this project.
+//!
+//! A task is a `clap::Args` struct with a `run` method. Put one in its own
+//! file, add a `mod` line here, and it is a subcommand of `manage`.
+
+use brocanth_task::{anyhow, clap, task, Context, Task};
+
+/// Say hello, to prove the wiring works.
+#[task]
+#[derive(clap::Args)]
+pub struct Greet {
+    /// Who to greet.
+    #[arg(long, default_value = "world")]
+    pub name: String,
+}
+
+impl Task for Greet {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        println!("hello, {} (env: {})", self.name, ctx.env());
+        Ok(())
+    }
+}
+"#;
 
 /// Where a brocanth crate comes from: a local checkout when one was named, the
 /// repository otherwise.
@@ -634,11 +683,23 @@ fn cargo_toml(a: &Answers) -> String {
         absent.join("\n")
     );
 
+    // With tasks there are two binaries, the application and `manage`, and
+    // cargo refuses to guess between them: a brand-new project where
+    // `cargo run` answers "could not determine which binary to run" is a bad
+    // first minute. Naming the default here costs one line and means the
+    // obvious command works.
+    let default_run = if a.has(Pick::Tasks) {
+        format!("default-run = {:?}\n", a.name)
+    } else {
+        String::new()
+    };
+
     format!(
         "[package]\n\
          name = {name:?}\n\
          version = \"0.1.0\"\n\
          edition = \"2021\"\n\
+         {default_run}\
          \n\
          # Exactly what was chosen when this application was scaffolded.\n\
          #\n\
@@ -650,6 +711,7 @@ fn cargo_toml(a: &Answers) -> String {
          [dependencies]\n\
          {deps}\n",
         name = a.name,
+        default_run = default_run,
         deps = deps.join("\n"),
         absent = if absent.contains("#   ") {
             absent
@@ -795,21 +857,27 @@ fn main_rs(a: &Answers) -> String {
             \x20   //    the application rather than silently not running.\n\
             \x20   let mut stack: MiddlewareStack<Ctx, Page> = MiddlewareStack::new();\n\
             \x20   for mount in app.router_plan().mounts() {\n\
-            \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Page>) -> Page =\n\
-            \x20           match mount.middleware.as_str() {\n",
+            \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Page>) -> Page = match mount.middleware.as_str() {\n",
         );
         if a.has(Pick::Logging) {
-            out.push_str("                \"request_log\" => plugins::logging::layer,\n");
+            out.push_str("            \"request_log\" => plugins::logging::layer,\n");
         }
         if a.has(Pick::Sessions) {
-            out.push_str("                \"session\" => plugins::sessions::layer,\n");
+            out.push_str("            \"session\" => plugins::sessions::layer,\n");
         }
+        // Wrapped the way rustfmt wants it. A scaffolded project should be
+        // fmt-clean on its first `cargo fmt`, or the generator is handing the
+        // developer a diff they did not write.
         out.push_str(
-            "                other => {\n\
-            \x20                   return Err(format!(\"`{other}` is mounted, but this binary has no layer for it\"))\n\
-            \x20               }\n\
-            \x20           };\n\
-            \x20       stack.use_at(&mount.pattern, layer).map_err(|e| e.to_string())?;\n\
+            "            other => {\n\
+            \x20               return Err(format!(\n\
+            \x20                   \"`{other}` is mounted, but this binary has no layer for it\"\n\
+            \x20               ))\n\
+            \x20           }\n\
+            \x20       };\n\
+            \x20       stack\n\
+            \x20           .use_at(&mount.pattern, layer)\n\
+            \x20           .map_err(|e| e.to_string())?;\n\
             \x20   }\n\
              \n",
         );
@@ -894,9 +962,7 @@ fn main_rs(a: &Answers) -> String {
         \x20           let mut ctx = Ctx::new(verb, path, matched.params());\n\
         \x20           stack.run(path, &mut ctx, handler)\n\
         \x20       }\n\
-        \x20       Dispatch::MethodNotAllowed { allow, .. } => {\n\
-        \x20           Page::new(405, format!(\"Allow: {allow}\"))\n\
-        \x20       }\n\
+        \x20       Dispatch::MethodNotAllowed { allow, .. } => Page::new(405, format!(\"Allow: {allow}\")),\n\
         \x20       Dispatch::NotFound => Page::new(404, \"Not Found\"),\n\
         \x20   }\n\
          }\n",

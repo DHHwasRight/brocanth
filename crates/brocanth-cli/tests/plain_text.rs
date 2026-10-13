@@ -552,5 +552,36 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
     );
     assert!(listed.contains("tasks"), "{listed}");
 
+    // `cargo run` with no `--bin`, which is what somebody types first. With
+    // two binaries cargo refuses to guess, so the manifest has to name one.
+    let ran = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["run", "--quiet"])
+        .current_dir(&root)
+        .output()
+        .expect("cargo run");
+    assert!(
+        ran.status.success(),
+        "`cargo run` does not pick a binary:\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    // PLAN.md §4.8: "if scaffolding produces code you would not write by
+    // hand, the framework below it is wrong." Nobody writes an unindented
+    // struct body, and a template built with `\n\` continuations loses the
+    // next line's leading whitespace -- which is exactly how `src/tasks/mod.rs`
+    // and `src/bin/manage.rs` shipped flat. rustfmt is the cheapest judge of
+    // "would you write this", so it judges.
+    let fmt = Command::new("cargo")
+        .args(["fmt", "--check"])
+        .current_dir(&root)
+        .output()
+        .expect("cargo fmt");
+    assert!(
+        fmt.status.success(),
+        "a freshly scaffolded project is not fmt-clean:\n{}{}",
+        String::from_utf8_lossy(&fmt.stdout),
+        String::from_utf8_lossy(&fmt.stderr)
+    );
+
     std::fs::remove_dir_all(&parent).unwrap();
 }
