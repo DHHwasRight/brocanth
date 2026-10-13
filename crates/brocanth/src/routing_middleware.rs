@@ -14,9 +14,51 @@
 //! 3. `except` wins over the pattern. A path that matches the pattern and
 //!    also matches any `except` entry skips that layer, and only that layer.
 //!
-//! The stack holds no runtime and spawns nothing. `O` is whatever the
-//! application's handler returns, so a future-returning handler works later
-//! without changing anything here.
+//! The stack holds no runtime and spawns nothing.
+//!
+//! # `O` is not enough for a future
+//!
+//! An earlier version of this header claimed that because `O` is whatever the
+//! application's handler returns, a future-returning handler would work later
+//! without changing anything here. **That claim is false.** It is recorded
+//! here rather than quietly deleted, because it is the kind of claim that gets
+//! planned against.
+//!
+//! A layer that awaits has to hold [`Next`] across the `.await`, because
+//! `next.run(ctx)` is the thing it awaits. So the future borrows the chain and
+//! the context, and its type has to name those borrows. But `O` is a **type
+//! parameter of the trait**, fixed when the stack is built. Neither borrow
+//! exists yet at that point, so `O` cannot name either one, and `rustc` says
+//! so:
+//!
+//! ```text
+//! error: lifetime may not live long enough
+//!    |
+//!    | .use_at("/{*rest}", |ctx: &mut (), next: Next<'_, (), Fut<'f>>| {
+//!    |                           -                                   - return type of
+//!    |                           |                                     closure is Fut<'2>
+//!    |                           let's call the lifetime of this reference `'1`
+//!    |     Box::pin(async move { next.run(ctx).await + 1 })
+//!    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires
+//!    |                                                     that `'1` must outlive `'2`
+//! ```
+//!
+//! A second, independent blocker sits under it: [`Next`] holds
+//! `terminal: &'a dyn Fn(..) -> O`, and `dyn Fn` is not `Sync`, so a future
+//! holding a [`Next`] is not `Send` even where every lifetime does line up.
+//! Nothing that borrows this chain can cross a task boundary.
+//!
+//! What fixes both is a trait whose output type is **lifetime-parametric**,
+//! which in today's Rust means a method-level `'a` and a concrete return type
+//! rather than a trait parameter: an `AsyncLayer` whose `call<'a>` returns
+//! `BoxFuture<'a, ..>`. Tower reaches the same place from the other side. Its
+//! `Service::Future` is an associated type and a layer *owns* its inner
+//! service rather than borrowing a chain, so nothing it awaits is a borrow of
+//! the stack.
+//!
+//! `docs/async-handlers.md` §4 has the full argument, both compiler errors in
+//! full, and the `AsyncLayer` shape that does work. It is not built here:
+//! nothing mounts a layer yet, so there is no caller to need it.
 
 use crate::routing_path::TemplateError;
 use crate::routing_pattern::ScopePattern;

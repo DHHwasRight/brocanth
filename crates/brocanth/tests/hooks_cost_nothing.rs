@@ -134,7 +134,34 @@ fn llvm_ir() -> String {
 }
 
 /// The body of the one `define` whose symbol contains `name`.
+///
+/// Follows an `alias`, because LLVM folds identical functions: when a probe
+/// compiles to the same instructions as another probe, the second symbol
+/// becomes `@a = unnamed_addr alias .., ptr @b` and there is no `define` for
+/// it. Reading that as "the probe moved" would throw away the result, and the
+/// result is the strongest possible pass -- the empty case was not merely
+/// small, it was byte-identical to a case already known to be free. So this
+/// strengthens the test rather than relaxing it: a probe can no longer escape
+/// inspection by being optimised into somebody else's symbol.
+///
+/// Measured while prototyping async handlers: an empty *async* hook family
+/// folded into `empty_before_dispatch`, whose body is `ret i1 true`. See
+/// `docs/async-handlers.md` §5.
 fn function_body(ir: &str, name: &str) -> Option<String> {
+    for line in ir.lines() {
+        let Some((lhs, rhs)) = line.split_once(" = ") else {
+            continue;
+        };
+        if !lhs.starts_with('@') || !lhs.contains(name) || !rhs.contains(" alias ") {
+            continue;
+        }
+        let target = rhs.rsplit_once("ptr @")?.1.trim();
+        return function_body(ir, target);
+    }
+    body_of_define(ir, name)
+}
+
+fn body_of_define(ir: &str, name: &str) -> Option<String> {
     let mut lines = ir.lines();
     while let Some(line) = lines.next() {
         if !line.starts_with("define") || !line.contains(name) {

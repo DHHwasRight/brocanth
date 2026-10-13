@@ -580,12 +580,53 @@ impl Pipeline {
         H: HookFamilies,
         F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
     {
-        let outcome = match self.before_dispatch::<H>(request, state) {
-            Ok(Flow::Continue) => dispatch(request, state),
-            Ok(Flow::Respond(response)) => Ok(*response),
-            Err(e) => Err(HandlerError::from(e)),
+        let outcome = match self.begin::<H>(request, state) {
+            Begin::Dispatch => dispatch(request, state),
+            Begin::Answered(outcome) => outcome,
         };
+        self.finish::<H>(request, state, outcome)
+    }
 
+    /// The first half of [`Pipeline::run`]: the request hooks, and what they
+    /// decided.
+    ///
+    /// This exists so that an **async** caller can put its own `.await`
+    /// between the two halves without the core ever holding a future. The
+    /// alternative was a `run_async` taking a higher-ranked closure that
+    /// returns a boxed future, and that costs a second `Box::pin` per request
+    /// on top of the handler's own, and an error message nobody can read. The
+    /// caller writes:
+    ///
+    /// ```ignore
+    /// // `ignore` rather than `no_run`: running this needs an executor, and
+    /// // the core does not have one. That is the point of the split.
+    /// let outcome = match app.begin(&mut request, &mut state) {
+    ///     Begin::Dispatch => handler.call(&mut cx).await,
+    ///     Begin::Answered(outcome) => outcome,
+    /// };
+    /// let response = app.finish(&mut request, &mut state, outcome);
+    /// ```
+    ///
+    /// With `H = NoHooks` this is `Begin::Dispatch` and nothing else survives
+    /// compilation, exactly as before. See `docs/async-handlers.md` §2.4.
+    #[inline]
+    pub fn begin<H: HookFamilies>(&self, request: &mut Request, state: &mut RequestState) -> Begin {
+        match self.before_dispatch::<H>(request, state) {
+            Ok(Flow::Continue) => Begin::Dispatch,
+            Ok(Flow::Respond(response)) => Begin::Answered(Ok(*response)),
+            Err(e) => Begin::Answered(Err(HandlerError::from(e))),
+        }
+    }
+
+    /// The second half of [`Pipeline::run`]: error hooks, response hooks and
+    /// `after_dispatch`, over whatever the handler produced.
+    #[inline]
+    pub fn finish<H: HookFamilies>(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+        outcome: Result<Response, HandlerError>,
+    ) -> Response {
         let mut response = match outcome {
             Ok(response) => response,
             Err(error) => self.render_error::<H>(&error, request, state),
@@ -597,6 +638,28 @@ impl Pipeline {
 
         self.after_dispatch::<H>(request, &response, state);
         response
+    }
+}
+
+/// What the request hooks left for the caller to do.
+///
+/// Not a `Result<Flow, _>`, because by this point a hook's error and a hook's
+/// short-circuit are the same thing to the caller: an outcome to hand to
+/// [`Pipeline::finish`].
+pub enum Begin {
+    /// No hook answered. Run the handler.
+    Dispatch,
+    /// A hook answered, or failed. Hand this to [`Pipeline::finish`].
+    Answered(Result<Response, HandlerError>),
+}
+
+impl std::fmt::Debug for Begin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dispatch => f.write_str("Dispatch"),
+            Self::Answered(Ok(r)) => write!(f, "Answered({})", r.status()),
+            Self::Answered(Err(e)) => write!(f, "Answered(Err({e}))"),
+        }
     }
 }
 

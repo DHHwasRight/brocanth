@@ -753,7 +753,11 @@ fn a_contributed_handler_runs_and_sees_the_context() {
     let mut cx = RouteCx::new(&request, &params, &context, &mut state);
 
     let route = app.route_plan().named("admin.dashboard").unwrap();
-    let response = (route.handler)(&mut cx).unwrap();
+    let response = route
+        .handler
+        .call_sync(&mut cx)
+        .expect("a sync route")
+        .unwrap();
     assert_eq!(response.body(), b"dashboard");
 }
 

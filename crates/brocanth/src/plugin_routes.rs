@@ -45,6 +45,8 @@
 //! [`App::mount_routes_default`]: crate::plugin_app::App::mount_routes_default
 //! [`App::mount_routes_where`]: crate::plugin_app::App::mount_routes_where
 
+use core::future::Future;
+use core::pin::Pin;
 use std::collections::HashMap;
 
 use thiserror::Error;
@@ -111,9 +113,119 @@ impl<'a, E> RouteCx<'a, E> {
     }
 }
 
-/// What a contributed route is.
+/// What a contributed route is, when it does not wait for anything.
+///
+/// Unchanged, deliberately. A sync route is the same box, the same vtable and
+/// the same call it has always been; see [`AnyHandler`] for what the one added
+/// branch costs.
 pub type Handler<E> =
     Box<dyn Fn(&mut RouteCx<'_, E>) -> Result<Response, HandlerError> + Send + Sync>;
+
+/// A future the core carries without owning a runtime.
+///
+/// `core::future::Future` and `alloc::boxed::Box` are std, so this adds no
+/// dependency: `tests/no_hidden_dependencies.rs` still sees three crates.
+/// `Send` is here because a bridged request crosses a task boundary, and a
+/// future that is not `Send` cannot cross one.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// What a contributed route is, when it waits.
+///
+/// The future borrows the [`RouteCx`], so it may read the request and write
+/// the request state across an `.await` without any of it being cloned. The
+/// price is one `Box::pin` per request, paid by async routes only.
+pub type AsyncHandler<E> = Box<
+    dyn for<'a, 'r> Fn(&'a mut RouteCx<'r, E>) -> BoxFuture<'a, Result<Response, HandlerError>>
+        + Send
+        + Sync,
+>;
+
+/// Boxes an async route. A convenience, not a necessity.
+///
+/// `Box::new(|cx: &mut RouteCx<'_, E>| Box::pin(async move { .. }))` compiles
+/// on its own wherever the expected type is already `AsyncHandler<E>` -- a
+/// `let` with that annotation, or an argument of
+/// [`RouteBundle::get_async`] -- because the expected type drives the
+/// closure's signature. Measured, not assumed: `tests/async_handlers.rs`
+/// registers one of each way.
+///
+/// This exists for the third place, where the expected type is a generic `F`
+/// and there is nothing to drive the inference. There rustc settles the
+/// closure's `Fn` impl at one concrete lifetime and then reports that it does
+/// not satisfy the higher-ranked bound, which is the famously unhelpful
+/// `lifetime may not live long enough` pointing at a `Box::pin` that is
+/// correct. `docs/async-handlers.md` §6.4 has the full error.
+pub fn async_handler<E, F>(f: F) -> AsyncHandler<E>
+where
+    F: for<'a, 'r> Fn(&'a mut RouteCx<'r, E>) -> BoxFuture<'a, Result<Response, HandlerError>>
+        + Send
+        + Sync
+        + 'static,
+{
+    Box::new(f)
+}
+
+/// A route, of either kind.
+///
+/// One table, not two. The router is generic over its payload, so an
+/// application with no async route can still hold a `Router<Handler<E>>` and
+/// pay nothing at all; an application with a mix holds a
+/// `Router<AnyHandler<E>>` and pays one predictable branch per dispatch, on
+/// top of the indirect call it already had.
+///
+/// Two tables were the other candidate, and they are wrong here for the reason
+/// `routing` gives for choosing `wayfind` over two `matchit` routers: a 405
+/// needs one matcher. Splitting the table by handler kind puts one path in two
+/// places and turns the `Allow` set into a merge.
+pub enum AnyHandler<E> {
+    Sync(Handler<E>),
+    Async(AsyncHandler<E>),
+}
+
+impl<E> AnyHandler<E> {
+    /// Whether running this route needs a runtime to drive it.
+    ///
+    /// The bridge reads it to decide between `spawn_blocking` and an inline
+    /// `.await`, before it touches the handler.
+    #[must_use]
+    pub fn is_async(&self) -> bool {
+        matches!(self, Self::Async(_))
+    }
+
+    /// Runs a sync route, or reports that this one is not sync.
+    ///
+    /// For a caller with no runtime at all: a test, or the `routes` command.
+    pub fn call_sync(&self, cx: &mut RouteCx<'_, E>) -> Option<Result<Response, HandlerError>> {
+        match self {
+            Self::Sync(handler) => Some(handler(cx)),
+            Self::Async(_) => None,
+        }
+    }
+
+    /// Runs the route, whichever kind it is.
+    ///
+    /// A sync route run this way is called inline and the future it is wrapped
+    /// in completes on its first poll, so nothing is queued and no waker is
+    /// used. It is still a future, which is the cost of the uniform call.
+    pub async fn call(&self, cx: &mut RouteCx<'_, E>) -> Result<Response, HandlerError> {
+        match self {
+            Self::Sync(handler) => handler(cx),
+            Self::Async(handler) => handler(cx).await,
+        }
+    }
+}
+
+impl<E> From<Handler<E>> for AnyHandler<E> {
+    fn from(handler: Handler<E>) -> Self {
+        Self::Sync(handler)
+    }
+}
+
+impl<E> std::fmt::Debug for AnyHandler<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_async() { "Async" } else { "Sync" })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Contribution
@@ -130,7 +242,7 @@ pub struct ContributedRoute<E> {
     pub source: String,
     /// One line for `brocanth routes`.
     pub description: String,
-    pub handler: Handler<E>,
+    pub handler: AnyHandler<E>,
 }
 
 impl<E> std::fmt::Debug for ContributedRoute<E> {
@@ -140,6 +252,7 @@ impl<E> std::fmt::Debug for ContributedRoute<E> {
             .field("path", &self.path)
             .field("verb", &self.verb)
             .field("source", &self.source)
+            .field("kind", &self.handler)
             .finish()
     }
 }
@@ -200,6 +313,20 @@ impl<'a, E> RouteBundle<'a, E> {
         self.described(name, verb, path, "", handler)
     }
 
+    /// Adds one route that waits.
+    ///
+    /// The kind is decided here, at registration, and never again. There is no
+    /// handler that is sync on Tuesday.
+    pub fn route_async(
+        &mut self,
+        name: &str,
+        verb: Verb,
+        path: &str,
+        handler: AsyncHandler<E>,
+    ) -> &mut Self {
+        self.described_async(name, verb, path, "", handler)
+    }
+
     /// [`RouteBundle::route`], with a line for `brocanth routes`.
     pub fn described(
         &mut self,
@@ -208,6 +335,29 @@ impl<'a, E> RouteBundle<'a, E> {
         path: &str,
         description: &str,
         handler: Handler<E>,
+    ) -> &mut Self {
+        self.push(name, verb, path, description, AnyHandler::Sync(handler))
+    }
+
+    /// [`RouteBundle::route_async`], with a line for `brocanth routes`.
+    pub fn described_async(
+        &mut self,
+        name: &str,
+        verb: Verb,
+        path: &str,
+        description: &str,
+        handler: AsyncHandler<E>,
+    ) -> &mut Self {
+        self.push(name, verb, path, description, AnyHandler::Async(handler))
+    }
+
+    fn push(
+        &mut self,
+        name: &str,
+        verb: Verb,
+        path: &str,
+        description: &str,
+        handler: AnyHandler<E>,
     ) -> &mut Self {
         let qualified = format!("{}.{}", self.source, name);
         if !(self.filter)(&qualified) {
@@ -253,6 +403,26 @@ impl<'a, E> RouteBundle<'a, E> {
 
     pub fn delete(&mut self, name: &str, path: &str, handler: Handler<E>) -> &mut Self {
         self.route(name, Verb::Delete, path, handler)
+    }
+
+    pub fn get_async(&mut self, name: &str, path: &str, handler: AsyncHandler<E>) -> &mut Self {
+        self.route_async(name, Verb::Get, path, handler)
+    }
+
+    pub fn post_async(&mut self, name: &str, path: &str, handler: AsyncHandler<E>) -> &mut Self {
+        self.route_async(name, Verb::Post, path, handler)
+    }
+
+    pub fn put_async(&mut self, name: &str, path: &str, handler: AsyncHandler<E>) -> &mut Self {
+        self.route_async(name, Verb::Put, path, handler)
+    }
+
+    pub fn patch_async(&mut self, name: &str, path: &str, handler: AsyncHandler<E>) -> &mut Self {
+        self.route_async(name, Verb::Patch, path, handler)
+    }
+
+    pub fn delete_async(&mut self, name: &str, path: &str, handler: AsyncHandler<E>) -> &mut Self {
+        self.route_async(name, Verb::Delete, path, handler)
     }
 
     pub(crate) fn into_errors(self) -> Vec<RouteError> {

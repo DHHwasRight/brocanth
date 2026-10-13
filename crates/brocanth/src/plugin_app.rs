@@ -41,8 +41,8 @@ use crate::plugin_api::{
 };
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
 use crate::plugin_hooks::{
-    ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline, Request,
-    RequestHook, RequestState, Response, ResponseHook,
+    Begin, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline,
+    Request, RequestHook, RequestState, Response, ResponseHook,
 };
 use crate::plugin_model::{ModelDispatch, ModelHooks};
 use crate::plugin_order::{sort, OrderError, Ordered};
@@ -860,6 +860,28 @@ impl<E, H: HookFamilies> App<E, H> {
         F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
     {
         self.pipeline.run::<H, F>(request, state, dispatch)
+    }
+
+    /// The request hooks, for a caller that will `.await` the handler itself.
+    ///
+    /// See [`Pipeline::begin`]. An async server layer calls `begin`, awaits
+    /// the handler, then calls [`App::finish`]; the core still holds no
+    /// future and spawns nothing.
+    #[inline]
+    pub fn begin(&self, request: &mut Request, state: &mut RequestState) -> Begin {
+        self.pipeline.begin::<H>(request, state)
+    }
+
+    /// The error hooks, response hooks and `after_dispatch`, over whatever the
+    /// handler produced. See [`App::begin`].
+    #[inline]
+    pub fn finish(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+        outcome: Result<Response, HandlerError>,
+    ) -> Response {
+        self.pipeline.finish::<H>(request, state, outcome)
     }
 
     /// A handle an ORM keeps so its write path can emit model events.
