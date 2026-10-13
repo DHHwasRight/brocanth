@@ -1,0 +1,22 @@
+[package]
+name = "brocanth-events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Change and ChangeSink: the seam between a model layer that publishes and a realtime layer that subscribes, so neither depends on the other."
+
+# No dependencies, and PLAN.md §8 is why: "if turning a feature off leaves its
+# dependencies in Cargo.lock, the split is wrong." `serde` is a real optional
+# dependency behind `dep:serde`, so with the feature off no serde code is
+# compiled or linked here. There are no dev-dependencies either: a round-trip
+# test would need a format crate, and the format belongs to whoever owns the
+# channel.
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+# Derives Serialize/Deserialize, for a crate that puts a change on a Postgres
+# LISTEN/NOTIFY channel (§10). Every field is public, so a crate that would
+# rather write its own wire type does not need this.
+serde = ["dep:serde"]
