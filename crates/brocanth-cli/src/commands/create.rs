@@ -1835,7 +1835,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_agent_brief_names_every_capability_this_project_does_not_have() {
         // The load-bearing half of AGENTS.md. A model that cannot see what is
         // absent assumes the framework has it, writes against it, and gets a

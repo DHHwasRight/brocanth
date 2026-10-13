@@ -789,35 +789,63 @@ step toward it. Deciding it needs its own document.
 
 ## 10. Migration path
 
+> **Status, 2026-10-13: steps 1 to 5 are landed.** Only step 6 remains, and it
+> still has no caller. Three steps turned out differently from the plan, and
+> the correction sits under the claim that was wrong rather than only in §13.
+
 There is one, and it is unusually cheap, because `Handler<E>` does not change
 and `Router<H>` does not change.
 
 **Step 1 — correct the lie.** Fix or delete `routing_middleware.rs:17-19`.
 This is worth doing on its own, today, whatever happens to the rest.
+*Landed in `47537ee`. The comment was replaced rather than deleted, with both
+compiler errors, because the claim is the kind people plan against.*
 
 **Step 2 — the two handler types.** `BoxFuture`, `AsyncHandler`, `AnyHandler`,
 `*_async` on `RouteBundle`, `ContributedRoute::handler: AnyHandler<E>`. One
 call site changes in the test suite. No plugin changes. No router changes.
+*Landed in `47537ee`, exactly as described.*
 
 **Step 3 — split the pipeline.** `Begin`, `Pipeline::begin`,
 `Pipeline::finish`, `App::begin`, `App::finish`. `Pipeline::run` keeps working
 and is implemented over the two halves. Purely additive.
+*Landed in `47537ee`, exactly as described.*
 
 **Step 4 — the bridge.** Choose per request on `is_async`. Keep `spawn_blocking`
 for sync routes. **Solve the panic story for the async arm before shipping it**;
 this is the one step with real unknowns.
+*Landed in `0e27087`. The panic is catchable — see §7, now rewritten — but
+three other things in that section were wrong: the hooks must **not** run on
+the worker, the bridge cannot simply hold a `Router<AnyHandler<E>>`, and
+reading `is_async` is not free. The measured result:*
+
+```
+async: 50 x 100ms in 107ms, peak 50 concurrent on  2 thread(s)
+ sync: 50 x 100ms in 115ms, peak 50 concurrent on 50 thread(s)
+```
 
 **Step 5 — the async request hook family**, if `brocanth-auth` wants
 `auth.session` written. Wire `AsyncRequestHook` through `HookRegistrar`,
 `HookSource::Families` and `plugin_hooking`. Document the ordering between the
 sync list and the async list, because it is a seam a plugin author will trip
 over.
+*Landed in `e70adcd`, and the seam does not exist: there are no longer two
+lists. One `Vec<RequestStep>` and one sort, so `after("session")` is obeyed
+whichever kind `session` is — including a **sync** hook ordered after an
+**async** one, which no two-list design can satisfy at all.*
 
 **Step 6 — async middleware**, if and when `MiddlewareCatalog` carries layers
 rather than names. Not before. There is no caller today.
+*Not landed. Still no caller.*
 
 Steps 1 to 3 are reversible and testable on their own. Step 4 is the one to
 plan time for. Steps 5 and 6 are optional and independent of each other.
+
+*Correction to that last sentence: step 5 is independent of step 6 but is
+**gated on step 4** for any real application. An application that installs an
+async request hook can no longer call `App::run` — that is a compile error, by
+design — so it needs the bridge. The document listed 5 as optional and
+independent; it is neither, for anyone who actually wants `auth.session`.*
 
 ---
 
@@ -911,6 +939,8 @@ that reached for tokio would be testing the wrong thing, and
    an async route against a `spawn_blocking` one is not measured, because the
    bridge was not modified. The 50-in-113ms figure in the brief is the number
    this change is meant to improve, and nothing here has improved it yet.
+   *Stale. Step 4 landed and measured it: 107ms on **2** threads against 115ms
+   on **50**. The win is the thread count, not the clock.*
 
 ---
 
@@ -926,3 +956,64 @@ question that needed answering. Whether the plugin contract should grow a fifth
 hook family is a different question, and this document does not answer it.
 
 Do not do step 6 until something mounts a middleware layer.
+
+---
+
+## 13. What building it proved wrong
+
+Steps 1 to 5 are landed. This section is the list of places where the document
+above was mistaken, kept so that the next person reading it knows which
+sentences to distrust.
+
+1. **§7's code sketch runs the request hooks on the worker**, calling them
+   "sync and cheap". They are cheap as a *response* hook. As a *request* hook
+   they are the one thing in the system most likely to block, because §8.1 of
+   this same document names `auth.session` — a session-store lookup — as what
+   most wants to be one. Shipping the sketch would have blocked a worker inside
+   exactly the hook the document exists to enable, and would have broken §7's
+   own promise that a sync route keeps every word of the module's
+   justification. Only the async arm's hooks moved.
+
+2. **§7 assumes the bridge can hold a `Router<AnyHandler<E>>`.** It cannot
+   without breaking every existing caller: `Router` has no `map` and does not
+   expose its handlers. A `RouteKind` trait and a default type parameter were
+   needed — which buys a better property anyway, since an application with no
+   async routes gets the function it had, with the inline arm and the panic net
+   deleted by a constant.
+
+3. **§7 implies reading `is_async` is free.** It is readable from
+   `Dispatch::Found`, but that arm is reached *after* the request hooks, and the
+   thread choice has to be made before them. The cost is an extra router lookup
+   on any table containing an async route, plus two mispredictions when a hook
+   reroutes across the kinds. Both are handled and tested; neither was in the
+   document.
+
+4. **§7's panic paragraph puts `catch_unwind` on the handler.** Not enough:
+   `spawn_blocking` also catches a panicking *hook*, so the net must cover
+   `begin` and `finish` or the two arms disagree about a panicking response
+   hook.
+
+5. **§5's "two families, two traits and two `Vec`s"** — the third was a choice,
+   not a consequence, and dropping it dissolves the ordering seam the document
+   flagged as its main open risk.
+
+6. **§11 claims the async hook family was partly built in the prototype.** None
+   of it was in the committed tree; only steps 1 to 3 were ported. Anyone
+   planning against that sentence would underestimate the work.
+
+7. **Cancellation is absent from this document entirely**, and it is a larger
+   change for application authors than the panic story it does discuss. A
+   handler that is a future is droppable, so a client disconnect can abandon one
+   mid-request — which `spawn_blocking` could not do, because a thread cannot be
+   cancelled. The precise statement about panics falls out of the same fact: a
+   panicking async handler is a handler cancelled at its last `.await`, plus an
+   unwind. So what it can leave half-done is what *cancellation* can leave
+   half-done, which is work whose cleanup is itself a future — a transaction
+   whose rollback is async, for instance. This belongs in the handler-authoring
+   docs.
+
+8. **One thing the document got right**, and it was listed as the open risk:
+   `catch_unwind` across an `.await` is sound here. Not because futures are
+   unwind-safe, but because the bridge stops looking at anything the handler
+   touched — the request and its state are local to the caught region, are shown
+   to no hook, and are dropped.
