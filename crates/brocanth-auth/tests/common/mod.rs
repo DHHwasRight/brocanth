@@ -8,10 +8,14 @@
 
 use std::sync::Arc;
 
+use brocanth_auth::accounts::Accounts;
+use brocanth_auth::alerts::LoginAlerts;
 use brocanth_auth::clock::TestClock;
 use brocanth_auth::http_client::{HttpResponse, StubHttp};
 use brocanth_auth::memory::MemoryStore;
+use brocanth_auth::mfa::Mfa;
 use brocanth_auth::oauth::{ClientConfig, OauthClient};
+use brocanth_auth::otp::Otp;
 use brocanth_auth::password::{PasswordCost, Passwords};
 use brocanth_auth::session::{SessionConfig, Sessions, SigningKey};
 
@@ -117,6 +121,36 @@ impl Fixture {
             self.clock.clone(),
             SigningKey::from_bytes([9u8; 32]),
             SessionConfig::default(),
+        )
+    }
+
+    pub fn accounts(&self) -> Accounts<MemoryStore, TestClock> {
+        Accounts::new(
+            self.store.clone(),
+            self.clock.clone(),
+            self.passwords.clone(),
+        )
+        .expect("accounts")
+    }
+
+    pub fn mfa(&self) -> Mfa<MemoryStore, TestClock> {
+        Mfa::new(self.store.clone(), self.clock.clone()).expect("mfa")
+    }
+
+    pub fn otp(&self) -> Otp<MemoryStore, TestClock> {
+        Otp::new(
+            self.store.clone(),
+            self.clock.clone(),
+            self.passwords.clone(),
+        )
+        .expect("otp")
+    }
+
+    pub fn alerts(&self) -> LoginAlerts<MemoryStore, TestClock> {
+        LoginAlerts::new(
+            self.store.clone(),
+            self.clock.clone(),
+            SigningKey::from_bytes([9u8; 32]),
         )
     }
 }

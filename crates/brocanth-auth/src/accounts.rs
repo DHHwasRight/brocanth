@@ -47,6 +47,7 @@ use std::sync::Arc;
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{Account, AccountId, EmailAddress};
+use crate::impersonation::AccountHolder;
 use crate::password::Passwords;
 use crate::storage::{AuthStore, NewAccount, StoreError};
 use crate::tokens::{IssuedToken, TokenPurpose, Tokens};
@@ -134,11 +135,7 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
     ///
     /// # Errors
     /// Fails when the OS has no randomness for the sentinel id.
-    pub fn new(
-        store: Arc<S>,
-        clock: Arc<C>,
-        passwords: Arc<Passwords>,
-    ) -> Result<Self, AuthError> {
+    pub fn new(store: Arc<S>, clock: Arc<C>, passwords: Arc<Passwords>) -> Result<Self, AuthError> {
         Ok(Self {
             tokens: Tokens::new(store.clone(), clock),
             store,
@@ -247,10 +244,7 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
     ///
     /// # Errors
     /// Fails only on a genuine store or randomness failure.
-    pub async fn request_password_reset(
-        &self,
-        email: &str,
-    ) -> Result<ResetRequested, AuthError> {
+    pub async fn request_password_reset(&self, email: &str) -> Result<ResetRequested, AuthError> {
         let account = match EmailAddress::parse(email) {
             Ok(parsed) => self.store.account_by_email(&parsed).await?,
             Err(_) => None,
@@ -312,15 +306,25 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
     /// Revokes every session, for the same reason as
     /// [`Accounts::reset_password`].
     ///
+    /// # Why the account arrives wrapped
+    ///
+    /// [`AccountHolder`] is the proof that the person asking is the account
+    /// holder and not an operator impersonating them.
+    /// [`AccountHolder::of`] refuses to build one from an impersonated
+    /// session, so "an operator cannot change a customer's password" is a thing
+    /// the signature enforces rather than a thing a runbook asks for. See
+    /// [`crate::impersonation`].
+    ///
     /// # Errors
     /// Returns [`AuthError::InvalidCredentials`] when the current password is
     /// wrong.
     pub async fn change_password(
         &self,
-        account: &AccountId,
+        who: &AccountHolder,
         current: &str,
         new_password: &str,
     ) -> Result<(), AuthError> {
+        let account = who.account();
         let stored = self
             .store
             .account(account)

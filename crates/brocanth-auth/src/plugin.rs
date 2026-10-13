@@ -23,6 +23,27 @@
 //! core's HTTP layer. Until then the offers are names with descriptions, which
 //! is honest: the plugin is waiting on the core rather than working around it.
 //!
+//! # What is deliberately *not* on [`Auth`]
+//!
+//! Second factors, one-time codes and login alerts are not reachable from the
+//! context item, and that is §8 rather than an oversight. [`Mfa`] needs a store
+//! that implements [`MfaStore`], [`Otp`] needs [`OtpStore`], [`LoginAlerts`]
+//! needs [`SignInLocationStore`] — and putting any of them on [`Auth`] would
+//! put those bounds on `AuthConfig`, so every application would have to
+//! implement a TOTP table to get a password form.
+//!
+//! An application that wants them builds them next to the plugin, from the same
+//! `Arc<S>`, and contributes them to the context itself. One line each, in its
+//! own `main`, where the decision is visible — which is what §8 asks for
+//! everywhere else too.
+//!
+//! [`Mfa`]: crate::mfa::Mfa
+//! [`Otp`]: crate::otp::Otp
+//! [`LoginAlerts`]: crate::alerts::LoginAlerts
+//! [`MfaStore`]: crate::storage::MfaStore
+//! [`OtpStore`]: crate::storage::OtpStore
+//! [`SignInLocationStore`]: crate::storage::SignInLocationStore
+//!
 //! # Nothing is constructed behind your back
 //!
 //! [`AuthConfig`] takes the store, the HTTP client, the clock, the signing key
@@ -268,15 +289,11 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Plugin for AuthPlugin<S, H, C> {
             }
         }
 
-        self.auth =
-            Some(Auth::build(config).map_err(|e| PluginError::new(e.to_string()))?);
+        self.auth = Some(Auth::build(config).map_err(|e| PluginError::new(e.to_string()))?);
         Ok(())
     }
 
-    fn configure_router(
-        &mut self,
-        catalog: &mut MiddlewareCatalog<'_>,
-    ) -> Result<(), PluginError> {
+    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
         catalog.offer(
             "auth.session",
             "reads the signed session cookie, refreshes its idle timer, and puts the \

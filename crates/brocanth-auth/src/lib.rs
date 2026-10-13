@@ -39,16 +39,37 @@
 //! * **A matching email never links automatically.** A provider that says
 //!   `alice@example.com` has not proved Alice consented; several real products
 //!   have shipped exactly that account takeover. See [`linking`].
-//! * **Login, registration and password reset do not reveal whether an address
-//!   exists** — not in the response shape and not in the timing. See
-//!   [`accounts`].
+//! * **Login, registration, password reset and one-time codes do not reveal
+//!   whether an address exists** — not in the response shape and not in the
+//!   timing. See [`accounts`] and [`otp`].
+//! * **Authentication is a set of factors, not a boolean.** [`FactorSet`] says
+//!   what was proved, [`FactorPolicy`] says what is enough, and the session
+//!   keeps the set. Adding passkeys later is a new variant rather than a new
+//!   flow. See [`mfa`].
+//! * **A TOTP code is spent once, not once per thirty seconds.** The step the
+//!   code belongs to is claimed atomically, which is the half of RFC 6238 most
+//!   implementations leave out. See [`totp`].
+//! * **An impersonated session says so, permanently.** Both identities are on
+//!   the session row, an operator cannot change the password, manage the second
+//!   factors, elevate, or impersonate again — each refused by a type and not by
+//!   a comment. See [`impersonation`].
+//!
+//! [`FactorSet`]: mfa::FactorSet
+//! [`FactorPolicy`]: mfa::FactorPolicy
 //!
 //! # Nothing is assumed about storage
 //!
 //! There is no database here, no SQL, no ORM and no pool. [`AuthStore`] is the
 //! whole storage contract — find an identity, create one, link a provider,
 //! store and revoke a session, store and consume a single-use token — and
-//! [`MemoryStore`] implements it for tests. An adapter over `brocanth-model`
+//! [`MemoryStore`] implements it for tests. Second factors, one-time codes and
+//! login alerts each add a *separate* trait on top of it ([`MfaStore`],
+//! [`OtpStore`], [`SignInLocationStore`]), so a product that wants none of them
+//! implements none of them.
+//!
+//! [`MfaStore`]: storage::MfaStore
+//! [`OtpStore`]: storage::OtpStore
+//! [`SignInLocationStore`]: storage::SignInLocationStore An adapter over `brocanth-model`
 //! is a later, separate crate, and it changes nothing above this line.
 //!
 //! # Nothing is assumed about HTTP either
@@ -67,36 +88,54 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+pub mod alerts;
 pub mod apple;
 pub mod clock;
 pub mod error;
 pub mod http_client;
 pub mod identity;
+pub mod impersonation;
 pub mod linking;
 pub mod memory;
+pub mod mfa;
 pub mod oauth;
+pub mod otp;
 pub mod password;
 pub mod plugin;
 pub mod providers;
 pub mod random;
+pub mod recovery;
 pub mod session;
 pub mod storage;
 pub mod tokens;
+pub mod totp;
 
 pub use accounts::{Accounts, LoginRejection, RegistrationAccepted, ResetRequested};
+pub use alerts::{LoginAlert, LoginAlerts};
 pub use clock::{Clock, SystemClock, TestClock, UnixTime};
 pub use error::AuthError;
 pub use http_client::{HttpClient, HttpRequest, HttpResponse};
 pub use identity::{Account, AccountId, EmailAddress, ProviderIdentity, ProviderLink};
+pub use impersonation::{AccountHolder, Impersonation, Restricted};
 pub use linking::{LinkRefusal, Linking, SignInOutcome};
 pub use memory::MemoryStore;
+pub use mfa::{
+    FactorClass, FactorKind, FactorPolicy, FactorSet, Mfa, SecondFactorRequirement, Sufficiency,
+    TotpEnrolment,
+};
 pub use oauth::{
     AuthorizationRequest, CallbackParams, ClientConfig, ClientSecret, FlowState, OauthClient,
     TokenResponse,
 };
+pub use otp::{Otp, OtpChallengeId, OtpCode, OtpDelivery, OtpRequested};
 pub use password::{PasswordCost, Passwords};
 pub use plugin::{Auth, AuthConfig, AuthPlugin};
 pub use providers::{Provider, ProviderKind};
+pub use recovery::{RecoveryCode, RecoveryCodes};
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
-pub use storage::{AuthStore, NewAccount, NewProviderLink, SessionRecord, StoreError, TokenRecord};
+pub use storage::{
+    AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord, OtpStore, SessionRecord,
+    SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+};
 pub use tokens::{IssuedToken, TokenPurpose, Tokens};
+pub use totp::{Totp, TotpSecret};

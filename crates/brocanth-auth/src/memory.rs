@@ -6,16 +6,18 @@
 //! specification of the trait's two hard requirements — the email is unique,
 //! and [`MemoryStore::consume_token`] deletes and returns under one lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
 use crate::clock::UnixTime;
 use crate::identity::{Account, AccountId, EmailAddress, ProviderLink};
+use crate::otp::OtpChallengeId;
 use crate::session::SessionId;
 use crate::storage::{
-    AuthStore, NewAccount, NewProviderLink, SessionRecord, StoreError, TokenRecord,
+    AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord, OtpStore, SessionRecord,
+    SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -25,6 +27,10 @@ struct State {
     links: HashMap<(String, String), ProviderLink>,
     sessions: HashMap<SessionId, SessionRecord>,
     tokens: HashMap<(TokenPurpose, String), TokenRecord>,
+    totp: HashMap<AccountId, TotpSecretRecord>,
+    recovery: HashMap<AccountId, HashSet<[u8; 32]>>,
+    otp: HashMap<OtpChallengeId, OtpChallengeRecord>,
+    locations: HashMap<(AccountId, [u8; 32]), UnixTime>,
 }
 
 /// An [`AuthStore`] in a `Mutex<HashMap>`.
@@ -59,6 +65,11 @@ impl MemoryStore {
         self.state.lock().expect("memory store lock").accounts.len()
     }
 
+    /// How many one-time-code challenges are outstanding. For assertions.
+    pub fn otp_challenge_count(&self) -> usize {
+        self.state.lock().expect("memory store lock").otp.len()
+    }
+
     fn stamp(&self) -> UnixTime {
         *self.now.lock().expect("memory store lock")
     }
@@ -82,10 +93,7 @@ impl AuthStore for MemoryStore {
             .cloned())
     }
 
-    async fn account_by_email(
-        &self,
-        email: &EmailAddress,
-    ) -> Result<Option<Account>, StoreError> {
+    async fn account_by_email(&self, email: &EmailAddress) -> Result<Option<Account>, StoreError> {
         Ok(self
             .state
             .lock()
@@ -103,7 +111,11 @@ impl AuthStore for MemoryStore {
         // The unique index, by hand. A store without one lets two concurrent
         // registrations of the same address both win.
         if let Some(email) = &new.email {
-            if state.accounts.values().any(|a| a.email.as_ref() == Some(email)) {
+            if state
+                .accounts
+                .values()
+                .any(|a| a.email.as_ref() == Some(email))
+            {
                 return Err(StoreError::EmailTaken);
             }
         }
@@ -132,11 +144,7 @@ impl AuthStore for MemoryStore {
         Ok(())
     }
 
-    async fn set_email_verified(
-        &self,
-        id: &AccountId,
-        verified: bool,
-    ) -> Result<(), StoreError> {
+    async fn set_email_verified(&self, id: &AccountId, verified: bool) -> Result<(), StoreError> {
         let mut state = self.state.lock().expect("memory store lock");
         let account = state
             .accounts
@@ -201,11 +209,7 @@ impl AuthStore for MemoryStore {
         Ok(link)
     }
 
-    async fn unlink_provider(
-        &self,
-        account: &AccountId,
-        provider: &str,
-    ) -> Result<(), StoreError> {
+    async fn unlink_provider(&self, account: &AccountId, provider: &str) -> Result<(), StoreError> {
         let mut state = self.state.lock().expect("memory store lock");
         state
             .links
@@ -254,10 +258,7 @@ impl AuthStore for MemoryStore {
         Ok(())
     }
 
-    async fn delete_sessions_for_account(
-        &self,
-        account: &AccountId,
-    ) -> Result<u64, StoreError> {
+    async fn delete_sessions_for_account(&self, account: &AccountId) -> Result<u64, StoreError> {
         let mut state = self.state.lock().expect("memory store lock");
         let before = state.sessions.len();
         state.sessions.retain(|_, s| &s.account != account);
@@ -298,5 +299,196 @@ impl AuthStore for MemoryStore {
             .tokens
             .retain(|(p, _), t| !(*p == purpose && &t.account == account));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MfaStore for MemoryStore {
+    async fn totp_secret(
+        &self,
+        account: &AccountId,
+    ) -> Result<Option<TotpSecretRecord>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .totp
+            .get(account)
+            .cloned())
+    }
+
+    async fn put_totp_secret(
+        &self,
+        account: &AccountId,
+        record: TotpSecretRecord,
+    ) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .totp
+            .insert(account.clone(), record);
+        Ok(())
+    }
+
+    async fn confirm_totp_secret(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+    ) -> Result<(), StoreError> {
+        if let Some(record) = self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .totp
+            .get_mut(account)
+        {
+            record.confirmed_at = Some(at);
+        }
+        Ok(())
+    }
+
+    async fn delete_totp_secret(&self, account: &AccountId) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .totp
+            .remove(account);
+        Ok(())
+    }
+
+    async fn claim_totp_step(&self, account: &AccountId, step: i64) -> Result<bool, StoreError> {
+        // One lock, compare-and-set. This is the replay defence: strictly
+        // greater, so the step a code was accepted for cannot be accepted
+        // again. In SQL it is a conditional `UPDATE` and a row count.
+        let mut state = self.state.lock().expect("memory store lock");
+        let Some(record) = state.totp.get_mut(account) else {
+            return Ok(false);
+        };
+        if step <= record.last_step {
+            return Ok(false);
+        }
+        record.last_step = step;
+        Ok(true)
+    }
+
+    async fn replace_recovery_codes(
+        &self,
+        account: &AccountId,
+        digests: Vec<[u8; 32]>,
+    ) -> Result<(), StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        if digests.is_empty() {
+            state.recovery.remove(account);
+        } else {
+            state
+                .recovery
+                .insert(account.clone(), digests.into_iter().collect());
+        }
+        Ok(())
+    }
+
+    async fn consume_recovery_code(
+        &self,
+        account: &AccountId,
+        digest: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        // Remove-and-report under one lock. Deleting is the check.
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .recovery
+            .get_mut(account)
+            .is_some_and(|set| set.remove(digest)))
+    }
+
+    async fn count_recovery_codes(&self, account: &AccountId) -> Result<u32, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .recovery
+            .get(account)
+            .map_or(0, |set| set.len() as u32))
+    }
+}
+
+#[async_trait]
+impl OtpStore for MemoryStore {
+    async fn create_otp_challenge(&self, challenge: OtpChallengeRecord) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .otp
+            .insert(challenge.id.clone(), challenge);
+        Ok(())
+    }
+
+    async fn claim_otp_attempt(
+        &self,
+        id: &OtpChallengeId,
+        now: UnixTime,
+    ) -> Result<Option<OtpChallengeRecord>, StoreError> {
+        // Increment and conditionally delete, under one lock. Two guesses
+        // cannot share one attempt.
+        let mut state = self.state.lock().expect("memory store lock");
+        let Some(record) = state.otp.get_mut(id) else {
+            return Ok(None);
+        };
+        record.attempts += 1;
+        let claimed = record.clone();
+        if claimed.attempts >= claimed.max_attempts || now >= claimed.expires_at {
+            state.otp.remove(id);
+        }
+        Ok(Some(claimed))
+    }
+
+    async fn delete_otp_challenge(&self, id: &OtpChallengeId) -> Result<(), StoreError> {
+        self.state.lock().expect("memory store lock").otp.remove(id);
+        Ok(())
+    }
+
+    async fn purge_otp_challenges(&self, now: UnixTime) -> Result<u64, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        let before = state.otp.len();
+        state.otp.retain(|_, c| c.expires_at > now);
+        Ok((before - state.otp.len()) as u64)
+    }
+}
+
+#[async_trait]
+impl SignInLocationStore for MemoryStore {
+    async fn record_sign_in_location(
+        &self,
+        account: &AccountId,
+        fingerprint: &[u8; 32],
+        at: UnixTime,
+    ) -> Result<Option<UnixTime>, StoreError> {
+        // Read the old value and write the new one under one lock, so two
+        // sign-ins at once cannot both call the network new.
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .locations
+            .insert((account.clone(), *fingerprint), at))
+    }
+
+    async fn count_sign_in_locations(&self, account: &AccountId) -> Result<u64, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .locations
+            .keys()
+            .filter(|(who, _)| who == account)
+            .count() as u64)
+    }
+
+    async fn purge_sign_in_locations(&self, unseen_since: UnixTime) -> Result<u64, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        let before = state.locations.len();
+        state.locations.retain(|_, seen| *seen >= unseen_since);
+        Ok((before - state.locations.len()) as u64)
     }
 }

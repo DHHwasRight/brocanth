@@ -25,10 +25,18 @@ jsonwebtoken = { version = "11", default-features = false, features = [
     "use_pem",
     "rust_crypto",
 ] }
-# HMAC-SHA256 for the session cookie signature and for hashing the verifier
-# half of a single-use token. RustCrypto again, same reason.
+# HMAC-SHA256 for the session cookie signature, for hashing the verifier half
+# of a single-use token, and for the keyed network digest a login alert stores.
+# RustCrypto again, same reason.
 hmac = "0.13"
 sha2 = "0.11"
+# HMAC-SHA1, and only for TOTP. RFC 6238's interoperable parameters are SHA-1,
+# six digits and thirty seconds, and an authenticator app that ignores the
+# `algorithm` field of the `otpauth:` URI — most of them — will produce SHA-1
+# codes whatever we ask for. HMAC needs its hash to be a PRF, not
+# collision-resistant, so the attack on SHA-1 does not reach here. RustCrypto,
+# so it shares `digest` with `sha2` and adds no second trait stack.
+sha1 = "0.11"
 # Constant-time equality. `==` on a byte slice short-circuits and leaks the
 # length of the common prefix, which is enough to forge a MAC one byte at a
 # time.

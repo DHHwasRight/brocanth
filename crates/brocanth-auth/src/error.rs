@@ -74,6 +74,26 @@ pub enum AuthError {
     #[error("no valid session")]
     NoSession,
 
+    /// An impersonated session attempted something only the account holder
+    /// may do.
+    ///
+    /// Not a credential failure and not a bug: the operator is exactly who they
+    /// said they were. See [`crate::impersonation::Restricted`] for the list
+    /// and for which type refuses each item.
+    #[error("an impersonated session may not do that")]
+    Impersonated,
+
+    /// The action needs a session that re-proved its identity recently, and
+    /// this one has not.
+    ///
+    /// The caller's move is a step-up: ask for a factor, then
+    /// [`Sessions::rotate`] to [`Privilege::Elevated`].
+    ///
+    /// [`Sessions::rotate`]: crate::session::Sessions::rotate
+    /// [`Privilege::Elevated`]: crate::session::Privilege::Elevated
+    #[error("that action needs a recently re-proved session")]
+    ElevationRequired,
+
     /// The provider identity is already linked to a different account.
     #[error("that provider account is already linked to another account")]
     AlreadyLinked,

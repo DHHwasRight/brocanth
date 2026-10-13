@@ -17,6 +17,18 @@
 //! identifier, carries the account and the absolute deadline over, and deletes
 //! the old row — in that order, so a crash leaves the user logged in rather
 //! than locked out.
+//!
+//! # What a session carries beyond its account
+//!
+//! Two fields, both added because leaving them out was the bug.
+//!
+//! [`SessionRecord::factors`] is the set of factors that proved this session —
+//! see [`crate::mfa`], where authentication is a set rather than a boolean.
+//! [`SessionRecord::impersonation`] names the operator when somebody is acting
+//! as somebody else, and is never cleared — see [`crate::impersonation`].
+//!
+//! [`SessionRecord::factors`]: crate::storage::SessionRecord::factors
+//! [`SessionRecord::impersonation`]: crate::storage::SessionRecord::impersonation
 
 use std::sync::Arc;
 
@@ -25,6 +37,8 @@ use serde::{Deserialize, Serialize};
 use crate::clock::{Clock, UnixTime};
 use crate::error::AuthError;
 use crate::identity::AccountId;
+use crate::impersonation::Impersonation;
+use crate::mfa::FactorSet;
 use crate::random::{b64, ct_eq, random_bytes, random_secret, unb64};
 use crate::storage::{AuthStore, SessionRecord};
 
@@ -197,6 +211,14 @@ pub struct SessionConfig {
     pub same_site: SameSite,
     /// Cookie path.
     pub path: String,
+    /// Seconds an impersonated session lives, from the moment it is opened.
+    ///
+    /// Separate from [`SessionConfig::absolute_timeout`] and much shorter, and
+    /// not negotiable per call: an operator looking at somebody's account is
+    /// doing a task that takes minutes, and a thirty-day window on somebody
+    /// else's identity is a window an operator will forget is open. See
+    /// [`Sessions::impersonate`].
+    pub impersonation_timeout: i64,
 }
 
 impl Default for SessionConfig {
@@ -214,6 +236,9 @@ impl Default for SessionConfig {
             // back from every provider.
             same_site: SameSite::Lax,
             path: "/".into(),
+            // Thirty minutes. Long enough to read a ticket and reproduce a bug,
+            // short enough that the tab left open over lunch is dead.
+            impersonation_timeout: 30 * 60,
         }
     }
 }
@@ -268,7 +293,7 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
         &self.config
     }
 
-    /// Opens a session.
+    /// Opens a session, recording no factors.
     ///
     /// # Errors
     /// Fails when randomness or the store fails.
@@ -277,14 +302,144 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
         account: &AccountId,
         privilege: Privilege,
     ) -> Result<StartedSession, AuthError> {
+        self.begin_with_factors(account, privilege, FactorSet::empty())
+            .await
+    }
+
+    /// Opens a session and records which factors proved it.
+    ///
+    /// This is what a sign-in should call. The set is the one
+    /// [`FactorPolicy::for_sign_in`] just accepted, and it stays on the row for
+    /// the session's whole life, so an audit log and a step-up check read the
+    /// same field rather than guessing.
+    ///
+    /// [`FactorPolicy::for_sign_in`]: crate::mfa::FactorPolicy::for_sign_in
+    ///
+    /// # Errors
+    /// Fails when randomness or the store fails.
+    pub async fn begin_with_factors(
+        &self,
+        account: &AccountId,
+        privilege: Privilege,
+        factors: FactorSet,
+    ) -> Result<StartedSession, AuthError> {
         let now = self.clock.now();
         self.create(
             account.clone(),
             privilege,
             now,
             now + self.config.absolute_timeout,
+            factors,
+            None,
         )
         .await
+    }
+
+    /// Opens a session in which an operator acts as somebody else.
+    ///
+    /// The new session's [`SessionRecord::account`] is `subject`, so every
+    /// authorization check in the application keeps working unchanged, and its
+    /// [`SessionRecord::impersonation`] names the operator, their own session,
+    /// the time and the reason. Both identities, on the row, for as long as the
+    /// row exists.
+    ///
+    /// Three things are decided here rather than offered as parameters, because
+    /// each is a refusal rather than a default:
+    ///
+    /// * The privilege is [`Privilege::Authenticated`]. There is no argument to
+    ///   pass [`Privilege::Elevated`], and [`Sessions::rotate`] will not grant
+    ///   it later either.
+    /// * The factor set is empty. Nobody proved anything as the subject, and
+    ///   writing the operator's factors there would be a lie that an audit
+    ///   reads as the subject having signed in.
+    /// * The deadline is [`SessionConfig::impersonation_timeout`] from now, not
+    ///   the operator's own deadline.
+    ///
+    /// The operator's own session is untouched and still alive;
+    /// [`Sessions::end_impersonation`] goes back to it.
+    ///
+    /// [`SessionRecord::account`]: crate::storage::SessionRecord::account
+    /// [`SessionRecord::impersonation`]: crate::storage::SessionRecord::impersonation
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Impersonated`] when the operator's session is
+    /// itself impersonated — impersonation does not nest, because a chain of
+    /// them records one operator and hides the rest.
+    /// Returns [`AuthError::ElevationRequired`] when the operator's session is
+    /// not [`Privilege::Elevated`]: wearing somebody's face is at least as
+    /// dangerous as changing your own password, so it needs at least the same
+    /// recent proof. Returns [`AuthError::Misconfigured`] for an operator
+    /// impersonating themselves, or an empty reason.
+    pub async fn impersonate(
+        &self,
+        operator_session: &SessionRecord,
+        subject: &AccountId,
+        reason: impl Into<String>,
+    ) -> Result<StartedSession, AuthError> {
+        if operator_session.is_impersonated() {
+            return Err(AuthError::Impersonated);
+        }
+        if operator_session.privilege < Privilege::Elevated {
+            return Err(AuthError::ElevationRequired);
+        }
+        if &operator_session.account == subject {
+            return Err(AuthError::misconfigured(
+                "an operator does not need to impersonate themselves",
+            ));
+        }
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(AuthError::misconfigured(
+                "impersonation records a reason; an empty one is not a record",
+            ));
+        }
+        let now = self.clock.now();
+        self.create(
+            subject.clone(),
+            Privilege::Authenticated,
+            now,
+            now + self.config.impersonation_timeout,
+            FactorSet::empty(),
+            Some(Impersonation {
+                operator: operator_session.account.clone(),
+                operator_session: operator_session.id.clone(),
+                started_at: now,
+                reason,
+            }),
+        )
+        .await
+    }
+
+    /// Ends an impersonation and hands back the operator's own cookie.
+    ///
+    /// The impersonated session is deleted rather than converted. There is no
+    /// code path anywhere that clears
+    /// [`SessionRecord::impersonation`]: a session that was opened by
+    /// impersonation can never become an ordinary one, which is what makes the
+    /// field trustworthy in an audit.
+    ///
+    /// [`SessionRecord::impersonation`]: crate::storage::SessionRecord::impersonation
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Misconfigured`] when the session is not
+    /// impersonated, and [`AuthError::NoSession`] when the operator's own
+    /// session has since expired or been revoked — in which case the operator
+    /// signs in again, which is correct.
+    pub async fn end_impersonation(&self, session: &SessionRecord) -> Result<SetCookie, AuthError> {
+        let marker = session
+            .impersonation
+            .as_ref()
+            .ok_or_else(|| AuthError::misconfigured("that session is not an impersonation"))?;
+        let operator = self
+            .store
+            .session(&marker.operator_session)
+            .await?
+            .ok_or(AuthError::NoSession)?;
+        self.store.delete_session(&session.id).await?;
+        Ok(self.cookie_for(
+            &operator.id,
+            operator.absolute_expires_at - self.clock.now(),
+        ))
     }
 
     /// Loads the session a cookie refers to, and marks it used.
@@ -298,13 +453,10 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     /// bad cookie is entitled to none of those distinctions.
     pub async fn load(&self, cookie_value: &str) -> Result<SessionRecord, AuthError> {
         let id = self.unseal(cookie_value).ok_or(AuthError::NoSession)?;
-        let session = self
-            .store
-            .session(&id)
-            .await?
-            .ok_or(AuthError::NoSession)?;
+        let session = self.store.session(&id).await?.ok_or(AuthError::NoSession)?;
         let now = self.clock.now();
-        if now >= session.absolute_expires_at || now - session.last_seen_at >= self.config.idle_timeout
+        if now >= session.absolute_expires_at
+            || now - session.last_seen_at >= self.config.idle_timeout
         {
             // A dead session is deleted on sight rather than left to a sweeper:
             // the request that discovered it is the cheapest place to do it.
@@ -326,14 +478,45 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     /// defence. The absolute deadline is carried over rather than reset, so
     /// rotating repeatedly cannot be used to hold a session open forever.
     ///
+    /// The factor set and the impersonation marker are carried over unchanged.
+    /// Use [`Sessions::rotate_with_factors`] when the rotation is itself a
+    /// step-up and new factors were proved.
+    ///
     /// # Errors
-    /// Returns [`AuthError::NoSession`] when the old session is gone.
+    /// Returns [`AuthError::NoSession`] when the old session is gone, and
+    /// [`AuthError::Impersonated`] when the caller asks for
+    /// [`Privilege::Elevated`] on a session an operator opened. That refusal is
+    /// one of the five in [`crate::impersonation::Restricted`]: an operator
+    /// acting as somebody else never reaches the privilege that guards changing
+    /// their credentials.
     pub async fn rotate(
         &self,
         old: &SessionId,
         privilege: Privilege,
     ) -> Result<StartedSession, AuthError> {
+        let factors = self
+            .store
+            .session(old)
+            .await?
+            .ok_or(AuthError::NoSession)?
+            .factors;
+        self.rotate_with_factors(old, privilege, factors).await
+    }
+
+    /// Rotates and replaces the factor set.
+    ///
+    /// # Errors
+    /// See [`Sessions::rotate`].
+    pub async fn rotate_with_factors(
+        &self,
+        old: &SessionId,
+        privilege: Privilege,
+        factors: FactorSet,
+    ) -> Result<StartedSession, AuthError> {
         let previous = self.store.session(old).await?.ok_or(AuthError::NoSession)?;
+        if previous.is_impersonated() && privilege >= Privilege::Elevated {
+            return Err(AuthError::Impersonated);
+        }
         let now = self.clock.now();
         let started = self
             .create(
@@ -341,6 +524,8 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
                 privilege,
                 now,
                 previous.absolute_expires_at,
+                factors,
+                previous.impersonation.clone(),
             )
             .await?;
         // New row first, old row second. The reverse order loses the session
@@ -405,12 +590,15 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create(
         &self,
         account: AccountId,
         privilege: Privilege,
         now: UnixTime,
         absolute_expires_at: UnixTime,
+        factors: FactorSet,
+        impersonation: Option<Impersonation>,
     ) -> Result<StartedSession, AuthError> {
         let id = SessionId::generate()?;
         let session = SessionRecord {
@@ -420,6 +608,8 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
             created_at: now,
             last_seen_at: now,
             absolute_expires_at,
+            factors,
+            impersonation,
         };
         self.store.create_session(session.clone()).await?;
         let cookie = self.cookie_for(&id, absolute_expires_at - now);
@@ -446,13 +636,12 @@ mod tests {
     #[test]
     fn a_tampered_cookie_does_not_unseal() {
         let key = SigningKey::from_bytes([7u8; 32]);
-        let sessions: Sessions<crate::memory::MemoryStore, crate::clock::TestClock> =
-            Sessions::new(
-                Arc::new(crate::memory::MemoryStore::new()),
-                Arc::new(crate::clock::TestClock::default()),
-                key,
-                SessionConfig::default(),
-            );
+        let sessions: Sessions<crate::memory::MemoryStore, crate::clock::TestClock> = Sessions::new(
+            Arc::new(crate::memory::MemoryStore::new()),
+            Arc::new(crate::clock::TestClock::default()),
+            key,
+            SessionConfig::default(),
+        );
         let id = SessionId::new("abcdef");
         let sealed = sessions.seal(&id);
         assert_eq!(sessions.unseal(&sealed), Some(id));
