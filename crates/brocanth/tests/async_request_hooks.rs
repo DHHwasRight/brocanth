@@ -427,16 +427,89 @@ fn an_async_hook_whose_plugin_forgot_the_marker_fails_the_build_and_names_it() {
         .map(|_| ())
         .unwrap_err();
 
-    let BuildError::AsyncHooksNotDeclared {
+    let BuildError::FamilyNotDeclared {
         ref instance,
         ref hook,
+        family,
+        marker,
     } = error
     else {
         panic!("expected the undeclared-family error, got {error}");
     };
     assert_eq!(instance, "forgetful");
     assert_eq!(hook, "forgetful.load");
+    assert_eq!(family, "async request");
+    assert_eq!(marker, "OnAsyncRequest");
     assert!(error.to_string().contains("OnAsyncRequest"), "{error}");
+}
+
+/// Registers a *response* hook and declares only `OnRequest`.
+///
+/// The same mistake as `Forgetful`, in the family that has been in the core
+/// since before the async one existed. It was silent until the check that
+/// caught `Forgetful` was generalised: `H::RESPONSE` is false, so the loop
+/// that would run this hook is compiled out and nothing says so.
+struct Mute;
+
+impl Plugin for Mute {
+    type Config = ();
+    type Provides = NoContext;
+    const NAME: &'static str = "mute";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new(_config: Self::Config) -> Self {
+        Self
+    }
+}
+
+struct Stamper;
+
+impl brocanth::plugin_hooks::ResponseHook for Stamper {
+    fn on_response(
+        &self,
+        _request: &Request,
+        _response: &mut Response,
+        _state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+impl HookSource for Mute {
+    // The lie: it installs a response hook below.
+    type Families = OnRequest;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        registrar.response("etag", Order::new(), Stamper);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_response_hook_whose_plugin_forgot_the_marker_fails_the_build_too() {
+    // The hole the async guard exposed and did not close on its own. An ETag
+    // hook that never runs is a performance bug rather than a security one,
+    // which is why it survived -- but a hook that is registered, sorted,
+    // stored and then never called should never be silent, whatever it does.
+    let error = AppBuilder::new()
+        .plugin_hooking(Mute)
+        .build()
+        .map(|_| ())
+        .unwrap_err();
+
+    let BuildError::FamilyNotDeclared {
+        ref instance,
+        ref hook,
+        family,
+        marker,
+    } = error
+    else {
+        panic!("expected the undeclared-family error, got {error}");
+    };
+    assert_eq!(instance, "mute");
+    assert_eq!(hook, "mute.etag");
+    assert_eq!(family, "response");
+    assert_eq!(marker, "OnResponse");
 }
 
 #[test]

@@ -105,13 +105,18 @@ pub enum BuildError {
     HooksNotDeclared { instance: String, plugin: String },
 
     #[error(
-        "`{instance}` registered the async request hook `{hook}`, and its \
-         `HookSource::Families` does not name `OnAsyncRequest`. The record is what decides \
-         whether the request chain survives compilation, so the hook would never run. Write \
-         `type Families = OnAsyncRequest;`, or `Both<OnAsyncRequest, ..>` beside the \
-         families it already names"
+        "`{instance}` registered the {family} hook `{hook}`, and its `HookSource::Families` \
+         does not name `{marker}`. The record is what decides whether that chain survives \
+         compilation, so the hook would be sorted, stored, and never run. Write \
+         `type Families = {marker};`, or `Both<{marker}, ..>` beside the families it \
+         already names"
     )]
-    AsyncHooksNotDeclared { instance: String, hook: String },
+    FamilyNotDeclared {
+        instance: String,
+        hook: String,
+        family: &'static str,
+        marker: &'static str,
+    },
 
     #[error("the hook order does not resolve: {0}")]
     Order(
@@ -591,18 +596,51 @@ impl<E, H> AppBuilder<E, H> {
             }
         }
 
-        // A hook registered into a family the record does not name would be
-        // sorted, stored, and then never run, because the entry point that
-        // walks it is compiled out. For the async family that silence would
-        // be a session lookup that did not happen, so it stops the build.
-        if !H::ASYNC_REQUEST {
-            if let Some(first) = request
-                .iter()
-                .find(|o| matches!(o.value, RequestStep::Async(_)))
-            {
-                return Err(BuildError::AsyncHooksNotDeclared {
-                    instance: first.id.instance().to_string(),
-                    hook: first.id.to_string(),
+        // A hook registered into a family the record does not name is sorted,
+        // stored, and then never run, because the entry point that walks it is
+        // compiled out by `if !H::FAMILY { return }`. Nothing says so at run
+        // time -- the hook is simply absent, which is the hardest kind of bug
+        // to see. So every family is checked, and the build stops naming the
+        // marker to write.
+        //
+        // All five, not only the async one: an unrun ETag hook is a
+        // performance bug where an unrun session lookup is a security one, but
+        // neither should be silent.
+        let undeclared = [
+            (
+                !H::ASYNC_REQUEST,
+                request
+                    .iter()
+                    .find(|o| matches!(o.value, RequestStep::Async(_)))
+                    .map(|o| &o.id),
+                "async request",
+                "OnAsyncRequest",
+            ),
+            (
+                !H::REQUEST,
+                request
+                    .iter()
+                    .find(|o| matches!(o.value, RequestStep::Sync(_)))
+                    .map(|o| &o.id),
+                "request",
+                "OnRequest",
+            ),
+            (
+                !H::RESPONSE,
+                response.first().map(|o| &o.id),
+                "response",
+                "OnResponse",
+            ),
+            (!H::ERROR, error.first().map(|o| &o.id), "error", "OnError"),
+            (!H::MODEL, model.any_id(), "model", "OnModel"),
+        ];
+        for (missing, found, family, marker) in undeclared {
+            if let (true, Some(id)) = (missing, found) {
+                return Err(BuildError::FamilyNotDeclared {
+                    instance: id.instance().to_string(),
+                    hook: id.to_string(),
+                    family,
+                    marker,
                 });
             }
         }

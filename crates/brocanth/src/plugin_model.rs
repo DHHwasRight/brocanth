@@ -146,6 +146,17 @@ impl ModelHooks {
         self.pending.is_empty() && self.sorted.is_empty()
     }
 
+    /// The id of some registered hook, for an error that has to name one.
+    ///
+    /// Which one is unspecified: a `HashMap` has no first. The caller is
+    /// reporting that a family was registered into but never declared, and any
+    /// hook in it points at the plugin that has to be fixed. Only `pending` is
+    /// searched, because this is asked before [`Self::finish`] has run.
+    #[doc(hidden)]
+    pub fn any_id(&self) -> Option<&HookId> {
+        self.pending.values().flatten().map(|o| &o.id).next()
+    }
+
     /// How many hooks are registered for `Ev`.
     pub fn len_for<Ev: ModelEvent>(&self) -> usize {
         self.sorted
