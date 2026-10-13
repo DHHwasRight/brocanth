@@ -191,9 +191,11 @@ impl Harness {
     pub async fn migrate_once<M: MigratorTrait>(&self) -> Result<(), DbErr> {
         use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
-        // An arbitrary constant, fixed so that every brocanth-model test
-        // process picks the same lock.
-        const LOCK: i64 = 0x6272_6f6d_6f64; // "bromod"
+        // The eight ASCII bytes of `brocmodl`, read as a big-endian `i64`, so
+        // the row in `pg_locks` can be read back as text and identified.
+        // `brocanth-jobs`, `brocanth-storage` and `brocanth-cache` key their
+        // own migration locks the same way, each on its own word.
+        const LOCK: i64 = 0x6272_6f63_6d6f_646c; // "brocmodl"
 
         let txn = self.conn.begin().await?;
         txn.execute_raw(Statement::from_sql_and_values(

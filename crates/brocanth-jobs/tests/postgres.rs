@@ -218,15 +218,32 @@ async fn a_recurring_schedule_fires_once_per_window_on_postgres() {
         .await
         .expect("install");
 
+    // The counts are read per queue, not from `tick_schedules`'s return value.
+    // That return value is queue-wide, and this test shares a database with
+    // the others and with whatever a previous run left behind.
+    async fn ready(queue: &Queue, name: &str) -> u64 {
+        queue
+            .stats()
+            .await
+            .expect("stats")
+            .queues
+            .iter()
+            .find(|q| q.queue == name)
+            .map_or(0, |q| q.ready)
+    }
+
     // Nothing is due at noon: the next occurrence is 13:00.
-    assert_eq!(queue.tick_schedules().await.expect("tick"), 0);
+    queue.tick_schedules().await.expect("tick");
+    assert_eq!(ready(&queue, &t).await, 0);
 
     // 13:00:10, ten seconds late and well inside the grace period.
     clock.set(noon + chrono::Duration::seconds(3_610));
-    assert_eq!(queue.tick_schedules().await.expect("tick"), 1, "one firing");
+    queue.tick_schedules().await.expect("tick");
+    assert_eq!(ready(&queue, &t).await, 1, "one firing");
+    queue.tick_schedules().await.expect("tick");
     assert_eq!(
-        queue.tick_schedules().await.expect("tick"),
-        0,
+        ready(&queue, &t).await,
+        1,
         "the fired marker stuck, so the same window does not fire twice"
     );
 
@@ -246,4 +263,97 @@ async fn a_recurring_schedule_fires_once_per_window_on_postgres() {
         .shutdown(Duration::from_secs(5))
         .await
         .expect("shutdown");
+
+    // Take the schedule back out. It is the one row in this file that outlives
+    // its test, and a later run's `tick_schedules` would otherwise fire it.
+    assert!(queue.remove_recurring(&t).await.expect("remove"));
+}
+
+/// The regression test for the one bug in this crate that a laptop cannot see.
+///
+/// `CREATE TABLE IF NOT EXISTS` is not atomic on Postgres: the catalogue check
+/// and the create are separate steps. Eight sessions calling [`Queue::migrate`]
+/// at the same moment against a schema that does not yet exist is a rolling
+/// deploy in miniature, and before the advisory lock went in it failed with
+/// `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`.
+///
+/// It has to race against an **empty** schema, because once the tables are
+/// there `IF NOT EXISTS` short-circuits and there is nothing left to race. So
+/// the test makes a throwaway Postgres schema, points the queue at it through
+/// the `options=-c search_path=...` parameter, and drops it afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migrate_is_safe_from_several_connections_at_once() {
+    let Some(url) = common::postgres_url() else {
+        common::skipped(
+            "no Postgres server; set BROCANTH_JOBS_TEST_POSTGRES or \
+             BROCANTH_TEST_DATABASE_URL to run this",
+        );
+        return;
+    };
+
+    let schema = format!("brocanth_jobs_race_{}", std::process::id());
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connecting to Postgres");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&admin)
+    .await
+    .expect("dropping any leftover schema");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .expect("creating the throwaway schema");
+
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let scoped = format!("{url}{separator}options=-c%20search_path%3D{schema}");
+
+    // Eight at once. Each opens its own pool, exactly as eight instances of an
+    // application booting together would.
+    let mut racers = Vec::new();
+    for _ in 0..8 {
+        let scoped = scoped.clone();
+        racers.push(tokio::spawn(async move {
+            let queue = Queue::connect(&scoped).await?;
+            queue.migrate().await
+        }));
+    }
+    let mut failures = Vec::new();
+    for racer in racers {
+        if let Err(e) = racer.await.expect("the task did not panic") {
+            failures.push(e.to_string());
+        }
+    }
+
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename",
+    )
+    .bind(&schema)
+    .fetch_all(&admin)
+    .await
+    .expect("listing the tables");
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&admin)
+    .await
+    .expect("dropping the throwaway schema");
+
+    assert!(
+        failures.is_empty(),
+        "concurrent migrate() must not fail: {failures:?}"
+    );
+    assert_eq!(
+        tables,
+        [
+            "brocanth_dead_jobs",
+            "brocanth_job_schedules",
+            "brocanth_jobs"
+        ],
+        "all three tables, created once"
+    );
 }

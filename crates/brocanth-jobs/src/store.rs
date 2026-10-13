@@ -371,36 +371,49 @@ impl Store {
     /// statements back as text, so an application that keeps every change in
     /// `migrations/` can paste them into one.
     ///
-    /// On Postgres it runs under an advisory lock. `CREATE TABLE IF NOT
-    /// EXISTS` is **not** safe to run concurrently there: two of them pass the
-    /// existence check together and then collide in the catalogue with
-    /// `duplicate key value violates unique constraint
-    /// "pg_class_relname_nsp_index"`. Two workers booting at the same moment
-    /// is exactly that race, and so is a parallel test suite against one
-    /// server. `pg_advisory_xact_lock` serialises them, and Postgres rolls DDL
-    /// back, so a half-finished schema cannot be left behind. SQLite needs
-    /// none of this: it takes one write lock for the whole file anyway.
+    /// # One transaction, and on Postgres one lock
+    ///
+    /// **`CREATE TABLE IF NOT EXISTS` is not atomic on Postgres.** The
+    /// catalogue check and the create are separate steps, so two sessions that
+    /// check at the same moment both decide to create, and the loser fails
+    /// with
+    ///
+    /// ```text
+    /// duplicate key value violates unique constraint "pg_class_relname_nsp_index"
+    /// ```
+    ///
+    /// — a system-catalogue error that names nothing a reader can act on. The
+    /// thing that triggers it is a **rolling deploy**: two instances booting
+    /// together is the ordinary case, not an edge, and it does not reproduce on
+    /// a laptop running one process, which is how it survives.
+    ///
+    /// `pg_advisory_xact_lock` held for the whole transaction serialises them,
+    /// and Postgres rolls DDL back, so all three tables arrive or none do.
+    ///
+    /// **SQLite needs neither the lock nor, strictly, the transaction**, and
+    /// that was checked rather than assumed: eight connections calling this at
+    /// once on one file pass with the statements run straight at the pool.
+    /// SQLite takes one write lock for the whole file, so the check and the
+    /// create inside `IF NOT EXISTS` cannot be split by another writer. The
+    /// transaction is taken anyway, for the other half of the guarantee —
+    /// **all three tables or none** — which SQLite delivers because it rolls
+    /// DDL back too. `BEGIN IMMEDIATE` rather than `BEGIN`, for the reason
+    /// this module's header gives.
+    ///
+    /// Both races have a test: `tests/postgres.rs` and `tests/queue.rs`.
     pub(crate) async fn migrate(&self) -> Result<()> {
-        match &self.backend {
+        transaction!(&self.backend, |tx, dialect| {
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
+            if dialect == Dialect::Postgres {
                 sqlx::query("SELECT pg_advisory_xact_lock($1)")
                     .bind(MIGRATION_LOCK)
                     .execute(&mut *tx)
                     .await?;
-                for statement in schema(Dialect::Postgres) {
-                    sqlx::query(*statement).execute(&mut *tx).await?;
-                }
-                tx.commit().await?;
             }
-            #[cfg(feature = "sqlite")]
-            Backend::Sqlite(pool) => {
-                for statement in schema(Dialect::Sqlite) {
-                    sqlx::query(*statement).execute(pool).await?;
-                }
+            for statement in schema(dialect) {
+                sqlx::query(*statement).execute(&mut *tx).await?;
             }
-        }
+        });
         Ok(())
     }
 
@@ -961,10 +974,15 @@ impl Store {
 }
 
 /// The DDL, which [`crate::Queue::schema_sql`] also hands out as text.
-/// The advisory-lock key [`Store::migrate`] holds on Postgres. Arbitrary, and
-/// fixed so that every process creating these tables picks the same one.
+/// The advisory-lock key [`Store::migrate`] holds on Postgres.
+///
+/// The eight ASCII bytes of `brocjobs`, read as a big-endian `i64`, so the row
+/// in `pg_locks` can be read back as text and identified instead of looked up.
+/// `brocanth-storage` uses `brocstor` and `brocanth-cache` uses `brocache` the
+/// same way, and three different keys is the point: these are three schemas
+/// that have no reason to wait for each other.
 #[cfg(feature = "postgres")]
-const MIGRATION_LOCK: i64 = 0x6272_6f6a_6f62; // "brojob"
+const MIGRATION_LOCK: i64 = 0x6272_6f63_6a6f_6273; // "brocjobs"
 
 pub(crate) fn schema(dialect: Dialect) -> &'static [&'static str] {
     match dialect {

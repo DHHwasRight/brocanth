@@ -654,3 +654,72 @@ async fn the_queue_reaches_a_handler_through_the_context() {
 
     assert_eq!(cx.get::<Queue, _>().backend(), "sqlite");
 }
+
+// ---------------------------------------------------------------------------
+// 8. The other half of the migration-concurrency guarantee
+// ---------------------------------------------------------------------------
+
+/// `CREATE TABLE IF NOT EXISTS` racing itself, on SQLite.
+///
+/// On Postgres this is a real bug: the catalogue check and the create are
+/// separate steps, so two sessions both decide to create and the loser fails
+/// with a `pg_class_relname_nsp_index` violation. `tests/postgres.rs` holds
+/// that race, and `Store::migrate` answers it with an advisory lock.
+///
+/// SQLite has no advisory locks, and the finding here is that it needs none:
+/// this passes with or without the transaction `Store::migrate` now takes,
+/// because SQLite holds one write lock for the whole file and no second writer
+/// can get between the check and the create. The transaction buys the other
+/// half — all three tables or none — not this half. Written down because
+/// "SQLite is probably fine" is the kind of claim that is worth a test rather
+/// than a sentence.
+///
+/// The pool is opened once first, on purpose, and that is a finding of its
+/// own. Opening eight *new* pools on a database file that does not exist yet
+/// fails intermittently with `SQLITE_BUSY`, in `Queue::connect` rather than in
+/// `migrate`: the switch into WAL mode needs an exclusive lock that
+/// `sqlite3_busy_timeout` explicitly cannot wait on, which sqlx documents on
+/// `SqliteConnectOptions::journal_mode`. That is a separate bug and this test
+/// deliberately does not cover it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn migrate_is_safe_from_several_connections_at_once() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let url = format!("sqlite://{}", dir.path().join("race.db").display());
+
+    // Create the file and settle its journal mode before anything races.
+    let first = Queue::connect(&url).await.expect("connect");
+
+    let mut racers = Vec::new();
+    for _ in 0..8 {
+        let url = url.clone();
+        racers.push(tokio::spawn(async move {
+            Queue::connect(&url).await.expect("connect").migrate().await
+        }));
+    }
+    for racer in racers {
+        racer
+            .await
+            .expect("the task did not panic")
+            .expect("concurrent migrate() must not fail");
+    }
+
+    // The queue works afterwards, which is the proof that the schema is whole
+    // rather than merely that nothing returned an error.
+    let t = token("sqlite-race");
+    first
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .await
+        .expect("enqueue");
+    assert_eq!(first.stats().await.expect("stats").ready, 1);
+    first
+        .dead_jobs(1, 0)
+        .await
+        .expect("the dead letter is there");
+    first
+        .tick_schedules()
+        .await
+        .expect("the schedules are there");
+}

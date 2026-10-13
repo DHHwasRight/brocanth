@@ -28,6 +28,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
 
+# No backend feature here on purpose. It is the same `sqlx` the library
+# depends on, so whichever driver the build already has is the driver the
+# tests get. `tests/postgres.rs` uses it to build the throwaway schema the
+# migration-race test needs, which `Queue` has no reason to expose.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
+
 # This crate, as a dev-dependency on itself, with SQLite on. It is the answer
 # to the question the default change raises: `cargo test -p brocanth-jobs` on a
 # laptop with no server running still has to run the suite.
