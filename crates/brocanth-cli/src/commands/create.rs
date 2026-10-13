@@ -91,13 +91,21 @@ pub enum Pick {
     Sessions,
     /// The model layer: SeaORM, validations and migrations
     Model,
+    /// Project tasks: a `manage` binary whose subcommands are your own structs
+    Tasks,
 }
 
 impl Pick {
-    const ALL: [Pick; 4] = [Pick::Logging, Pick::Config, Pick::Sessions, Pick::Model];
+    const ALL: [Pick; 5] = [
+        Pick::Logging,
+        Pick::Config,
+        Pick::Sessions,
+        Pick::Model,
+        Pick::Tasks,
+    ];
     /// What a non-interactive run gets when no flag chose. Stated rather than
     /// guessed at: the command prints the flag that overrides it.
-    const DEFAULT: [Pick; 2] = [Pick::Logging, Pick::Config];
+    const DEFAULT: [Pick; 3] = [Pick::Logging, Pick::Config, Pick::Tasks];
 
     fn key(self) -> &'static str {
         match self {
@@ -105,6 +113,7 @@ impl Pick {
             Pick::Config => "config",
             Pick::Sessions => "sessions",
             Pick::Model => "model",
+            Pick::Tasks => "tasks",
         }
     }
 
@@ -116,6 +125,7 @@ impl Pick {
             Pick::Config => "config/<env>.toml, merged; without it nothing links a TOML parser",
             Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
             Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
+            Pick::Tasks => "a `manage` binary; a struct with #[task] becomes a subcommand",
         }
     }
 
@@ -124,6 +134,7 @@ impl Pick {
         match self {
             Pick::Config => Some("brocanth-config"),
             Pick::Model => Some("brocanth-model"),
+            Pick::Tasks => Some("brocanth-task"),
             Pick::Logging | Pick::Sessions => None,
         }
     }
@@ -163,7 +174,10 @@ impl Answers {
         self.picks
             .iter()
             .copied()
-            .filter(|p| *p != Pick::Config)
+            // Config is not a plugin instance, and Tasks is a second binary
+            // rather than anything the application registers: neither belongs
+            // in the list `main` mounts.
+            .filter(|p| *p != Pick::Config && *p != Pick::Tasks)
             .collect()
     }
 
@@ -496,8 +510,69 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
             config_toml(a),
         ));
     }
+    if a.has(Pick::Tasks) {
+        // The marker the global `brocanth` binary walks up to find. Its
+        // presence is what makes a directory a project; nothing reads it yet.
+        files.push((
+            "brocanth.toml".to_string(),
+            format!("[project]\nname = {:?}\n", a.name),
+        ));
+        // `cargo manage seed_demo` from anywhere in the project. `--` stops
+        // cargo reading the task's own flags as its own.
+        files.push((
+            ".cargo/config.toml".to_string(),
+            "[alias]\n# `cargo manage <task>` runs a task without naming the binary.\nmanage = \"run --quiet --bin manage --\"\n".to_string(),
+        ));
+        files.push(("src/bin/manage.rs".to_string(), MANAGE_RS.to_string()));
+        files.push(("src/tasks/mod.rs".to_string(), TASKS_MOD_RS.to_string()));
+    }
     files
 }
+
+/// The task runner binary: separate from the application, the way `bin/rails`
+/// is separate from the server. The application's `main` stays about serving.
+const MANAGE_RS: &str = "\
+//! The task runner. Every subcommand is a struct in `src/tasks/`.\n\
+//!\n\
+//! Nothing here lists them: `#[task]` registers each one at link time, so a\n\
+//! new file under `src/tasks/` is a new subcommand and this file never\n\
+//! changes.\n\
+//!\n\
+//! A task living in a *third-party* crate needs that crate referenced here --\n\
+//! `use their_crate as _;` -- or the linker drops it and the task silently\n\
+//! never appears.\n\
+\n\
+#[path = \"../tasks/mod.rs\"]\n\
+mod tasks;\n\
+\n\
+fn main() -> brocanth_task::anyhow::Result<()> {\n\
+    brocanth_task::main(brocanth_task::Context::boot()?)\n\
+}\n";
+
+/// One task, as an example to copy.
+const TASKS_MOD_RS: &str = "\
+//! Every task in this project.\n\
+//!\n\
+//! A task is a `clap::Args` struct with a `run` method. Put one in its own\n\
+//! file, add a `mod` line here, and it is a subcommand of `manage`.\n\
+\n\
+use brocanth_task::{anyhow, clap, task, Context, Task};\n\
+\n\
+/// Say hello, to prove the wiring works.\n\
+#[task]\n\
+#[derive(clap::Args)]\n\
+pub struct Greet {\n\
+    /// Who to greet.\n\
+    #[arg(long, default_value = \"world\")]\n\
+    pub name: String,\n\
+}\n\
+\n\
+impl Task for Greet {\n\
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {\n\
+        println!(\"hello, {} (env: {})\", self.name, ctx.env());\n\
+        Ok(())\n\
+    }\n\
+}\n";
 
 /// Where a brocanth crate comes from: a local checkout when one was named, the
 /// repository otherwise.
@@ -835,6 +910,9 @@ fn type_of(pick: Pick) -> &'static str {
         Pick::Sessions => "Sessions",
         Pick::Model => "Model",
         Pick::Config => "ConfigPlugin",
+        // Never reached: `plugins()` drops it before this is called, because
+        // tasks are a binary beside the application, not a layer inside it.
+        Pick::Tasks => unreachable!("tasks is not a plugin"),
     }
 }
 

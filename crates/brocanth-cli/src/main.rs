@@ -11,6 +11,7 @@ mod project;
 mod tui;
 mod ui;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -38,6 +39,8 @@ fn help_styles() -> clap::builder::Styles {
     name = "brocanth",
     version,
     about = "A server framework for HTML-first applications. Nothing ships unless it is asked for.",
+    after_help = "Inside a project, any other subcommand is a task: it is built and run by \
+the project's own binary. `brocanth tasks` lists the ones this project defines.",
     styles = help_styles(),
     max_term_width = 100,
 )]
@@ -81,6 +84,14 @@ enum Command {
     Generate(commands::generate::GenerateArgs),
     /// Serve the application and rebuild as it changes
     Dev(commands::dev::DevArgs),
+    /// A task defined in this project, run by the project's own binary
+    ///
+    /// Anything this tool does not recognise is a task. `brocanth` is
+    /// installed once; the tasks it can run live in a project and are
+    /// compiled into that project's binary, so they cannot be listed here.
+    /// Inside a project, `brocanth tasks` lists them.
+    #[command(external_subcommand)]
+    Task(Vec<OsString>),
 }
 
 fn main() -> ExitCode {
@@ -97,6 +108,7 @@ fn main() -> ExitCode {
         Command::Check(args) => commands::check::run(&ui, dir, args),
         Command::Generate(args) => commands::generate::run(&ui, dir, args),
         Command::Dev(args) => commands::dev::run(&ui, dir, args),
+        Command::Task(args) => commands::delegate::run(&ui, dir, args),
     };
 
     match result {

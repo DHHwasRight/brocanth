@@ -1,0 +1,5 @@
+error: unknown argument; `#[task]` accepts only `name = "..."`
+ --> tests/ui/fail_unknown_argument.rs:4:8
+  |
+4 | #[task(nmae = "typo")]
+  |        ^^^^

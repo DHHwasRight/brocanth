@@ -37,3 +37,4 @@ ratatui = { version = "0.30.2", default-features = false, features = [
     "layout-cache",
     "underline-color",
 ] }
+cargo_metadata = "0.23.1"

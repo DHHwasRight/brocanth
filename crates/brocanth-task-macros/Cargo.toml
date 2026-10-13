@@ -1,0 +1,15 @@
+[package]
+name = "brocanth-task-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The #[task] attribute. Not used directly; brocanth-task re-exports it."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"

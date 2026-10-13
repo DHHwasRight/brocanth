@@ -8,6 +8,7 @@
 pub mod build;
 pub mod check;
 pub mod create;
+pub mod delegate;
 pub mod dev;
 pub mod generate;
 pub mod routes;

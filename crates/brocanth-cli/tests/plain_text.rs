@@ -481,9 +481,76 @@ fn a_directory_that_is_not_an_application_says_which_flag_to_pass() {
     assert_eq!(run.code, 1);
     assert!(run.stderr.contains("error[no-package]:"), "{}", run.stderr);
     assert!(
-        run.stderr.contains("run `brocanth create <NAME>` to make one"),
+        run.stderr
+            .contains("run `brocanth create <NAME>` to make one"),
         "{}",
         run.stderr
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore = "runs cargo build over a generated project; minutes, not milliseconds"]
+fn a_scaffolded_project_builds_and_its_tasks_run() {
+    // The end-to-end claim: `create` writes a project, cargo compiles it, and
+    // the task the scaffold put in `src/tasks/` is a working subcommand of
+    // the `manage` binary. Every other test here stops short of a compiler,
+    // so this is the only one that would notice a scaffold that is merely
+    // well-formed text.
+    let parent = temp("scaffold-builds");
+    let checkout = checkout();
+    let run = run_in(
+        &parent,
+        &[
+            "create",
+            "built",
+            "--with",
+            "logging,config,tasks",
+            "--no-git",
+            "--brocanth-path",
+            &checkout,
+        ],
+        &[],
+    );
+    assert_eq!(run.code, 0, "{}", run.whole());
+    let root = parent.join("built");
+
+    // The four files tasks add, and the alias that makes them reachable.
+    for path in [
+        "brocanth.toml",
+        ".cargo/config.toml",
+        "src/bin/manage.rs",
+        "src/tasks/mod.rs",
+    ] {
+        assert!(root.join(path).is_file(), "{path} is missing");
+    }
+    let alias = std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap();
+    assert!(alias.contains("manage = "), "{alias}");
+
+    let built = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "--quiet"])
+        .current_dir(&root)
+        .output()
+        .expect("cargo build");
+    assert!(
+        built.status.success(),
+        "the scaffold does not compile:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    // And the task actually registered, through the slice, in a project this
+    // tool wrote from scratch.
+    let manage = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["run", "--quiet", "--bin", "manage", "--", "tasks"])
+        .current_dir(&root)
+        .output()
+        .expect("cargo run");
+    let listed = String::from_utf8_lossy(&manage.stdout);
+    assert!(
+        listed.contains("greet"),
+        "the example task is absent:\n{listed}"
+    );
+    assert!(listed.contains("tasks"), "{listed}");
+
+    std::fs::remove_dir_all(&parent).unwrap();
 }

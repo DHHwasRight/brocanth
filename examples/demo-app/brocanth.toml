@@ -1,0 +1,4 @@
+# The marker the `brocanth` binary walks up to find. Its presence is what
+# makes this directory a project; the contents are not read yet.
+[project]
+name = "demo-app"
