@@ -56,6 +56,7 @@ What it writes:
   blog/.cargo/config.toml        110 bytes
   blog/src/bin/manage.rs         556 bytes
   blog/src/tasks/mod.rs          551 bytes
+  blog/AGENTS.md                2696 bytes
 
     core      a router handing a request and a context to a handler
     logging   a line per request; the core assumes no log layer
@@ -69,6 +70,27 @@ Those last two lines are the point of the whole design, not a progress
 message. A capability nobody asked for is not compiled, not linked, and has no
 entry in `Cargo.lock`. `cargo tree` on a fresh project will not show an ORM or
 a SQL driver.
+
+### `AGENTS.md`, and why the scaffold writes one
+
+brocanth is meant to be written by a language model as much as by a person, so
+every project gets a brief for one. It is generated rather than copied,
+because the useful part is **this project's** facts:
+
+```
+**Absent:** `sessions`, `model` — not compiled, not linked, absent from
+`Cargo.lock`. Do not write code that uses them; add the dependency and name
+the plugin in `main` first.
+```
+
+A model that cannot see what is missing assumes the framework has it, writes
+against it, and then tries to fix the compile error by guessing harder.
+Naming the gap turns that into "add the dependency first". The brief also
+carries the check-your-work loop, how to add a route, and the house style.
+
+`docs/llm-authoring.md` in this checkout is the longer version: what cannot
+compile and can therefore be relied on, what can still go wrong and therefore
+needs a test, and a map of the crates.
 
 ### Choosing what goes in
 
@@ -315,6 +337,10 @@ decision.
 
 ## Where to go next
 
+- `docs/llm-authoring.md` — the brief for writing brocanth with a language
+  model: the 36 mistakes that cannot compile, the ones that still can, and the
+  crate map. Worth reading even if you are writing by hand, because it is the
+  shortest statement of what the framework guarantees.
 - `PLAN.md` — the argument the whole project is built on. §8 (modularity) is
   the one that explains why a scaffold tells you what it left out.
 - `crates/brocanth-task/README.md` — tasks in full.

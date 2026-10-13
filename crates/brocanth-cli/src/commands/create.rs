@@ -567,7 +567,120 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         files.push(("src/bin/manage.rs".to_string(), MANAGE_RS.to_string()));
         files.push(("src/tasks/mod.rs".to_string(), TASKS_MOD_RS.to_string()));
     }
+    files.push(("AGENTS.md".to_string(), agents_md(a)));
     files
+}
+
+/// The brief a coding agent reads before it writes anything here.
+///
+/// Written by the scaffold rather than left to the developer, because the
+/// facts it carries are *this* project's: which capabilities were chosen, and
+/// therefore which are absent from the binary. A model that cannot see that
+/// list guesses, and the guess is always that the framework has the feature.
+///
+/// `AGENTS.md` is the filename the common agent tools look for; Claude Code
+/// also reads `CLAUDE.md`, and a developer who wants that can symlink it.
+fn agents_md(a: &Answers) -> String {
+    let mut chosen = vec!["`core`  the router, the context, the plugin seams".to_string()];
+    for pick in &a.picks {
+        chosen.push(format!("`{}`  {}", pick.key(), pick.gist()));
+    }
+    let absent: Vec<String> = Pick::ALL
+        .iter()
+        .filter(|p| !a.has(**p))
+        .map(|p| format!("`{}`", p.key()))
+        .collect();
+    let absent = if absent.is_empty() {
+        "Nothing. Every capability was chosen.".to_string()
+    } else {
+        format!(
+            "{} — not compiled, not linked, absent from `Cargo.lock`. Do not \
+             write code that uses them; add the dependency and name the plugin \
+             in `main` first.",
+            absent.join(", ")
+        )
+    };
+
+    let tasks = if a.has(Pick::Tasks) {
+        "\n## Tasks\n\nA task is a `clap::Args` struct with `#[task]` on it, in its own file under\n\
+         `src/tasks/`, plus a `mod` line. It becomes a subcommand automatically —\n\
+         registration happens at link time and there is no list to add it to.\n\n\
+         ```\ncargo manage tasks          # every task in this binary\ncargo manage greet --name x\n```\n"
+    } else {
+        ""
+    };
+
+    format!(
+        "# Working in {name}\n\
+         \n\
+         A brief for a coding agent. Written by `brocanth create`, so the lists\n\
+         below are this project's and not the framework's in general.\n\
+         \n\
+         ## Check your work\n\
+         \n\
+         Run these after every change, in this order. They are ordered by how\n\
+         fast they fail.\n\
+         \n\
+         ```\n\
+         brocanth check     # wiring first: mounts and middleware offers, then cargo\n\
+         cargo test\n\
+         cargo clippy --all-targets -- -D warnings\n\
+         cargo fmt --check\n\
+         ```\n\
+         \n\
+         `brocanth routes` prints the route table and, below it, every mounted\n\
+         middleware with the file and line where it was mounted. Use it instead\n\
+         of guessing what covers a request.\n\
+         \n\
+         ## What this binary contains\n\
+         \n\
+         {chosen}\n\
+         \n\
+         **Absent:** {absent}\n\
+         \n\
+         That is the framework's central rule: a capability nobody asked for is\n\
+         not compiled and not linked. If you need one, add it to `Cargo.toml`\n\
+         *and* name its plugin in `src/main.rs`. Nothing registers itself.\n\
+         \n\
+         ## Adding a route\n\
+         \n\
+         A route is a file. `src/pages/about.rs` is `/about`;\n\
+         `src/pages/users/[id].rs` is `/users/{{id}}`. Two edits:\n\
+         \n\
+         1. Write `src/pages/<name>.rs` with a `pub fn handle(ctx: &mut Ctx) -> Page`.\n\
+         2. In `src/pages/mod.rs`, add `pub mod <name>;` and a `routes.file(..)`\n\
+         \x20  row. It names the **file**, not the URL, so the table and the\n\
+         \x20  filesystem cannot drift apart.\n\
+         \n\
+         A handler returns a value and never writes a response itself. That is\n\
+         what makes a half-written body on an error impossible rather than\n\
+         unlikely.\n\
+         {tasks}\
+         \n\
+         ## House style\n\
+         \n\
+         - A comment says **why**, next to the decision, and what was chosen\n\
+         \x20 against. Not what the line does.\n\
+         - A test name is a sentence describing the guarantee it protects.\n\
+         - Prefer a type that cannot be built wrong over a check that can be\n\
+         \x20 forgotten.\n\
+         - State a limit where someone would look for it rather than leaving it\n\
+         \x20 to be discovered.\n\
+         \n\
+         ## Framework reference\n\
+         \n\
+         `docs/llm-authoring.md` in the brocanth checkout is the full brief: what\n\
+         cannot compile and can therefore be relied on, what can still go wrong\n\
+         and therefore needs a test, and the crate map.\n",
+        name = a.title,
+        chosen = chosen
+            .iter()
+            .map(|l| format!("- {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        absent = absent,
+        tasks = tasks,
+    )
 }
 
 /// The task runner binary: separate from the application, the way `bin/rails`
@@ -1719,6 +1832,42 @@ mod tests {
                 .validate_sections(&claimed)
                 .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
         }
+    }
+
+    #[test]
+    #[test]
+    fn the_agent_brief_names_every_capability_this_project_does_not_have() {
+        // The load-bearing half of AGENTS.md. A model that cannot see what is
+        // absent assumes the framework has it, writes against it, and gets a
+        // compile error it then tries to fix by guessing harder. Naming the
+        // gap is what turns that into "add the dependency first".
+        let only_logging = scaffold(&answers(&[Pick::Logging]));
+        let brief = &only_logging
+            .iter()
+            .find(|(p, _)| p == "AGENTS.md")
+            .expect("every project gets an agent brief")
+            .1;
+
+        assert!(brief.contains("`logging`"), "{brief}");
+        for absent in ["`config`", "`sessions`", "`model`", "`tasks`"] {
+            assert!(
+                brief.contains(absent),
+                "{absent} is absent from the binary and unnamed in the brief:\n{brief}"
+            );
+        }
+
+        // And the opposite end: with everything chosen there is nothing to
+        // warn about, and the brief must not invent a gap.
+        let everything = scaffold(&answers(&Pick::ALL));
+        let full = &everything
+            .iter()
+            .find(|(p, _)| p == "AGENTS.md")
+            .expect("an agent brief")
+            .1;
+        assert!(
+            full.contains("Nothing. Every capability was chosen."),
+            "{full}"
+        );
     }
 
     #[test]
