@@ -86,6 +86,7 @@ use serde::{Deserialize, Serialize};
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{AccountId, EmailAddress};
+use crate::mfa::{FactorKind, FactorSet, Verified};
 use crate::password::Passwords;
 use crate::random::{random_bytes, random_secret};
 use crate::storage::{OtpChallengeRecord, OtpStore};
@@ -348,6 +349,26 @@ impl<S: OtpStore, C: Clock> Otp<S, C> {
     /// [`Passwords::verify_or_dummy`], so a challenge that does not exist costs
     /// the same argon2id verification as one that does.
     ///
+    /// # What the proof is worth
+    ///
+    /// The [`Verified`] it answers names [`FactorKind::EmailOtp`], which is
+    /// [`FactorClass::Second`] — so **it does not open a session on its own**:
+    /// [`FactorPolicy::admit`] answers [`Admission::Insufficient`] for a proof
+    /// with no primary factor in it. That is deliberate. A code mailed to an
+    /// address proves control of a mailbox, and whether a mailbox is a primary
+    /// credential is a decision about your product, not about cryptography — a
+    /// password reset already means it can be, which is exactly why this crate
+    /// will not make it so by default. An application that wants PocketBase's
+    /// `auth-with-otp` as a sign-in in its own right has decided otherwise, and
+    /// says so in one line with
+    /// [`Verified::without_a_credential_check`], whose name is the review
+    /// prompt.
+    ///
+    /// [`FactorClass::Second`]: crate::mfa::FactorClass::Second
+    /// [`FactorPolicy::admit`]: crate::mfa::FactorPolicy::admit
+    /// [`Admission::Insufficient`]: crate::mfa::Admission::Insufficient
+    /// [`Verified::without_a_credential_check`]: crate::mfa::Verified::without_a_credential_check
+    ///
     /// # Errors
     /// Returns [`AuthError::InvalidCredentials`] for a wrong code, an expired
     /// challenge, an unknown challenge, a challenge whose attempts are spent,
@@ -359,7 +380,7 @@ impl<S: OtpStore, C: Clock> Otp<S, C> {
         &self,
         challenge: &OtpChallengeId,
         presented: &str,
-    ) -> Result<AccountId, AuthError> {
+    ) -> Result<Verified, AuthError> {
         let now = self.clock.now();
         let record = self.store.claim_otp_attempt(challenge, now).await?;
 
@@ -378,7 +399,10 @@ impl<S: OtpStore, C: Clock> Otp<S, C> {
         // Single use. The row survived the attempt claim because attempts were
         // left; a correct code spends the whole challenge.
         self.store.delete_otp_challenge(challenge).await?;
-        Ok(record.account)
+        Ok(Verified::minted(
+            record.account,
+            FactorSet::of([FactorKind::EmailOtp]),
+        ))
     }
 
     /// Deletes challenges that expired before now, and answers how many.

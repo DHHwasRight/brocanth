@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use brocanth_auth::accounts::{Accounts, RegistrationNotice, ResetOutcome};
 use brocanth_auth::error::AuthError;
+use brocanth_auth::mfa::{FactorKind, FactorSet};
 use brocanth_auth::password::{PasswordCost, Passwords};
 use common::Fixture;
 
@@ -70,12 +71,14 @@ async fn login_gives_one_answer_for_four_different_reasons() {
         assert_eq!(err.to_string(), "invalid credentials");
     }
 
-    // And the right password still works.
+    // And the right password still works, and answers a proof as well as an
+    // account.
     let ada = accounts
         .login("ada@example.com", "the right password")
         .await
         .expect("the real credentials");
-    assert_eq!(ada.email.unwrap().as_str(), "ada@example.com");
+    assert_eq!(ada.account().email.as_ref().unwrap().as_str(), "ada@example.com");
+    assert_eq!(ada.proof().kinds(), FactorSet::of([FactorKind::Password]));
 }
 
 #[tokio::test]
@@ -102,10 +105,11 @@ async fn registration_succeeds_whether_or_not_the_address_is_taken() {
 
     // The second attempt created nothing and did not change the password.
     assert_eq!(f.store.account_count(), 1);
-    accounts
+    let still = accounts
         .login("ada@example.com", "a long enough password")
         .await
         .expect("the original password still works");
+    assert!(still.account().email.is_some());
 }
 
 #[tokio::test]

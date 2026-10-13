@@ -46,6 +46,12 @@
 //!   what was proved, [`FactorPolicy`] says what is enough, and the session
 //!   keeps the set. Adding passkeys later is a new variant rather than a new
 //!   flow. See [`mfa`].
+//! * **A sign-in that skipped the second factor does not compile.** Checking a
+//!   credential mints a [`Verified`]; the policy turns one into an [`Admitted`],
+//!   which has no public constructor; and opening a session consumes the
+//!   [`Admitted`] by value. §9's rule for `Verified` — *"must be consumed, not
+//!   produced"* — one layer down, because a second factor a handler can forget
+//!   is a second factor some handler eventually will forget. See [`mfa`].
 //! * **A TOTP code is spent once, not once per thirty seconds.** The step the
 //!   code belongs to is claimed atomically, which is the half of RFC 6238 most
 //!   implementations leave out. See [`totp`].
@@ -56,6 +62,8 @@
 //!
 //! [`FactorSet`]: mfa::FactorSet
 //! [`FactorPolicy`]: mfa::FactorPolicy
+//! [`Verified`]: mfa::Verified
+//! [`Admitted`]: mfa::Admitted
 //!
 //! # Nothing is assumed about storage
 //!
@@ -110,7 +118,7 @@ pub mod storage;
 pub mod tokens;
 pub mod totp;
 
-pub use accounts::{Accounts, LoginRejection, RegistrationAccepted, ResetRequested};
+pub use accounts::{Accounts, Authenticated, LoginRejection, RegistrationAccepted, ResetRequested};
 pub use alerts::{LoginAlert, LoginAlerts};
 pub use clock::{Clock, SystemClock, TestClock, UnixTime};
 pub use error::AuthError;
@@ -120,8 +128,8 @@ pub use impersonation::{AccountHolder, Impersonation, Restricted};
 pub use linking::{LinkRefusal, Linking, SignInOutcome};
 pub use memory::MemoryStore;
 pub use mfa::{
-    FactorClass, FactorKind, FactorPolicy, FactorSet, Mfa, SecondFactorRequirement, Sufficiency,
-    TotpEnrolment,
+    Admission, Admitted, Elevation, Enrolled, FactorClass, FactorKind, FactorPolicy, FactorSet,
+    Mfa, RecoveryAccepted, SecondFactorRequirement, TotpEnrolment, Verified,
 };
 pub use oauth::{
     AuthorizationRequest, CallbackParams, ClientConfig, ClientSecret, FlowState, OauthClient,

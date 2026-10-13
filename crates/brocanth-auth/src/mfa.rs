@@ -34,7 +34,7 @@
 //!
 //! The sufficiency rule for a sign-in, in one sentence: **a standalone factor
 //! alone, or a primary factor plus — when the account has a second factor to
-//! give — one second factor.** [`FactorPolicy::for_sign_in`] is that sentence.
+//! give — one second factor.** [`FactorPolicy::admit`] is that sentence.
 //!
 //! # And its relationship to [`Privilege`]
 //!
@@ -61,6 +61,64 @@
 //! [`Sessions::rotate`]: crate::session::Sessions::rotate
 //! [`SessionRecord::elevation_is_fresh`]: crate::storage::SessionRecord::elevation_is_fresh
 //!
+//! # The chain of witnesses, and why there is one
+//!
+//! §9 of the plan says of its own `Verified`: *"must be consumed, not
+//! produced. `#[must_use]` is not enough — you can construct one and drop it.
+//! The write API takes it."* Authentication is the same shape one layer down,
+//! so it has the same answer. A second factor a handler can forget is a second
+//! factor some handler eventually will forget, and it will compile.
+//!
+//! So nothing here takes a bare [`AccountId`] and hands back a session. There
+//! is a chain, and every link is moved rather than copied:
+//!
+//! ```text
+//!   Accounts::login          ─┐
+//!   Linking::sign_in          ├─▶  Verified  ──┐
+//!   Mfa::verify_totp          │                │  .and(…)
+//!   Mfa::verify_recovery_code │                ▼
+//!   Otp::authenticate        ─┘            Verified
+//!                                              │
+//!                 Mfa::second_factors ──▶ Enrolled │
+//!                                              ▼   ▼
+//!                                   FactorPolicy::admit
+//!                                              │
+//!                                          Admitted
+//!                                              ▼
+//!                               Sessions::begin_with_factors
+//! ```
+//!
+//! [`Verified`] is minted only by code that actually checked a credential.
+//! [`Admitted`] has **no public constructor at all** — the only way to hold one
+//! is to have handed a [`Verified`] to [`FactorPolicy::admit`] and been
+//! admitted — and [`Sessions::begin_with_factors`] takes it **by value**. So a
+//! handler that signs somebody in without consulting the policy does not
+//! compile, and one that consults the policy, is told
+//! [`Admission::Incomplete`], and signs them in anyway has nothing to pass.
+//!
+//! Neither [`Verified`] nor [`Admitted`] is `Clone` or `Copy`: one proof mints
+//! one session.
+//!
+//! [`Sessions::begin_with_factors`]: crate::session::Sessions::begin_with_factors
+//!
+//! ## The two escape hatches, and their names
+//!
+//! [`Verified::without_a_credential_check`] and
+//! [`Enrolled::without_asking_the_store`] exist, because a test, a migration
+//! and an application whose primary factor this crate does not implement all
+//! need a way in. They are named so that a reviewer stops on them. There is no
+//! third: [`Admitted`] and [`Elevation`] can only come from the policy.
+//!
+//! ## Surviving the round trip to the second-factor form
+//!
+//! A two-step sign-in is two HTTP requests, and the [`Verified`] from the first
+//! cannot be a global variable. [`Verified::seal`] signs it with the session
+//! key — the same mechanism [`crate::oauth::FlowState`] uses — and
+//! [`Verified::unseal`] recovers it, or refuses a forged or expired one. Put
+//! the sealed string in a short-lived cookie. Without this, every real MFA flow
+//! would have to call `without_a_credential_check` on the second request, which
+//! would hollow out the whole chain.
+//!
 //! # The one thing this cannot hide
 //!
 //! An attacker who already has a correct password learns whether the account
@@ -78,8 +136,9 @@ use crate::clock::{Clock, UnixTime};
 use crate::error::AuthError;
 use crate::identity::AccountId;
 use crate::impersonation::AccountHolder;
+use crate::random::{b64, ct_eq, unb64};
 use crate::recovery::{self, RecoveryCodes};
-use crate::session::Privilege;
+use crate::session::SigningKey;
 use crate::storage::{MfaStore, TotpSecretRecord};
 use crate::totp::{Totp, TotpSecret};
 
@@ -309,18 +368,254 @@ impl TryFrom<Vec<String>> for FactorSet {
     }
 }
 
-/// Whether a set of satisfied factors is enough.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Sufficiency {
-    /// Enough. Open a session at this privilege.
-    Sufficient(Privilege),
-    /// A primary factor landed but the account owes a second one. Any single
-    /// kind in this set completes the sign-in; ask for one of them.
-    Incomplete(FactorSet),
+/// Proof that this crate verified one or more factors for one account.
+///
+/// Not `Clone` and not `Copy`: a proof mints one session. The only things that
+/// produce one are the functions that actually check a credential —
+/// [`Accounts::login`], [`Linking::sign_in`], [`Mfa::verify_totp`],
+/// [`Mfa::verify_recovery_code`], [`Otp::authenticate`] — and the escape hatch
+/// [`Verified::without_a_credential_check`].
+///
+/// It carries the account, so two proofs for two different people cannot be
+/// fused into one sign-in: [`Verified::and`] refuses it.
+///
+/// [`Accounts::login`]: crate::accounts::Accounts::login
+/// [`Linking::sign_in`]: crate::linking::Linking::sign_in
+/// [`Otp::authenticate`]: crate::otp::Otp::authenticate
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a proof that is dropped has authenticated nobody"]
+pub struct Verified {
+    account: AccountId,
+    kinds: FactorSet,
+}
+
+/// The wire form of a sealed [`Verified`].
+#[derive(Serialize, Deserialize)]
+struct SealedProof {
+    #[serde(rename = "a")]
+    account: AccountId,
+    #[serde(rename = "k")]
+    kinds: FactorSet,
+    #[serde(rename = "e")]
+    expires_at: UnixTime,
+}
+
+impl Verified {
+    /// Whose factors these are.
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
+
+    /// What was proved.
+    pub fn kinds(&self) -> FactorSet {
+        self.kinds
+    }
+
+    /// Merges a second proof for the same account.
+    ///
+    /// This is how a two-step sign-in is assembled: the password proof from
+    /// the first request, `and` the TOTP proof from the second.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Misconfigured`] when the two proofs name different
+    /// accounts. That is a bug in the calling flow — most likely a partial
+    /// authentication carried for the wrong person — and letting it through
+    /// would sign somebody in as somebody else.
+    pub fn and(self, other: Verified) -> Result<Self, AuthError> {
+        if self.account != other.account {
+            return Err(AuthError::misconfigured(
+                "two factor proofs for two different accounts cannot be one sign-in",
+            ));
+        }
+        Ok(Self {
+            account: self.account,
+            kinds: self.kinds.union(other.kinds),
+        })
+    }
+
+    /// The internal constructor, for code in this crate that has just checked
+    /// a credential. Not public: the whole guarantee is that an application
+    /// cannot reach this.
+    pub(crate) fn minted(account: AccountId, kinds: FactorSet) -> Self {
+        Self { account, kinds }
+    }
+
+    /// Asserts a factor this crate did not check.
+    ///
+    /// For a test, a migration, or an application whose primary factor lives
+    /// somewhere else — a passkey it verified itself, a SAML assertion, a
+    /// one-time code it has decided is a primary credential. **Calling this in
+    /// place of a real check defeats the whole chain**, which is why it is
+    /// named the way it is rather than `new`.
+    pub fn without_a_credential_check(account: AccountId, kinds: FactorSet) -> Self {
+        Self { account, kinds }
+    }
+
+    /// Seals the proof for the round trip to the second-factor form.
+    ///
+    /// The result is `payload.tag`, signed with the session key, and it is not
+    /// confidential — it names an account and a factor kind, which the person
+    /// holding it already knows. What it is, is unforgeable and short-lived.
+    /// Give it a `ttl` of minutes: it is a half-finished sign-in, and a
+    /// half-finished sign-in that lives for an hour is a credential.
+    pub fn seal(&self, key: &SigningKey, now: UnixTime, ttl: i64) -> String {
+        let payload = serde_json::to_vec(&SealedProof {
+            account: self.account.clone(),
+            kinds: self.kinds,
+            expires_at: now + ttl,
+        })
+        .expect("a proof always serialises");
+        let encoded = b64(&payload);
+        let tag = key.sign_message(encoded.as_bytes());
+        format!("{encoded}.{}", b64(&tag))
+    }
+
+    /// Recovers a sealed proof, or `None` when it is malformed, forged or
+    /// expired.
+    ///
+    /// One `None` for all three, for the same reason [`Sessions::unseal`]
+    /// answers one: the holder of a bad partial authentication is entitled to
+    /// no distinctions.
+    ///
+    /// [`Sessions::unseal`]: crate::session::Sessions::unseal
+    pub fn unseal(key: &SigningKey, now: UnixTime, sealed: &str) -> Option<Self> {
+        let (encoded, tag) = sealed.rsplit_once('.')?;
+        let presented = unb64(tag).ok()?;
+        let expected = key.sign_message(encoded.as_bytes());
+        // Constant time, for the same reason the session cookie is.
+        if !ct_eq(&presented, &expected) {
+            return None;
+        }
+        let payload: SealedProof = serde_json::from_slice(&unb64(encoded).ok()?).ok()?;
+        if now >= payload.expires_at {
+            return None;
+        }
+        Some(Self {
+            account: payload.account,
+            kinds: payload.kinds,
+        })
+    }
+}
+
+/// What an account could prove, as the store answered it.
+///
+/// [`FactorPolicy::admit`] takes one by reference, so a flow cannot decide
+/// whether a second factor is owed without having asked. Passing
+/// [`FactorSet::empty`] by hand is still possible through
+/// [`Enrolled::without_asking_the_store`] — but that is a line somebody wrote,
+/// and the failure this chain exists to prevent is a line somebody *forgot*.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Enrolled {
+    account: AccountId,
+    factors: FactorSet,
+}
+
+impl Enrolled {
+    /// Whose factors these are.
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
+
+    /// What they are.
+    pub fn factors(&self) -> FactorSet {
+        self.factors
+    }
+
+    /// Asserts an enrolment without reading the store.
+    ///
+    /// For a test, or an application that keeps its second factors somewhere
+    /// this crate does not know about. Named so a reviewer stops on it.
+    pub fn without_asking_the_store(account: AccountId, factors: FactorSet) -> Self {
+        Self { account, factors }
+    }
+}
+
+/// Permission to open a session, from the policy that read the proof.
+///
+/// **There is no public constructor.** The only way to hold one is to have
+/// handed a [`Verified`] to [`FactorPolicy::admit`] and been admitted, and
+/// [`Sessions::begin_with_factors`] takes it by value. Between them those two
+/// facts are the whole guarantee: a sign-in that skipped the policy cannot be
+/// written.
+///
+/// [`Sessions::begin_with_factors`]: crate::session::Sessions::begin_with_factors
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an admission that is dropped opens no session"]
+pub struct Admitted {
+    account: AccountId,
+    factors: FactorSet,
+}
+
+impl Admitted {
+    /// Who is being admitted.
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
+
+    /// What proved it. This becomes [`SessionRecord::factors`].
+    ///
+    /// [`SessionRecord::factors`]: crate::storage::SessionRecord::factors
+    pub fn factors(&self) -> FactorSet {
+        self.factors
+    }
+}
+
+/// Permission to raise a session to [`Privilege::Elevated`].
+///
+/// [`Privilege::Elevated`]: crate::session::Privilege::Elevated
+///
+/// No public constructor either: it comes from
+/// [`FactorPolicy::for_elevation`], and [`Sessions::elevate`] takes it by
+/// value.
+///
+/// [`Sessions::elevate`]: crate::session::Sessions::elevate
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an elevation that is dropped elevates nothing"]
+pub struct Elevation {
+    account: AccountId,
+    factors: FactorSet,
+}
+
+impl Elevation {
+    /// Whose elevation it is.
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
+
+    /// What was re-proved, just now.
+    pub fn factors(&self) -> FactorSet {
+        self.factors
+    }
+}
+
+/// What the policy made of a proof.
+///
+/// The two unfinished variants hand the proof **back**, because the flow has to
+/// carry it into the second step. The two finished ones do not: a refused
+/// sign-in has nothing to continue with.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the answer decides whether anybody is signed in"]
+pub enum Admission {
+    /// Enough. Spend it on [`Sessions::begin_with_factors`].
+    ///
+    /// [`Sessions::begin_with_factors`]: crate::session::Sessions::begin_with_factors
+    Admit(Admitted),
+    /// A primary factor landed but the account owes a second one.
+    Incomplete {
+        /// The proof so far. Seal it into a short-lived cookie
+        /// ([`Verified::seal`]) and merge the next factor into it with
+        /// [`Verified::and`].
+        proof: Verified,
+        /// Any single kind here completes the sign-in. Ask for one of them.
+        candidates: FactorSet,
+    },
     /// The policy demands a second factor and this account has none to give.
     /// Send the person to enrolment; do not open a session.
-    EnrolmentRequired,
-    /// Nothing presented counts. There is no primary factor in the set.
+    EnrolmentRequired {
+        /// The proof so far, for the enrolment screen to carry.
+        proof: Verified,
+    },
+    /// Nothing presented counts. There is no primary factor in the proof.
     Insufficient,
 }
 
@@ -366,6 +661,8 @@ impl FactorPolicy {
 
     /// Lets a recovery code reach [`Privilege::Elevated`].
     ///
+    /// [`Privilege::Elevated`]: crate::session::Privilege::Elevated
+    ///
     /// Read the module documentation first. The default is off because a
     /// recovery code is the credential most likely to be on paper in a drawer,
     /// and elevation is what guards changing the password.
@@ -399,66 +696,113 @@ impl FactorPolicy {
         self.second_factor
     }
 
-    /// Whether `satisfied` is enough to open a session.
+    /// Reads a proof and decides whether it opens a session.
+    ///
+    /// The rule, in one sentence: a standalone factor alone, or a primary
+    /// factor plus — when the account has a second factor to give — one second
+    /// factor.
+    ///
+    /// `proof` is **consumed**. On [`Admission::Admit`] it becomes an
+    /// [`Admitted`], which is the only thing [`Sessions::begin_with_factors`]
+    /// accepts; on the two unfinished answers it is handed back so the flow can
+    /// carry it into the second step. A refusal keeps it, because there is
+    /// nothing to continue.
     ///
     /// `enrolled` is what the account *could* prove —
-    /// [`Mfa::second_factors`] computes it. Only its
-    /// [`FactorClass::Second`] and [`FactorClass::Standalone`] members are
-    /// read, so the two queries that method makes are all this needs.
-    pub fn for_sign_in(&self, enrolled: &FactorSet, satisfied: &FactorSet) -> Sufficiency {
+    /// [`Mfa::second_factors`] computes it. Only its [`FactorClass::Second`]
+    /// and [`FactorClass::Standalone`] members are read, so the two queries
+    /// that method makes are all this needs.
+    ///
+    /// A proof and an enrolment for two different accounts answer
+    /// [`Admission::Insufficient`]: the mismatch is a bug in the flow, and the
+    /// safe reading of a bug here is "nobody is signed in".
+    ///
+    /// [`Sessions::begin_with_factors`]: crate::session::Sessions::begin_with_factors
+    pub fn admit(&self, enrolled: &Enrolled, proof: Verified) -> Admission {
+        if enrolled.account() != proof.account() {
+            return Admission::Insufficient;
+        }
+        let satisfied = proof.kinds();
+        let enrolled_kinds = enrolled.factors();
+
         if satisfied.any_of_class(FactorClass::Standalone) {
-            return Sufficiency::Sufficient(Privilege::Authenticated);
+            return Admission::Admit(Admitted {
+                account: proof.account,
+                factors: satisfied,
+            });
         }
         if !satisfied.any_of_class(FactorClass::Primary) {
-            return Sufficiency::Insufficient;
+            return Admission::Insufficient;
         }
         let owes_a_second = match self.second_factor {
             SecondFactorRequirement::Always => true,
             SecondFactorRequirement::WhenEnrolled => {
-                enrolled.any_of_class(FactorClass::Second)
-                    || enrolled.any_of_class(FactorClass::Standalone)
+                enrolled_kinds.any_of_class(FactorClass::Second)
+                    || enrolled_kinds.any_of_class(FactorClass::Standalone)
             }
         };
         if !owes_a_second || satisfied.any_of_class(FactorClass::Second) {
-            return Sufficiency::Sufficient(Privilege::Authenticated);
+            return Admission::Admit(Admitted {
+                account: proof.account,
+                factors: satisfied,
+            });
         }
-        let candidates = enrolled
+        let candidates = enrolled_kinds
             .of_class(FactorClass::Second)
-            .union(enrolled.of_class(FactorClass::Standalone))
-            .difference(*satisfied);
+            .union(enrolled_kinds.of_class(FactorClass::Standalone))
+            .difference(satisfied);
         if candidates.is_empty() {
-            Sufficiency::EnrolmentRequired
+            Admission::EnrolmentRequired { proof }
         } else {
-            Sufficiency::Incomplete(candidates)
+            Admission::Incomplete { proof, candidates }
         }
     }
 
-    /// Whether a **fresh** proof is enough to reach [`Privilege::Elevated`].
+    /// Reads a **fresh** proof and decides whether it reaches
+    /// [`Privilege::Elevated`].
     ///
-    /// `satisfied` here is what was proved *just now*, in the step-up, not what
-    /// opened the session. Rotate the session to
-    /// [`Privilege::Elevated`] when this answers true; do not elevate on the
-    /// strength of the original sign-in, which may be eight hours old.
-    pub fn for_elevation(&self, enrolled: &FactorSet, satisfied: &FactorSet) -> bool {
+    /// [`Privilege::Elevated`]: crate::session::Privilege::Elevated
+    ///
+    /// `proof` is what was re-proved *just now*, in the step-up, not what
+    /// opened the session: do not elevate on the strength of a sign-in that may
+    /// be eight hours old. The [`Elevation`] it returns is the only thing
+    /// [`Sessions::elevate`] accepts, and `None` is a refusal that keeps the
+    /// proof, because a refused step-up has nothing to continue with.
+    ///
+    /// [`Sessions::elevate`]: crate::session::Sessions::elevate
+    pub fn for_elevation(&self, enrolled: &Enrolled, proof: Verified) -> Option<Elevation> {
+        if enrolled.account() != proof.account() {
+            return None;
+        }
+        let satisfied = proof.kinds();
+        let enrolled_kinds = enrolled.factors();
+        let granted = || {
+            Some(Elevation {
+                account: proof.account.clone(),
+                factors: satisfied,
+            })
+        };
+
         if satisfied.any_of_class(FactorClass::Standalone) {
-            return true;
+            return granted();
         }
         let mut second = satisfied.of_class(FactorClass::Second);
         if !self.recovery_code_elevates {
             second = second.without(FactorKind::RecoveryCode);
         }
         if !second.is_empty() {
-            return true;
+            return granted();
         }
         // An account with nothing but a password cannot produce a second
         // factor, so re-typing the password is the strongest proof available
         // and refusing it would mean nobody can ever change their password.
-        if !(enrolled.any_of_class(FactorClass::Second)
-            || enrolled.any_of_class(FactorClass::Standalone))
+        if !(enrolled_kinds.any_of_class(FactorClass::Second)
+            || enrolled_kinds.any_of_class(FactorClass::Standalone))
+            && satisfied.any_of_class(FactorClass::Primary)
         {
-            return satisfied.any_of_class(FactorClass::Primary);
+            return granted();
         }
-        false
+        None
     }
 }
 
@@ -480,6 +824,16 @@ pub struct TotpEnrolment {
     pub secret: TotpSecret,
     /// The `otpauth:` URI to put in the QR code.
     pub uri: String,
+}
+
+/// A spent recovery code: the proof it produced, and how many are left.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a proof that is dropped has authenticated nobody"]
+pub struct RecoveryAccepted {
+    /// The proof, to merge into a sign-in with [`Verified::and`].
+    pub proof: Verified,
+    /// How many codes the account has left, for the screen that nags about it.
+    pub remaining: u32,
 }
 
 /// Second factors: enrolment, verification and recovery codes.
@@ -548,33 +902,40 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
 
     /// The second factors this account could present: two queries, no secrets.
     ///
-    /// This is the `enrolled` argument [`FactorPolicy::for_sign_in`] wants.
+    /// This is the `enrolled` argument [`FactorPolicy::admit`] wants.
+    ///
+    /// # Why it takes a proof and not an account id
+    ///
+    /// "Does this address have two-factor authentication?" is a question an
+    /// unauthenticated caller must not be able to ask — it says the address is
+    /// registered, and it tells a phisher which prompt to build. Taking a
+    /// [`Verified`] means a primary factor has already been checked for this
+    /// account, so the only person who can ask is the person who could already
+    /// sign in. The proof is **borrowed**, not spent: it still has a session to
+    /// mint afterwards.
     ///
     /// # Errors
     /// Fails when the store fails.
-    pub async fn second_factors(&self, account: &AccountId) -> Result<FactorSet, AuthError> {
-        let mut set = FactorSet::empty();
-        if self
-            .store
-            .totp_secret(account)
-            .await?
-            .is_some_and(|r| r.confirmed_at.is_some())
-        {
-            set.insert(FactorKind::Totp);
-        }
-        if self.store.count_recovery_codes(account).await? > 0 {
-            set.insert(FactorKind::RecoveryCode);
-        }
-        Ok(set)
+    pub async fn second_factors(&self, proof: &Verified) -> Result<Enrolled, AuthError> {
+        Ok(Enrolled {
+            account: proof.account().clone(),
+            factors: self.second_factors_of(proof.account()).await?,
+        })
     }
 
     /// Everything the account has, including its primary credentials, for a
     /// settings page. Four queries.
     ///
+    /// Takes an [`AccountHolder`] rather than an account id for the reason
+    /// [`Mfa::second_factors`] takes a proof, and one more: this is the list a
+    /// settings page renders, and an operator impersonating somebody has no
+    /// business reading which credentials they hold.
+    ///
     /// # Errors
     /// Fails when the store fails.
-    pub async fn enrolled(&self, account: &AccountId) -> Result<FactorSet, AuthError> {
-        let mut set = self.second_factors(account).await?;
+    pub async fn enrolled(&self, who: &AccountHolder) -> Result<FactorSet, AuthError> {
+        let account = who.account();
+        let mut set = self.second_factors_of(account).await?;
         if self
             .store
             .account(account)
@@ -589,12 +950,28 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         Ok(set)
     }
 
-    /// How many recovery codes are left.
+    /// How many recovery codes are left, for the screen that nags about it.
     ///
     /// # Errors
     /// Fails when the store fails.
-    pub async fn recovery_codes_remaining(&self, account: &AccountId) -> Result<u32, AuthError> {
-        Ok(self.store.count_recovery_codes(account).await?)
+    pub async fn recovery_codes_remaining(&self, who: &AccountHolder) -> Result<u32, AuthError> {
+        Ok(self.store.count_recovery_codes(who.account()).await?)
+    }
+
+    async fn second_factors_of(&self, account: &AccountId) -> Result<FactorSet, AuthError> {
+        let mut set = FactorSet::empty();
+        if self
+            .store
+            .totp_secret(account)
+            .await?
+            .is_some_and(|r| r.confirmed_at.is_some())
+        {
+            set.insert(FactorKind::Totp);
+        }
+        if self.store.count_recovery_codes(account).await? > 0 {
+            set.insert(FactorKind::RecoveryCode);
+        }
+        Ok(set)
     }
 
     /// Starts a TOTP enrolment: a fresh secret, stored unconfirmed.
@@ -721,7 +1098,11 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
     /// Returns [`AuthError::InvalidCredentials`] for a wrong code, a replayed
     /// code, a code outside the window, and an account with no TOTP. One
     /// variant, four causes.
-    pub async fn verify_totp(&self, account: &AccountId, presented: &str) -> Result<(), AuthError> {
+    pub async fn verify_totp(
+        &self,
+        account: &AccountId,
+        presented: &str,
+    ) -> Result<Verified, AuthError> {
         let record = self.store.totp_secret(account).await?;
         let enrolled = record
             .as_ref()
@@ -738,7 +1119,10 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         if !self.store.claim_totp_step(account, step).await? {
             return Err(AuthError::InvalidCredentials);
         }
-        Ok(())
+        Ok(Verified::minted(
+            account.clone(),
+            FactorSet::of([FactorKind::Totp]),
+        ))
     }
 
     /// Spends a recovery code and answers how many are left.
@@ -753,12 +1137,15 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         &self,
         account: &AccountId,
         presented: &str,
-    ) -> Result<u32, AuthError> {
+    ) -> Result<RecoveryAccepted, AuthError> {
         let digest = recovery::digest(presented);
         if !self.store.consume_recovery_code(account, &digest).await? {
             return Err(AuthError::InvalidCredentials);
         }
-        Ok(self.store.count_recovery_codes(account).await?)
+        Ok(RecoveryAccepted {
+            proof: Verified::minted(account.clone(), FactorSet::of([FactorKind::RecoveryCode])),
+            remaining: self.store.count_recovery_codes(account).await?,
+        })
     }
 
     /// Whether an elevation granted at `since` is still fresh.

@@ -13,10 +13,30 @@
 //! Session fixation is: the attacker fixes an identifier in the victim's
 //! browser *before* the victim authenticates, then reuses it afterwards. The
 //! defence is that the identifier a user arrives with is never the identifier
-//! they keep after a privilege change. [`Sessions::rotate`] mints a new
-//! identifier, carries the account and the absolute deadline over, and deletes
-//! the old row — in that order, so a crash leaves the user logged in rather
-//! than locked out.
+//! they keep after a privilege change. Every function here that changes
+//! privilege mints a new identifier, carries the account and the absolute
+//! deadline over, and deletes the old row — in that order, so a crash leaves
+//! the user logged in rather than locked out.
+//!
+//! # Why privilege is not an argument
+//!
+//! There are four doors and each one is a different method, because the
+//! privilege a session reaches is decided by what was *proved* and not by what
+//! was asked for:
+//!
+//! * [`Sessions::begin_anonymous`] — no identity, always
+//!   [`Privilege::Anonymous`].
+//! * [`Sessions::begin_with_factors`] — always [`Privilege::Authenticated`],
+//!   and it takes the policy's [`Admitted`] by value.
+//! * [`Sessions::elevate`] — the only way to [`Privilege::Elevated`], and it
+//!   takes an [`Elevation`] by value.
+//! * [`Sessions::rotate`] and [`Sessions::step_down`] — same privilege, or
+//!   lower.
+//!
+//! Nothing here accepts a `Privilege` from the caller, so there is no line
+//! anybody can write that opens an authenticated session without a proof. The
+//! old shape — `begin(account, Privilege::Authenticated)` — is what made
+//! forgetting the second factor a compiling program.
 //!
 //! # What a session carries beyond its account
 //!
@@ -38,7 +58,7 @@ use crate::clock::{Clock, UnixTime};
 use crate::error::AuthError;
 use crate::identity::AccountId;
 use crate::impersonation::Impersonation;
-use crate::mfa::FactorSet;
+use crate::mfa::{Admitted, Elevation, FactorSet};
 use crate::random::{b64, ct_eq, random_bytes, random_secret, unb64};
 use crate::storage::{AuthStore, SessionRecord};
 
@@ -293,46 +313,80 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
         &self.config
     }
 
-    /// Opens a session, recording no factors.
+    /// Opens a pre-login session: a cart, a flash message, no identity.
+    ///
+    /// It is always [`Privilege::Anonymous`] and its factor set is always
+    /// empty, and there is no argument that changes either. That is the point:
+    /// the only function in this type that can mint an
+    /// [`Privilege::Authenticated`] session from nothing would be this one, so
+    /// it cannot.
     ///
     /// # Errors
     /// Fails when randomness or the store fails.
-    pub async fn begin(
-        &self,
-        account: &AccountId,
-        privilege: Privilege,
-    ) -> Result<StartedSession, AuthError> {
-        self.begin_with_factors(account, privilege, FactorSet::empty())
-            .await
-    }
-
-    /// Opens a session and records which factors proved it.
-    ///
-    /// This is what a sign-in should call. The set is the one
-    /// [`FactorPolicy::for_sign_in`] just accepted, and it stays on the row for
-    /// the session's whole life, so an audit log and a step-up check read the
-    /// same field rather than guessing.
-    ///
-    /// [`FactorPolicy::for_sign_in`]: crate::mfa::FactorPolicy::for_sign_in
-    ///
-    /// # Errors
-    /// Fails when randomness or the store fails.
-    pub async fn begin_with_factors(
-        &self,
-        account: &AccountId,
-        privilege: Privilege,
-        factors: FactorSet,
-    ) -> Result<StartedSession, AuthError> {
+    pub async fn begin_anonymous(&self, account: &AccountId) -> Result<StartedSession, AuthError> {
         let now = self.clock.now();
         self.create(
             account.clone(),
-            privilege,
+            Privilege::Anonymous,
             now,
             now + self.config.absolute_timeout,
-            factors,
+            FactorSet::empty(),
             None,
         )
         .await
+    }
+
+    /// Signs somebody in, spending the policy's admission.
+    ///
+    /// This is the only way to reach [`Privilege::Authenticated`] from
+    /// outside, and it takes [`Admitted`] **by value**. [`Admitted`] has no
+    /// public constructor: the only way to hold one is to have handed a
+    /// [`Verified`] — which only a real credential check mints — to
+    /// [`FactorPolicy::admit`] and been admitted. So a handler that calls
+    /// `Accounts::login` and then opens a session without consulting the
+    /// policy has nothing to pass here, and does not compile. §9 of the plan,
+    /// one layer down: *"must be consumed, not produced"*.
+    ///
+    /// `replacing` is the session the browser arrived with, when there was
+    /// one. Passing it is the session-fixation defence for the login path: the
+    /// identifier an attacker planted before the victim authenticated is
+    /// deleted here, new row first and old row second, so a crash leaves the
+    /// user signed in rather than locked out.
+    ///
+    /// The privilege is [`Privilege::Authenticated`], never
+    /// [`Privilege::Elevated`], however many factors were presented — see
+    /// [`crate::mfa`] for why elevation is a re-proof and not a front-door
+    /// strength. The admitted factor set stays on the row for the session's
+    /// whole life, so an audit log and a step-up check read the same field
+    /// rather than guessing.
+    ///
+    /// [`Verified`]: crate::mfa::Verified
+    /// [`FactorPolicy::admit`]: crate::mfa::FactorPolicy::admit
+    ///
+    /// # Errors
+    /// Fails when randomness or the store fails. A `replacing` identifier that
+    /// is already gone is not an error: the session it named is exactly as
+    /// deleted as the caller wanted.
+    pub async fn begin_with_factors(
+        &self,
+        admitted: Admitted,
+        replacing: Option<&SessionId>,
+    ) -> Result<StartedSession, AuthError> {
+        let now = self.clock.now();
+        let started = self
+            .create(
+                admitted.account().clone(),
+                Privilege::Authenticated,
+                now,
+                now + self.config.absolute_timeout,
+                admitted.factors(),
+                None,
+            )
+            .await?;
+        if let Some(old) = replacing {
+            self.store.delete_session(old).await?;
+        }
+        Ok(started)
     }
 
     /// Opens a session in which an operator acts as somebody else.
@@ -347,7 +401,7 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     /// each is a refusal rather than a default:
     ///
     /// * The privilege is [`Privilege::Authenticated`]. There is no argument to
-    ///   pass [`Privilege::Elevated`], and [`Sessions::rotate`] will not grant
+    ///   pass [`Privilege::Elevated`], and [`Sessions::elevate`] will not grant
     ///   it later either.
     /// * The factor set is empty. Nobody proved anything as the subject, and
     ///   writing the operator's factors there would be a lie that an audit
@@ -470,53 +524,92 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
         })
     }
 
-    /// Replaces a session's identifier, keeping the account and the absolute
-    /// deadline, and sets the new privilege.
+    /// Replaces a session's identifier, keeping everything else.
     ///
-    /// Call this at *every* privilege change: on login, on elevation after a
-    /// re-authentication, and on any step-down. It is the session-fixation
-    /// defence. The absolute deadline is carried over rather than reset, so
-    /// rotating repeatedly cannot be used to hold a session open forever.
+    /// The privilege, the factor set, the account, the impersonation marker and
+    /// the absolute deadline all carry over. There is **no privilege
+    /// argument**, and that is the design: a rotation re-mints an identifier,
+    /// it is not a place to acquire an identity. A pre-login session cannot
+    /// become an authenticated one by rotating — it has to go through
+    /// [`Sessions::begin_with_factors`], which demands the policy's admission.
+    /// Raising privilege is [`Sessions::elevate`] and lowering it is
+    /// [`Sessions::step_down`], and each says so in its name.
     ///
-    /// The factor set and the impersonation marker are carried over unchanged.
-    /// Use [`Sessions::rotate_with_factors`] when the rotation is itself a
-    /// step-up and new factors were proved.
+    /// The deadline is carried over rather than reset, so rotating repeatedly
+    /// cannot be used to hold a session open forever.
     ///
     /// # Errors
-    /// Returns [`AuthError::NoSession`] when the old session is gone, and
-    /// [`AuthError::Impersonated`] when the caller asks for
-    /// [`Privilege::Elevated`] on a session an operator opened. That refusal is
-    /// one of the five in [`crate::impersonation::Restricted`]: an operator
-    /// acting as somebody else never reaches the privilege that guards changing
-    /// their credentials.
-    pub async fn rotate(
-        &self,
-        old: &SessionId,
-        privilege: Privilege,
-    ) -> Result<StartedSession, AuthError> {
-        let factors = self
-            .store
-            .session(old)
-            .await?
-            .ok_or(AuthError::NoSession)?
-            .factors;
-        self.rotate_with_factors(old, privilege, factors).await
+    /// Returns [`AuthError::NoSession`] when the old session is gone.
+    pub async fn rotate(&self, old: &SessionId) -> Result<StartedSession, AuthError> {
+        let previous = self.store.session(old).await?.ok_or(AuthError::NoSession)?;
+        let privilege = previous.privilege;
+        let factors = previous.factors;
+        self.replace(previous, privilege, factors, old).await
     }
 
-    /// Rotates and replaces the factor set.
+    /// Raises a session to [`Privilege::Elevated`], spending a fresh proof.
+    ///
+    /// Takes [`Elevation`] by value, and [`Elevation`] has no public
+    /// constructor: it comes from [`FactorPolicy::for_elevation`], which reads
+    /// a [`Verified`] that a real credential check minted. So "the password
+    /// change screen elevated the session without asking for anything" is not a
+    /// thing that compiles.
+    ///
+    /// The elevation's factors are added to the session's own, and the new row
+    /// is a rotation, so `created_at` becomes the moment of the elevation —
+    /// which is what [`SessionRecord::elevation_is_fresh`] measures from.
+    ///
+    /// [`Verified`]: crate::mfa::Verified
+    /// [`FactorPolicy::for_elevation`]: crate::mfa::FactorPolicy::for_elevation
+    /// [`SessionRecord::elevation_is_fresh`]: crate::storage::SessionRecord::elevation_is_fresh
     ///
     /// # Errors
-    /// See [`Sessions::rotate`].
-    pub async fn rotate_with_factors(
+    /// Returns [`AuthError::NoSession`] when the session is gone,
+    /// [`AuthError::Impersonated`] when an operator opened it — one of the five
+    /// in [`crate::impersonation::Restricted`] — and
+    /// [`AuthError::Misconfigured`] when the proof names a different account.
+    pub async fn elevate(
         &self,
         old: &SessionId,
-        privilege: Privilege,
-        factors: FactorSet,
+        proof: Elevation,
     ) -> Result<StartedSession, AuthError> {
         let previous = self.store.session(old).await?.ok_or(AuthError::NoSession)?;
-        if previous.is_impersonated() && privilege >= Privilege::Elevated {
+        if previous.is_impersonated() {
             return Err(AuthError::Impersonated);
         }
+        if &previous.account != proof.account() {
+            return Err(AuthError::misconfigured(
+                "that elevation was proved for a different account",
+            ));
+        }
+        let factors = previous.factors.union(proof.factors());
+        self.replace(previous, Privilege::Elevated, factors, old)
+            .await
+    }
+
+    /// Drops a session back to [`Privilege::Anonymous`], keeping its row.
+    ///
+    /// The factor set goes with the identity — a session that is no longer
+    /// signed in did not keep its proofs — and so does the impersonation
+    /// marker, because it was never cleared anywhere and is not cleared here:
+    /// stepping an impersonation down leaves it an impersonation that has
+    /// stopped acting.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::NoSession`] when the session is gone.
+    pub async fn step_down(&self, old: &SessionId) -> Result<StartedSession, AuthError> {
+        let previous = self.store.session(old).await?.ok_or(AuthError::NoSession)?;
+        self.replace(previous, Privilege::Anonymous, FactorSet::empty(), old)
+            .await
+    }
+
+    async fn replace(
+        &self,
+        previous: SessionRecord,
+        privilege: Privilege,
+        factors: FactorSet,
+        old: &SessionId,
+    ) -> Result<StartedSession, AuthError> {
         let now = self.clock.now();
         let started = self
             .create(

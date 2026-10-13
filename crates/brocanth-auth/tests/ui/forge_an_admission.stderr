@@ -1,0 +1,9 @@
+error[E0451]: fields `account` and `factors` of struct `Admitted` are private
+  --> tests/ui/forge_an_admission.rs:9:9
+   |
+ 8 |     let _ = Admitted {
+   |             -------- in this type
+ 9 |         account: AccountId::new("ada"),
+   |         ^^^^^^^ private field
+10 |         factors: FactorSet::of([FactorKind::Password]),
+   |         ^^^^^^^ private field

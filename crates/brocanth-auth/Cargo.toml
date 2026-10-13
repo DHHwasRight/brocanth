@@ -72,6 +72,13 @@ reqwest = { version = "0.13", default-features = false, features = [
 # The only thing the tests need that the library does not already provide: a
 # runtime to drive the async store and HTTP traits.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `trybuild`: the standard way to assert that something does **not** compile.
+# The guarantee in `mfa` — that a sign-in which skipped the policy cannot be
+# written — is a claim about programs that do not exist, and no ordinary test
+# can make it. See `tests/compile_fail.rs`. The expected-output files are
+# rustc's own diagnostics, so they are pinned to the toolchain in `mise.toml`;
+# a toolchain bump regenerates them with `TRYBUILD=overwrite`.
+trybuild = "1.0.122"
 
 [features]
 # Empty by default, and that is the §8 rule rather than an oversight. The plan

@@ -48,6 +48,7 @@ use std::sync::Arc;
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{Account, AccountId, ProviderIdentity, ProviderLink};
+use crate::mfa::{FactorKind, FactorSet, Verified};
 use crate::storage::{AuthStore, NewAccount, NewProviderLink};
 
 /// Why a sign-in could not finish on its own.
@@ -63,7 +64,10 @@ pub enum LinkRefusal {
 }
 
 /// What happened when somebody signed in with a provider.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: the two successful variants carry a [`Verified`], and a proof
+/// that can be copied is a proof that mints two sessions.
+#[derive(Debug)]
 pub enum SignInOutcome {
     /// The provider was already linked. Open a session.
     SignedIn {
@@ -71,6 +75,11 @@ pub enum SignInOutcome {
         account: Account,
         /// The link that matched.
         link: ProviderLink,
+        /// Proof that a primary factor landed — completing an OAuth 2.0 or OIDC
+        /// flow is as much a primary factor as typing a password, so this path
+        /// mints the same witness the password path does. Without it, one route
+        /// would be the hole the other closed. See [`crate::mfa`].
+        proof: Verified,
     },
     /// Nothing matched and nothing collided, so an account was created and the
     /// provider attached to it.
@@ -79,6 +88,12 @@ pub enum SignInOutcome {
         account: Account,
         /// The new link.
         link: ProviderLink,
+        /// Proof that a primary factor landed. A brand-new account owes no
+        /// second factor, so [`FactorPolicy::admit`] will admit it — but it is
+        /// still the policy that says so, not this module.
+        ///
+        /// [`FactorPolicy::admit`]: crate::mfa::FactorPolicy::admit
+        proof: Verified,
     },
     /// The sign-in stops here and the application must ask the person to
     /// authenticate as the existing account, then call [`Linking::link`].
@@ -136,7 +151,12 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
                 .account(&link.account)
                 .await?
                 .ok_or_else(|| AuthError::Store("a link points at no account".into()))?;
-            return Ok(SignInOutcome::SignedIn { account, link });
+            let proof = Verified::minted(account.id.clone(), FactorSet::of([FactorKind::Provider]));
+            return Ok(SignInOutcome::SignedIn {
+                account,
+                link,
+                proof,
+            });
         }
 
         if let Some(email) = &identity.email {
@@ -163,7 +183,12 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
             })
             .await?;
         let link = self.attach(&account.id, &identity).await?;
-        Ok(SignInOutcome::Registered { account, link })
+        let proof = Verified::minted(account.id.clone(), FactorSet::of([FactorKind::Provider]));
+        Ok(SignInOutcome::Registered {
+            account,
+            link,
+            proof,
+        })
     }
 
     /// Attaches a provider to an account.

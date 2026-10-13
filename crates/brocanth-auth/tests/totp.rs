@@ -7,6 +7,7 @@ use brocanth_auth::clock::Clock;
 use brocanth_auth::error::AuthError;
 use brocanth_auth::identity::{AccountId, EmailAddress};
 use brocanth_auth::impersonation::AccountHolder;
+use brocanth_auth::mfa::{FactorKind, FactorSet};
 use brocanth_auth::storage::{AuthStore, NewAccount};
 use brocanth_auth::totp::{Totp, TotpSecret};
 use common::Fixture;
@@ -109,7 +110,8 @@ async fn a_correct_code_cannot_be_used_twice_inside_its_own_step() {
     // Move to a fresh step and sign in with it.
     f.clock.advance(mfa.totp().step_seconds());
     let code = mfa.totp().code_at(&enrolment.secret, f.clock.now());
-    mfa.verify_totp(&account, &code).await.expect("first use");
+    let proof = mfa.verify_totp(&account, &code).await.expect("first use");
+    assert_eq!(proof.account(), &account);
 
     // The same code is still *correct* for another twenty-odd seconds. That is
     // the window a shoulder surfer, a phishing proxy or a log reader works in,
@@ -163,7 +165,8 @@ async fn an_older_step_inside_the_window_is_refused_once_a_newer_one_was_spent()
         .totp()
         .code_at(&enrolment.secret, now - mfa.totp().step_seconds());
 
-    mfa.verify_totp(&account, &current).await.expect("current");
+    let proof = mfa.verify_totp(&account, &current).await.expect("current");
+    assert_eq!(proof.kinds(), FactorSet::of([FactorKind::Totp]));
     // The previous step is still inside the skew window and its code is still
     // arithmetically correct. The claim is monotonic, so it is refused anyway.
     let err = mfa.verify_totp(&account, &previous).await.unwrap_err();

@@ -31,7 +31,7 @@ async fn an_unknown_identity_with_a_free_address_registers() {
         .await
         .unwrap();
     let account = match outcome {
-        SignInOutcome::Registered { account, link } => {
+        SignInOutcome::Registered { account, link, .. } => {
             assert_eq!(link.provider, "google");
             assert_eq!(link.subject, "g-1");
             account

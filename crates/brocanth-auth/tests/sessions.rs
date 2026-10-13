@@ -37,17 +37,21 @@ async fn a_session_rotates_on_privilege_change() {
     let account = an_account(&f).await;
 
     // The pre-login session: a cart, a flash message, no identity.
-    let before = sessions
-        .begin(&account, Privilege::Anonymous)
-        .await
-        .expect("begin");
+    let before = sessions.begin_anonymous(&account).await.expect("begin");
     let fixed_by_an_attacker = before.session.id.clone();
 
     f.clock.advance(5);
+    // Signing in is no longer "rotate to a higher privilege" — a rotation
+    // cannot raise one. It is the policy's admission, spent, naming the
+    // identifier the browser arrived with.
+    let admitted = common::admit(
+        &common::nothing_enrolled(&account),
+        common::password_proof(&account),
+    );
     let after = sessions
-        .rotate(&fixed_by_an_attacker, Privilege::Authenticated)
+        .begin_with_factors(admitted, Some(&fixed_by_an_attacker))
         .await
-        .expect("rotate");
+        .expect("sign in");
 
     // A new identifier. This is the whole session-fixation defence.
     assert_ne!(after.session.id, fixed_by_an_attacker);
@@ -64,11 +68,12 @@ async fn a_session_rotates_on_privilege_change() {
         .is_none());
     assert_eq!(f.store.session_count(), 1);
 
-    // The absolute deadline is carried over, not reset: rotating repeatedly
-    // must not be a way to hold a session open forever.
+    // A sign-in starts its own absolute deadline — it is a new session, not a
+    // continuation of the anonymous one. `rotate` is the operation that must
+    // carry the deadline over, and the test below asserts that.
     assert_eq!(
         after.session.absolute_expires_at,
-        before.session.absolute_expires_at
+        f.clock.now() + sessions.config().absolute_timeout
     );
 
     // The cookie that comes back carries the new identifier, signed.
@@ -91,17 +96,46 @@ async fn elevating_rotates_again() {
     let sessions = f.sessions();
     let account = an_account(&f).await;
 
-    let signed_in = sessions
-        .begin(&account, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let signed_in = common::signed_in(&sessions, &account).await;
     let elevated = sessions
-        .rotate(&signed_in.session.id, Privilege::Elevated)
+        .elevate(&signed_in.session.id, common::elevation(&account))
         .await
         .unwrap();
     assert_ne!(elevated.session.id, signed_in.session.id);
     assert_eq!(elevated.session.privilege, Privilege::Elevated);
     assert_eq!(f.store.session_count(), 1);
+}
+
+#[tokio::test]
+async fn a_rotation_carries_the_deadline_and_cannot_raise_the_privilege() {
+    let f = Fixture::new();
+    let sessions = f.sessions();
+    let account = an_account(&f).await;
+
+    // Rotating repeatedly must not be a way to hold a session open forever.
+    let before = common::signed_in(&sessions, &account).await;
+    f.clock.advance(5);
+    let after = sessions.rotate(&before.session.id).await.unwrap();
+    assert_ne!(after.session.id, before.session.id);
+    assert_eq!(
+        after.session.absolute_expires_at,
+        before.session.absolute_expires_at
+    );
+    // Same privilege, same factors. There is no argument that changes either,
+    // which is the point: an anonymous session cannot acquire an identity by
+    // being rotated.
+    assert_eq!(after.session.privilege, before.session.privilege);
+    assert_eq!(after.session.factors, before.session.factors);
+
+    let anonymous = sessions.begin_anonymous(&account).await.unwrap();
+    let still_anonymous = sessions.rotate(&anonymous.session.id).await.unwrap();
+    assert_eq!(still_anonymous.session.privilege, Privilege::Anonymous);
+    assert!(still_anonymous.session.factors.is_empty());
+
+    // And a sign-out that keeps the cart drops the identity and the proofs.
+    let down = sessions.step_down(&after.session.id).await.unwrap();
+    assert_eq!(down.session.privilege, Privilege::Anonymous);
+    assert!(down.session.factors.is_empty());
 }
 
 #[tokio::test]
@@ -121,13 +155,10 @@ async fn revocation_ends_every_session_for_an_account() {
         .id;
 
     // Three devices for Ada, one for Grace.
-    let a = sessions.begin(&ada, Privilege::Authenticated).await.unwrap();
-    let b = sessions.begin(&ada, Privilege::Authenticated).await.unwrap();
-    let c = sessions.begin(&ada, Privilege::Elevated).await.unwrap();
-    let d = sessions
-        .begin(&grace, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let a = common::signed_in(&sessions, &ada).await;
+    let b = common::signed_in(&sessions, &ada).await;
+    let c = common::elevated(&sessions, &ada).await;
+    let d = common::signed_in(&sessions, &grace).await;
     assert_eq!(f.store.session_count(), 4);
 
     let ended = sessions.revoke_all(&ada).await.unwrap();
@@ -150,10 +181,7 @@ async fn an_idle_session_dies_and_is_deleted_by_the_request_that_found_it() {
     let f = Fixture::new();
     let sessions = f.sessions();
     let account = an_account(&f).await;
-    let started = sessions
-        .begin(&account, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let started = common::signed_in(&sessions, &account).await;
     let cookie = sessions.seal(&started.session.id);
 
     // Just inside the idle window: alive, and the timer is refreshed.
@@ -176,10 +204,7 @@ async fn an_absolutely_expired_session_dies_however_busy_it_was() {
     let f = Fixture::new();
     let sessions = f.sessions();
     let account = an_account(&f).await;
-    let started = sessions
-        .begin(&account, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let started = common::signed_in(&sessions, &account).await;
     let cookie = sessions.seal(&started.session.id);
 
     // Used constantly, so the idle timer never fires.
@@ -200,10 +225,7 @@ async fn a_forged_cookie_never_reaches_the_store() {
     let f = Fixture::new();
     let sessions = f.sessions();
     let account = an_account(&f).await;
-    let started = sessions
-        .begin(&account, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let started = common::signed_in(&sessions, &account).await;
 
     // The right identifier with the wrong signature.
     let forged = format!("{}.{}", started.session.id, "AAAAAAAAAAAAAAAAAAAAAA");
@@ -227,8 +249,8 @@ async fn a_forged_cookie_never_reaches_the_store() {
 async fn a_password_reset_revokes_every_session_without_being_asked() {
     let f = Fixture::new();
     let sessions = f.sessions();
-    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone())
-        .expect("accounts");
+    let accounts =
+        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).expect("accounts");
 
     let registered = accounts
         .register("ada@example.com", "a long enough password")
@@ -240,14 +262,8 @@ async fn a_password_reset_revokes_every_session_without_being_asked() {
     };
 
     // Two live sessions — one of them the attacker's.
-    let mine = sessions
-        .begin(&account.id, Privilege::Authenticated)
-        .await
-        .unwrap();
-    let theirs = sessions
-        .begin(&account.id, Privilege::Authenticated)
-        .await
-        .unwrap();
+    let mine = common::signed_in(&sessions, &account.id).await;
+    let theirs = common::signed_in(&sessions, &account.id).await;
     assert_eq!(f.store.session_count(), 2);
 
     let requested = accounts

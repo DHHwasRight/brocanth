@@ -1,0 +1,10 @@
+error[E0382]: use of moved value: `proof`
+  --> tests/ui/spend_one_proof_twice.rs:17:43
+   |
+ 9 |     let proof = Verified::without_a_credential_check(
+   |         ----- move occurs because `proof` has type `Verified`, which does not implement the `Copy` trait
+...
+16 |     let _first = policy.admit(&enrolled, proof);
+   |                                          ----- value moved here
+17 |     let _second = policy.admit(&enrolled, proof);
+   |                                           ^^^^^ value used here after move

@@ -48,11 +48,16 @@ async fn a_code_is_eight_digits_and_works_once() {
     assert_eq!(code.as_str().len(), 8);
     assert!(code.as_str().bytes().all(|b| b.is_ascii_digit()));
 
-    let account = otp
+    let proof = otp
         .authenticate(&challenge, code.as_str())
         .await
         .expect("the first use");
-    assert!(!account.as_str().is_empty());
+    assert!(!proof.account().as_str().is_empty());
+    // A mailed code is a *second* factor here, not a sign-in on its own.
+    assert_eq!(
+        proof.kinds(),
+        brocanth_auth::mfa::FactorSet::of([brocanth_auth::mfa::FactorKind::EmailOtp])
+    );
 
     let err = otp
         .authenticate(&challenge, code.as_str())
@@ -130,9 +135,11 @@ async fn the_last_attempt_in_the_budget_still_counts() {
         assert!(otp.authenticate(&challenge, "00000000").await.is_err());
     }
     // Four typos and then the right code is a real person, not an attack.
-    otp.authenticate(&challenge, code.as_str())
+    let proof = otp
+        .authenticate(&challenge, code.as_str())
         .await
         .expect("the fifth attempt is still an attempt");
+    assert!(!proof.account().as_str().is_empty());
 }
 
 #[tokio::test]
@@ -154,9 +161,11 @@ async fn an_attempt_against_one_challenge_does_not_spend_another() {
     }
     // Asking twice does not invalidate the code somebody is part-way through
     // typing, and burning one challenge does not burn the other.
-    otp.authenticate(&second_challenge, second_code.as_str())
+    let proof = otp
+        .authenticate(&second_challenge, second_code.as_str())
         .await
         .expect("the second challenge is its own budget");
+    assert!(!proof.account().as_str().is_empty());
 }
 
 // ---------------------------------------------------------------------------

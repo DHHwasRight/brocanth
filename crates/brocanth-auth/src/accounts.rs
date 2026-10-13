@@ -48,6 +48,7 @@ use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{Account, AccountId, EmailAddress};
 use crate::impersonation::AccountHolder;
+use crate::mfa::{FactorKind, FactorSet, Verified};
 use crate::password::Passwords;
 use crate::storage::{AuthStore, NewAccount, StoreError};
 use crate::tokens::{IssuedToken, TokenPurpose, Tokens};
@@ -113,6 +114,49 @@ pub enum ResetOutcome {
 pub struct ResetRequested {
     /// What to mail. See [`ResetOutcome`].
     pub outcome: ResetOutcome,
+}
+
+/// A successful login: who it was, and the proof that they proved it.
+///
+/// The proof is the first link in the chain [`crate::mfa`] describes. It is
+/// not enough on its own to open a session — [`FactorPolicy::admit`] decides
+/// that, because this crate cannot know whether the account owes a second
+/// factor without asking the store.
+///
+/// `#[must_use]` is on it, but the real enforcement is downstream: a
+/// [`Verified`] that is dropped cannot become an [`Admitted`], and an
+/// [`Admitted`] is the only thing [`Sessions::begin_with_factors`] accepts.
+///
+/// [`FactorPolicy::admit`]: crate::mfa::FactorPolicy::admit
+/// [`Admitted`]: crate::mfa::Admitted
+/// [`Sessions::begin_with_factors`]: crate::session::Sessions::begin_with_factors
+#[derive(Debug)]
+#[must_use = "a login that is not carried to the policy has signed nobody in"]
+pub struct Authenticated {
+    account: Account,
+    proof: Verified,
+}
+
+impl Authenticated {
+    /// The account, so a caller is no worse off than when `login` returned one.
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// The proof, to read without spending it.
+    pub fn proof(&self) -> &Verified {
+        &self.proof
+    }
+
+    /// Takes both apart.
+    pub fn into_parts(self) -> (Account, Verified) {
+        (self.account, self.proof)
+    }
+
+    /// Takes the proof and discards the account.
+    pub fn into_proof(self) -> Verified {
+        self.proof
+    }
 }
 
 /// Registration, login, password reset and email verification.
@@ -218,12 +262,21 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
 
     /// Authenticates an address and a password.
     ///
+    /// Answers an [`Authenticated`], which carries the account **and** a
+    /// [`Verified`] naming [`FactorKind::Password`]. The proof is what the rest
+    /// of the sign-in is built from; see [`crate::mfa`] for the chain and why a
+    /// bare `Account` was the wrong return type.
+    ///
+    /// Nothing about the failure path changed: the extra value is built only
+    /// after the password has already verified, so the two branches still do
+    /// the same work in the same time.
+    ///
     /// # Errors
     /// Returns [`AuthError::InvalidCredentials`] for a wrong password, an
     /// address nobody has registered, an address that is not an address, and
     /// an account that has no password because it only signs in through a
     /// provider. One error, one timing, four causes.
-    pub async fn login(&self, email: &str, password: &str) -> Result<Account, AuthError> {
+    pub async fn login(&self, email: &str, password: &str) -> Result<Authenticated, AuthError> {
         // A malformed address does not short-circuit: it goes down the same
         // path with no account, so it costs the same as every other failure.
         let account = match EmailAddress::parse(email) {
@@ -234,7 +287,9 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
         if self.passwords.verify_or_dummy(hash, password) {
             // `verify_or_dummy` answered true, so `account` is `Some` and has
             // a hash.
-            account.ok_or(AuthError::InvalidCredentials)
+            let account = account.ok_or(AuthError::InvalidCredentials)?;
+            let proof = Verified::minted(account.id.clone(), FactorSet::of([FactorKind::Password]));
+            Ok(Authenticated { account, proof })
         } else {
             Err(AuthError::InvalidCredentials)
         }

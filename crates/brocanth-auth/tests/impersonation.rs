@@ -27,15 +27,7 @@ async fn an_account(f: &Fixture, email: &str) -> AccountId {
 async fn an_elevated_operator(f: &Fixture) -> SessionRecord {
     let sessions = f.sessions();
     let operator = an_account(f, "ops@example.com").await;
-    let opened = sessions
-        .begin(&operator, Privilege::Authenticated)
-        .await
-        .unwrap();
-    sessions
-        .rotate(&opened.session.id, Privilege::Elevated)
-        .await
-        .unwrap()
-        .session
+    common::elevated(&sessions, &operator).await.session
 }
 
 #[tokio::test]
@@ -101,20 +93,17 @@ async fn an_impersonated_session_cannot_change_the_password() {
     assert!(matches!(err, AuthError::Impersonated), "{err:?}");
 
     // The subject's own session still can.
-    let theirs = sessions
-        .begin(&subject, Privilege::Elevated)
-        .await
-        .unwrap()
-        .session;
+    let theirs = common::signed_in(&sessions, &subject).await.session;
     let who = AccountHolder::of(&theirs).expect("their own session");
     accounts
         .change_password(&who, "the real password", "a new one")
         .await
         .expect("the account holder may");
-    accounts
+    let after = accounts
         .login("ada@example.com", "a new one")
         .await
         .expect("and it took effect");
+    assert_eq!(after.account().id, subject);
 }
 
 #[tokio::test]
@@ -131,17 +120,13 @@ async fn an_impersonated_session_cannot_elevate() {
         .session;
 
     let err = sessions
-        .rotate(&acting.id, Privilege::Elevated)
+        .elevate(&acting.id, common::elevation(&subject))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::Impersonated), "{err:?}");
 
     // Rotating for any other reason still works, and stays impersonated.
-    let again = sessions
-        .rotate(&acting.id, Privilege::Authenticated)
-        .await
-        .unwrap()
-        .session;
+    let again = sessions.rotate(&acting.id).await.unwrap().session;
     assert!(again.is_impersonated(), "a rotation laundered the marker");
     assert_eq!(again.operator(), Some(&operator.account));
 }
@@ -176,11 +161,7 @@ async fn an_operator_who_has_not_re_proved_themselves_cannot_start() {
     let operator = an_account(&f, "ops@example.com").await;
     let subject = an_account(&f, "ada@example.com").await;
 
-    let ordinary = sessions
-        .begin(&operator, Privilege::Authenticated)
-        .await
-        .unwrap()
-        .session;
+    let ordinary = common::signed_in(&sessions, &operator).await.session;
     let err = sessions
         .impersonate(&ordinary, &subject, "TICKET-4471")
         .await
@@ -246,11 +227,7 @@ async fn ending_an_impersonation_deletes_it_and_returns_the_operators_cookie() {
     assert!(f.store.session(&operator.id).await.unwrap().is_some());
 
     // And it is not something you can do to an ordinary session.
-    let theirs = sessions
-        .begin(&subject, Privilege::Authenticated)
-        .await
-        .unwrap()
-        .session;
+    let theirs = common::signed_in(&sessions, &subject).await.session;
     assert!(sessions.end_impersonation(&theirs).await.is_err());
 }
 

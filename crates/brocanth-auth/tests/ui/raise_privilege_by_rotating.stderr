@@ -1,0 +1,16 @@
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+  --> tests/ui/raise_privilege_by_rotating.rs:19:22
+   |
+19 |     let _ = sessions.rotate(&SessionId::new("whatever"), Privilege::Authenticated);
+   |                      ^^^^^^                              ------------------------ unexpected argument #2 of type `Privilege`
+   |
+note: method defined here
+  --> src/session.rs
+   |
+   |     pub async fn rotate(&self, old: &SessionId) -> Result<StartedSession, AuthError> {
+   |                  ^^^^^^
+help: remove the extra argument
+   |
+19 -     let _ = sessions.rotate(&SessionId::new("whatever"), Privilege::Authenticated);
+19 +     let _ = sessions.rotate(&SessionId::new("whatever"));
+   |

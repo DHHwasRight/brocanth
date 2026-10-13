@@ -28,8 +28,8 @@
 //! |---|---|
 //! | Change the password | [`Accounts::change_password`] takes [`AccountHolder`], which [`AccountHolder::of`] refuses to build from an impersonated session |
 //! | Enrol, confirm or remove a second factor | the same, on [`Mfa`] |
-//! | See the recovery codes | the same: codes are returned only by the calls that take an [`AccountHolder`] |
-//! | Reach [`Privilege::Elevated`] | [`Sessions::rotate`] refuses the elevation, and [`FactorPolicy`] never grants it to an impersonated session |
+//! | See the recovery codes | the same: codes are returned only by the calls that take an [`AccountHolder`], and so is the list of enrolled factors ([`Mfa::enrolled`]) |
+//! | Reach [`Privilege::Elevated`] | [`Sessions::elevate`] refuses an impersonated session, and no other method takes a [`Privilege`] at all |
 //! | Impersonate somebody else | [`Sessions::impersonate`] refuses an operator session that is itself impersonated |
 //!
 //! The list is deliberately short. Everything an operator genuinely needs
@@ -46,8 +46,10 @@
 //! [`Accounts::change_password`]: crate::accounts::Accounts::change_password
 //! [`Mfa`]: crate::mfa::Mfa
 //! [`FactorPolicy`]: crate::mfa::FactorPolicy
+//! [`Privilege`]: crate::session::Privilege
 //! [`Privilege::Elevated`]: crate::session::Privilege::Elevated
-//! [`Sessions::rotate`]: crate::session::Sessions::rotate
+//! [`Sessions::elevate`]: crate::session::Sessions::elevate
+//! [`Mfa::enrolled`]: crate::mfa::Mfa::enrolled
 //! [`Sessions::impersonate`]: crate::session::Sessions::impersonate
 //! [`brocanth-policy`]: https://docs.rs/brocanth-policy
 
@@ -163,7 +165,7 @@ impl Restricted {
             Restricted::ChangePassword
             | Restricted::ManageSecondFactors
             | Restricted::ReadRecoveryCodes => "AccountHolder::of",
-            Restricted::Elevate => "Sessions::rotate",
+            Restricted::Elevate => "Sessions::elevate",
             Restricted::Nest => "Sessions::impersonate",
         }
     }

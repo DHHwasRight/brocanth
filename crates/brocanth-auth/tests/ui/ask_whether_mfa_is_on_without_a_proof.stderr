@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/ask_whether_mfa_is_on_without_a_proof.rs:16:32
+   |
+16 |     let _ = mfa.second_factors(&AccountId::new("ada"));
+   |                 -------------- ^^^^^^^^^^^^^^^^^^^^^^ expected `&Verified`, found `&AccountId`
+   |                 |
+   |                 arguments to this method are incorrect
+   |
+   = note: expected reference `&Verified`
+              found reference `&AccountId`
+note: method defined here
+  --> src/mfa.rs
+   |
+   |     pub async fn second_factors(&self, proof: &Verified) -> Result<Enrolled, AuthError> {
+   |                  ^^^^^^^^^^^^^^

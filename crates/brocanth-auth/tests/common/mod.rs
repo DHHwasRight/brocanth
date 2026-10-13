@@ -12,12 +12,15 @@ use brocanth_auth::accounts::Accounts;
 use brocanth_auth::alerts::LoginAlerts;
 use brocanth_auth::clock::TestClock;
 use brocanth_auth::http_client::{HttpResponse, StubHttp};
+use brocanth_auth::identity::AccountId;
 use brocanth_auth::memory::MemoryStore;
-use brocanth_auth::mfa::Mfa;
+use brocanth_auth::mfa::{
+    Admission, Admitted, Elevation, Enrolled, FactorKind, FactorPolicy, FactorSet, Mfa, Verified,
+};
 use brocanth_auth::oauth::{ClientConfig, OauthClient};
 use brocanth_auth::otp::Otp;
 use brocanth_auth::password::{PasswordCost, Passwords};
-use brocanth_auth::session::{SessionConfig, Sessions, SigningKey};
+use brocanth_auth::session::{SessionConfig, Sessions, SigningKey, StartedSession};
 
 /// A 2048-bit RSA private key, for signing test id_tokens. Test-only.
 pub const TEST_RSA_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
@@ -175,4 +178,64 @@ pub fn client_config() -> ClientConfig {
 /// A `200 OK` JSON response.
 pub fn json(body: impl Into<Vec<u8>>) -> HttpResponse {
     HttpResponse::json(body)
+}
+
+// ---------------------------------------------------------------------------
+// The witness chain, for tests that need a live session but are not testing
+// the credential check that would normally produce one.
+//
+// Every one of these goes through the real `FactorPolicy`. The only thing they
+// skip is the argon2 verification, which is what
+// `Verified::without_a_credential_check` is named for.
+// ---------------------------------------------------------------------------
+
+/// A password proof for an account, as `Accounts::login` would have minted.
+pub fn password_proof(account: &AccountId) -> Verified {
+    Verified::without_a_credential_check(account.clone(), FactorSet::of([FactorKind::Password]))
+}
+
+/// Nothing enrolled, as `Mfa::second_factors` would have answered for an
+/// account with no second factor.
+pub fn nothing_enrolled(account: &AccountId) -> Enrolled {
+    Enrolled::without_asking_the_store(account.clone(), FactorSet::empty())
+}
+
+/// Runs the real policy and unwraps the admission.
+pub fn admit(enrolled: &Enrolled, proof: Verified) -> Admitted {
+    match FactorPolicy::recommended().admit(enrolled, proof) {
+        Admission::Admit(admitted) => admitted,
+        other => panic!("the policy refused: {other:?}"),
+    }
+}
+
+/// A live, signed-in session for an account.
+pub async fn signed_in(
+    sessions: &Sessions<MemoryStore, TestClock>,
+    account: &AccountId,
+) -> StartedSession {
+    let admitted = admit(&nothing_enrolled(account), password_proof(account));
+    sessions
+        .begin_with_factors(admitted, None)
+        .await
+        .expect("begin")
+}
+
+/// An elevation for an account with no second factor, where re-typing the
+/// password is the strongest proof available.
+pub fn elevation(account: &AccountId) -> Elevation {
+    FactorPolicy::recommended()
+        .for_elevation(&nothing_enrolled(account), password_proof(account))
+        .expect("the policy elevates a password when there is no second factor")
+}
+
+/// A live, elevated session for an account.
+pub async fn elevated(
+    sessions: &Sessions<MemoryStore, TestClock>,
+    account: &AccountId,
+) -> StartedSession {
+    let started = signed_in(sessions, account).await;
+    sessions
+        .elevate(&started.session.id, elevation(account))
+        .await
+        .expect("elevate")
 }
