@@ -56,6 +56,14 @@
 //! `tokio::task::spawn_blocking`: the core runs on a blocking thread so the
 //! async workers stay free. The cost is one thread per concurrent request,
 //! stated and measured in [`bridge`].
+//!
+//! A route that *can* wait does not pay it. The core's route table holds
+//! handlers of two kinds, and the bridge reads the kind before it touches the
+//! handler: a route that waits is awaited inline and costs a task, a route
+//! that cannot is sent to a blocking thread as before. Fifty concurrent 100 ms
+//! handlers are fifty OS threads in the second case and two in the first.
+//! [`bridge`] has both numbers, what the inline arm does about a panicking
+//! handler, and what that does not cover.
 
 #[cfg(feature = "bridge")]
 pub mod bridge;

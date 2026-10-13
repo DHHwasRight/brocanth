@@ -21,8 +21,9 @@
 //! it for as long as it computes -- or for as long as a database driver keeps
 //! it waiting.
 //!
-//! **The decision: every core request runs on [`tokio::task::spawn_blocking`],
-//! never on a Tokio worker.** Three candidates, and what each costs:
+//! **The decision, and it still holds for every route that cannot wait: a core
+//! request runs on [`tokio::task::spawn_blocking`], never on a Tokio worker.**
+//! Three candidates, and what each costs:
 //!
 //! 1. *Inline.* One line, no threads, no bounds to satisfy. It also gives the
 //!    whole M:N property back: `fifty_waiting_handlers_do_not_cost_fifty_threads`
@@ -50,6 +51,127 @@
 //! The one thing choice 2 buys that is not performance: a panicking handler
 //! comes back as a [`JoinError`](tokio::task::JoinError), so it is a 500 for
 //! that request rather than a dropped connection.
+//!
+//! # A route that can wait
+//!
+//! The core now has two kinds of route. [`AnyHandler`] is `Sync` or `Async`
+//! and says which **before** it is called, so the bridge chooses per request:
+//!
+//! | The route | Where it runs | What it costs |
+//! |---|---|---|
+//! | sync | `spawn_blocking`, exactly as above | one OS thread, for as long as it computes |
+//! | async | inline, on the worker that read the request | one task, and one `Box::pin` |
+//!
+//! Fifty concurrent 100 ms handlers are fifty OS threads when they are sync
+//! and **two threads** when they are async, which is the whole point of the
+//! two kinds. Both numbers are measured, side by side over one table, in
+//! `fifty_awaiting_core_handlers_cost_no_blocking_thread_at_all`.
+//!
+//! A table with no async route in it pays nothing for the choice.
+//! [`RouteKind::MAY_BE_ASYNC`] is `false` for a `Router<Handler<E>>`, so for an
+//! application that never registered an async route the inline arm is a
+//! constant `false` and folds away, leaving the function it was before.
+//!
+//! **Where the two halves of the request run, and why it is not symmetric.**
+//! For a sync route the whole pipeline -- request hooks, dispatch, handler,
+//! error hooks, response hooks, `after_dispatch` -- runs on the blocking
+//! thread, exactly as it did. For an async route only the handler can wait, so
+//! [`App::begin`] and [`App::finish`] run inline on the worker. That is the one
+//! thing this arm changes about hooks, and it is worth saying plainly: **a
+//! `RequestHook::before_dispatch` that blocks will block a worker when the
+//! route it precedes is async.** Response hooks are CPU by contract --
+//! compression and ETag over a `Vec<u8>` that is already in memory -- so they
+//! are safe there; a request hook that reaches a session store is not. Until
+//! the core has an async request hook family, such a hook wants a sync route.
+//!
+//! The alternative was to run `begin` on a blocking thread and hop back to the
+//! worker to await. It keeps that guarantee and loses the headline: fifty
+//! requests arriving together would each take a pool thread for the length of
+//! their hooks, and the blocking pool spawns a thread per queued task, so the
+//! fifty threads come back for a shorter time. The measurement this module
+//! exists for would then be a smaller number rather than zero.
+//!
+//! **Choosing before the handler is touched.** The kind is read from the route
+//! table, through [`RouteKind::is_async`], before [`App::begin`] runs -- which
+//! means it is read from the request as it arrived, and a request hook may
+//! still rewrite the method or the path afterwards. The prediction is exact
+//! unless a hook rewrites a request from one kind of route onto the other, and
+//! both mispredictions stay **correct**: an async route reached on a blocking
+//! thread is driven to completion there, by a parked thread rather than a
+//! runtime, and a sync route reached inline is called inline. Each costs that
+//! one request the thread placement the other kind wanted. The price of
+//! reading the kind this early is one extra router lookup per request for a
+//! table that has async routes in it, and nothing at all for a table that does
+//! not.
+//!
+//! # The panic story, for the arm that has no `JoinError`
+//!
+//! `spawn_blocking` is a panic net as well as a thread: the panic unwinds into
+//! Tokio, comes back as a [`JoinError`](tokio::task::JoinError) and becomes a
+//! 500. An inline `.await` has no such net. A panicking handler would unwind
+//! into hyper's connection task and the client would get a closed socket with
+//! no status, which is a worse answer than the one the sync arm gives.
+//!
+//! So the inline arm carries its own net: [`catch_unwind`], a future that polls
+//! another future inside [`std::panic::catch_unwind`]. Four things had to be
+//! true for that to be sound rather than merely convenient.
+//!
+//! **1. What `AssertUnwindSafe` is asserting here.** [`UnwindSafe`] is a lint
+//! against *observing* state that a caught panic left half-written. Almost no
+//! real future is `UnwindSafe`, so the assertion is unavoidable; what makes it
+//! true is what the bridge does afterwards. **On a caught panic this module
+//! observes nothing the handler touched.** The request and the [`RequestState`]
+//! are local to the caught region, they are shown to no hook, and they are
+//! dropped. The answer is the same fixed `500 Internal Server Error` the
+//! `JoinError` arm writes, built from two string literals. In particular the
+//! caught outcome is **not** handed to [`App::finish`]: a half-written
+//! `RequestState` never reaches an error hook or a response hook, and the two
+//! arms produce the same bytes. That is the whole of the assertion.
+//!
+//! **2. What it does not cover.** Everything the handler reached *through* the
+//! context: a connection pool, a cache, an `Arc<Mutex<_>>` an application put
+//! there. Those outlive the request, and a panic in the middle of one leaves it
+//! as the application left it. This is not new and not narrowed -- a panic
+//! inside `spawn_blocking` leaves exactly the same shared state behind, and the
+//! process keeps serving in both cases. `std::sync::Mutex` poisoning is what
+//! turns a half-write into an error for the next request rather than silence.
+//! The inline arm does not widen that exposure; it inherits it.
+//!
+//! **3. A panic mid-`.await`.** The panic unwinds the `poll` frame, which runs
+//! the destructors of everything live in that poll; the future is then left
+//! for the wrapper to drop, which runs the destructors of everything it held
+//! across its last suspension point. Both halves of the cleanup happen. What a
+//! panicking async handler is, exactly, is **a handler cancelled at its last
+//! `.await`, plus an unwind** -- so what it can leave half-done is what
+//! cancellation can leave half-done: work with no synchronous cleanup, such as
+//! a transaction whose rollback is itself a future. `spawn_blocking` has no
+//! equivalent, because a thread cannot be cancelled; that is the one way the
+//! two arms genuinely differ. It is also not confined to panics: an inline
+//! handler is droppable at every `.await` *because* it is a future, so a client
+//! that disconnects mid-request can cancel it where it could not cancel a
+//! blocking thread. An async route is cancellable. Say so in its documentation.
+//!
+//! A future that panicked is never polled again. The wrapper marks itself
+//! finished before it returns the payload, and a second poll is a panic with a
+//! sentence in it rather than a re-entry into a half-torn generator.
+//!
+//! **4. `panic = "abort"`.** [`catch_unwind`] catches nothing under it: the
+//! process aborts at the panic site. That is reachable -- any binary depending
+//! on this crate may set `panic = "abort"` in its own profile, and this
+//! workspace sets no `[profile]` at all, so the default `unwind` is what the
+//! tests measure. The thing to notice is that the two arms do **not** split
+//! under abort: `spawn_blocking` produces no `JoinError` either, because the
+//! process is gone before Tokio sees anything. "A panicking handler is a 500"
+//! was already conditional on `panic = "unwind"` before this change, and it is
+//! conditional on it in exactly the same way after.
+//!
+//! The panic is still printed. `std` runs the panic hook at the panic site,
+//! before unwinding, so the default hook's message and backtrace reach stderr
+//! from both arms; `brocanth-jobs`' `panic_hook` captures one into a
+//! thread-local and reads it back *on the thread that panicked, immediately
+//! after catching*, and that discipline survives here -- the panic and the
+//! catch are the same `poll` call on the same thread, whichever thread that
+//! poll ran on.
 //!
 //! # Who answers what
 //!
@@ -85,14 +207,20 @@
 //!
 //! [`MiddlewareStack::run`]: brocanth::routing::MiddlewareStack::run
 
+use std::any::Any;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::{self, AssertUnwindSafe};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use brocanth::plugin_app::{App, BuildError};
 use brocanth::plugin_hooks::{
-    HookFamilies, Request as CoreRequest, RequestState, Response as CoreResponse,
+    Begin, HandlerError, HookFamilies, Request as CoreRequest, RequestState,
+    Response as CoreResponse,
 };
-use brocanth::plugin_routes::{Handler, RouteCx};
+use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
 use brocanth::plugin_shutdown::{ShutdownReason, ShutdownReport};
 use brocanth::routing::{Allow, Dispatch, Router, Verb};
 use bytes::Bytes;
@@ -271,6 +399,192 @@ fn method_not_allowed(allow: Allow) -> CoreResponse {
 }
 
 // ---------------------------------------------------------------------------
+// What a route table holds
+// ---------------------------------------------------------------------------
+
+/// What the bridge needs to know about whatever the route table holds.
+///
+/// Implemented for the two payloads the core offers, and for nothing else: a
+/// [`Handler<E>`], which never waits, and an [`AnyHandler<E>`], which is one
+/// kind or the other and says which before it is called.
+///
+/// It exists so that a table with no async route in it keeps the function it
+/// had. [`RouteKind::MAY_BE_ASYNC`] is a constant, not a field: for a
+/// `Router<Handler<E>>` the inline arm of [`Bridge::handle`] is dead code
+/// before the optimiser sees it, so the choice is not even a branch.
+pub trait RouteKind<E>: Send + Sync + 'static {
+    /// Whether any route in a table of this kind could ever be async.
+    ///
+    /// `false` removes the inline arm, the extra router lookup that feeds it
+    /// and the panic net that guards it, all at compile time.
+    const MAY_BE_ASYNC: bool;
+
+    /// Whether running *this* route needs something to drive it.
+    ///
+    /// Read before the handler is touched. It costs a discriminant.
+    fn is_async(&self) -> bool;
+
+    /// Runs the route on the thread that calls it, and does not return until
+    /// it is done.
+    ///
+    /// A sync route is called. An async route can only be reached here when a
+    /// request hook rewrote the request onto one after the bridge had already
+    /// chosen a blocking thread, and it is driven to completion on that
+    /// thread, by [`block_on`] -- which parks rather than spinning, and is on
+    /// a blocking pool thread, where blocking is the point.
+    fn call_blocking(&self, cx: &mut RouteCx<'_, E>) -> Result<CoreResponse, HandlerError>;
+
+    /// Runs the route as a future, for a caller that will `.await` it.
+    ///
+    /// A sync route reached this way is called inline and the future it is
+    /// wrapped in is ready on its first poll.
+    fn call_inline<'a>(
+        &'a self,
+        cx: &'a mut RouteCx<'_, E>,
+    ) -> impl Future<Output = Result<CoreResponse, HandlerError>> + Send + 'a;
+}
+
+impl<E: 'static> RouteKind<E> for Handler<E> {
+    const MAY_BE_ASYNC: bool = false;
+
+    fn is_async(&self) -> bool {
+        false
+    }
+
+    fn call_blocking(&self, cx: &mut RouteCx<'_, E>) -> Result<CoreResponse, HandlerError> {
+        self(cx)
+    }
+
+    // `async fn` would say the same thing and lose the `Send` bound, which the
+    // bridge needs: the future is awaited inside a task hyper may move.
+    #[allow(clippy::manual_async_fn)]
+    fn call_inline<'a>(
+        &'a self,
+        cx: &'a mut RouteCx<'_, E>,
+    ) -> impl Future<Output = Result<CoreResponse, HandlerError>> + Send + 'a {
+        // Unreachable: `MAY_BE_ASYNC` is `false`, so nothing calls this. It
+        // still has to typecheck, and it is still the right answer.
+        async move { self(cx) }
+    }
+}
+
+impl<E: 'static> RouteKind<E> for AnyHandler<E> {
+    const MAY_BE_ASYNC: bool = true;
+
+    fn is_async(&self) -> bool {
+        AnyHandler::is_async(self)
+    }
+
+    fn call_blocking(&self, cx: &mut RouteCx<'_, E>) -> Result<CoreResponse, HandlerError> {
+        match self.call_sync(cx) {
+            Some(outcome) => outcome,
+            None => block_on(self.call(cx)),
+        }
+    }
+
+    fn call_inline<'a>(
+        &'a self,
+        cx: &'a mut RouteCx<'_, E>,
+    ) -> impl Future<Output = Result<CoreResponse, HandlerError>> + Send + 'a {
+        self.call(cx)
+    }
+}
+
+/// Drives a future to completion on the calling thread.
+///
+/// Twenty lines of `std` rather than `Handle::block_on`, because the thread
+/// this runs on is a blocking pool thread -- Tokio's rules about blocking
+/// inside a runtime are about workers, and a function that cannot be wrong
+/// about which is which is worth more than the lines it saves. The runtime is
+/// still entered on that thread, so a future waiting on a Tokio timer or
+/// socket is woken by the driver as usual: the waker unparks this thread.
+///
+/// A spurious unpark polls again, which every future permits.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = TaskContext::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The panic net for the inline arm
+// ---------------------------------------------------------------------------
+
+/// Polls `future` inside [`std::panic::catch_unwind`].
+///
+/// The caller passes [`AssertUnwindSafe`], the way `futures`' own
+/// `catch_unwind` makes it do, so the assertion is spelled where it is made
+/// rather than hidden in here. The module header says what it asserts and what
+/// it does not cover.
+fn catch_unwind<F: Future>(future: F) -> CatchUnwind<F> {
+    CatchUnwind {
+        future,
+        finished: false,
+    }
+}
+
+/// See [`catch_unwind`].
+struct CatchUnwind<F> {
+    future: F,
+    finished: bool,
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = Result<F::Output, Box<dyn Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        // SAFETY: `future` is structurally pinned -- it is reached only
+        // through `Pin`, it is never moved out, and it is dropped in place
+        // with the rest of this struct. `finished` is not pinned and is only
+        // read and written.
+        let this = unsafe { self.get_unchecked_mut() };
+        assert!(
+            !this.finished,
+            "a future that already finished was polled again"
+        );
+        // SAFETY: as above. `this` came from a `Pin`, so `future` has not
+        // moved and will not.
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+
+        match panic::catch_unwind(AssertUnwindSafe(|| future.poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(value)) => {
+                this.finished = true;
+                Poll::Ready(Ok(value))
+            }
+            Err(payload) => {
+                // The panicked future is left where it is, finished, and is
+                // dropped with this wrapper a few instructions later -- which
+                // is what runs the destructors of whatever it held across its
+                // last `.await`. Taking it out to drop it early would move a
+                // value that is pinned, and `Pin::set`ting it to nothing would
+                // put a panicking destructor between the drop and the write.
+                this.finished = true;
+                Poll::Ready(Err(payload))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The bridge
 // ---------------------------------------------------------------------------
 
@@ -279,14 +593,17 @@ fn method_not_allowed(allow: Allow) -> CoreResponse {
 /// [`serve`] is the whole of what most applications need. This type is for the
 /// one that wants its own [`Server`] -- an ephemeral port in a test, a stopper
 /// wired to a signal handler -- and still wants the core behind it.
-pub struct Bridge<E, H> {
+pub struct Bridge<E, H, R = Handler<E>> {
     app: App<E, H>,
-    router: Router<Handler<E>>,
+    router: Router<R>,
 }
 
-impl<E: 'static, H: HookFamilies> Bridge<E, H> {
+impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     /// Pairs an application with the table it serves.
-    pub fn new(app: App<E, H>, router: Router<Handler<E>>) -> Self {
+    ///
+    /// The table holds [`Handler<E>`] when no route waits, and
+    /// [`AnyHandler<E>`] when some do. Nothing else changes between the two.
+    pub fn new(app: App<E, H>, router: Router<R>) -> Self {
         Self { app, router }
     }
 
@@ -295,7 +612,8 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
         &self.app
     }
 
-    /// One request, on a blocking thread. See the module header for why.
+    /// One request, on a blocking thread, or inline when the route can wait.
+    /// See the module header for why, and for what the inline arm costs.
     pub async fn handle(self: &Arc<Self>, request: Request) -> Response {
         let Ok(request) = to_core(request) else {
             // The path and the query do not recompose into a URI. 404 would be
@@ -305,6 +623,19 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
             return Response::text(400, "Bad Request");
         };
 
+        // The kind is read from the table before the handler is touched, and
+        // `MAY_BE_ASYNC` deletes the question entirely for a table that holds
+        // no async route.
+        if R::MAY_BE_ASYNC && self.routes_to_an_async_handler(&request) {
+            return match catch_unwind(AssertUnwindSafe(self.inline(request))).await {
+                Ok(response) => response,
+                // The same two string literals the `JoinError` arm answers
+                // with, and for the same reason. Nothing the handler touched
+                // is read on the way here.
+                Err(_) => Response::text(500, "Internal Server Error"),
+            };
+        }
+
         let bridge = Arc::clone(self);
         match tokio::task::spawn_blocking(move || bridge.blocking(request)).await {
             Ok(response) => response,
@@ -313,6 +644,17 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
             // client would have got a closed socket with no status.
             Err(_) => Response::text(500, "Internal Server Error"),
         }
+    }
+
+    /// Whether this request, as it arrived, matches a route that waits.
+    ///
+    /// A hint, not a decision: the request hooks have not run yet and one of
+    /// them may rewrite the method or the path. Both arms answer correctly
+    /// either way; see the module header.
+    fn routes_to_an_async_handler(&self, request: &CoreRequest) -> bool {
+        Verb::from_http(request.method())
+            .and_then(|verb| self.router.dispatch(verb, request.uri().path()).handler())
+            .is_some_and(RouteKind::is_async)
     }
 
     /// One request, synchronously: hooks, router, handler, hooks.
@@ -340,7 +682,7 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
                 Dispatch::Found { handler, matched } => {
                     let params = matched.params();
                     let mut cx = RouteCx::new(request, &params, &context, state);
-                    handler(&mut cx)
+                    handler.call_blocking(&mut cx)
                 }
                 // Built here rather than returned early, so that the response
                 // hooks and `after_dispatch` see them like any other response.
@@ -350,6 +692,48 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
         });
 
         from_core(response)
+    }
+
+    /// One request, inline: hooks, router, `.await` the handler, hooks.
+    ///
+    /// The same pipeline as [`Bridge::blocking`] and the same owner for every
+    /// status -- the 404, the 405 and the 501 are built inside the dispatch
+    /// region here too, so the response hooks and `after_dispatch` see them.
+    /// A request only reaches this function because it matched a route that
+    /// waits, so those three are reachable here only when a request hook then
+    /// rewrote it off that route; they are written out anyway, because the two
+    /// arms must not be able to disagree about who owns a status.
+    /// [`App::run`] is spelled out as [`App::begin`] and [`App::finish`] for
+    /// one reason: the `.await` goes between them, and the core never holds a
+    /// future.
+    ///
+    /// No panic net of its own. The caller wraps the whole of this in one, so
+    /// that a panicking *hook* is a 500 as well -- on the other arm
+    /// `spawn_blocking` catches those too, and the two arms answer alike.
+    async fn inline(&self, mut request: CoreRequest) -> Response {
+        let context = self.app.context();
+        let mut state = RequestState::new();
+
+        let outcome = match self.app.begin(&mut request, &mut state) {
+            Begin::Answered(outcome) => outcome,
+            Begin::Dispatch => {
+                let read: &CoreRequest = &request;
+                match Verb::from_http(read.method()) {
+                    None => Ok(plain(501, "Not Implemented")),
+                    Some(verb) => match self.router.dispatch(verb, read.uri().path()) {
+                        Dispatch::Found { handler, matched } => {
+                            let params = matched.params();
+                            let mut cx = RouteCx::new(read, &params, &context, &mut state);
+                            handler.call_inline(&mut cx).await
+                        }
+                        Dispatch::MethodNotAllowed { allow, .. } => Ok(method_not_allowed(allow)),
+                        Dispatch::NotFound => Ok(plain(404, "Not Found")),
+                    },
+                }
+            }
+        };
+
+        from_core(self.app.finish(&mut request, &mut state, outcome))
     }
 
     /// Starts the application, serves `server` until it is stopped, then stops
@@ -437,10 +821,10 @@ impl<E: 'static, H: HookFamilies> Bridge<E, H> {
 ///
 /// As [`Bridge::serve`], plus [`BridgeError::Serve`] when the address cannot
 /// be bound.
-pub async fn serve<E: 'static, H: HookFamilies>(
+pub async fn serve<E: 'static, H: HookFamilies, R: RouteKind<E>>(
     addr: &str,
     app: App<E, H>,
-    router: Router<Handler<E>>,
+    router: Router<R>,
 ) -> Result<(), BridgeError> {
     let server = Server::bind(addr).await?;
     Bridge::new(app, router).serve(server).await
@@ -450,6 +834,8 @@ pub async fn serve<E: 'static, H: HookFamilies>(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     fn request(headers: Vec<(String, String)>) -> Request {
         Request {
@@ -558,6 +944,117 @@ mod tests {
             )]
         );
         assert_eq!(out.body, Bytes::from_static(b"ok"));
+    }
+
+    // -----------------------------------------------------------------
+    // The kind, and the two ways to run one
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_table_of_plain_handlers_cannot_ask_the_question_at_all() {
+        // Not a tautology: it is the constant that deletes the inline arm,
+        // the extra lookup and the panic net from an application that never
+        // registered a route that waits.
+        const { assert!(!<Handler<()> as RouteKind<()>>::MAY_BE_ASYNC) };
+        const { assert!(<AnyHandler<()> as RouteKind<()>>::MAY_BE_ASYNC) };
+    }
+
+    #[test]
+    fn block_on_returns_what_a_ready_future_returns() {
+        assert_eq!(block_on(async { 7 }), 7);
+    }
+
+    #[test]
+    fn block_on_parks_until_another_thread_wakes_it() {
+        // The case `call_blocking` reaches when a request hook rewrote a
+        // request onto a route that waits: the thread is already blocking, so
+        // it parks and the waker unparks it.
+        struct Delayed {
+            started: bool,
+            done: Arc<AtomicBool>,
+        }
+
+        impl Future for Delayed {
+            type Output = &'static str;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                if self.done.load(Ordering::SeqCst) {
+                    return Poll::Ready("woken");
+                }
+                if !self.started {
+                    self.started = true;
+                    let waker = cx.waker().clone();
+                    let done = Arc::clone(&self.done);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(10));
+                        done.store(true, Ordering::SeqCst);
+                        waker.wake();
+                    });
+                }
+                Poll::Pending
+            }
+        }
+
+        let delayed = Delayed {
+            started: false,
+            done: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(block_on(delayed), "woken");
+    }
+
+    // -----------------------------------------------------------------
+    // The panic net
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_future_that_does_not_panic_comes_back_whole() {
+        assert_eq!(
+            block_on(catch_unwind(AssertUnwindSafe(async { 1 + 1 }))).ok(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_panic_before_the_first_await_is_caught() {
+        // The panic messages in the output below are the point of the tests.
+        let caught = block_on(catch_unwind(AssertUnwindSafe(async {
+            panic!("on purpose, before");
+        })));
+        assert!(caught.is_err());
+    }
+
+    #[test]
+    fn a_panic_after_a_suspension_is_caught_and_the_future_is_not_polled_again() {
+        /// Pending once, then panics: a future that panicked mid-`.await`.
+        struct PanicLater {
+            polls: usize,
+        }
+
+        impl Future for PanicLater {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<()> {
+                self.polls += 1;
+                if self.polls == 1 {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                panic!("on purpose, after a suspension");
+            }
+        }
+
+        let mut net = Box::pin(catch_unwind(AssertUnwindSafe(PanicLater { polls: 0 })));
+        let mut cx = TaskContext::from_waker(std::task::Waker::noop());
+        assert!(net.as_mut().poll(&mut cx).is_pending());
+        assert!(matches!(net.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+
+        // A third poll would re-enter a half-torn generator. It is a bug in
+        // the caller rather than a case to handle, so it says so and stops.
+        let again = panic::catch_unwind(AssertUnwindSafe(|| net.as_mut().poll(&mut cx)));
+        assert!(
+            again.is_err(),
+            "a future that panicked was polled again and did not object"
+        );
     }
 
     #[test]
