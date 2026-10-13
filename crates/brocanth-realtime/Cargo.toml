@@ -1,0 +1,46 @@
+[package]
+name = "brocanth-realtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A realtime broker indexed by topic and addressed by audience, so one write is a map lookup rather than one query per subscriber."
+
+# PLAN.md §8 governs, so the refusals are the design.
+#
+# * **No async runtime, in any configuration.** A bounded queue, a condition
+#   variable and a stored `Waker` are in `std`, and that is the whole of what a
+#   mailbox needs. `brocanth-jobs` takes tokio because a queue poller is
+#   genuinely asynchronous; this crate never waits for anything, so a runtime
+#   here would be a dependency taken to express a preference. The result works
+#   unchanged under tokio, under `brocanth-storage`'s twenty-line executor, and
+#   under a thread per connection.
+# * **No SQL driver.** §10 wants `LISTEN/NOTIFY`, and what this crate owns of
+#   that is the channel name, the payload and the 8000-byte limit. Opening the
+#   connection is the application's, behind the `Notifier` trait. A driver here
+#   would also re-open the `links = "sqlite3"` conflict `brocanth-policy`
+#   documents, for nothing.
+# * **No renderer.** §10 wants a fragment rather than JSON and names `rsx` as
+#   the renderer. `FrameEmitter` is the seam; the default emitter is twenty
+#   lines and no dependency. An arrow from realtime to the renderer would make
+#   every application that broadcasts link a template engine.
+# * **No `brocanth`.** Nothing here touches a request, a response or a route.
+#   That is also why the transport is not here: see the crate documentation.
+[dependencies]
+brocanth-events.workspace = true
+brocanth-policy.workspace = true
+thiserror = "2"
+
+# Only for `listen-notify`. With the feature off neither appears in the tree,
+# which is the §8.2 test: "a feature that is off must mean the code is absent".
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+# Multi-process realtime over Postgres `LISTEN/NOTIFY` (§10). Off by default
+# because a single-process deployment must not link a JSON codec to broadcast
+# in memory.
+listen-notify = ["dep:serde", "dep:serde_json"]
+
+[lints.rust]
+missing_docs = "warn"
