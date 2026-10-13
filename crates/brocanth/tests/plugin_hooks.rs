@@ -125,8 +125,11 @@ impl RequestHook for TraceHook {
     }
 
     fn after_dispatch(&self, _request: &Request, response: &Response, _state: &mut RequestState) {
-        self.rec
-            .push(format!("{}:after({})", self.tag, response.status().as_u16()));
+        self.rec.push(format!(
+            "{}:after({})",
+            self.tag,
+            response.status().as_u16()
+        ));
     }
 }
 
@@ -296,7 +299,8 @@ impl Plugin for Pool {
     }
 
     fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.rec.push(format!("{}:start({})", self.name, lc.stage()));
+        self.rec
+            .push(format!("{}:start({})", self.name, lc.stage()));
         Ok(())
     }
 
@@ -536,7 +540,10 @@ fn a_hooking_plugin_registered_with_plugin_fails_the_build_and_names_the_call_to
         .build()
         .unwrap_err();
 
-    assert!(matches!(err, BuildError::HooksNotInstalled { .. }), "{err:?}");
+    assert!(
+        matches!(err, BuildError::HooksNotInstalled { .. }),
+        "{err:?}"
+    );
     let text = err.to_string();
     assert!(text.contains("plugin_hooking"), "{text}");
     assert!(text.contains("`trace`"), "{text}");
@@ -562,7 +569,10 @@ fn a_hooking_plugin_that_forgets_the_declaration_fails_the_build_too() {
     }
 
     let err = AppBuilder::new().plugin_hooking(Quiet).build().unwrap_err();
-    assert!(matches!(err, BuildError::HooksNotDeclared { .. }), "{err:?}");
+    assert!(
+        matches!(err, BuildError::HooksNotDeclared { .. }),
+        "{err:?}"
+    );
     assert!(err.to_string().contains("INSTALLS_HOOKS"), "{err}");
 }
 
@@ -714,7 +724,9 @@ fn two_bundles_on_one_path_is_an_error_naming_both() {
         .unwrap();
 
     app.mount_routes::<Admin>("/admin").unwrap();
-    let err = app.mount_routes_of::<Admin>("shadow", "/admin").unwrap_err();
+    let err = app
+        .mount_routes_of::<Admin>("shadow", "/admin")
+        .unwrap_err();
 
     assert!(matches!(err, RouteError::Conflict { .. }), "{err:?}");
     let text = err.to_string();
@@ -840,7 +852,9 @@ fn a_failing_drain_is_recorded_and_the_others_still_close() {
     assert_eq!(report.failures()[0].instance, "broken");
     assert_eq!(report.failures()[0].phase, ShutdownPhase::Drain);
     // `pool` closed anyway, which is the whole point.
-    assert!(rec.take().contains(&"pool:shutdown(grace=false)".to_string()));
+    assert!(rec
+        .take()
+        .contains(&"pool:shutdown(grace=false)".to_string()));
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ use std::process::Command;
 /// compiled with.
 const MUST_BE_FREE: &[&str] = &[
     "empty_before_dispatch",
+    "empty_async_before_dispatch",
     "empty_on_response",
     "empty_after_dispatch",
     "empty_model_emit",
@@ -43,6 +44,7 @@ const MUST_BE_FREE: &[&str] = &[
 /// above would be measuring nothing.
 const MUST_NOT_BE_FREE: &[&str] = &[
     "populated_before_dispatch",
+    "populated_async_before_dispatch",
     "populated_on_response",
     "populated_model_emit",
 ];
@@ -230,10 +232,9 @@ fn a_request_through_an_application_with_no_hooks_allocates_nothing() {
     let mut request = Request::new(Vec::new());
     let mut state = RequestState::new();
 
-    let handler =
-        |_: &mut Request, _: &mut RequestState| -> Result<Response, HandlerError> {
-            Ok(Response::new(Vec::new()))
-        };
+    let handler = |_: &mut Request, _: &mut RequestState| -> Result<Response, HandlerError> {
+        Ok(Response::new(Vec::new()))
+    };
 
     // Warm anything the first call might set up, so the measurement is of the
     // steady state rather than of a one-off.

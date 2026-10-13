@@ -75,6 +75,21 @@
 //! order and sees the finished response whatever happened to it. Which is what
 //! a logger, a metrics plugin and an ORM's connection-per-request all need.
 //!
+//! A hook that must *wait* before the handler — a session loaded from a store,
+//! an authorisation checked against a service — implements
+//! [`AsyncRequestHook`] instead. It is a second trait because its
+//! `before_dispatch` returns a future. It is **not** a second phase: both
+//! kinds go into one chain and through one sort, so `after("session")` is
+//! obeyed whichever kind `session` is. `after_dispatch` stays synchronous for
+//! both, because nothing after the response is final is worth holding the
+//! connection open for.
+//!
+//! The price is named rather than hidden: an application that installs an
+//! async request hook calls [`App::begin_async`], awaits the handler, and
+//! calls [`App::finish`]. For that application [`App::run`] and [`App::begin`]
+//! are a **compile** error, because they would have to walk past a step they
+//! cannot run.
+//!
 //! ## 4. Response — rewriting headers and body
 //!
 //! [`ResponseHook::on_response`], in **reverse** declared order, so the hook
@@ -126,6 +141,13 @@
 //! cycle is a build error naming both ends and printing the loop. See
 //! [`plugin_order`].
 //!
+//! One chain covers both request hook traits, so a cycle between a sync hook
+//! and an async one is the same build error as a cycle between two sync ones.
+//! What a family record says must be true: a plugin that registers an async
+//! request hook and leaves [`OnAsyncRequest`] out of its families fails the
+//! build naming the hook, because the record is what decides whether the chain
+//! is compiled at all.
+//!
 //! A hook nobody registered costs nothing: no allocation, no dynamic dispatch
 //! and no branch on an empty list. An empty `Vec` still has to be looked at to
 //! find out it is empty, so emptiness is not a run-time fact here — it is a
@@ -172,6 +194,12 @@
 //! [`ModelHook`]: plugin_model::ModelHook
 //! [`Order`]: plugin_order::Order
 //! [`ProvidesContext<T>`]: plugin_context::ProvidesContext
+//! [`App::begin`]: plugin_app::App::begin
+//! [`App::begin_async`]: plugin_app::App::begin_async
+//! [`App::finish`]: plugin_app::App::finish
+//! [`App::run`]: plugin_app::App::run
+//! [`AsyncRequestHook`]: plugin_hooks::AsyncRequestHook
+//! [`OnAsyncRequest`]: plugin_hooks::OnAsyncRequest
 //! [`RequestHook::before_dispatch`]: plugin_hooks::RequestHook::before_dispatch
 //! [`RequestHook::after_dispatch`]: plugin_hooks::RequestHook::after_dispatch
 //! [`ResponseHook::on_response`]: plugin_hooks::ResponseHook::on_response

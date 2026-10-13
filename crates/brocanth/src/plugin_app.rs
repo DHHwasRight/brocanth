@@ -19,7 +19,10 @@
 //! 5. `configure_router` — every instance offers middleware
 //! 6. hook installation — every instance registered with
 //!    [`AppBuilder::plugin_hooking`] fills the request, response, error and
-//!    model chains, which are then sorted into their declared order
+//!    model chains, which are then sorted into their declared order. The
+//!    synchronous and the asynchronous request hooks share one chain and one
+//!    sort, so the order between the two kinds is declared rather than
+//!    implied by which trait a hook implements
 //! 7. `before_start` — every instance
 //! 8. `listen` — not here; the HTTP server consumes the finished [`App`]
 //! 9. `start` — [`App::start`], once the socket is open
@@ -42,7 +45,7 @@ use crate::plugin_api::{
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
 use crate::plugin_hooks::{
     Begin, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline,
-    Request, RequestHook, RequestState, Response, ResponseHook,
+    Request, RequestState, RequestStep, Response, ResponseHook,
 };
 use crate::plugin_model::{ModelDispatch, ModelHooks};
 use crate::plugin_order::{sort, OrderError, Ordered};
@@ -100,6 +103,15 @@ pub enum BuildError {
          build instead of silently dropping its hooks"
     )]
     HooksNotDeclared { instance: String, plugin: String },
+
+    #[error(
+        "`{instance}` registered the async request hook `{hook}`, and its \
+         `HookSource::Families` does not name `OnAsyncRequest`. The record is what decides \
+         whether the request chain survives compilation, so the hook would never run. Write \
+         `type Families = OnAsyncRequest;`, or `Both<OnAsyncRequest, ..>` beside the \
+         families it already names"
+    )]
+    AsyncHooksNotDeclared { instance: String, hook: String },
 
     #[error("the hook order does not resolve: {0}")]
     Order(
@@ -350,10 +362,8 @@ impl<E, H> AppBuilder<E, H> {
     pub fn plugin_hooking<P: HookSource>(
         self,
         plugin: P,
-    ) -> AppBuilder<
-        <P::Provides as Provided>::Install<E>,
-        crate::plugin_hooks::Both<P::Families, H>,
-    > {
+    ) -> AppBuilder<<P::Provides as Provided>::Install<E>, crate::plugin_hooks::Both<P::Families, H>>
+    {
         self.add(
             P::NAME.to_string(),
             plugin,
@@ -369,10 +379,8 @@ impl<E, H> AppBuilder<E, H> {
         self,
         name: impl Into<String>,
         plugin: P,
-    ) -> AppBuilder<
-        <P::Provides as Provided>::Install<E>,
-        crate::plugin_hooks::Both<P::Families, H>,
-    > {
+    ) -> AppBuilder<<P::Provides as Provided>::Install<E>, crate::plugin_hooks::Both<P::Families, H>>
+    {
         self.add(name.into(), plugin, true, Some(install_hooks_of::<P>))
             .retype()
     }
@@ -451,7 +459,10 @@ impl<E, H> AppBuilder<E, H> {
     }
 
     /// Runs the lifecycle and returns the finished application.
-    pub fn build(mut self) -> Result<App<E, H>, BuildError> {
+    pub fn build(mut self) -> Result<App<E, H>, BuildError>
+    where
+        H: HookFamilies,
+    {
         // A name identifies one instance, so it must identify only one.
         let names: Vec<String> = self
             .instances
@@ -536,8 +547,16 @@ impl<E, H> AppBuilder<E, H> {
     }
 
     /// Collects every installed hook and sorts it into declared order.
-    fn install_hooks(&self) -> Result<(Pipeline, ModelHooks), BuildError> {
-        let mut request: Vec<Ordered<Box<dyn RequestHook>>> = Vec::new();
+    ///
+    /// The sync and the async request hooks go into one `Vec` and through one
+    /// [`sort`], so the order between the two kinds is the order somebody
+    /// declared rather than a consequence of which list a hook landed in. See
+    /// the header of [`crate::plugin_hooks`].
+    fn install_hooks(&self) -> Result<(Pipeline, ModelHooks), BuildError>
+    where
+        H: HookFamilies,
+    {
+        let mut request: Vec<Ordered<RequestStep>> = Vec::new();
         let mut response: Vec<Ordered<Box<dyn ResponseHook>>> = Vec::new();
         let mut error: Vec<Ordered<Box<dyn ErrorHook>>> = Vec::new();
         let mut model = ModelHooks::new();
@@ -569,6 +588,22 @@ impl<E, H> AppBuilder<E, H> {
                         }
                     })?;
                 }
+            }
+        }
+
+        // A hook registered into a family the record does not name would be
+        // sorted, stored, and then never run, because the entry point that
+        // walks it is compiled out. For the async family that silence would
+        // be a session lookup that did not happen, so it stops the build.
+        if !H::ASYNC_REQUEST {
+            if let Some(first) = request
+                .iter()
+                .find(|o| matches!(o.value, RequestStep::Async(_)))
+            {
+                return Err(BuildError::AsyncHooksNotDeclared {
+                    instance: first.id.instance().to_string(),
+                    hook: first.id.to_string(),
+                });
             }
         }
 
@@ -801,8 +836,11 @@ impl<E, H> App<E, H> {
     ) -> Result<usize, RouteError> {
         let wanted = instance.unwrap_or(P::NAME);
         let Some(index) = self.index_of::<P>(instance) else {
-            let registered: Vec<String> =
-                self.instances.iter().map(|r| r.inner.name().into()).collect();
+            let registered: Vec<String> = self
+                .instances
+                .iter()
+                .map(|r| r.inner.name().into())
+                .collect();
             return Err(no_such_plugin(wanted, &registered));
         };
 
@@ -850,12 +888,7 @@ impl<E, H: HookFamilies> App<E, H> {
     /// [`NoHooks`] and the whole of it folds down to `dispatch(..)` plus the
     /// bare 500 for an error nobody claimed: no allocation, no dynamic
     /// dispatch, no branch on an empty list.
-    pub fn run<F>(
-        &self,
-        request: &mut Request,
-        state: &mut RequestState,
-        dispatch: F,
-    ) -> Response
+    pub fn run<F>(&self, request: &mut Request, state: &mut RequestState, dispatch: F) -> Response
     where
         F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
     {
@@ -870,6 +903,22 @@ impl<E, H: HookFamilies> App<E, H> {
     #[inline]
     pub fn begin(&self, request: &mut Request, state: &mut RequestState) -> Begin {
         self.pipeline.begin::<H>(request, state)
+    }
+
+    /// The request hooks, including the ones that wait.
+    ///
+    /// See [`Pipeline::begin_async`]. An application that installed an
+    /// [`AsyncRequestHook`](crate::plugin_hooks::AsyncRequestHook) must use
+    /// this rather than [`App::run`] or [`App::begin`]: for it, the other two
+    /// are a compile error rather than a chain walked halfway. An application
+    /// without one may still use it. The chain is then the sync chain, and
+    /// the future is ready on its first poll.
+    ///
+    /// [`App::finish`] is unchanged and is still synchronous, because nothing
+    /// after dispatch waits.
+    #[inline]
+    pub async fn begin_async(&self, request: &mut Request, state: &mut RequestState) -> Begin {
+        self.pipeline.begin_async::<H>(request, state).await
     }
 
     /// The error hooks, response hooks and `after_dispatch`, over whatever the
@@ -925,11 +974,7 @@ impl<E, H: HookFamilies> App<E, H> {
     /// Never returns an error, because a shutdown is a report: one plugin
     /// failing to drain must not stop the next one from closing. Read
     /// [`ShutdownReport::failures`].
-    pub fn shutdown(
-        &mut self,
-        reason: ShutdownReason,
-        grace: Option<Duration>,
-    ) -> ShutdownReport {
+    pub fn shutdown(&mut self, reason: ShutdownReason, grace: Option<Duration>) -> ShutdownReport {
         let started = Instant::now();
         let mut report = ShutdownReport::new(reason, grace);
 
@@ -937,14 +982,8 @@ impl<E, H: HookFamilies> App<E, H> {
             for reg in self.instances.iter_mut().rev() {
                 let name = reg.inner.name().to_string();
                 let outcome = {
-                    let mut sd = ShutdownCx::new(
-                        reason,
-                        phase,
-                        grace,
-                        started,
-                        &name,
-                        &mut self.services,
-                    );
+                    let mut sd =
+                        ShutdownCx::new(reason, phase, grace, started, &name, &mut self.services);
                     match phase {
                         ShutdownPhase::Begin => reg.inner.begin_shutdown(&mut sd),
                         ShutdownPhase::Drain => reg.inner.shutdown(&mut sd),

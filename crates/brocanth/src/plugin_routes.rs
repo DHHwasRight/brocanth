@@ -303,13 +303,7 @@ impl<'a, E> RouteBundle<'a, E> {
     /// `admin` instance becomes `admin.dashboard`. A bad path is reported from
     /// [`RouteSource`]'s caller rather than here, so a plugin can describe its
     /// whole bundle without threading a `Result` through every line.
-    pub fn route(
-        &mut self,
-        name: &str,
-        verb: Verb,
-        path: &str,
-        handler: Handler<E>,
-    ) -> &mut Self {
+    pub fn route(&mut self, name: &str, verb: Verb, path: &str, handler: Handler<E>) -> &mut Self {
         self.described(name, verb, path, "", handler)
     }
 

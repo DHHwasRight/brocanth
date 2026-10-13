@@ -138,8 +138,7 @@ impl<'a> ShutdownCx<'a> {
     /// [`None`] means unlimited; `Some(Duration::ZERO)` means the budget is
     /// gone and a plugin should drop what it is holding rather than wait.
     pub fn remaining(&self) -> Option<Duration> {
-        self.grace
-            .map(|g| g.saturating_sub(self.started.elapsed()))
+        self.grace.map(|g| g.saturating_sub(self.started.elapsed()))
     }
 
     /// Whether the grace period has run out.

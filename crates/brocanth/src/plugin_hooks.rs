@@ -43,6 +43,40 @@
 //! `after_dispatch` runs whatever happened — a short-circuit, a handler error,
 //! a response hook failure — because a logger that only logs the happy path is
 //! not a logger.
+//!
+//! # The request hook that waits
+//!
+//! [`AsyncRequestHook`] is a fifth family, for the hook that must read a
+//! session store before the handler runs. It is a second **trait**, because
+//! its `before_dispatch` returns a future, and a second **marker**
+//! ([`OnAsyncRequest`]), because the record has to say whether the chain
+//! survives compilation. It is **not** a second phase and **not** a second
+//! list.
+//!
+//! One list, one [`sort`](crate::plugin_order::sort), one declared order.
+//! `after("auth.session")` means the same thing whichever kind
+//! `auth.session` is, and a cycle across the two kinds is the same build
+//! error as a cycle within one. The cost of that decision is stated once and
+//! loudly:
+//!
+//! > **An application that installs an async request hook cannot use
+//! > [`Pipeline::run`], [`Pipeline::begin`] or `App::run`.** They are a
+//! > compile error for it, not a silent skip. It calls
+//! > [`Pipeline::begin_async`], awaits the handler, and calls
+//! > [`Pipeline::finish`].
+//!
+//! The alternative — two lists, the sync one drained before the async one —
+//! was rejected. It makes `after("auth.session")` true or false depending on
+//! a property of `auth.session` that its author never wrote down, and it
+//! cannot express "load the session, then stamp the request id" at all if the
+//! two hooks land in the wrong lists. A seam that cannot be declared is a
+//! seam that gets discovered in production.
+//!
+//! `after_dispatch` has no async twin. It cannot fail, cannot change the
+//! response, and runs after the response is final, so waiting there holds the
+//! connection open for work the client is not waiting for. An async hook's
+//! `after_dispatch` is the ordinary synchronous one, in the ordinary reverse
+//! order, among the ordinary hooks.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -51,6 +85,7 @@ use std::marker::PhantomData;
 use crate::plugin_api::{Plugin, PluginError};
 use crate::plugin_model::{ModelEvent, ModelHook, ModelHooks};
 use crate::plugin_order::{HookId, Order, Ordered};
+use crate::plugin_routes::BoxFuture;
 
 /// The request a hook sees. Buffered, because the framework buffers: PLAN.md
 /// §3, *"Buffered render, clean 500 — no half-written responses."*
@@ -75,8 +110,17 @@ pub trait HookFamilies: 'static {
     const ERROR: bool;
     const MODEL: bool;
 
+    /// The plugin installed an [`AsyncRequestHook`].
+    ///
+    /// Defaulted, so a record written before this family existed still
+    /// compiles. A record that says `true` here makes the **synchronous**
+    /// request entry points a compile error for that application: see
+    /// [`Pipeline::before_dispatch`].
+    const ASYNC_REQUEST: bool = false;
+
     /// Whether any family at all is installed.
-    const ANY: bool = Self::REQUEST || Self::RESPONSE || Self::ERROR || Self::MODEL;
+    const ANY: bool =
+        Self::REQUEST || Self::RESPONSE || Self::ERROR || Self::MODEL || Self::ASYNC_REQUEST;
 }
 
 /// No hooks. Where every application starts, and where most of them stay.
@@ -84,6 +128,13 @@ pub struct NoHooks;
 
 /// The plugin hooks the request: before dispatch, after dispatch, or both.
 pub struct OnRequest;
+
+/// The plugin hooks the request and waits while it does.
+///
+/// A separate marker from [`OnRequest`] because the two traits have different
+/// signatures, **not** because the two run in separate phases. Both land in
+/// one chain and one declared order: see [`Pipeline::before_dispatch_async`].
+pub struct OnAsyncRequest;
 
 /// The plugin rewrites responses.
 pub struct OnResponse;
@@ -103,6 +154,7 @@ impl HookFamilies for NoHooks {
     const RESPONSE: bool = false;
     const ERROR: bool = false;
     const MODEL: bool = false;
+    const ASYNC_REQUEST: bool = false;
 }
 
 impl HookFamilies for OnRequest {
@@ -110,6 +162,15 @@ impl HookFamilies for OnRequest {
     const RESPONSE: bool = false;
     const ERROR: bool = false;
     const MODEL: bool = false;
+    const ASYNC_REQUEST: bool = false;
+}
+
+impl HookFamilies for OnAsyncRequest {
+    const REQUEST: bool = false;
+    const RESPONSE: bool = false;
+    const ERROR: bool = false;
+    const MODEL: bool = false;
+    const ASYNC_REQUEST: bool = true;
 }
 
 impl HookFamilies for OnResponse {
@@ -117,6 +178,7 @@ impl HookFamilies for OnResponse {
     const RESPONSE: bool = true;
     const ERROR: bool = false;
     const MODEL: bool = false;
+    const ASYNC_REQUEST: bool = false;
 }
 
 impl HookFamilies for OnError {
@@ -124,6 +186,7 @@ impl HookFamilies for OnError {
     const RESPONSE: bool = false;
     const ERROR: bool = true;
     const MODEL: bool = false;
+    const ASYNC_REQUEST: bool = false;
 }
 
 impl HookFamilies for OnModel {
@@ -131,6 +194,7 @@ impl HookFamilies for OnModel {
     const RESPONSE: bool = false;
     const ERROR: bool = false;
     const MODEL: bool = true;
+    const ASYNC_REQUEST: bool = false;
 }
 
 impl<A: HookFamilies, B: HookFamilies> HookFamilies for Both<A, B> {
@@ -138,6 +202,7 @@ impl<A: HookFamilies, B: HookFamilies> HookFamilies for Both<A, B> {
     const RESPONSE: bool = A::RESPONSE || B::RESPONSE;
     const ERROR: bool = A::ERROR || B::ERROR;
     const MODEL: bool = A::MODEL || B::MODEL;
+    const ASYNC_REQUEST: bool = A::ASYNC_REQUEST || B::ASYNC_REQUEST;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +386,96 @@ pub trait RequestHook: Send + Sync + 'static {
     }
 }
 
+/// Around dispatch, for a hook that waits.
+///
+/// The same seam as [`RequestHook`], with one difference: `before_dispatch`
+/// returns a future, so the hook may read a session store, a cache or an HTTP
+/// service before the handler runs. Everything else is the same, and that is
+/// deliberate.
+///
+/// # One chain, not two
+///
+/// `OnRequest` and [`OnAsyncRequest`] are two families, two traits and two
+/// shapes of `before_dispatch`. They are **not** two phases. Both kinds go
+/// into one list, sorted once by [`sort`](crate::plugin_order::sort), so
+/// `after("auth.session")` means the same thing whichever kind
+/// `auth.session` is and whichever kind declared it. See
+/// [`Pipeline::before_dispatch_async`] for what that costs.
+///
+/// # `after_dispatch` is not async, on purpose
+///
+/// It cannot fail, cannot change the response, and runs after the response is
+/// final. Waiting there holds the connection open to do work the client is not
+/// waiting for; a plugin that wants that wants a job queue. So the signature
+/// here is the synchronous one, byte for byte the same as
+/// [`RequestHook::after_dispatch`], and an async hook that started a timer in
+/// `before_dispatch` still stops it in the right place and the right order.
+///
+/// # Writing one without `async_trait`
+///
+/// The core has no dependencies to spend on that, so the method returns a
+/// [`BoxFuture`] and the body is an `async move` block:
+///
+/// ```
+/// use brocanth::plugin_api::PluginError;
+/// use brocanth::plugin_hooks::{AsyncRequestHook, Flow, Request, RequestState};
+/// use brocanth::plugin_routes::BoxFuture;
+///
+/// struct LoadSession;
+///
+/// impl AsyncRequestHook for LoadSession {
+///     fn before_dispatch<'a>(
+///         &'a self,
+///         request: &'a mut Request,
+///         state: &'a mut RequestState,
+///     ) -> BoxFuture<'a, Result<Flow, PluginError>> {
+///         Box::pin(async move {
+///             let _ = (request, state);
+///             Ok(Flow::Continue)
+///         })
+///     }
+/// }
+/// ```
+pub trait AsyncRequestHook: Send + Sync + 'static {
+    /// Before the handler, with an `.await` available.
+    ///
+    /// [`Flow::Respond`] and `Err` mean exactly what they mean on
+    /// [`RequestHook::before_dispatch`]: the rest of the chain does not run,
+    /// the handler does not run, and response hooks and `after_dispatch`
+    /// still do. "The rest of the chain" is the whole chain, sync hooks
+    /// included, because there is only one.
+    fn before_dispatch<'a>(
+        &'a self,
+        request: &'a mut Request,
+        state: &'a mut RequestState,
+    ) -> BoxFuture<'a, Result<Flow, PluginError>>;
+
+    /// After the response is final. Synchronous, for the reason in the trait
+    /// header.
+    fn after_dispatch(&self, request: &Request, response: &Response, state: &mut RequestState) {
+        let _ = (request, response, state);
+    }
+}
+
+/// One step of the request chain: a hook that returns, or a hook that waits.
+///
+/// Private to the crate because it is a representation, not a seam. A plugin
+/// implements [`RequestHook`] or [`AsyncRequestHook`]; this is only how the
+/// pipeline keeps them in one order.
+pub(crate) enum RequestStep {
+    Sync(Box<dyn RequestHook>),
+    Async(Box<dyn AsyncRequestHook>),
+}
+
+impl RequestStep {
+    fn after_dispatch(&self, request: &Request, response: &Response, state: &mut RequestState) {
+        match self {
+            Self::Sync(hook) => hook.after_dispatch(request, response, state),
+            Self::Async(hook) => hook.after_dispatch(request, response, state),
+        }
+    }
+}
+
 /// Rewriting a response: headers, body, or both.
 ///
 /// Runs in **reverse** declared order, so the hook declared last is the
@@ -363,7 +518,7 @@ pub trait ErrorHook: Send + Sync + 'static {
 /// two distinguishable hooks, and an [`Order`].
 pub struct HookRegistrar<'a> {
     instance: &'a str,
-    request: &'a mut Vec<Ordered<Box<dyn RequestHook>>>,
+    request: &'a mut Vec<Ordered<RequestStep>>,
     response: &'a mut Vec<Ordered<Box<dyn ResponseHook>>>,
     error: &'a mut Vec<Ordered<Box<dyn ErrorHook>>>,
     model: &'a mut ModelHooks,
@@ -372,7 +527,7 @@ pub struct HookRegistrar<'a> {
 impl<'a> HookRegistrar<'a> {
     pub(crate) fn new(
         instance: &'a str,
-        request: &'a mut Vec<Ordered<Box<dyn RequestHook>>>,
+        request: &'a mut Vec<Ordered<RequestStep>>,
         response: &'a mut Vec<Ordered<Box<dyn ResponseHook>>>,
         error: &'a mut Vec<Ordered<Box<dyn ErrorHook>>>,
         model: &'a mut ModelHooks,
@@ -396,7 +551,30 @@ impl<'a> HookRegistrar<'a> {
         self.request.push(Ordered::new(
             HookId::new(self.instance, name),
             order,
-            Box::new(hook) as Box<dyn RequestHook>,
+            RequestStep::Sync(Box::new(hook)),
+        ));
+        self
+    }
+
+    /// A request hook that waits. See [`AsyncRequestHook`].
+    ///
+    /// It goes into the **same** list as [`HookRegistrar::request`], so an
+    /// `Order` may name a sync hook and be obeyed, and a sync hook may name
+    /// this one and be obeyed. The plugin must also name
+    /// [`OnAsyncRequest`] in its [`HookSource::Families`]; it is the record
+    /// that decides whether the chain survives compilation at all, so a hook
+    /// registered here and missing from there fails the build rather than
+    /// going quiet.
+    pub fn request_async(
+        &mut self,
+        name: &str,
+        order: Order,
+        hook: impl AsyncRequestHook,
+    ) -> &mut Self {
+        self.request.push(Ordered::new(
+            HookId::new(self.instance, name),
+            order,
+            RequestStep::Async(Box::new(hook)),
         ));
         self
     }
@@ -461,14 +639,16 @@ pub trait HookSource: Plugin {
 /// other's.
 #[derive(Default)]
 pub struct Pipeline {
-    request: Vec<Box<dyn RequestHook>>,
+    /// The sync and the async request hooks, in one declared order. The kind
+    /// of each step is a property of the step, never of its position.
+    request: Vec<RequestStep>,
     response: Vec<Box<dyn ResponseHook>>,
     error: Vec<Box<dyn ErrorHook>>,
 }
 
 impl Pipeline {
     pub(crate) fn from_parts(
-        request: Vec<Box<dyn RequestHook>>,
+        request: Vec<RequestStep>,
         response: Vec<Box<dyn ResponseHook>>,
         error: Vec<Box<dyn ErrorHook>>,
     ) -> Self {
@@ -479,8 +659,28 @@ impl Pipeline {
         }
     }
 
+    /// How many [`RequestHook`]s are installed.
     pub fn request_hooks(&self) -> usize {
-        self.request.len()
+        self.request
+            .iter()
+            .filter(|s| matches!(s, RequestStep::Sync(_)))
+            .count()
+    }
+
+    /// How many [`AsyncRequestHook`]s are installed.
+    pub fn async_request_hooks(&self) -> usize {
+        self.request
+            .iter()
+            .filter(|s| matches!(s, RequestStep::Async(_)))
+            .count()
+    }
+
+    /// Whether any installed request hook waits.
+    ///
+    /// A value, not a type, so a server layer can log it. The decision that
+    /// matters is the type-level one on [`HookFamilies::ASYNC_REQUEST`].
+    pub fn has_async_request_hooks(&self) -> bool {
+        self.async_request_hooks() > 0
     }
 
     pub fn response_hooks(&self) -> usize {
@@ -495,20 +695,135 @@ impl Pipeline {
         self.request.is_empty() && self.response.is_empty() && self.error.is_empty()
     }
 
-    /// Runs the request hooks in declared order.
+    /// Runs the request hooks in declared order, for a caller that cannot
+    /// wait.
     ///
     /// `H` is the application's family record, so when no plugin installed a
     /// request hook the whole body folds away to `Ok(Flow::Continue)`.
+    ///
+    /// # It does not compile when an async request hook is installed
+    ///
+    /// An application whose record says `H::ASYNC_REQUEST` has a chain this
+    /// function cannot walk: one of the steps returns a future, and there is
+    /// nothing here to drive it. Skipping that step would skip a session
+    /// lookup or an authorisation check and answer the request anyway, so the
+    /// const block below refuses at compile time instead, naming
+    /// [`Pipeline::before_dispatch_async`] as the call to write. The error
+    /// arrives at the line that called it — `App::run`, `App::begin` or this
+    /// — and not at run time.
+    ///
+    /// ```compile_fail
+    /// # use brocanth::plugin_api::{Plugin, PluginError};
+    /// # use brocanth::plugin_app::AppBuilder;
+    /// # use brocanth::plugin_context::NoContext;
+    /// # use brocanth::plugin_hooks::{
+    /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
+    /// #     RequestState, Response,
+    /// # };
+    /// # use brocanth::plugin_order::Order;
+    /// # use brocanth::plugin_routes::BoxFuture;
+    /// # struct Session;
+    /// # impl Plugin for Session {
+    /// #     type Config = ();
+    /// #     type Provides = NoContext;
+    /// #     const NAME: &'static str = "session";
+    /// #     const INSTALLS_HOOKS: bool = true;
+    /// #     fn new(_: ()) -> Self { Self }
+    /// # }
+    /// # impl AsyncRequestHook for Session {
+    /// #     fn before_dispatch<'a>(
+    /// #         &'a self,
+    /// #         _request: &'a mut Request,
+    /// #         _state: &'a mut RequestState,
+    /// #     ) -> BoxFuture<'a, Result<Flow, PluginError>> {
+    /// #         Box::pin(async { Ok(Flow::Continue) })
+    /// #     }
+    /// # }
+    /// # impl HookSource for Session {
+    /// #     type Families = OnAsyncRequest;
+    /// #     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+    /// #         r.request_async("load", Order::new(), Session);
+    /// #         Ok(())
+    /// #     }
+    /// # }
+    /// let app = AppBuilder::new().plugin_hooking(Session).build().unwrap();
+    /// let mut request = Request::new(Vec::new());
+    /// let mut state = RequestState::new();
+    ///
+    /// // The chain holds a step this call cannot run, so it does not build.
+    /// app.run(&mut request, &mut state, |_, _| Ok(Response::new(Vec::new())));
+    /// ```
+    ///
+    /// The same application with the same hook, through the entry point that
+    /// can run it. This one builds, which is what makes the refusal above a
+    /// statement about the const block and not about a typo:
+    ///
+    /// ```
+    /// # use brocanth::plugin_api::{Plugin, PluginError};
+    /// # use brocanth::plugin_app::AppBuilder;
+    /// # use brocanth::plugin_context::NoContext;
+    /// # use brocanth::plugin_hooks::{
+    /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
+    /// #     RequestState, Response,
+    /// # };
+    /// # use brocanth::plugin_order::Order;
+    /// # use brocanth::plugin_routes::BoxFuture;
+    /// # struct Session;
+    /// # impl Plugin for Session {
+    /// #     type Config = ();
+    /// #     type Provides = NoContext;
+    /// #     const NAME: &'static str = "session";
+    /// #     const INSTALLS_HOOKS: bool = true;
+    /// #     fn new(_: ()) -> Self { Self }
+    /// # }
+    /// # impl AsyncRequestHook for Session {
+    /// #     fn before_dispatch<'a>(
+    /// #         &'a self,
+    /// #         _request: &'a mut Request,
+    /// #         _state: &'a mut RequestState,
+    /// #     ) -> BoxFuture<'a, Result<Flow, PluginError>> {
+    /// #         Box::pin(async { Ok(Flow::Continue) })
+    /// #     }
+    /// # }
+    /// # impl HookSource for Session {
+    /// #     type Families = OnAsyncRequest;
+    /// #     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+    /// #         r.request_async("load", Order::new(), Session);
+    /// #         Ok(())
+    /// #     }
+    /// # }
+    /// let app = AppBuilder::new().plugin_hooking(Session).build().unwrap();
+    /// let mut request = Request::new(Vec::new());
+    /// let mut state = RequestState::new();
+    ///
+    /// // A future for the caller's own executor to drive. Building it is
+    /// // what this example checks; `tests/async_request_hooks.rs` awaits it.
+    /// let _begin = app.begin_async(&mut request, &mut state);
+    /// ```
     #[inline]
     pub fn before_dispatch<H: HookFamilies>(
         &self,
         request: &mut Request,
         state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
+        const {
+            assert!(
+                !H::ASYNC_REQUEST,
+                "this application installed an async request hook, and the synchronous \
+                 request-hook entry points cannot run one. Replace `App::run` with \
+                 `App::begin_async`, the handler, and `App::finish`."
+            );
+        }
         if !H::REQUEST {
             return Ok(Flow::Continue);
         }
-        for hook in &self.request {
+        for step in &self.request {
+            // `H::ASYNC_REQUEST` is false here, so the chain holds no async
+            // step and this arm is dead. It is written as a skip rather than
+            // an `unreachable!` so the hot path carries no panic landing pad.
+            let RequestStep::Sync(hook) = step else {
+                continue;
+            };
             match hook.before_dispatch(request, state)? {
                 Flow::Continue => {}
                 stop => return Ok(stop),
@@ -517,7 +832,50 @@ impl Pipeline {
         Ok(Flow::Continue)
     }
 
+    /// Runs the request hooks in declared order, waiting where a hook waits.
+    ///
+    /// This is the entry point for a caller that has a runtime. It walks the
+    /// **whole** chain — the [`RequestHook`]s and the [`AsyncRequestHook`]s,
+    /// in the one order [`sort`](crate::plugin_order::sort) produced — so
+    /// `after("auth.session")` is obeyed whichever kind each hook is. A sync
+    /// hook in this chain is called, not awaited; it costs the call and
+    /// nothing else.
+    ///
+    /// [`Flow::Respond`] and `Err` mean here exactly what they mean in
+    /// [`Pipeline::before_dispatch`]: no later hook of either kind runs, the
+    /// handler does not run, and [`Pipeline::finish`] still runs the response
+    /// hooks and `after_dispatch`.
+    ///
+    /// When neither request family is installed the body folds away to
+    /// `Ok(Flow::Continue)` and the future is ready on its first poll:
+    /// `tests/hooks_cost_nothing.rs` reads the generated code for it.
+    #[inline]
+    pub async fn before_dispatch_async<H: HookFamilies>(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> Result<Flow, PluginError> {
+        if !H::REQUEST && !H::ASYNC_REQUEST {
+            return Ok(Flow::Continue);
+        }
+        for step in &self.request {
+            let flow = match step {
+                RequestStep::Sync(hook) => hook.before_dispatch(request, state)?,
+                RequestStep::Async(hook) => hook.before_dispatch(request, state).await?,
+            };
+            match flow {
+                Flow::Continue => {}
+                stop => return Ok(stop),
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
     /// Runs the request hooks in reverse declared order, read-only.
+    ///
+    /// Both kinds, and synchronously for both: `after_dispatch` has nothing
+    /// to wait for. So a caller that used the async entry point still
+    /// finishes the request with no runtime in hand.
     #[inline]
     pub fn after_dispatch<H: HookFamilies>(
         &self,
@@ -525,11 +883,11 @@ impl Pipeline {
         response: &Response,
         state: &mut RequestState,
     ) {
-        if !H::REQUEST {
+        if !H::REQUEST && !H::ASYNC_REQUEST {
             return;
         }
-        for hook in self.request.iter().rev() {
-            hook.after_dispatch(request, response, state);
+        for step in self.request.iter().rev() {
+            step.after_dispatch(request, response, state);
         }
     }
 
@@ -575,7 +933,12 @@ impl Pipeline {
     ///
     /// With `H = NoHooks` this is `dispatch(request, state)` and the error
     /// path, and nothing else survives compilation.
-    pub fn run<H, F>(&self, request: &mut Request, state: &mut RequestState, dispatch: F) -> Response
+    pub fn run<H, F>(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+        dispatch: F,
+    ) -> Response
     where
         H: HookFamilies,
         F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
@@ -618,6 +981,27 @@ impl Pipeline {
         }
     }
 
+    /// [`Pipeline::begin`] for a caller that has a runtime.
+    ///
+    /// The one entry point that can run an [`AsyncRequestHook`], and the one
+    /// an application that installed one must use. It runs the sync hooks
+    /// too, in the single declared order, so a caller never needs both.
+    ///
+    /// [`Pipeline::finish`] is unchanged and still synchronous: nothing after
+    /// dispatch waits.
+    #[inline]
+    pub async fn begin_async<H: HookFamilies>(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> Begin {
+        match self.before_dispatch_async::<H>(request, state).await {
+            Ok(Flow::Continue) => Begin::Dispatch,
+            Ok(Flow::Respond(response)) => Begin::Answered(Ok(*response)),
+            Err(e) => Begin::Answered(Err(HandlerError::from(e))),
+        }
+    }
+
     /// The second half of [`Pipeline::run`]: error hooks, response hooks and
     /// `after_dispatch`, over whatever the handler produced.
     #[inline]
@@ -632,7 +1016,10 @@ impl Pipeline {
             Err(error) => self.render_error::<H>(&error, request, state),
         };
 
-        if self.on_response::<H>(request, &mut response, state).is_err() {
+        if self
+            .on_response::<H>(request, &mut response, state)
+            .is_err()
+        {
             response = bare_500();
         }
 
@@ -666,7 +1053,8 @@ impl std::fmt::Debug for Begin {
 impl std::fmt::Debug for Pipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pipeline")
-            .field("request", &self.request.len())
+            .field("request", &self.request_hooks())
+            .field("async_request", &self.async_request_hooks())
             .field("response", &self.response.len())
             .field("error", &self.error.len())
             .finish()
@@ -690,10 +1078,14 @@ impl std::fmt::Debug for Pipeline {
 /// to be read; nothing else in the crate calls them.
 #[doc(hidden)]
 pub mod probe {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
     use super::{
-        Flow, HookFamilies, NoHooks, OnModel, OnRequest, OnResponse, Pipeline, Request,
-        RequestState, Response,
+        Flow, HookFamilies, NoHooks, OnAsyncRequest, OnModel, OnRequest, OnResponse, Pipeline,
+        Request, RequestState, Response,
     };
+    use crate::plugin_api::PluginError;
     use crate::plugin_model::{ModelDispatch, ModelEvent};
 
     /// An event kind nobody hooks, for the model probe.
@@ -718,6 +1110,24 @@ pub mod probe {
         state: &mut RequestState,
     ) -> bool {
         before::<OnRequest>(pipeline, request, state)
+    }
+
+    #[inline(never)]
+    pub fn empty_async_before_dispatch(
+        pipeline: &Pipeline,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> bool {
+        before_async::<NoHooks>(pipeline, request, state)
+    }
+
+    #[inline(never)]
+    pub fn populated_async_before_dispatch(
+        pipeline: &Pipeline,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> bool {
+        before_async::<OnAsyncRequest>(pipeline, request, state)
     }
 
     #[inline(never)]
@@ -772,6 +1182,28 @@ pub mod probe {
         matches!(
             pipeline.before_dispatch::<H>(request, state),
             Ok(Flow::Continue)
+        )
+    }
+
+    /// The async chain, polled once with a no-op waker.
+    ///
+    /// Polling once is enough for the measurement: with no family installed
+    /// the future is ready on its first poll, which is the thing being
+    /// proved. With one installed the first poll reaches the loop, which is
+    /// the thing being proved there.
+    fn before_async<H: HookFamilies>(
+        pipeline: &Pipeline,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> bool {
+        poll_once(pipeline.before_dispatch_async::<H>(request, state))
+    }
+
+    fn poll_once(future: impl Future<Output = Result<Flow, PluginError>>) -> bool {
+        let mut cx = Context::from_waker(Waker::noop());
+        matches!(
+            std::pin::pin!(future).poll(&mut cx),
+            Poll::Ready(Ok(Flow::Continue))
         )
     }
 }

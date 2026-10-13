@@ -115,19 +115,15 @@ impl ModelHooks {
     }
 
     /// Adds a hook for `Ev`. Order is resolved later, by [`ModelHooks::finish`].
-    pub fn register<Ev: ModelEvent>(
-        &mut self,
-        id: HookId,
-        order: Order,
-        hook: impl ModelHook<Ev>,
-    ) {
+    pub fn register<Ev: ModelEvent>(&mut self, id: HookId, order: Order, hook: impl ModelHook<Ev>) {
         let key = TypeId::of::<Ev>();
         self.names.insert(key, type_name::<Ev>());
         let boxed: Box<dyn ModelHook<Ev>> = Box::new(hook);
-        self.pending
-            .entry(key)
-            .or_default()
-            .push(Ordered::new(id, order, Box::new(boxed) as Box<dyn Any + Send + Sync>));
+        self.pending.entry(key).or_default().push(Ordered::new(
+            id,
+            order,
+            Box::new(boxed) as Box<dyn Any + Send + Sync>,
+        ));
     }
 
     /// Sorts each event's hooks into their declared order.
@@ -191,7 +187,9 @@ impl std::fmt::Debug for ModelHooks {
             .map(|(_, n)| *n)
             .collect();
         events.sort_unstable();
-        f.debug_struct("ModelHooks").field("events", &events).finish()
+        f.debug_struct("ModelHooks")
+            .field("events", &events)
+            .finish()
     }
 }
 
