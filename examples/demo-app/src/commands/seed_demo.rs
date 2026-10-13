@@ -1,9 +1,9 @@
 //! `seed_demo` -- the name derived from the struct, in snake_case.
 
-use brocanth_task::{anyhow, clap, task, Context, Task};
+use brocanth_command::{anyhow, clap, cmd, Context, Command};
 
 /// Fill the demo database with sample rows.
-#[task]
+#[cmd]
 #[derive(clap::Args)]
 pub struct SeedDemo {
     /// How many rows to write.
@@ -11,7 +11,7 @@ pub struct SeedDemo {
     pub count: u32,
 }
 
-impl Task for SeedDemo {
+impl Command for SeedDemo {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
         println!(
             "would seed {} rows into the {} database",

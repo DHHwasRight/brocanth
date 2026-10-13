@@ -8,7 +8,7 @@
 #[test]
 fn the_macro_accepts_what_it_should_and_explains_what_it_should_not() {
     let t = trybuild::TestCases::new();
-    t.pass("tests/ui/pass_task.rs");
+    t.pass("tests/ui/pass_command.rs");
     t.compile_fail("tests/ui/fail_on_enum.rs");
     t.compile_fail("tests/ui/fail_unknown_argument.rs");
 }

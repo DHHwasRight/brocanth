@@ -96,7 +96,7 @@ pub enum Pick {
     Sessions,
     /// The model layer: SeaORM, validations and migrations
     Model,
-    /// Project tasks: a `manage` binary whose subcommands are your own structs
+    /// Project commands: a `manage` binary whose subcommands are your own structs
     Tasks,
 }
 
@@ -118,7 +118,7 @@ impl Pick {
             Pick::Config => "config",
             Pick::Sessions => "sessions",
             Pick::Model => "model",
-            Pick::Tasks => "tasks",
+            Pick::Tasks => "commands",
         }
     }
 
@@ -130,7 +130,7 @@ impl Pick {
             Pick::Config => "config/<env>.toml, merged; without it nothing links a TOML parser",
             Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
             Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
-            Pick::Tasks => "a `manage` binary; a struct with #[task] becomes a subcommand",
+            Pick::Tasks => "a `manage` binary; a struct with #[cmd] becomes a subcommand",
         }
     }
 
@@ -139,7 +139,7 @@ impl Pick {
         match self {
             Pick::Config => Some("brocanth-config"),
             Pick::Model => Some("brocanth-model"),
-            Pick::Tasks => Some("brocanth-task"),
+            Pick::Tasks => Some("brocanth-command"),
             Pick::Logging | Pick::Sessions => None,
         }
     }
@@ -524,7 +524,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         // tools, not because one is a fallback.
         (
             "mise.toml".to_string(),
-            "[tools]\n# Must match the toolchain brocanth's proc-macro artifacts\n             # were built with: they are not compatible across patch releases.\n             rust = \"1.98\"\n\n             [tasks.run]\nrun = \"cargo run\"\n\n             [tasks.test]\nrun = \"cargo test\"\n"
+            "[tools]\n# Must match the toolchain brocanth's proc-macro artifacts\n             # were built with: they are not compatible across patch releases.\n             rust = \"1.98\"\n\n             [commands.run]\nrun = \"cargo run\"\n\n             [commands.test]\nrun = \"cargo test\"\n"
                 .to_string(),
         ),
         ("src/main.rs".to_string(), main_rs(a)),
@@ -559,13 +559,13 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
             format!("[project]\nname = {:?}\n", a.name),
         ));
         // `cargo manage seed_demo` from anywhere in the project. `--` stops
-        // cargo reading the task's own flags as its own.
+        // cargo reading the command's own flags as its own.
         files.push((
             ".cargo/config.toml".to_string(),
-            "[alias]\n# `cargo manage <task>` runs a task without naming the binary.\nmanage = \"run --quiet --bin manage --\"\n".to_string(),
+            "[alias]\n# `cargo manage <command>` runs a command without naming the binary.\nmanage = \"run --quiet --bin manage --\"\n".to_string(),
         ));
         files.push(("src/bin/manage.rs".to_string(), MANAGE_RS.to_string()));
-        files.push(("src/tasks/mod.rs".to_string(), TASKS_MOD_RS.to_string()));
+        files.push(("src/commands/mod.rs".to_string(), COMMANDS_MOD_RS.to_string()));
     }
     files.push(("AGENTS.md".to_string(), agents_md(a)));
     files
@@ -601,11 +601,11 @@ fn agents_md(a: &Answers) -> String {
         )
     };
 
-    let tasks = if a.has(Pick::Tasks) {
-        "\n## Tasks\n\nA task is a `clap::Args` struct with `#[task]` on it, in its own file under\n\
-         `src/tasks/`, plus a `mod` line. It becomes a subcommand automatically —\n\
+    let commands = if a.has(Pick::Tasks) {
+        "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
+         `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
          registration happens at link time and there is no list to add it to.\n\n\
-         ```\ncargo manage tasks          # every task in this binary\ncargo manage greet --name x\n```\n"
+         ```\ncargo manage commands          # every command in this binary\ncargo manage greet --name x\n```\n"
     } else {
         ""
     };
@@ -655,7 +655,7 @@ fn agents_md(a: &Answers) -> String {
          A handler returns a value and never writes a response itself. That is\n\
          what makes a half-written body on an error impossible rather than\n\
          unlikely.\n\
-         {tasks}\
+         {commands}\
          \n\
          ## House style\n\
          \n\
@@ -679,48 +679,48 @@ fn agents_md(a: &Answers) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         absent = absent,
-        tasks = tasks,
+        commands = commands,
     )
 }
 
-/// The task runner binary: separate from the application, the way `bin/rails`
+/// The command runner binary: separate from the application, the way `bin/rails`
 /// is separate from the server. The application's `main` stays about serving.
-// Raw, for the reason given on TASKS_MOD_RS: `\n\` strips the next line's
+// Raw, for the reason given on COMMANDS_MOD_RS: `\n\` strips the next line's
 // indentation, which flattened the one indented line in this file.
-const MANAGE_RS: &str = r#"//! The task runner. Every subcommand is a struct in `src/tasks/`.
+const MANAGE_RS: &str = r#"//! The command runner. Every subcommand is a struct in `src/commands/`.
 //!
-//! Nothing here lists them: `#[task]` registers each one at link time, so a
-//! new file under `src/tasks/` is a new subcommand and this file never
+//! Nothing here lists them: `#[cmd]` registers each one at link time, so a
+//! new file under `src/commands/` is a new subcommand and this file never
 //! changes.
 //!
-//! A task living in a *third-party* crate needs that crate referenced here --
-//! `use their_crate as _;` -- or the linker drops it and the task silently
+//! A command living in a *third-party* crate needs that crate referenced here --
+//! `use their_crate as _;` -- or the linker drops it and the command silently
 //! never appears.
 
-#[path = "../tasks/mod.rs"]
-mod tasks;
+#[path = "../commands/mod.rs"]
+mod commands;
 
-fn main() -> brocanth_task::anyhow::Result<()> {
-    brocanth_task::main(brocanth_task::Context::boot()?)
+fn main() -> brocanth_command::anyhow::Result<()> {
+    brocanth_command::main(brocanth_command::Context::boot()?)
 }
 "#;
 
-/// One task, as an example to copy.
+/// One command, as an example to copy.
 // A raw string, and deliberately: the `\n\` continuation used elsewhere in
 // this file eats the newline *and every leading space on the next line*, so an
 // indented template written that way is emitted flat. This one was, until a
 // scaffolded project was run through rustfmt. PLAN.md §4.8 -- "if scaffolding
 // produces code you would not write by hand, the framework below it is wrong"
 // -- and nobody writes an unindented struct body.
-const TASKS_MOD_RS: &str = r#"//! Every task in this project.
+const COMMANDS_MOD_RS: &str = r#"//! Every command in this project.
 //!
-//! A task is a `clap::Args` struct with a `run` method. Put one in its own
+//! A command is a `clap::Args` struct with a `run` method. Put one in its own
 //! file, add a `mod` line here, and it is a subcommand of `manage`.
 
-use brocanth_task::{anyhow, clap, task, Context, Task};
+use brocanth_command::{anyhow, clap, cmd, Context, Command};
 
 /// Say hello, to prove the wiring works.
-#[task]
+#[cmd]
 #[derive(clap::Args)]
 pub struct Greet {
     /// Who to greet.
@@ -728,7 +728,7 @@ pub struct Greet {
     pub name: String,
 }
 
-impl Task for Greet {
+impl Command for Greet {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
         println!("hello, {} (env: {})", self.name, ctx.env());
         Ok(())
@@ -796,7 +796,7 @@ fn cargo_toml(a: &Answers) -> String {
         absent.join("\n")
     );
 
-    // With tasks there are two binaries, the application and `manage`, and
+    // With commands there are two binaries, the application and `manage`, and
     // cargo refuses to guess between them: a brand-new project where
     // `cargo run` answers "could not determine which binary to run" is a bad
     // first minute. Naming the default here costs one line and means the
@@ -1109,8 +1109,8 @@ fn type_of(pick: Pick) -> &'static str {
         Pick::Model => "Model",
         Pick::Config => "ConfigPlugin",
         // Never reached: `plugins()` drops it before this is called, because
-        // tasks are a binary beside the application, not a layer inside it.
-        Pick::Tasks => unreachable!("tasks is not a plugin"),
+        // commands are a binary beside the application, not a layer inside it.
+        Pick::Tasks => unreachable!("commands is not a plugin"),
     }
 }
 
@@ -2057,7 +2057,7 @@ mod tests {
             .1;
 
         assert!(brief.contains("`logging`"), "{brief}");
-        for absent in ["`config`", "`sessions`", "`model`", "`tasks`"] {
+        for absent in ["`config`", "`sessions`", "`model`", "`commands`"] {
             assert!(
                 brief.contains(absent),
                 "{absent} is absent from the binary and unnamed in the brief:\n{brief}"

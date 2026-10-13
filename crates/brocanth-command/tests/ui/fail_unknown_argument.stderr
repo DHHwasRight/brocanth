@@ -1,0 +1,5 @@
+error: unknown argument; `#[cmd]` accepts only `name = "..."`
+ --> tests/ui/fail_unknown_argument.rs:4:7
+  |
+4 | #[cmd(nmae = "typo")]
+  |       ^^^^

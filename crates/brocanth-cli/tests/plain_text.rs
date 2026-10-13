@@ -493,7 +493,7 @@ fn a_directory_that_is_not_an_application_says_which_flag_to_pass() {
 #[ignore = "runs cargo build over a generated project; minutes, not milliseconds"]
 fn a_scaffolded_project_builds_and_its_tasks_run() {
     // The end-to-end claim: `create` writes a project, cargo compiles it, and
-    // the task the scaffold put in `src/tasks/` is a working subcommand of
+    // the command the scaffold put in `src/commands/` is a working subcommand of
     // the `manage` binary. Every other test here stops short of a compiler,
     // so this is the only one that would notice a scaffold that is merely
     // well-formed text.
@@ -505,7 +505,7 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
             "create",
             "built",
             "--with",
-            "logging,config,tasks",
+            "logging,config,commands",
             "--no-git",
             "--brocanth-path",
             &checkout,
@@ -515,12 +515,12 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
     assert_eq!(run.code, 0, "{}", run.whole());
     let root = parent.join("built");
 
-    // The four files tasks add, and the alias that makes them reachable.
+    // The four files commands add, and the alias that makes them reachable.
     for path in [
         "brocanth.toml",
         ".cargo/config.toml",
         "src/bin/manage.rs",
-        "src/tasks/mod.rs",
+        "src/commands/mod.rs",
     ] {
         assert!(root.join(path).is_file(), "{path} is missing");
     }
@@ -538,19 +538,19 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
         String::from_utf8_lossy(&built.stderr)
     );
 
-    // And the task actually registered, through the slice, in a project this
+    // And the command actually registered, through the slice, in a project this
     // tool wrote from scratch.
     let manage = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["run", "--quiet", "--bin", "manage", "--", "tasks"])
+        .args(["run", "--quiet", "--bin", "manage", "--", "commands"])
         .current_dir(&root)
         .output()
         .expect("cargo run");
     let listed = String::from_utf8_lossy(&manage.stdout);
     assert!(
         listed.contains("greet"),
-        "the example task is absent:\n{listed}"
+        "the example command is absent:\n{listed}"
     );
-    assert!(listed.contains("tasks"), "{listed}");
+    assert!(listed.contains("commands"), "{listed}");
 
     // `cargo run` with no `--bin`, which is what somebody types first. With
     // two binaries cargo refuses to guess, so the manifest has to name one.
@@ -568,7 +568,7 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
     // PLAN.md §4.8: "if scaffolding produces code you would not write by
     // hand, the framework below it is wrong." Nobody writes an unindented
     // struct body, and a template built with `\n\` continuations loses the
-    // next line's leading whitespace -- which is exactly how `src/tasks/mod.rs`
+    // next line's leading whitespace -- which is exactly how `src/commands/mod.rs`
     // and `src/bin/manage.rs` shipped flat. rustfmt is the cheapest judge of
     // "would you write this", so it judges.
     let fmt = Command::new("cargo")

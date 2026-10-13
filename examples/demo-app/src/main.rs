@@ -1,11 +1,11 @@
 //! A brocanth project. The binary is the CLI.
 //!
-//! `brocanth_task::main` builds the command line out of every task linked
-//! into this binary, so adding a file under `src/tasks/` adds a subcommand.
+//! `brocanth_command::main` builds the command line out of every command linked
+//! into this binary, so adding a file under `src/commands/` adds a subcommand.
 //! Nothing here lists them.
 
-mod tasks;
+mod commands;
 
-fn main() -> brocanth_task::anyhow::Result<()> {
-    brocanth_task::main(brocanth_task::Context::boot()?)
+fn main() -> brocanth_command::anyhow::Result<()> {
+    brocanth_command::main(brocanth_command::Context::boot()?)
 }

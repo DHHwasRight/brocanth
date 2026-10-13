@@ -7,7 +7,7 @@
 //!
 //! An assertion that something *fails* is only worth having if the failure
 //! says what is wrong, so these are snapshots of the compiler's own output
-//! rather than a bare "it did not build". `brocanth-task` set the precedent in
+//! rather than a bare "it did not build". `brocanth-command` set the precedent in
 //! this workspace.
 //!
 //! The pass case matters as much as the three failures: it is the same

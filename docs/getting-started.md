@@ -55,13 +55,13 @@ What it writes:
   blog/brocanth.toml              24 bytes
   blog/.cargo/config.toml        110 bytes
   blog/src/bin/manage.rs         556 bytes
-  blog/src/tasks/mod.rs          551 bytes
+  blog/src/commands/mod.rs          551 bytes
   blog/AGENTS.md                2696 bytes
 
     core      a router handing a request and a context to a handler
     logging   a line per request; the core assumes no log layer
     config    config/<env>.toml, merged; without it nothing links a TOML parser
-    tasks     a `manage` binary; a struct with #[task] becomes a subcommand
+    commands     a `manage` binary; a struct with #[cmd] becomes a subcommand
     sessions  not asked for: absent from the source, the binary and the lock file
     model     not asked for: absent from the source, the binary and the lock file
 ```
@@ -95,11 +95,11 @@ needs a test, and a map of the crates.
 ### Choosing what goes in
 
 ```
-brocanth create blog --with logging,config,tasks,sessions,model
+brocanth create blog --with logging,config,commands,sessions,model
 brocanth create blog --core-only
 ```
 
-The default is `logging,config,tasks`. `--core-only` gives a router, a context
+The default is `logging,config,commands`. `--core-only` gives a router, a context
 and nothing else.
 
 | `--with` | What it adds |
@@ -108,7 +108,7 @@ and nothing else.
 | `config` | `config/<env>.toml`, four sources merged, typed per section. |
 | `sessions` | Cookie sessions, and a `Session` on the context. |
 | `model` | The model layer: SeaORM, validations and migrations. **Postgres by default** — see the warning at the end. |
-| `tasks` | A `manage` binary whose subcommands are your own structs. |
+| `commands` | A `manage` binary whose subcommands are your own structs. |
 
 ## Run it
 
@@ -267,17 +267,17 @@ return is fixed-arity and this is the unbounded form:
 Ok(Response::empty(303).with_header("location", "/users/7"))
 ```
 
-## Add a task
+## Add a command
 
-Tasks are the part that is finished. A struct with `#[task]` on it becomes a
+Tasks are the part that is finished. A struct with `#[cmd]` on it becomes a
 subcommand of your project's own binary — there is no list to add it to, because
 registration happens at link time.
 
-`src/tasks/mod.rs` already has one:
+`src/commands/mod.rs` already has one:
 
 ```rust
 /// Say hello, to prove the wiring works.
-#[task]
+#[cmd]
 #[derive(clap::Args)]
 pub struct Greet {
     /// Who to greet.
@@ -285,7 +285,7 @@ pub struct Greet {
     pub name: String,
 }
 
-impl Task for Greet {
+impl Command for Greet {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
         println!("hello, {} (env: {})", self.name, ctx.env());
         Ok(())
@@ -297,9 +297,9 @@ Two ways to run it. Inside the project, through the alias `create` wrote into
 `.cargo/config.toml`:
 
 ```
-$ cargo manage tasks
+$ cargo manage commands
 greet  Say hello, to prove the wiring works
-tasks  List every task this binary contains
+commands  List every command this binary contains
 
 $ cargo manage greet --name max
 hello, max (env: development)
@@ -312,29 +312,29 @@ $ brocanth greet --name max
 ```
 
 `brocanth` handles the subcommands it knows (`create`, `routes`, `check`,
-`build`, `generate`, `dev`) and treats everything else as a task: it walks up
+`build`, `generate`, `dev`) and treats everything else as a command: it walks up
 for `brocanth.toml`, runs `cargo build`, asks `cargo metadata` where the binary
-landed, and `exec`s it. So the task owns the terminal, its exit code is the one
-your shell sees, and Ctrl-C reaches the task rather than a wrapper.
+landed, and `exec`s it. So the command owns the terminal, its exit code is the one
+your shell sees, and Ctrl-C reaches the command rather than a wrapper.
 
 The help text comes from the doc comment, because `clap::Args::augment_args`
 copies it onto the command. There is no second description to keep in step.
 
-Put a new task in its own file under `src/tasks/`, add a `mod` line, and it is
+Put a new command in its own file under `src/commands/`, add a `mod` line, and it is
 a subcommand.
 
 ### The one failure here that is silent
 
-**A crate that is never referenced is dropped by the linker, and its tasks go
+**A crate that is never referenced is dropped by the linker, and its commands go
 with it.** Your own crate is fine — `main` is in it. A *third-party* crate whose
-only job is to contribute tasks is not: nothing in your code mentions it, so
+only job is to contribute commands is not: nothing in your code mentions it, so
 nothing keeps it. Reference it explicitly in `src/bin/manage.rs`:
 
 ```rust
 use some_task_pack as _;
 ```
 
-Without that line it compiles, the tests pass, and the tasks are simply absent
+Without that line it compiles, the tests pass, and the commands are simply absent
 from `--help`.
 
 ## What is not built yet
@@ -393,7 +393,7 @@ decision.
   shortest statement of what the framework guarantees.
 - `PLAN.md` — the argument the whole project is built on. §8 (modularity) is
   the one that explains why a scaffold tells you what it left out.
-- `crates/brocanth-task/README.md` — tasks in full.
+- `crates/brocanth-command/README.md` — commands in full.
 - `docs/async-handlers.md` — how a route gets to `.await`, what it costs, and
   what is still missing.
 - `docs/pocketbase-surface.md` — the thing brocanth is measured against, with

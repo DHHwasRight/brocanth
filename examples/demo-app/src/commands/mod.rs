@@ -1,6 +1,6 @@
-//! Every task in this project.
+//! Every command in this project.
 //!
-//! The `mod` lines are the whole of it. A task registers itself through a
+//! The `mod` lines are the whole of it. A command registers itself through a
 //! distributed slice, so this file never names one -- but the modules still
 //! have to be compiled, and that is what these lines do.
 

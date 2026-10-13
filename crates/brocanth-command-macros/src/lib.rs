@@ -1,22 +1,22 @@
-//! The `#[task]` attribute.
+//! The `#[cmd]` attribute.
 //!
-//! Not depended on directly: `brocanth-task` re-exports it, so a project adds
+//! Not depended on directly: `brocanth-command` re-exports it, so a project adds
 //! one crate and gets the macro, the trait, the registry and the runner.
 //!
 //! # What it emits, and why that shape
 //!
-//! A task has two halves with two different authors. The *name* is derived
+//! A command has two halves with two different authors. The *name* is derived
 //! from the struct and belongs to the macro; the *body* is the point of the
-//! task and belongs to the person writing it. A single trait cannot hold both,
+//! command and belongs to the person writing it. A single trait cannot hold both,
 //! because an `impl` block has one author -- so there are two traits:
 //!
 //! ```ignore
-//! #[brocanth_task::task]
+//! #[brocanth_command::cmd]
 //! #[derive(clap::Args)]
 //! struct SeedDemo { /* ... */ }
 //!
 //! // Written here, by hand:
-//! impl Task for SeedDemo {
+//! impl Command for SeedDemo {
 //!     fn run(self, ctx: &mut Context) -> anyhow::Result<()> { /* ... */ }
 //! }
 //!
@@ -24,9 +24,9 @@
 //! // impl Registered for SeedDemo { const NAME: &'static str = "seed_demo"; }
 //! ```
 //!
-//! Every path the macro emits is absolute (`::brocanth_task::...`), so a local
+//! Every path the macro emits is absolute (`::brocanth_command::...`), so a local
 //! item called `Task`, `Registered` or `entry` cannot capture it. The slice
-//! element carries `#[linkme(crate = ::brocanth_task::linkme)]`, which is what
+//! element carries `#[linkme(crate = ::brocanth_command::linkme)]`, which is what
 //! lets the registration work through a re-export: a project never names
 //! `linkme` in its own manifest.
 
@@ -35,13 +35,13 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, Item, ItemStruct, LitStr};
 
-/// Registers a `clap::Args` struct as a task.
+/// Registers a `clap::Args` struct as a command.
 ///
 /// The command name defaults to the struct name in `snake_case`
 /// (`SeedDemo` becomes `seed_demo`) and `name = "..."` overrides it, which is
 /// how a name no Rust identifier can spell -- `cache:clear` -- is reached.
 #[proc_macro_attribute]
-pub fn task(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn cmd(args: TokenStream, input: TokenStream) -> TokenStream {
     // Parsed as `Item` rather than `ItemStruct` so that an enum gets an error
     // naming what it is, pointing at itself, instead of clap's parser failing
     // somewhere inside a struct it never found.
@@ -74,19 +74,19 @@ fn parse_name(args: TokenStream) -> syn::Result<Option<String>> {
             if literal.value().is_empty() {
                 return Err(syn::Error::new(
                     literal.span(),
-                    "a task name cannot be empty",
+                    "a command name cannot be empty",
                 ));
             }
             name = Some(literal.value());
             return Ok(());
         }
-        Err(meta.error("unknown argument; `#[task]` accepts only `name = \"...\"`"))
+        Err(meta.error("unknown argument; `#[cmd]` accepts only `name = \"...\"`"))
     });
     syn::parse::Parser::parse(parser, args)?;
     Ok(name)
 }
 
-/// The error for `#[task]` on anything that is not a struct.
+/// The error for `#[cmd]` on anything that is not a struct.
 fn not_a_struct(item: &Item) -> proc_macro2::TokenStream {
     let what = match item {
         Item::Enum(_) => "an enum",
@@ -100,9 +100,8 @@ fn not_a_struct(item: &Item) -> proc_macro2::TokenStream {
     syn::Error::new_spanned(
         item,
         format!(
-            "`#[task]` works on a struct, not on {what}: a task's fields are \
-             its command-line arguments, which is what `#[derive(clap::Args)]` \
-             reads"
+            "`#[cmd]` works on a struct, not on {what}: a command's fields are \
+             its arguments, which is what `#[derive(clap::Args)]` reads"
         ),
     )
     .to_compile_error()
@@ -119,9 +118,9 @@ fn expand(strukt: &ItemStruct, override_name: &Option<String>) -> proc_macro2::T
 
     // Prefixed and shouty so it cannot collide with anything the author wrote,
     // and suffixed with the derived name rather than the struct's, so two
-    // tasks that differ only by `name = "..."` still get distinct statics.
+    // commands that differ only by `name = "..."` still get distinct statics.
     let slot = format_ident!(
-        "__BROCANTH_TASK_{}",
+        "__BROCANTH_COMMAND_{}",
         name.to_shouty_snake_case(),
         span = ident.span()
     );
@@ -130,17 +129,17 @@ fn expand(strukt: &ItemStruct, override_name: &Option<String>) -> proc_macro2::T
         #strukt
 
         #[automatically_derived]
-        impl #impl_generics ::brocanth_task::Registered for #ident #ty_generics #where_clause {
+        impl #impl_generics ::brocanth_command::Registered for #ident #ty_generics #where_clause {
             const NAME: &'static str = #name;
         }
 
         // The registration. `#[linkme(crate = ...)]` is what makes this work
         // through the re-export: nothing here names `linkme` as the project
         // would have to spell it.
-        #[::brocanth_task::linkme::distributed_slice(::brocanth_task::TASKS)]
-        #[linkme(crate = ::brocanth_task::linkme)]
+        #[::brocanth_command::linkme::distributed_slice(::brocanth_command::COMMANDS)]
+        #[linkme(crate = ::brocanth_command::linkme)]
         #[doc(hidden)]
-        static #slot: ::brocanth_task::TaskEntry =
-            ::brocanth_task::entry::<#ident #ty_generics>();
+        static #slot: ::brocanth_command::CommandEntry =
+            ::brocanth_command::entry::<#ident #ty_generics>();
     }
 }

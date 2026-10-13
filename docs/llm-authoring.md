@@ -76,8 +76,8 @@ diagnostic recorded:
 | Spending one authentication proof twice | `E0382` use of moved value |
 | Asking whether MFA is on without a proof | `E0308` expected `&Verified` |
 | Raising privilege by rotating a session | `E0061` takes 1 argument |
-| `#[task]` on an enum | names what it is, and why a struct |
-| `#[task]` with an unknown argument | names the only argument it takes |
+| `#[cmd]` on an enum | names what it is, and why a struct |
+| `#[cmd]` with an unknown argument | names the only argument it takes |
 
 **26 `compile_fail` doctests**, concentrated where a mistake would be
 expensive: `brocanth-schema` (12), `brocanth-policy` (6), `brocanth-jobs` (4),
@@ -92,8 +92,8 @@ the core's context (2), the schema plugin (2).
 - **Registering a hooking plugin with `.plugin(p)` instead of
   `.plugin_hooking(p)` fails the build**, naming the call to write. The plugin
   declares `const INSTALLS_HOOKS: bool = true` and `build()` checks it.
-- **Two routes with the same path and verb, or two tasks with the same name,
-  are refused before anything is mutated** — and the task error names *every*
+- **Two routes with the same path and verb, or two commands with the same name,
+  are refused before anything is mutated** — and the command error names *every*
   collision, not the first.
 
 ### Write code that leans on this
@@ -122,10 +122,10 @@ will not catch them**, and a model should flag them rather than assume them.
 2. **An absent value given the permissive reading.** `Bound::or_allow(None)`
    really is "allow", and it is spelled out in the diff on purpose. It compiles
    and it is sometimes right; read it every time.
-3. **A task in a third-party crate that the linker drops.** Nothing references
-   the crate, so nothing keeps it, and the task is silently absent from
+3. **A command in a third-party crate that the linker drops.** Nothing references
+   the crate, so nothing keeps it, and the command is silently absent from
    `--help`. The fix is `use their_crate as _;` and it is the one failure in
-   the task system that is silent.
+   the command system that is silent.
 4. **Values in a cache or a blob store are bytes.** No schema, no versioning.
    Put the format version in the key.
 5. **Test suites that need a database skip themselves.** They say so loudly on
@@ -155,7 +155,7 @@ mounts itself. `brocanth routes` prints `MOUNTED AT` with a file and line.
 lines in `src/pages/mod.rs` — the `mod`, and a `routes.file(...)` row naming
 the file rather than the URL, so the table and the filesystem cannot drift.
 
-**A task is a struct.** `#[task]` on a `clap::Args` struct makes it a
+**A command is a struct.** `#[cmd]` on a `clap::Args` struct makes it a
 subcommand of the project's `manage` binary, registered at link time. There is
 no list to add it to.
 
@@ -174,7 +174,7 @@ no list to add it to.
 | `brocanth-cache` | a cache in Postgres on an unlogged table |
 | `brocanth-jobs` | a persistent queue and cron |
 | `brocanth-model` | the model layer: SeaORM, validations, migrations |
-| `brocanth-task` | the `#[task]` attribute and the task runner |
+| `brocanth-command` | the `#[cmd]` attribute and the command runner |
 | `brocanth-admin` | a Django-shaped backoffice over the schema |
 | `brocanth-schema` | zod-shaped validation, feeding OpenAPI |
 | `brocanth-server` | the HTTP server, and its bridge to the core |

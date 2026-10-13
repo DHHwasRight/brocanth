@@ -35,7 +35,7 @@ thiserror = "2"
 # trybuild compiles the cases under tests/ui and compares the compiler's own
 # output against a recorded snapshot. It is how `a build with no policy
 # registered must not compile` becomes an assertion rather than a sentence in a
-# README. `brocanth-task` set the precedent in this workspace.
+# README. `brocanth-command` set the precedent in this workspace.
 [dev-dependencies]
 trybuild = "1"
 

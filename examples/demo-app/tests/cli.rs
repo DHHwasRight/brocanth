@@ -2,7 +2,7 @@
 //!
 //! These run the real binary, which is the only way to see what the *linker*
 //! produced. A unit test can call the runner with a slice built by hand; only
-//! a built binary shows whether `#[task]` in two separate modules actually
+//! a built binary shows whether `#[cmd]` in two separate modules actually
 //! reached the registry.
 
 use assert_cmd::Command;
@@ -15,31 +15,34 @@ fn manage() -> Command {
 
 #[test]
 fn every_task_in_the_project_is_listed() {
-    // Three tasks from three places: two modules in this crate and one that
-    // came along inside brocanth-task itself. None of them is named in a list
+    // Three commands from three places: two modules in this crate and one that
+    // came along inside brocanth-command itself. None of them is named in a list
     // anywhere; the linker assembled this.
     manage()
-        .arg("tasks")
+        .arg("commands")
         .assert()
         .success()
         .stdout(contains("seed_demo"))
         .stdout(contains("cache:clear"))
-        .stdout(contains("tasks"));
+        .stdout(contains("commands"));
 }
 
 #[test]
 fn the_listing_is_alphabetical_rather_than_whatever_the_linker_chose() {
-    let out = manage().args(["tasks", "--quiet"]).output().expect("ran");
+    let out = manage().args(["commands", "--quiet"]).output().expect("ran");
     let names: Vec<String> = String::from_utf8(out.stdout)
         .expect("utf-8")
         .lines()
         .map(str::to_string)
         .collect();
-    assert_eq!(names, ["cache:clear", "seed_demo", "tasks"]);
+    // Alphabetical, so the built-in sits between the two of ours
+    // rather than last. Renaming it from `tasks` to `commands` moved
+    // it, which is exactly what this test exists to notice.
+    assert_eq!(names, ["cache:clear", "commands", "seed_demo"]);
 }
 
 #[test]
-fn a_task_runs_with_its_arguments_parsed() {
+fn a_command_runs_with_its_arguments_parsed() {
     manage()
         .args(["seed_demo", "--count", "5"])
         .assert()
@@ -90,7 +93,7 @@ fn a_flag_that_was_not_passed_is_false() {
 
 #[test]
 fn an_unknown_subcommand_fails_rather_than_doing_nothing_quietly() {
-    manage().arg("no-such-task").assert().failure();
+    manage().arg("no-such-command").assert().failure();
 }
 
 #[test]

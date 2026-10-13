@@ -3,11 +3,11 @@ name = "demo-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "A brocanth project with two tasks, used by the integration tests."
+description = "A brocanth project with two commands, used by the integration tests."
 publish = false
 
 [dependencies]
-brocanth-task.workspace = true
+brocanth-command.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"

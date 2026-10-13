@@ -1,6 +1,6 @@
 //! Everything that is not a built-in: handed to the project's own binary.
 //!
-//! `brocanth` is installed once, globally. The tasks it can run are defined in
+//! `brocanth` is installed once, globally. The commands it can run are defined in
 //! a project and compiled into that project's binary, so this command's whole
 //! job is to find that binary, make sure it is current, and get out of the
 //! way. It is the same shape as `rails` handing off to `bin/rails`.
@@ -9,14 +9,14 @@
 //!
 //! 1. Walk up for `brocanth.toml`. Without it there is no project, and
 //!    guessing would run the wrong one.
-//! 2. `cargo build`, with cargo's stderr straight through. A task that was
+//! 2. `cargo build`, with cargo's stderr straight through. A command that was
 //!    edited a second ago must be the one that runs, and cargo's progress and
 //!    errors are better than anything this could paraphrase.
 //! 3. Ask `cargo metadata` where the binary is. Guessing `target/debug/<name>`
 //!    is wrong under `CARGO_TARGET_DIR`, in a workspace, and on any profile
 //!    but the default.
 //! 4. Replace this process with it, so signals, exit codes and the terminal
-//!    all belong to the task rather than to a wrapper holding its hand.
+//!    all belong to the command rather than to a wrapper holding its hand.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -89,7 +89,7 @@ fn build(root: &Path) -> Result<(), Vec<Diagnostic>> {
         // this command just inherited. Repeating it would only bury it.
         return Err(vec![Diagnostic::error(
             "build",
-            "the project does not compile, so no task was run",
+            "the project does not compile, so no command was run",
         )]);
     }
     Ok(())
@@ -125,7 +125,7 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
         })?;
 
     // `manage` first, then whatever single binary there is. A project built
-    // by `brocanth create` has two -- the application and the task runner --
+    // by `brocanth create` has two -- the application and the command runner --
     // and `cargo metadata` lists them in manifest order, which is not a
     // promise. Picking by name makes the choice ours rather than cargo's.
     let bins: Vec<_> = package.targets.iter().filter(|t| t.is_bin()).collect();
@@ -138,7 +138,7 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
                 "no-binary",
                 format!("`{}` has no binary target", package.name),
             )
-            .help("a brocanth project needs a `src/main.rs` calling `brocanth_task::main`")]
+            .help("a brocanth project needs a `src/main.rs` calling `brocanth_command::main`")]
         })?;
 
     // From metadata, so `CARGO_TARGET_DIR`, a workspace root and a shared
@@ -156,7 +156,7 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
 
 /// Hands over to the project binary.
 ///
-/// On Unix this replaces the process, so the task owns the terminal, its exit
+/// On Unix this replaces the process, so the command owns the terminal, its exit
 /// code is the one the shell sees, and Ctrl-C reaches it rather than reaching
 /// a wrapper that has to decide what to do about it. `exec` only returns on
 /// failure, which is why the error path is after the call.

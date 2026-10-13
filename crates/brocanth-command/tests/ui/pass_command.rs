@@ -1,29 +1,29 @@
-//! The shape a task is meant to have, both spellings of the name.
-use brocanth_task::{anyhow, clap, task, Context, Registered, Task};
+//! The shape a command is meant to have, both spellings of the name.
+use brocanth_command::{anyhow, clap, cmd, Context, Registered, Command};
 
 /// Seed the demo database.
-#[task]
+#[cmd]
 #[derive(clap::Args)]
 struct SeedDemo {
     #[arg(long, default_value_t = 100)]
     count: u32,
 }
 
-impl Task for SeedDemo {
+impl Command for SeedDemo {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
 /// Clear the cache.
-#[task(name = "cache:clear")]
+#[cmd(name = "cache:clear")]
 #[derive(clap::Args)]
 struct CacheClear {
     #[arg(long)]
     force: bool,
 }
 
-impl Task for CacheClear {
+impl Command for CacheClear {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
         Ok(())
     }

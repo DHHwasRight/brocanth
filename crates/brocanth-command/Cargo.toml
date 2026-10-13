@@ -1,16 +1,16 @@
 [package]
-name = "brocanth-task"
+name = "brocanth-command"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Rails-style tasks for a brocanth project: define one in your own crate and the CLI finds it."
+description = "Rails-style commands for a brocanth project: define one in your own crate and the CLI finds it."
 
 # These three are re-exported, so a project depends on this crate alone and
 # never names clap, linkme or anyhow in its own manifest. `string` is on
-# because a task name reaches clap as an owned value when it comes from the
+# because a command name reaches clap as an owned value when it comes from the
 # registry rather than from a literal.
 [dependencies]
-brocanth-task-macros = { path = "../brocanth-task-macros", version = "0.1.0" }
+brocanth-command-macros = { path = "../brocanth-command-macros", version = "0.1.0" }
 clap = { version = "4", features = ["derive", "string"] }
 linkme = "0.3"
 anyhow = "1"

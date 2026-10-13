@@ -1,9 +1,9 @@
 [package]
-name = "brocanth-task-macros"
+name = "brocanth-command-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The #[task] attribute. Not used directly; brocanth-task re-exports it."
+description = "The #[cmd] attribute. Not used directly; brocanth-command re-exports it."
 
 [lib]
 proc-macro = true

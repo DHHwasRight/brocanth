@@ -17,8 +17,8 @@ members = [
     "crates/brocanth-schema",
     "crates/brocanth-server",
     "crates/brocanth-storage",
-    "crates/brocanth-task",
-    "crates/brocanth-task-macros",
+    "crates/brocanth-command",
+    "crates/brocanth-command-macros",
     "examples/demo-app",
 ]
 
@@ -30,7 +30,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 brocanth = { path = "crates/brocanth", version = "0.1.0" }
 brocanth-server = { path = "crates/brocanth-server", version = "0.1.0" }
-brocanth-task = { path = "crates/brocanth-task", version = "0.1.0" }
+brocanth-command = { path = "crates/brocanth-command", version = "0.1.0" }
 brocanth-cache = { path = "crates/brocanth-cache", version = "0.1.0" }
 brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
