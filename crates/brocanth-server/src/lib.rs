@@ -42,6 +42,23 @@
 //! while they compute -- which is correct for CPU work and wrong for a
 //! database call. The server is async all the way to the application's door;
 //! the last few metres are the core's next job.
+//!
+//! # The core, when it is asked for
+//!
+//! The function above is the whole contract, and an application is free to
+//! write the far side of it by hand. The `bridge` feature writes it instead:
+//! [`bridge::serve`] takes an `App` and a `Router` and does the conversion,
+//! the dispatch and the 404. It is off by default, so with the feature off
+//! this crate is exactly what it was -- a socket and one function -- and the
+//! module is not compiled at all.
+//!
+//! The limit above is what the bridge has to answer, and it answers it with
+//! `tokio::task::spawn_blocking`: the core runs on a blocking thread so the
+//! async workers stay free. The cost is one thread per concurrent request,
+//! stated and measured in [`bridge`].
+
+#[cfg(feature = "bridge")]
+pub mod bridge;
 
 use std::convert::Infallible;
 use std::future::Future;

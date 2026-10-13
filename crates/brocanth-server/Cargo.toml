@@ -5,6 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 description = "An HTTP entrypoint for a brocanth application, on Tokio."
 
+# `bridge` connects this crate to the brocanth core: an `App` and a `Router`
+# become the one async function `Server::run` takes. It is off by default so
+# that the standalone shape -- a socket, and one function the application
+# writes itself -- stays the crate's default and stays compiling. PLAN.md §8:
+# a feature that is off means the code is absent, not a branch that returns
+# early, so with the feature off `src/bridge.rs` is not compiled and none of
+# its API exists.
+#
+# What the feature does not buy is a smaller tree. `http` is optional here
+# because the bridge is the only thing in this crate that names it directly,
+# but `brocanth` and `hyper` both depend on it already, so turning the feature
+# off removes no crate from `Cargo.lock`. `brocanth` itself is not optional
+# either: `Verb` is this crate's request verb with or without the bridge.
+[features]
+default = []
+bridge = ["dep:http"]
+
 # Tokio rather than a thread pool, for M:N: a connection costs a task, not an
 # OS thread, so idle keep-alives are nearly free and the work-stealing
 # scheduler spreads handlers across cores on its own.
@@ -15,6 +32,7 @@ description = "An HTTP entrypoint for a brocanth application, on Tokio."
 # async pool -- two schedulers, each unaware of the other's backpressure.
 [dependencies]
 brocanth.workspace = true
+http = { version = "1", optional = true }
 hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", default-features = false, features = [
     "tokio",
@@ -30,3 +48,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync",
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+
+[package.metadata.docs.rs]
+all-features = true
