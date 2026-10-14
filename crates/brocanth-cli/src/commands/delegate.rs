@@ -190,6 +190,44 @@ fn handoff(binary: &Path, args: &[OsString]) -> Outcome {
     }
 }
 
+/// The commands a project defines, for `brocanth --help` to list.
+///
+/// Deliberately does **not** build. `--help` that compiles a project is a
+/// `--help` nobody runs twice, and the answer is only decoration: every
+/// command still works through [`run`], which does build. So this reports
+/// what an already-built binary says, and nothing when there is none.
+pub fn listed(dir: Option<&Path>) -> Option<Vec<(String, String)>> {
+    let start = match dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    let root = project_root(&start).ok()?;
+    let binary = binary_path(&root).ok()?;
+
+    let out = Command::new(&binary)
+        .arg("commands")
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    // `commands` prints "name  description", aligned. The name is the first
+    // run of non-space; everything after the gap is the description.
+    let listed: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            let (name, rest) = line.split_once("  ")?;
+            Some((name.trim().to_string(), rest.trim().to_string()))
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect();
+
+    (!listed.is_empty()).then_some(listed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

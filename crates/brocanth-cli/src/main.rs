@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use ui::{Face, Ui};
 
@@ -33,13 +33,18 @@ fn help_styles() -> clap::builder::Styles {
         .context(Style::new())
 }
 
+/// The tail of `--help` outside a project, or inside one whose binary has not
+/// been built yet.
+const AFTER_HELP: &str =
+    "Inside a project, any other subcommand is one this project defines: it is \
+built and run by the project's own binary. Build it and this help lists them.";
+
 #[derive(Parser)]
 #[command(
     name = "brocanth",
     version,
     about = "A server framework for HTML-first applications. Nothing ships unless it is asked for.",
-    after_help = "Inside a project, any other subcommand is a command: it is built and run by \
-the project's own binary. `brocanth commands` lists the ones this project defines.",
+    after_help = AFTER_HELP,
     styles = help_styles(),
     max_term_width = 100,
 )]
@@ -79,20 +84,111 @@ enum Command {
     /// installed once and scaffolds; a project's commands live in that
     /// project and are compiled into its binary, so they cannot be listed
     /// here. Inside a project, `brocanth commands` lists them.
+    ///
+    /// The payload is never read -- dispatch works off the raw matches, so a
+    /// listed command and an unlisted one take one path. The variant has to
+    /// exist anyway: it is what makes clap accept an unknown subcommand
+    /// rather than refusing it.
     #[command(external_subcommand)]
-    Delegated(Vec<OsString>),
+    Delegated(#[allow(dead_code)] Vec<OsString>),
+}
+
+/// `brocanth`'s own command, with the project's commands folded into the help.
+///
+/// Each one is a real subcommand, so it is listed under `Commands:` and
+/// completes -- but it takes every remaining argument verbatim and answers no
+/// `--help` of its own. The project's binary is the authority on its own
+/// flags, and a `--help` synthesised here would be a worse copy of one that
+/// already exists.
+fn with_project_commands() -> clap::Command {
+    let command = Cli::command();
+    let Some(listed) = commands::delegate::listed(dir_from_argv().as_deref()) else {
+        return command;
+    };
+    command
+        .after_help(
+            "Any other subcommand is also this project's: it is built and run by the \
+project's own binary, whether or not it is listed above.",
+        )
+        .subcommands(listed.into_iter().map(|(name, about)| {
+            clap::Command::new(name)
+                .about(about)
+                .disable_help_flag(true)
+                .arg(
+                    clap::Arg::new(DELEGATED)
+                        .num_args(..)
+                        .allow_hyphen_values(true)
+                        .trailing_var_arg(true)
+                        .value_parser(clap::value_parser!(OsString)),
+                )
+        }))
+}
+
+/// The argument every synthesised subcommand collects its own tail into.
+const DELEGATED: &str = "delegated";
+
+/// `-C`/`--dir` straight out of argv.
+///
+/// A pre-scan rather than a parse: clap cannot tell us where to look until it
+/// has parsed, and it cannot finish parsing until it knows what subcommands
+/// exist, which is what the directory decides.
+fn dir_from_argv() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy().into_owned();
+        if text == "-C" || text == "--dir" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(rest) = text.strip_prefix("--dir=") {
+            return Some(PathBuf::from(rest));
+        }
+        if let Some(rest) = text.strip_prefix("-C").filter(|r| !r.is_empty()) {
+            return Some(PathBuf::from(rest));
+        }
+    }
+    None
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // `-C` has to be read before clap parses, because what this tool can do
+    // depends on which directory it is pointed at: inside a project, the
+    // project's own commands belong in `--help` beside `create`. A help that
+    // omits what you can run is a help that lies by omission.
+    let matches = with_project_commands().get_matches();
+    let global = Global::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // Asked once. Everything downstream reads the answer off the `Ui`.
-    let face = Face::decide(cli.global.no_color, cli.global.quiet);
-    let ui = Ui::new(face, cli.global.quiet);
-    let dir = cli.global.dir.as_deref();
+    let face = Face::decide(global.no_color, global.quiet);
+    let ui = Ui::new(face, global.quiet);
+    let dir = global.dir.as_deref();
 
-    let result = match cli.command {
-        Command::Create(args) => commands::create::run(&ui, dir, args),
-        Command::Delegated(args) => commands::delegate::run(&ui, dir, args),
+    let result = match matches.subcommand() {
+        Some(("create", m)) => commands::create::run(
+            &ui,
+            dir,
+            commands::create::CreateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        // Everything else belongs to the project: the ones listed in the help
+        // and the ones added since it was last built take the same path.
+        Some((name, m)) => {
+            let mut args: Vec<OsString> = vec![name.into()];
+            // Two ids, because there are two ways to arrive here and only one
+            // of them defines an argument. A *listed* command is synthesised
+            // above and collects its tail into `DELEGATED`; an unlisted one
+            // reaches clap's `external_subcommand`, which uses the empty id.
+            // `try_get_many` rather than `get_many`: the latter panics on an
+            // id the matched subcommand never declared, which is exactly the
+            // case here.
+            for id in [DELEGATED, ""] {
+                if let Ok(Some(values)) = m.try_get_many::<OsString>(id) {
+                    args.extend(values.cloned());
+                }
+            }
+            commands::delegate::run(&ui, dir, args)
+        }
+        None => {
+            let _ = with_project_commands().print_help();
+            return ExitCode::FAILURE;
+        }
     };
 
     match result {

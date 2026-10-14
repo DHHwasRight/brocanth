@@ -17,7 +17,9 @@ brocanth.workspace = true
 # core's no-hidden-dependencies rule is the core's; this is the tool.
 brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
 
-clap = { version = "4", features = ["derive"] }
+# `string` so a command name discovered at run time -- a project's own, read
+# out of its built binary for `--help` -- can be an owned String.
+clap = { version = "4", features = ["derive", "string"] }
 # Colour, decided once in src/ui.rs. anstyle is the vocabulary and anstream is
 # the stream that strips it when nobody is watching. Not `colored`: MPL-2.0
 # would be the only copyleft licence in the tree.
