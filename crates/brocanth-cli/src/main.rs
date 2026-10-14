@@ -67,8 +67,8 @@ struct Global {
     /// Print only the result and anything wrong with it
     #[arg(long, short, global = true)]
     quiet: bool,
-    /// Also print what the tool is doing, and what it would have been asked
-    /// non-interactively
+    /// After the chooser, print the command line that would have given the
+    /// same answers with nothing to ask
     #[arg(long, short = 'D', global = true)]
     debug: bool,
 }

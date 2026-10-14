@@ -441,11 +441,9 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
 
     // What the chooser stood in for. Every answer it collects has a flag, and
     // this is that sentence made usable: copy the line into a script and the
-    // same project comes out, with nothing to ask.
-    ui.debug(format!(
-        "non-interactive equivalent: {}",
-        answers.as_flags()
-    ));
+    // same project comes out, with nothing to ask. Only here -- a run driven
+    // by flags was already the line, and has nothing to report back.
+    ui.debug(answers.as_flags());
     Ok(answers)
 }
 

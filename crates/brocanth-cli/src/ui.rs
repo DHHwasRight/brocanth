@@ -175,7 +175,12 @@ impl Ui {
 
     // -- the raw writes -----------------------------------------------------
 
-    /// Detail for somebody working on the tool or on a script that drives it.
+    /// Detail for somebody writing a script that drives this tool.
+    ///
+    /// There is one caller and there should stay one: the chooser, reporting
+    /// the flags it stood in for. A run that was already driven by flags has
+    /// nothing to say back, and a trace of what the tool is doing internally
+    /// is a different feature that nobody asked for.
     ///
     /// Stderr and off unless `--debug`, so it never reaches a pipe that was
     /// not asked to receive it. `--quiet` does not suppress it: a person who

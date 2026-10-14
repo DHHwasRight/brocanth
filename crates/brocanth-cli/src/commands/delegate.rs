@@ -48,14 +48,6 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
 
     build(&root)?;
     let binary = binary_path(&root)?;
-    ui.debug(format!(
-        "exec {} {}",
-        binary.display(),
-        args.iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
     handoff(&binary, &args)
 }
 

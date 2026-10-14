@@ -159,12 +159,19 @@ here once it has been compiled. Nothing is listed that this project cannot run.
 Outside a project the same help shows `create` alone, because there is no
 project to ask.
 
-`-D` prints what the tool is doing:
+`-D` has exactly one job, and it belongs to `create`. Run with no name, the
+chooser opens; `-D` then prints the command line that would have given the
+same answers with nothing to ask:
 
 ```
-$ brocanth -D serve --addr 127.0.0.1:8080
-debug: exec /path/to/blog/target/debug/blog serve --addr 127.0.0.1:8080
+$ brocanth -D create
+debug: brocanth create blog --title Blog --with logging,config,commands --git
 ```
+
+Copy that into a script and the same project comes out. It is written in
+full rather than minimally, because a line that leans on a default changes
+meaning when the default does. A run that was already driven by flags prints
+nothing: it was already the line.
 
 ## Add a page
 
