@@ -1,4 +1,14 @@
-//! `html!`, which puts a page inside the layouts its directory puts it in.
+//! `src/pages`, read while the crate compiles.
+//!
+//! Two macros, one idea: **a route is a file**, so the directory tree is the
+//! source of truth and nothing restates it. `pages!` turns the tree into the
+//! route table; `html!` turns a page's position in it into the layouts that
+//! wrap the page.
+//!
+//! ```ignore
+//! // src/pages/mod.rs
+//! brocanth_pages::pages!("src/pages");   // the mod lines, and router()
+//! ```
 //!
 //! # The rule
 //!
@@ -48,11 +58,54 @@
 //! that belongs to one request belongs on the page component, which the
 //! handler builds and which already has the context.
 
+mod naming;
+mod table;
+
 use std::path::{Path, PathBuf};
 
 use proc_macro::{Span, TokenStream};
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
+
+use naming::{ident, to_module_name};
+
+/// The route table, read off the directory tree.
+///
+/// Takes the pages root, relative to the package: `pages!("src/pages")`. It
+/// emits the `mod` lines and a `router()`, which is both halves of what was
+/// written by hand before.
+///
+/// A route is a file, so the set of routes is the set of files. Adding a
+/// page is adding a file; renaming one renames its route; deleting one
+/// deletes it. There is no list, so there is no list to keep in step.
+///
+/// The verb comes off the handler's name -- `handle` is GET, `handle_post`
+/// is POST -- and the page's source is parsed to find them, because which
+/// verbs a page answers is a fact about its Rust and not about its name. A
+/// `pub fn handle_<something>` that is not a verb is an error naming the
+/// ones that are, rather than a handler that compiles and is never reached.
+///
+/// Two things it will not do. `mod.rs` is skipped, because it is this table
+/// rather than a page; and a page with no handler at all is an error, not an
+/// empty row.
+#[proc_macro]
+pub fn pages(input: TokenStream) -> TokenStream {
+    let raw = input.to_string();
+    let Some(root) = string_literal(&raw) else {
+        return error(
+            "expected a string literal with the pages root, as in \
+             `brocanth_pages::pages!(\"src/pages\")`",
+        );
+    };
+    table::expand(Path::new(&root), &manifest_dir()).into()
+}
+
+/// The path out of `pages!("...")`, without pulling in a parser for it.
+fn string_literal(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.contains('\\')).then(|| inner.to_string())
+}
 
 /// Renders a page inside the layouts that cover it.
 ///
@@ -164,48 +217,8 @@ fn expand(layouts: &[Layout], content: &TokenStream2) -> TokenStream2 {
     }
 }
 
-/// `format_ident!` panics on `r#match`, which is a name a directory may
-/// legitimately have, so raw identifiers are built as raw identifiers.
-fn ident(part: &str) -> proc_macro2::Ident {
-    match part.strip_prefix("r#") {
-        Some(bare) => proc_macro2::Ident::new_raw(bare, proc_macro2::Span::call_site()),
-        None => format_ident!("{}", part),
-    }
-}
-
 fn manifest_dir() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
-}
-
-/// rsx's rule for turning a file or directory name into a module name, so
-/// `[id]` reaches `_id_` and the two agree about a route like `/users/{id}`.
-fn to_module_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        out.push(if ch.is_alphanumeric() || ch == '_' {
-            ch
-        } else {
-            '_'
-        });
-    }
-    if out.chars().next().is_some_and(|c| c.is_numeric()) {
-        out.insert(0, '_');
-    }
-    if is_keyword(&out) {
-        return format!("r#{out}");
-    }
-    out
-}
-
-fn is_keyword(word: &str) -> bool {
-    const KEYWORDS: [&str; 49] = [
-        "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false",
-        "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
-        "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
-        "unsafe", "use", "where", "while", "async", "await", "abstract", "become", "box", "do",
-        "final", "macro", "override", "priv", "typeof", "unsized", "virtual",
-    ];
-    KEYWORDS.contains(&word)
 }
 
 fn error(message: &str) -> TokenStream {

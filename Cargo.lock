@@ -723,6 +723,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-pages"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "brocanth-policy"
 version = "0.1.0"
 dependencies = [
@@ -805,14 +814,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
-]
-
-[[package]]
-name = "brocanth-view"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
 ]
 
 [[package]]

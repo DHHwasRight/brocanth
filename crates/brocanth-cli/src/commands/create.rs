@@ -746,12 +746,21 @@ fn agents_md(a: &Answers) -> String {
          ## Adding a route\n\
          \n\
          A route is a file. `src/pages/about.rs` is `/about`;\n\
-         `src/pages/users/[id].rs` is `/users/{{id}}`. Two edits:\n\
+         `src/pages/users/[id].rs` is `/users/{{id}}`. **Write the file. That is\n\
+         the whole of it** -- no `mod` line, no row to register, because there is\n\
+         no list. `brocanth_pages::pages!` in `src/pages/mod.rs` reads this\n\
+         directory while the crate compiles and writes both.\n\
          \n\
-         1. Write `src/pages/<name>.rs` returning `Result<impl IntoResponse, Error>`.\n\
-         2. In `src/pages/mod.rs`, add `pub mod <name>;` and a `routes.file(..)`\n\
-         \x20  row. It names the **file**, not the URL, so the table and the\n\
-         \x20  filesystem cannot drift apart.\n\
+         The verb comes off the handler's name: `handle` is GET, then\n\
+         `handle_head`, `handle_post`, `handle_put`, `handle_patch`,\n\
+         `handle_delete`, `handle_options`. A `pub fn handle_*` outside that\n\
+         list is a build error naming the list, rather than a handler nothing\n\
+         reaches; a page with no handler is a build error too. A private\n\
+         `fn handle_*` is a helper and is left alone.\n\
+         \n\
+         **Adding a file does not rebuild on its own** -- nothing referenced it\n\
+         yet. Run `touch src/pages/mod.rs` after creating a page or a layout.\n\
+         Editing or deleting one is noticed.\n\
          \n\
          A handler returns a value and never writes a response itself. That is\n\
          what makes a half-written body on an error impossible rather than\n\
@@ -912,11 +921,10 @@ fn cargo_toml(a: &Answers) -> String {
             deps.push(source_of(a, name));
         }
     }
-    if a.has(Pick::Rsx) {
-        // The `html!` macro, which reads the layouts out of the directory
-        // tree. A second crate because a proc macro has to be one.
-        deps.push(source_of(a, "brocanth-view"));
-    }
+    // The macros that read `src/pages`: the route table always, and the
+    // layouts when there are any. Compile-time only -- a proc macro puts no
+    // bytes in the binary, which is why this one is not a choice.
+    deps.push(source_of(a, "brocanth-pages"));
     {
         // Every project serves, so every project gets a socket and a reactor.
         deps.push(source_of(a, "brocanth-server"));
@@ -1391,29 +1399,22 @@ run = "cargo run"
 run = "cargo test"
 "#;
 
-const PAGES_MOD_RS_HEAD: &str = r##"//! The route table.
+const PAGES_MOD_RS_HEAD: &str = r##"//! The route table, which is this directory.
 //!
 //! One file is one route, and the path on disk is the URL: `index.rs` is `/`,
-//! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`. The framework does
-//! the conversion -- see [`router`] -- so the table and the filesystem cannot
-//! drift apart, and renaming a file renames a route.
+//! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`.
+//!
+//! Nothing below lists them. The macro reads this directory while the crate
+//! is compiled and writes the `mod` lines and [`router`] from what is there,
+//! so adding a page is adding a file and renaming one renames its route.
+//! The verb comes off the handler's name: `handle` is GET, `handle_post` is
+//! POST, and a `pub fn handle_*` that is not a verb is a build error rather
+//! than a handler nothing reaches.
+//!
+//! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
 
-pub mod about;
-pub mod index;
-"##;
+brocanth_pages::pages!("src/pages");
 
-/// `pub mod users`, which is also where a directory's own layout goes.
-const PAGES_USERS_MOD: &str = r##"
-pub mod users {
-    // `[id].rs` is not a Rust identifier, so the module says where to look.
-    // The typed-route-table macro emits this; until it lands it is written
-    // once, here.
-    #[path = "[id].rs"]
-    pub mod id;
-}
-"##;
-
-const PAGES_MOD_RS_BODY: &str = r##"
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 /// What a handler produces.
@@ -1653,25 +1654,6 @@ where
     Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
 }
 
-/// The table.
-///
-/// Each line names the *file* and the framework derives the route from it, so
-/// there is no second list to keep in step. Registering the same file and verb
-/// twice is an error rather than a silent overwrite.
-pub fn router() -> Result<Router<Handler>, BuildError> {
-    let mut routes = Router::builder();
-    routes.file("index.rs", "", Verb::Get, page(index::handle))?;
-    routes.file("about.rs", "", Verb::Get, page(about::handle))?;
-    routes.file("users/[id].rs", "", Verb::Get, page(users::id::handle))?;
-    routes.file(
-        "users/[id].rs",
-        "",
-        Verb::Post,
-        page(users::id::handle_post),
-    )?;
-    routes.build()
-}
-
 "##;
 
 /// The templates and the bridge to them, written only when the project asked
@@ -1683,10 +1665,10 @@ const PAGES_RSX_RS: &str = r##"/// Every template in this application.
 /// compiled. Nothing is read from disk when a request arrives, and a template
 /// that does not parse is a compile error on its own line.
 ///
-/// A module of their own, because the generated `pub mod index` would
-/// otherwise collide with the `pub mod index;` at the top of this file. The
-/// path is relative to the package root and not to this file, because a proc
-/// macro cannot learn where it was written on stable Rust.
+/// A module of their own, because `load_dir!` emits a `pub mod index` for
+/// `index.rsx` and `pages!` emits one for `index.rs`: unnested they collide.
+/// The path is relative to the package root and not to this file, because a
+/// proc macro cannot learn where it was written on stable Rust.
 ///
 /// A file whose name is not an identifier gets the nearest one: `[id].rsx` is
 /// `views::users::_id_`.
@@ -1709,7 +1691,7 @@ pub mod views {
 /// Re-exported here so a page imports it from the same place as everything
 /// else it uses, and so the layout rule lives beside the route table rather
 /// than in a crate name.
-pub use brocanth_view::html;
+pub use brocanth_pages::html;
 
 /// A page with no layout at all: a fragment, a partial, an htmx swap.
 ///
@@ -1764,8 +1746,6 @@ mod tests {
 /// test module rather than after it, which clippy refuses.
 fn pages_mod_rs(a: &Answers) -> String {
     let mut out = String::from(PAGES_MOD_RS_HEAD);
-    out.push_str(PAGES_USERS_MOD);
-    out.push_str(PAGES_MOD_RS_BODY);
     if a.has(Pick::Rsx) {
         // The root layout writes the name, so there is one place it is
         // spelled rather than one per page.
@@ -2674,18 +2654,37 @@ mod tests {
     }
 
     #[test]
-    fn every_page_the_table_names_is_a_file_the_scaffold_writes() {
-        // The generated `router()` names three files. If one were not written
-        // the application would not compile, which is a worse way to find out
-        // than this test.
+    fn the_table_is_the_directory_and_names_nothing() {
+        // There is no list of routes to go out of step, because there is no
+        // list: `pages!` reads the directory. So what this checks is that
+        // nothing crept back in.
         let a = answers(&Pick::ALL);
         let table = pages_mod_rs(&a);
+        assert!(
+            table.contains(r#"brocanth_pages::pages!("src/pages");"#),
+            "{table}"
+        );
+        // Code, not prose: the comment beside the templates explains why the
+        // generated `pub mod index` has to be nested, and says the words.
+        let code: Vec<&str> = table
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            !code.iter().any(|l| l.contains("routes.file(")),
+            "a row was written: {table}"
+        );
+        assert!(
+            !code.iter().any(|l| l.trim() == "pub mod index;"),
+            "a mod was written: {table}"
+        );
+
+        // And the files it will find are the ones the scaffold writes.
         let files = scaffold(&a);
         for page in ["index.rs", "about.rs", "users/[id].rs"] {
-            assert!(table.contains(&format!("\"{page}\"")), "{page}");
             assert!(
                 files.iter().any(|(p, _)| p == &format!("src/pages/{page}")),
-                "the table names {page} but nothing writes it"
+                "{page} is not written"
             );
         }
     }
@@ -2760,15 +2759,20 @@ mod tests {
 
     #[test]
     fn the_templates_get_a_module_that_cannot_collide_with_the_pages() {
-        // `load_dir!` emits `pub mod index` for `index.rsx`, and `pub mod
-        // index;` is already at the top of the file: unnested, the scaffold
-        // would not compile.
+        // `load_dir!` emits `pub mod index` for `index.rsx` and `pages!`
+        // emits one for `index.rs`. Both land in this file, so one of them
+        // has to be nested or the scaffold does not compile.
         let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
         assert!(
             pages.contains("pub mod views {\n    rsx::load_dir!(\"src/pages\");\n}"),
             "{pages}"
         );
-        assert!(pages.contains("pub mod index;"), "{pages}");
+        // Both macros read the same directory, so both would write
+        // `pub mod index` into the same file. One of them is nested.
+        assert!(
+            pages.contains("brocanth_pages::pages!(\"src/pages\");"),
+            "{pages}"
+        );
     }
 
     #[test]
@@ -2798,7 +2802,7 @@ mod tests {
 
         // Every page goes through the same import and the same call,
         // whichever directory it is in and however deep the nesting there.
-        assert!(pages.contains("pub use brocanth_view::html;"), "{pages}");
+        assert!(pages.contains("pub use brocanth_pages::html;"), "{pages}");
         for page in [index_rs(&a), about_rs(&a), user_rs(&a)] {
             assert!(page.contains("use crate::pages::{html, "), "{page}");
             assert!(page.contains("html!("), "{page}");
@@ -2806,14 +2810,19 @@ mod tests {
     }
 
     #[test]
-    fn the_macro_that_reads_the_tree_arrives_only_with_the_views() {
+    fn the_macros_that_read_the_tree_are_not_a_choice() {
+        // Every project has a route table and the table is the directory,
+        // so the macro that reads it is in every manifest. It is the one
+        // dependency 8 does not ask about, because a proc macro runs at
+        // build time and puts no bytes in the binary.
         let declared = |picks: &[Pick], name: &str| {
             cargo_toml(&answers(picks))
                 .lines()
                 .any(|l| l.starts_with(&format!("{name} = ")))
         };
-        assert!(declared(&[Pick::Rsx], "brocanth-view"));
-        assert!(!declared(&[Pick::Logging, Pick::Config], "brocanth-view"));
+        assert!(declared(&[Pick::Rsx], "brocanth-pages"));
+        assert!(declared(&[Pick::Logging, Pick::Config], "brocanth-pages"));
+        assert!(declared(&[], "brocanth-pages"));
     }
 
     #[test]
@@ -2831,7 +2840,7 @@ mod tests {
     fn a_handler_reaches_a_template_through_one_function_and_no_other() {
         let a = answers(&[Pick::Rsx]);
         let pages = pages_mod_rs(&a);
-        assert!(pages.contains("pub use brocanth_view::html;"));
+        assert!(pages.contains("pub use brocanth_pages::html;"));
         assert!(pages.contains("pub fn render(content: impl rsx::Template)"));
         // It returns the handler's own Result, which is what lets a template
         // that bails propagate instead of becoming a blank 200.
@@ -2863,7 +2872,7 @@ mod tests {
         // assembly of this file exists for no other reason.
         let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
         let html = pages
-            .find("pub use brocanth_view::html;")
+            .find("pub use brocanth_pages::html;")
             .expect("the bridge is written");
         let tests = pages.find("#[cfg(test)]").expect("the file has tests");
         assert!(html < tests, "the bridge is after the test module");

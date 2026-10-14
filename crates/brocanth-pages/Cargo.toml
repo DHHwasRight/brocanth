@@ -1,0 +1,20 @@
+[package]
+name = "brocanth-pages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The src/pages directory read at compile time: the route table, and the layouts."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+# `pages!` has to know which verbs a page answers, and that is a fact about
+# its Rust source rather than its name. Scanning the text for `pub fn handle`
+# would read one inside a comment or a string; parsing it cannot.
+#
+# `full` for item bodies, `parsing` is the default. No `printing`: nothing
+# here turns a `syn` type back into tokens.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "proc-macro"] }

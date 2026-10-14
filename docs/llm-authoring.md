@@ -78,6 +78,11 @@ diagnostic recorded:
 | `#[cmd]` on an enum | names what it is, and why a struct |
 | `#[cmd]` with an unknown argument | names the only argument it takes |
 
+**And the route table refuses three more**, named here because they are the
+mistakes a model makes when it treats `src/pages` like any other directory:
+a handler whose name is not a verb, a page file with no handler at all, and
+a second registration of a route that is already there.
+
 **26 `compile_fail` doctests**, concentrated where a mistake would be
 expensive: `brocanth-schema` (12), `brocanth-policy` (6), `brocanth-jobs` (4),
 the core's context (2), the schema plugin (2).
@@ -127,10 +132,11 @@ will not catch them**, and a model should flag them rather than assume them.
    the command system that is silent.
 4. **Values in a cache or a blob store are bytes.** No schema, no versioning.
    Put the format version in the key.
-5. **Adding a `layout.rsx` where there was none does not rebuild.** Nothing
-   referenced the file yet, so cargo cannot see it. `touch src/pages/mod.rs`.
-   Editing or deleting an existing layout is noticed, because each one the
-   macro used is `include_bytes!`d by the expansion.
+5. **Adding a file under `src/pages` does not rebuild on its own.** Nothing
+   referenced it yet, so cargo cannot see it — a new page does not route and
+   a new `layout.rsx` does not wrap. `touch src/pages/mod.rs`. Editing or
+   deleting an existing one is noticed, because every file the macros used is
+   `include_bytes!`d by the expansion.
 6. **Test suites that need a database skip themselves.** They say so loudly on
    stderr, but a green run is not a run — check whether
    `BROCANTH_TEST_DATABASE_URL` was set before believing a Postgres suite
@@ -153,10 +159,20 @@ not there, X is not in the binary.
 **A plugin offers middleware; the application mounts it.** A plugin never
 mounts itself, and the mount is a line in the application's own `src/app.rs`.
 
-**A route is a file.** `src/pages/about.rs` is `/about`;
-`src/pages/users/[id].rs` is `/users/{id}`. Adding a route is a file plus two
-lines in `src/pages/mod.rs` — the `mod`, and a `routes.file(...)` row naming
-the file rather than the URL, so the table and the filesystem cannot drift.
+**A route is a file, and nothing else says so.** `src/pages/about.rs` is
+`/about`; `src/pages/users/[id].rs` is `/users/{id}`. Adding a route is
+writing the file: `brocanth_pages::pages!("src/pages")` in `src/pages/mod.rs`
+reads the directory while the crate compiles and emits the `mod` lines and
+`router()`. There is no list, so a table that disagrees with the filesystem is
+not a state the project can be in. **Do not add a `mod` line or a
+`routes.file(..)` row** — the first is a duplicate module, the second a
+duplicate route, and both are build errors.
+
+The verb comes off the handler's name — `handle` is GET, then `handle_head`,
+`handle_post`, `handle_put`, `handle_patch`, `handle_delete`,
+`handle_options`. The page's source is parsed to find them. A `pub fn
+handle_*` outside that list is a build error naming the list; a page with no
+handler is a build error; a private `fn handle_*` is a helper.
 
 **A command is a struct.** `#[cmd]` on a `clap::Args` struct makes it a
 subcommand of the project's own binary, registered at link time. There is
@@ -202,7 +218,7 @@ engine in the tree — check `Cargo.toml` before writing markup.
 | `brocanth-admin` | a Django-shaped backoffice over the schema |
 | `brocanth-schema` | zod-shaped validation, feeding OpenAPI |
 | `brocanth-server` | the HTTP server, and its bridge to the core |
-| `brocanth-view` | `html!`: a page, inside the layouts its directory gives it |
+| `brocanth-pages` | `pages!` and `html!`: the route table and the layouts, read off `src/pages` |
 
 `rsx` is the one dependency in this list that is not a brocanth crate. It has
 its own repository, so `--brocanth-path` does not reach it and the generated

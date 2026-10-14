@@ -177,10 +177,9 @@ nothing: it was already the line.
 
 ## Add a page
 
-There is no generator, so this is two edits by hand. They are the two a
-generator would have made.
+Write a file. That is the whole of it.
 
-**1. Write the file.** `src/pages/contact.rs`:
+`src/pages/contact.rs`:
 
 ```rust
 //! `/contact` -- one file, one route.
@@ -192,21 +191,62 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 }
 ```
 
-**2. Add two lines to `src/pages/mod.rs`** — the `mod`, and the row in the
-table:
+Then `brocanth serve` and `curl http://127.0.0.1:3000/contact`. There is no
+`mod` line to add and no row to register, because **there is no list**.
+`src/pages/mod.rs` has one line where a table used to be:
 
 ```rust
-pub mod contact;
+brocanth_pages::pages!("src/pages");
 ```
+
+That macro reads the directory while the crate compiles and writes both: the
+`mod` lines, and a `router()` with one row per verb per page. So adding a page
+is adding a file, renaming one renames its route, and deleting one deletes it.
+
+**The verb comes off the handler's name.** `handle` is GET, `handle_post` is
+POST, and the rest of the table is `handle_head`, `handle_put`,
+`handle_patch`, `handle_delete`, `handle_options`. Two handlers in one file
+are two rows:
 
 ```rust
-routes.file("contact.rs", "", Verb::Get, page(contact::handle))?;
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> { .. }       // GET
+pub fn handle_delete(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> { .. } // DELETE
 ```
 
-`routes.file` names the *file* and the framework derives the URL from it, so
-the table and the filesystem cannot drift apart. `page(..)` is what lets every
-handler return its own type — see *What a handler returns* below. Then
-`brocanth serve` and `curl http://127.0.0.1:3000/contact`.
+```
+$ curl -i -X PUT http://127.0.0.1:3000/blog/hello
+HTTP/1.1 405 Method Not Allowed
+allow: GET, HEAD, DELETE
+```
+
+The page's source is **parsed** to find those, not scanned for text — the
+scaffold's own files mention `pub fn handle` in a doc comment, and a route
+table that depended on where a comment sits would be a table nobody could
+trust.
+
+Two mistakes it refuses rather than passes over:
+
+```
+error: `blog/[slug].rs` has `pub fn handle_json`, which is not a verb: the
+       framework reads the verb off the name, and the names it reads are
+       handle, handle_head, handle_post, handle_put, handle_patch,
+       handle_delete, handle_options. Rename it, or make it private if it
+       is not a handler
+```
+
+```
+error: `empty.rs` declares no handler, so nothing would route to it; write
+       `pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error>`,
+       or delete the file
+```
+
+A private `fn handle_anything` is a helper and is left alone. `mod.rs` is the
+table rather than a page, and is skipped.
+
+> **Adding a file does not rebuild on its own.** Nothing referenced it yet, so
+> cargo cannot see it. `touch src/pages/mod.rs` after creating a page or a
+> layout. Editing or deleting an existing one is noticed, because every file
+> the macros use is `include_bytes!`d by the expansion.
 
 A handler returns a value and never writes a response itself, which is what
 makes a half-written body on an error impossible rather than unlikely.
@@ -532,7 +572,7 @@ its own, `create`. There is no `routes`, no `check`, no `build`, no `dev` and
 no `generate`: they were removed, because a project's command line belongs to
 the project, where it can be tuned without forking anything.
 
-So adding a page is two edits by hand, as above, and watching for changes is
+So adding a page is writing a file, as above, and watching for changes is
 whatever you already use — `cargo watch`, `mise`, an editor task. If you want
 `myapp routes`, write it: a struct with `#[cmd]` under `src/commands/` is a
 subcommand, and the route table is `pages::router()`.
