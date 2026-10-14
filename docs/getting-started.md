@@ -128,57 +128,48 @@ DELETE /about      405 Allow: GET, HEAD
 GET    /nowhere    404 Not Found
 ```
 
-**Read that carefully: it made four requests to itself and exited.** There is
-no socket, no port, nothing to open in a browser. See *What is not built yet*.
-
-## See the route table
+**That is a real socket.** Open `http://127.0.0.1:3000` in a browser, or:
 
 ```
-brocanth routes
+$ curl -i -X DELETE http://127.0.0.1:3000/about
+HTTP/1.1 405 Method Not Allowed
+allow: GET, HEAD
 ```
 
-```
-  VERB  PATH         HANDLER                    MIDDLEWARE
-  GET   /            index.rs#handle            request_log
-  GET   /about       about.rs#handle            request_log
-  GET   /users/{id}  users/[id].rs#handle       request_log
-  POST  /users/{id}  users/[id].rs#handle_post  request_log
+A path that exists with a verb it does not answer is a 405 carrying an
+`Allow` list, never a 404.
 
-  MIDDLEWARE   PATTERN   MOUNTED AT         OFFERED BY
-  request_log  /{*rest}  src/main.rs:55:34  src/plugins/logging.rs
-
-✔ 4 rows · 3 routes · 1 mount
-```
-
-The second table is worth as much as the first. A plugin *offers* middleware
-and never mounts it; the application mounts it, and `MOUNTED AT` is the file
-and line where that decision was written. Nothing is in your request pipeline
-that you cannot point at.
-
-## Check it
+## See what this project can do
 
 ```
-brocanth check
+brocanth --help
 ```
 
 ```
-  ✔ middleware  2 plugins · 1 offer · 1 mount
-  ✔ compile     cargo check in 1.18s
-
-  errors        0
-  warnings      0
-  took      1.18s
-
-✔ nothing to report
+Commands:
+  create  Scaffold an application
+  serve   Serve the application over HTTP
+  help    Print this message or the help of the given subcommand(s)
 ```
 
-This checks the mounts and the offers *before* it calls cargo, so a middleware
-name that nothing provides is caught as a wiring error rather than as a type
-error forty lines into a backtrace.
+`create` is `brocanth`'s own and the only one it has. Everything below it is
+**your project's**, read out of the built binary — so a command you add appears
+here once it has been compiled. Nothing is listed that this project cannot run.
+
+Outside a project the same help shows `create` alone, because there is no
+project to ask.
+
+`-D` prints what the tool is doing:
+
+```
+$ brocanth -D serve --addr 127.0.0.1:8080
+debug: exec /path/to/blog/target/debug/blog serve --addr 127.0.0.1:8080
+```
 
 ## Add a page
 
-`brocanth generate` is not built yet, so this is two edits by hand.
+There is no generator, so this is two edits by hand. They are the two a
+generator would have made.
 
 **1. Write the file.** `src/pages/contact.rs`:
 
@@ -205,15 +196,8 @@ routes.file("contact.rs", "", Verb::Get, page(contact::handle))?;
 
 `routes.file` names the *file* and the framework derives the URL from it, so
 the table and the filesystem cannot drift apart. `page(..)` is what lets every
-handler return its own type — see *What a handler returns* below. Then:
-
-```
-brocanth routes
-```
-
-```
-  GET   /contact     contact.rs#handle          request_log
-```
+handler return its own type — see *What a handler returns* below. Then
+`brocanth serve` and `curl http://127.0.0.1:3000/contact`.
 
 A handler returns a value and never writes a response itself, which is what
 makes a half-written body on an error impossible rather than unlikely.
@@ -293,26 +277,25 @@ impl Command for Greet {
 }
 ```
 
-Two ways to run it. Inside the project, through the alias `create` wrote into
-`.cargo/config.toml`:
-
-```
-$ cargo manage commands
-greet  Say hello, to prove the wiring works
-commands  List every command this binary contains
-
-$ cargo manage greet --name max
-hello, max (env: development)
-```
-
-Or from anywhere, through the globally installed CLI:
+Two ways to run it. Through the globally installed CLI, from anywhere inside
+the project:
 
 ```
 $ brocanth greet --name max
+hello, max (env: development)
 ```
 
-`brocanth` handles the subcommands it knows (`create`, `routes`, `check`,
-`build`, `generate`, `dev`) and treats everything else as a command: it walks up
+Or by running the binary, which is the same thing without the walk-up:
+
+```
+$ cargo run -- greet --name max
+```
+
+There is no cargo alias. A project's command line is a framework concern and
+cargo is the build tool; hooking one into the other conflates them.
+
+`brocanth` knows one command of its own, `create`, and treats everything else
+as the project's: it walks up
 for `brocanth.toml`, runs `cargo build`, asks `cargo metadata` where the binary
 landed, and `exec`s it. So the command owns the terminal, its exit code is the one
 your shell sees, and Ctrl-C reaches the command rather than a wrapper.
@@ -339,37 +322,15 @@ from `--help`.
 
 ## What is not built yet
 
-Three things a getting-started guide would normally cover, which this one
-cannot.
+**The global tool scaffolds and nothing else.** `brocanth` has one command of
+its own, `create`. There is no `routes`, no `check`, no `build`, no `dev` and
+no `generate`: they were removed, because a project's command line belongs to
+the project, where it can be tuned without forking anything.
 
-**There is no HTTP server in a scaffolded project.** `src/main.rs` says so at
-line 86. `brocanth-server` exists and has a working bridge to the core behind
-its `bridge` feature, but `create` predates it and does not wire it in. Until it
-does, a generated `main` makes four in-process requests and exits.
-
-**`brocanth dev` is not built.** It prints the shape it will have and writes
-nothing:
-
-```
-  Not built yet. When it is, this command will:
-
-    serve    http://127.0.0.1:3000 from the built binary
-    watch    src/pages, templates, assets and config/
-    reload   templates and assets in place; a handler edit asks cargo
-    report   the compile duration every time, because it is the budget
-    survive  a failing build leaves the watcher running
-```
-
-**`brocanth generate` is not built.** Same: it prints what it would write and
-then tells you it wrote nothing.
-
-```
-! `brocanth generate` is a surface, not a generator; no file was created
-```
-
-Both are honest rather than absent, which is the right trade — a command that
-prints its contract is worth more than one that prints "not implemented" — but
-do not plan a tutorial around either.
+So adding a page is two edits by hand, as above, and watching for changes is
+whatever you already use — `cargo watch`, `mise`, an editor task. If you want
+`myapp routes`, write it: a struct with `#[cmd]` under `src/commands/` is a
+subcommand, and the route table is `pages::router()`.
 
 ## One thing to know if you pass `--with model`
 

@@ -48,6 +48,14 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
 
     build(&root)?;
     let binary = binary_path(&root)?;
+    ui.debug(format!(
+        "exec {} {}",
+        binary.display(),
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
     handoff(&binary, &args)
 }
 
@@ -192,10 +200,16 @@ fn handoff(binary: &Path, args: &[OsString]) -> Outcome {
 
 /// The commands a project defines, for `brocanth --help` to list.
 ///
-/// Deliberately does **not** build. `--help` that compiles a project is a
-/// `--help` nobody runs twice, and the answer is only decoration: every
-/// command still works through [`run`], which does build. So this reports
-/// what an already-built binary says, and nothing when there is none.
+/// Read out of the project binary's own `--help`, because that is the only
+/// place the list exists -- the commands are compiled into that binary and
+/// this tool cannot know them. There is deliberately no dedicated listing
+/// command to ask instead: it would be a second way to see what `--help`
+/// already shows, and a name a project could not then use for its own.
+///
+/// This does **not** build. A `--help` that compiles a project is a `--help`
+/// nobody runs twice, and the list is only decoration: every command still
+/// works through [`run`], which does build. An unbuilt project gets the plain
+/// help, and a command added since the last build runs anyway.
 pub fn listed(dir: Option<&Path>) -> Option<Vec<(String, String)>> {
     let start = match dir {
         Some(dir) => dir.to_path_buf(),
@@ -205,32 +219,94 @@ pub fn listed(dir: Option<&Path>) -> Option<Vec<(String, String)>> {
     let binary = binary_path(&root).ok()?;
 
     let out = Command::new(&binary)
-        .arg("commands")
+        .arg("--help")
         .stderr(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-
-    // `commands` prints "name  description", aligned. The name is the first
-    // run of non-space; everything after the gap is the description.
-    let listed: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_end();
-            let (name, rest) = line.split_once("  ")?;
-            Some((name.trim().to_string(), rest.trim().to_string()))
-        })
-        .filter(|(name, _)| !name.is_empty())
-        .collect();
-
+    let listed = parse_help(&String::from_utf8_lossy(&out.stdout));
     (!listed.is_empty()).then_some(listed)
+}
+
+/// The `Commands:` block of a clap help page, as name and description.
+///
+/// Split out so it can be tested against a recorded page rather than against
+/// whatever happens to be built.
+fn parse_help(help: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in help.lines() {
+        if line.trim_end() == "Commands:" {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        // The block ends at the first line that is not indented. A blank line
+        // does not end it: clap separates long entries with one.
+        if !line.starts_with("  ") {
+            if line.trim().is_empty() {
+                continue;
+            }
+            break;
+        }
+        let Some((name, about)) = line.trim().split_once("  ") else {
+            continue;
+        };
+        let name = name.trim();
+        // `help` is clap's, not the project's, and `brocanth` has its own.
+        if name.is_empty() || name == "help" {
+            continue;
+        }
+        out.push((name.to_string(), about.trim().to_string()));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real page, pasted, so the parser is tested against clap's output
+    /// rather than against an idea of it.
+    const HELP: &str = "\
+A brocanth application.
+
+Usage: blog [OPTIONS] <COMMAND>
+
+Commands:
+  serve  Serve the application over HTTP
+  ping   Answer pong
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+";
+
+    #[test]
+    fn the_command_block_is_read_and_nothing_else_is() {
+        let listed = parse_help(HELP);
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    "serve".to_string(),
+                    "Serve the application over HTTP".to_string()
+                ),
+                ("ping".to_string(), "Answer pong".to_string()),
+            ],
+            "`help` is clap's own and the options block is not a command list"
+        );
+    }
+
+    #[test]
+    fn a_help_page_with_no_commands_yields_nothing() {
+        let listed = parse_help("Usage: blog [OPTIONS]\n\nOptions:\n  -h, --help  Print help\n");
+        assert!(listed.is_empty(), "{listed:?}");
+    }
 
     #[test]
     fn the_root_is_the_nearest_ancestor_holding_the_marker() {

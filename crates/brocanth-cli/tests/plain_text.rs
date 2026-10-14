@@ -330,7 +330,7 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
     // And the commands actually registered, through the slice, in a project
     // this tool wrote from scratch.
     let listed = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["run", "--quiet", "--", "commands"])
+        .args(["run", "--quiet", "--", "--help"])
         .current_dir(&root)
         .output()
         .expect("cargo run");
@@ -339,7 +339,10 @@ fn a_scaffolded_project_builds_and_its_tasks_run() {
         listed.contains("serve"),
         "the one built-in command is absent:\n{listed}"
     );
-    assert!(listed.contains("commands"), "{listed}");
+    // And nothing else: the built-in that used to list commands is gone,
+    // because `brocanth --help` already shows them and a second way to see
+    // the same thing is a name a project then cannot use for its own.
+    assert!(!listed.contains("\ncommands "), "{listed}");
 
     // `serve --help`, which proves the command is wired and its flags parsed
     // without binding a socket in a test.

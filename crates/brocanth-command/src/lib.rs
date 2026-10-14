@@ -213,7 +213,11 @@ pub fn main(ctx: Context) -> anyhow::Result<()> {
 
 /// [`main`], with the slice and the arguments passed in, so it is testable.
 #[doc(hidden)]
-pub fn run_with<I, T>(commands: &'static [CommandEntry], mut ctx: Context, args: I) -> anyhow::Result<()>
+pub fn run_with<I, T>(
+    commands: &'static [CommandEntry],
+    mut ctx: Context,
+    args: I,
+) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
@@ -265,47 +269,6 @@ fn sorted_unique(commands: &'static [CommandEntry]) -> anyhow::Result<Vec<&'stat
     }
 
     Ok(by_name.into_values().flatten().collect())
-}
-
-// ---------------------------------------------------------------------------
-// The one built-in
-// ---------------------------------------------------------------------------
-
-/// List every command this binary contains.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Commands {
-    /// Print only the names, one per line, for a script to read.
-    #[arg(long)]
-    pub quiet: bool,
-}
-
-impl Command for Commands {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        // Through the same slice as everybody else's: if registration broke,
-        // this command would be the first to notice, because it would be
-        // missing from its own output.
-        let entries = sorted_unique(&COMMANDS)?;
-
-        if self.quiet {
-            for entry in entries {
-                println!("{}", entry.name);
-            }
-            return Ok(());
-        }
-
-        let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-        for entry in entries {
-            // The `about` comes from the struct's own doc comment, which
-            // `clap::Args::augment_args` copies onto the command.
-            let command = (entry.augment)(ClapCommand::new(entry.name));
-            match command.get_about() {
-                Some(about) => println!("{:width$}  {about}", entry.name),
-                None => println!("{}", entry.name),
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -417,39 +380,59 @@ mod tests {
         assert_eq!(names, ["apple", "mango", "zebra"]);
     }
 
+    /// A command that exists only here, so the registration claim has
+    /// something of its own to be about. This crate ships no commands: a
+    /// project's command line is the project's.
+    #[cmd]
+    #[derive(clap::Args)]
+    struct ProvesRegistration {
+        #[arg(long)]
+        flag: bool,
+    }
+
+    impl Command for ProvesRegistration {
+        fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn the_built_in_registered_itself_through_the_slice() {
-        // The dogfooding claim, asserted. If `#[cmd]` stopped emitting the
-        // slice element, this is the test that fails first.
+    fn the_attribute_really_writes_into_the_slice() {
+        // If `#[cmd]` stopped emitting the slice element, this is the test
+        // that fails first -- and nothing else would, because a command that
+        // never registers is simply absent rather than wrong.
         assert!(
-            COMMANDS.iter().any(|e| e.name == "commands"),
-            "the built-in is missing from the registry it reads"
+            COMMANDS.iter().any(|e| e.name == "proves_registration"),
+            "a `#[cmd]` struct is missing from the registry"
         );
     }
 
     #[test]
     fn the_derived_name_is_the_struct_name_in_snake_case() {
-        assert_eq!(<Commands as Registered>::NAME, "commands");
+        assert_eq!(
+            <ProvesRegistration as Registered>::NAME,
+            "proves_registration"
+        );
     }
 
     #[test]
-    fn a_task_runs_through_the_runner() {
+    fn a_command_runs_through_the_runner() {
         static ONE: [CommandEntry; 1] = [CommandEntry {
-            name: "commands",
-            augment: augment_of::<Commands>,
-            run: run_of::<Commands>,
+            name: "proves_registration",
+            augment: augment_of::<ProvesRegistration>,
+            run: run_of::<ProvesRegistration>,
         }];
-        run_with(&ONE, ctx(), ["manage", "commands", "--quiet"]).expect("it ran");
+        run_with(&ONE, ctx(), ["app", "proves_registration", "--flag"]).expect("it ran");
     }
 
     #[test]
     fn an_unknown_subcommand_is_an_error_rather_than_a_silent_success() {
         static ONE: [CommandEntry; 1] = [CommandEntry {
-            name: "commands",
-            augment: augment_of::<Commands>,
-            run: run_of::<Commands>,
+            name: "proves_registration",
+            augment: augment_of::<ProvesRegistration>,
+            run: run_of::<ProvesRegistration>,
         }];
-        assert!(run_with(&ONE, ctx(), ["manage", "nope"]).is_err());
+        assert!(run_with(&ONE, ctx(), ["app", "nope"]).is_err());
     }
 
     #[test]

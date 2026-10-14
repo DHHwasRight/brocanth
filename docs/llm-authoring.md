@@ -23,7 +23,7 @@ that move failure **into that loop** and out of production:
 | Errors say what to do next | A model iterates on the message, not on intuition | Every CLI diagnostic carries a `help:` |
 | Nothing implicit | A model cannot know a convention that is not in its context | A plugin not named in `main` contributes nothing |
 | One way to do a thing | Ambiguity is where a model guesses | Routes come from files; middleware is mounted in one place |
-| Self-describing state | A model cannot run a debugger | `brocanth routes` prints the table *and* where each mount was written |
+| Self-describing state | A model cannot run a debugger | `brocanth --help` inside a project lists the project's own commands, read out of its binary |
 
 Those five were design positions in `PLAN.md` before anyone said "LLM". The
 claim here is not that brocanth was retrofitted for models; it is that a
@@ -36,15 +36,14 @@ reasons, a framework a model can write.
 they fail and how cheap the fix is.
 
 ```
-brocanth check                       # wiring first, then cargo
 cargo test -p <crate>                # the crate you touched
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-`brocanth check` is first on purpose: it validates mounts and middleware offers
-*before* calling cargo, so a name nothing provides is reported as a wiring
-error rather than as a type error deep in a backtrace.
+In a scaffolded application, `brocanth serve` and then a request against it is
+the end-to-end check: the route table, the middleware chain and the status
+rules are only wired together once something is listening.
 
 For the whole workspace:
 
@@ -148,7 +147,7 @@ in the tree, no field on the context, no bytes in the binary. So when asked
 not there, X is not in the binary.
 
 **A plugin offers middleware; the application mounts it.** A plugin never
-mounts itself. `brocanth routes` prints `MOUNTED AT` with a file and line.
+mounts itself, and the mount is a line in the application's own `src/app.rs`.
 
 **A route is a file.** `src/pages/about.rs` is `/about`;
 `src/pages/users/[id].rs` is `/users/{id}`. Adding a route is a file plus two

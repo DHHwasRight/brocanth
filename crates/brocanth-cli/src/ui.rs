@@ -148,16 +148,18 @@ type Sink = AutoStream<Box<dyn Write>>;
 pub struct Ui {
     face: Face,
     quiet: bool,
+    debug: bool,
     err: RefCell<Sink>,
 }
 
 impl Ui {
     /// The real streams.
-    pub fn new(face: Face, quiet: bool) -> Self {
+    pub fn new(face: Face, quiet: bool, debug: bool) -> Self {
         let choice = face.choice();
         Self {
             face,
             quiet,
+            debug,
             err: RefCell::new(AutoStream::new(
                 Box::new(std::io::stderr()) as Box<dyn Write>,
                 choice,
@@ -173,7 +175,21 @@ impl Ui {
 
     // -- the raw writes -----------------------------------------------------
 
-    /// A line of commentary: what is happening, not what was asked for.
+    /// Detail for somebody working on the tool or on a script that drives it.
+    ///
+    /// Stderr and off unless `--debug`, so it never reaches a pipe that was
+    /// not asked to receive it. `--quiet` does not suppress it: a person who
+    /// asked for both wants the detail without the commentary, and reading
+    /// `--quiet` as "also drop what I just asked for" would be the tool
+    /// arguing with them.
+    pub fn debug(&self, text: impl Display) {
+        if !self.debug {
+            return;
+        }
+        let mut err = self.err.borrow_mut();
+        let _ = writeln!(err, "{}", paint(DIM, format!("debug: {text}")));
+    }
+
     /// Stderr, so it never lands in a redirect, and silent under `--quiet`.
     pub fn note(&self, text: impl Display) {
         if self.quiet {

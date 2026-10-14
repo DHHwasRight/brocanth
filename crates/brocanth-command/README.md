@@ -83,29 +83,28 @@ Four steps, and the order matters:
 Subcommands `brocanth` knows itself — `create`, `routes`, `build`, `check`,
 `generate`, `dev` — are handled directly and never delegated.
 
-## `cargo manage`
-
-`brocanth create` writes `.cargo/config.toml` with:
-
-```toml
-[alias]
-manage = "run --quiet --bin manage --"
-```
-
-So from anywhere in the project:
+## Running one
 
 ```
-$ cargo manage commands
-greet  Say hello, to prove the wiring works
-commands  List every command this binary contains
+$ brocanth --help
+Commands:
+  create  Scaffold an application
+  serve   Serve the application over HTTP
+  greet   Say hello, to prove the wiring works
 
-$ cargo manage greet --name brocanth
+$ brocanth greet --name brocanth
 hello, brocanth (env: development)
 ```
 
-The trailing `--` stops cargo reading the command's own flags as its own. Use
-this when you are already in the project; use `brocanth <command>` when you are
-not, or when you would rather not remember which it is.
+`brocanth` is installed once and knows one command of its own, `create`.
+Everything else it is given belongs to the project: it walks up for
+`brocanth.toml`, builds, and execs the project's binary. A built project also
+has its commands listed in that help, read out of the binary rather than
+guessed at.
+
+There is **no cargo alias**. A project's command line is a framework concern
+and cargo is the build tool; hooking one into the other conflates them. Run
+the binary directly if you would rather not go through `brocanth`.
 
 ## The linking gotcha
 

@@ -168,6 +168,28 @@ impl Answers {
         self.picks.contains(&pick)
     }
 
+    /// The command line that would have produced these answers with nothing
+    /// to ask.
+    ///
+    /// Written out in full rather than minimally: a line that relies on a
+    /// default is a line that changes meaning when the default does, and the
+    /// point of printing it is that somebody will paste it into a script.
+    fn as_flags(&self) -> String {
+        let mut out = format!("brocanth create {}", shell_quote(&self.name));
+        out.push_str(&format!(" --title {}", shell_quote(&self.title)));
+        if self.picks.is_empty() {
+            out.push_str(" --core-only");
+        } else {
+            let names: Vec<&str> = self.picks.iter().map(|p| p.key()).collect();
+            out.push_str(&format!(" --with {}", names.join(",")));
+        }
+        out.push_str(if self.git { " --git" } else { " --no-git" });
+        if let Some(path) = &self.local {
+            out.push_str(&format!(" --brocanth-path {}", shell_quote(path)));
+        }
+        out
+    }
+
     /// `my-blog` -> `my_blog`. The crate identifier, and the prefix of every
     /// environment variable the generated binary reads.
     fn ident(&self) -> String {
@@ -287,7 +309,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
             Cell::styled("start the server on 127.0.0.1:3000", DIM),
         ]);
         next.row(vec![
-            Cell::styled("brocanth commands", STRONG),
+            Cell::styled("brocanth --help", STRONG),
             Cell::styled("every command this project defines", DIM),
         ]);
     } else {
@@ -323,7 +345,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
                  --core-only, --git/--no-git",
             )]);
         }
-        return chooser(args, local);
+        return chooser(ui, args, local);
     }
 
     let name = args.name.clone().expect("the None arm returned above");
@@ -362,7 +384,7 @@ fn picked(args: &CreateArgs) -> Vec<Pick> {
 }
 
 /// The full-screen route. Returns the same [`Answers`] the flags produce.
-fn chooser(args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
+fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
     let preset = picked(args);
     let draft = Draft {
         name: String::new(),
@@ -405,7 +427,7 @@ fn chooser(args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diag
         .map(|(pick, _)| *pick)
         .collect();
 
-    Ok(Answers {
+    let answers = Answers {
         title: if draft.title.is_empty() {
             crate::ui::title_case(&draft.name)
         } else {
@@ -415,7 +437,16 @@ fn chooser(args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diag
         picks,
         local,
         git: draft.git,
-    })
+    };
+
+    // What the chooser stood in for. Every answer it collects has a flag, and
+    // this is that sentence made usable: copy the line into a script and the
+    // same project comes out, with nothing to ask.
+    ui.debug(format!(
+        "non-interactive equivalent: {}",
+        answers.as_flags()
+    ));
+    Ok(answers)
 }
 
 /// A relative `--brocanth-path` is relative to the directory the user typed it
@@ -474,6 +505,22 @@ fn virtual_manifest(dir: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
             error.help("pass the core crate's own directory, such as <checkout>/crates/brocanth");
     }
     Err(vec![error])
+}
+
+/// Single-quotes a value when a shell would otherwise take it apart.
+///
+/// Only for the debug line. A title is the one answer here that can carry a
+/// space, and a line a reader is invited to paste has to survive the paste.
+fn shell_quote(value: &str) -> String {
+    let safe = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c));
+    if safe {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
 }
 
 /// Why `name` is not a usable package name, in a few words, or `None`.
@@ -625,7 +672,7 @@ fn agents_md(a: &Answers) -> String {
         "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
          `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
          registration happens at link time and there is no list to add it to.\n\n\
-         ```\ncargo manage commands          # every command in this binary\ncargo manage greet --name x\n```\n"
+         ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n```\n"
     } else {
         ""
     };
@@ -2151,6 +2198,50 @@ mod tests {
                 .validate_sections(&claimed)
                 .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
         }
+    }
+
+    #[test]
+    fn the_chooser_reports_a_line_that_would_have_produced_the_same_answers() {
+        // What `--debug` prints after the chooser closes. Every answer the
+        // chooser collects has a flag, and this is that sentence made usable.
+        let mut answers = answers(&[Pick::Logging, Pick::Commands]);
+        answers.name = "blog".to_string();
+        answers.title = "Blog".to_string();
+        answers.git = true;
+
+        let line = answers.as_flags();
+        assert_eq!(
+            line,
+            "brocanth create blog --title Blog --with logging,commands --git"
+        );
+    }
+
+    #[test]
+    fn a_title_with_a_space_survives_being_pasted_into_a_shell() {
+        let mut answers = answers(&[]);
+        answers.name = "my_app".to_string();
+        answers.title = "My App".to_string();
+        answers.git = false;
+
+        // `--core-only` rather than an empty `--with`, because an empty list
+        // is a flag that does nothing and reads like a mistake.
+        assert_eq!(
+            answers.as_flags(),
+            "brocanth create my_app --title 'My App' --core-only --no-git"
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_title_cannot_break_out_of_the_quoting() {
+        let mut answers = answers(&[]);
+        answers.name = "x".to_string();
+        answers.title = "it's".to_string();
+        answers.git = false;
+        assert!(
+            answers.as_flags().contains(r"'it'\''s'"),
+            "{}",
+            answers.as_flags()
+        );
     }
 
     #[test]

@@ -67,6 +67,10 @@ struct Global {
     /// Print only the result and anything wrong with it
     #[arg(long, short, global = true)]
     quiet: bool,
+    /// Also print what the tool is doing, and what it would have been asked
+    /// non-interactively
+    #[arg(long, short = 'D', global = true)]
+    debug: bool,
 }
 
 #[derive(Subcommand)]
@@ -83,7 +87,7 @@ enum Command {
     /// Everything this tool does not recognise is one. `brocanth` is
     /// installed once and scaffolds; a project's commands live in that
     /// project and are compiled into its binary, so they cannot be listed
-    /// here. Inside a project, `brocanth commands` lists them.
+    /// here -- but a built project has them in this help, above.
     ///
     /// The payload is never read -- dispatch works off the raw matches, so a
     /// listed command and an unlisted one take one path. The variant has to
@@ -158,7 +162,7 @@ fn main() -> ExitCode {
     let global = Global::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // Asked once. Everything downstream reads the answer off the `Ui`.
     let face = Face::decide(global.no_color, global.quiet);
-    let ui = Ui::new(face, global.quiet);
+    let ui = Ui::new(face, global.quiet, global.debug);
     let dir = global.dir.as_deref();
 
     let result = match matches.subcommand() {

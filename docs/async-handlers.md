@@ -71,7 +71,7 @@ impl<E> AnyHandler<E> {
     pub fn is_async(&self) -> bool;
 
     /// Runs a sync route, or reports that this one is not sync.
-    /// For a caller with no runtime: a test, or `brocanth routes`.
+    /// For a caller with no runtime: a test, or a command that only inspects.
     pub fn call_sync(&self, cx: &mut RouteCx<'_, E>)
         -> Option<Result<Response, HandlerError>>;
 
