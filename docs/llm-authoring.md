@@ -7,7 +7,7 @@ reading the other 44,000 lines, and a person should be able to check what the
 model relied on.
 
 Everything here is verified against this checkout. Counts were taken on
-2026-10-13.
+2026-10-14.
 
 ## Why a framework can be good or bad at this
 
@@ -155,8 +155,17 @@ lines in `src/pages/mod.rs` — the `mod`, and a `routes.file(...)` row naming
 the file rather than the URL, so the table and the filesystem cannot drift.
 
 **A command is a struct.** `#[cmd]` on a `clap::Args` struct makes it a
-subcommand of the project's `manage` binary, registered at link time. There is
+subcommand of the project's own binary, registered at link time. There is
 no list to add it to.
+
+**A view is a `.rsx` file, when the project asked for one.** `--with rsx`
+writes `src/views/*.rsx` and `rsx::load_dir!` compiles the tree into the
+binary. A component is a function returning `Element`; its parameters are
+struct fields at the call site, so a wrong one is a build failure naming the
+right ones. One function reaches them from a handler:
+`html(views::index::Index { title })`, which returns the handler's own
+`Result`. Without `--with rsx` there is no `html`, no `views` module and no
+template engine in the tree — check `Cargo.toml` before writing markup.
 
 ### The crates, and what each is for
 
@@ -177,6 +186,10 @@ no list to add it to.
 | `brocanth-admin` | a Django-shaped backoffice over the schema |
 | `brocanth-schema` | zod-shaped validation, feeding OpenAPI |
 | `brocanth-server` | the HTTP server, and its bridge to the core |
+
+`rsx` is the one dependency in this list that is not a brocanth crate. It has
+its own repository, so `--brocanth-path` does not reach it and the generated
+manifest fetches it by git.
 
 **Postgres is the base.** SQLite is supported for smaller single-machine
 setups and is a cargo feature, not a different crate.

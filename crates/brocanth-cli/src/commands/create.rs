@@ -41,6 +41,11 @@ use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 /// Where the generated `Cargo.toml` points for the framework itself.
 const REPOSITORY: &str = "https://github.com/DHHwasRight/brocanth.git";
 
+/// rsx lives in its own repository, so `--brocanth-path` does not reach it.
+/// That asymmetry is on purpose: brocanth is the thing being developed here
+/// and wants a path, rsx is an ordinary dependency and is fetched.
+const RSX_REPOSITORY: &str = "https://github.com/DHHwasRight/rsx.git";
+
 #[derive(Args)]
 pub struct CreateArgs {
     /// Directory to create, and the cargo package name
@@ -98,15 +103,18 @@ pub enum Pick {
     Model,
     /// Project commands: a `manage` binary whose subcommands are your own structs
     Commands,
+    /// HTML from `.rsx` templates, compiled into the binary by a macro
+    Rsx,
 }
 
 impl Pick {
-    const ALL: [Pick; 5] = [
+    const ALL: [Pick; 6] = [
         Pick::Logging,
         Pick::Config,
         Pick::Sessions,
         Pick::Model,
         Pick::Commands,
+        Pick::Rsx,
     ];
     /// What a non-interactive run gets when no flag chose. Stated rather than
     /// guessed at: the command prints the flag that overrides it.
@@ -119,6 +127,7 @@ impl Pick {
             Pick::Sessions => "sessions",
             Pick::Model => "model",
             Pick::Commands => "commands",
+            Pick::Rsx => "rsx",
         }
     }
 
@@ -131,6 +140,9 @@ impl Pick {
             Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
             Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
             Pick::Commands => "this project's own command line, `serve` plus whatever you add",
+            Pick::Rsx => {
+                "`.rsx` templates compiled into the binary; without it a page builds a String"
+            }
         }
     }
 
@@ -140,6 +152,7 @@ impl Pick {
             Pick::Config => Some("brocanth-config"),
             Pick::Model => Some("brocanth-model"),
             Pick::Commands => Some("brocanth-command"),
+            Pick::Rsx => Some("rsx"),
             Pick::Logging | Pick::Sessions => None,
         }
     }
@@ -201,10 +214,10 @@ impl Answers {
         self.picks
             .iter()
             .copied()
-            // Config is not a plugin instance, and Tasks is a second binary
-            // rather than anything the application registers: neither belongs
-            // in the list `main` mounts.
-            .filter(|p| *p != Pick::Config && *p != Pick::Commands)
+            // Config is not a plugin instance, Commands is a command line
+            // rather than anything the application registers, and rsx is a
+            // macro the views call: none of the three is mounted.
+            .filter(|p| *p != Pick::Config && *p != Pick::Commands && *p != Pick::Rsx)
             .collect()
     }
 
@@ -592,11 +605,20 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         // Always: it is the one answer to what this application is, and both
         // shapes of `main` read it.
         ("src/app.rs".to_string(), app_rs(a)),
-        ("src/pages/mod.rs".to_string(), PAGES_MOD_RS.to_string()),
+        ("src/pages/mod.rs".to_string(), pages_mod_rs(a)),
         ("src/pages/index.rs".to_string(), index_rs(a)),
         ("src/pages/about.rs".to_string(), about_rs(a)),
-        ("src/pages/users/[id].rs".to_string(), USER_RS.to_string()),
+        ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
+    if a.has(Pick::Rsx) {
+        // `mod.rs` beside the templates rather than `views.rs` next to the
+        // directory: the macro call reads as part of the tree it loads.
+        files.push(("src/views/mod.rs".to_string(), VIEWS_MOD_RS.to_string()));
+        files.push(("src/views/layout.rsx".to_string(), LAYOUT_RSX.to_string()));
+        files.push(("src/views/index.rsx".to_string(), INDEX_RSX.to_string()));
+        files.push(("src/views/about.rsx".to_string(), ABOUT_RSX.to_string()));
+        files.push(("src/views/user.rsx".to_string(), USER_RSX.to_string()));
+    }
     if !a.plugins().is_empty() {
         files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a)));
     }
@@ -666,6 +688,16 @@ fn agents_md(a: &Answers) -> String {
         )
     };
 
+    // A raw string, for the reason given above `COMMANDS_MOD_RS`: the `\n\`
+    // continuation used elsewhere here keeps the source's own indentation and
+    // writes it into the file, which in Markdown turns a paragraph into a
+    // code block.
+    let views = if a.has(Pick::Rsx) {
+        AGENTS_VIEWS_MD
+    } else {
+        ""
+    };
+
     let commands = if a.has(Pick::Commands) {
         "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
          `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
@@ -687,15 +719,14 @@ fn agents_md(a: &Answers) -> String {
          fast they fail.\n\
          \n\
          ```\n\
-         brocanth check     # wiring first: mounts and middleware offers, then cargo\n\
          cargo test\n\
          cargo clippy --all-targets -- -D warnings\n\
          cargo fmt --check\n\
          ```\n\
          \n\
-         `brocanth routes` prints the route table and, below it, every mounted\n\
-         middleware with the file and line where it was mounted. Use it instead\n\
-         of guessing what covers a request.\n\
+         The route table is `pages::router()` and the test beside it asserts the\n\
+         shape of the directory. Read it rather than guessing what covers a\n\
+         request.\n\
          \n\
          ## What this binary contains\n\
          \n\
@@ -720,6 +751,7 @@ fn agents_md(a: &Answers) -> String {
          A handler returns a value and never writes a response itself. That is\n\
          what makes a half-written body on an error impossible rather than\n\
          unlikely.\n\
+         {views}\
          {commands}\
          \n\
          ## House style\n\
@@ -744,9 +776,42 @@ fn agents_md(a: &Answers) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         absent = absent,
+        views = views,
         commands = commands,
     )
 }
+
+/// The `## Views` section of `AGENTS.md`, written only when there are views.
+const AGENTS_VIEWS_MD: &str = r#"
+## Views
+
+Markup lives in `src/views/*.rsx` and is compiled into the binary by
+`rsx::load_dir!`. One file is one module, so `index.rsx` is `views::index`.
+
+A component is a function returning `Element`. Its parameters are its contract
+with the handler, and a caller fills them as struct fields, so a field the
+component does not declare is a compile error rather than a blank in the page.
+A parameter of type `Element` receives children, which is all a layout is.
+
+Reach a template from a handler with `html`, and with nothing else:
+
+```rust
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html(views::index::Index { title: "Home" })
+}
+```
+
+`html` returns the handler's own `Result`, so there is no `Ok(..)` to write and
+a template that bails propagates with `?`. For another status or a header,
+compose with the other return shapes: `Ok((html(tpl)?, 404))`.
+
+Not every response is a page. A redirect is `Response::empty(303)` with a
+header and no template anywhere near it.
+
+An interpolated value is escaped on the way out. Templates are read at
+**compile** time, so an edit needs a rebuild, and a template that does not
+parse is a build failure on its own line rather than a 500.
+"#;
 
 /// One command, as an example to copy.
 // A raw string, and deliberately: the `\n\` continuation used elsewhere in
@@ -770,6 +835,12 @@ pub mod serve;
 /// Where a brocanth crate comes from: a local checkout when one was named, the
 /// repository otherwise.
 fn source_of(a: &Answers, crate_name: &str) -> String {
+    // Not a brocanth crate, so `--brocanth-path` has nothing to say about it.
+    if crate_name == "rsx" {
+        return format!(
+            "rsx = {{ git = {RSX_REPOSITORY:?}, branch = \"main\" }}  # templates, compiled"
+        );
+    }
     match &a.local {
         // `--brocanth-path` points at `crates/brocanth`; its siblings are the
         // other crates of the same checkout.
@@ -824,6 +895,12 @@ fn cargo_toml(a: &Answers) -> String {
     if !a.has(Pick::Config) {
         absent.push(
             "#   brocanth-config  no TOML parser; main builds each plugin from a literal"
+                .to_string(),
+        );
+    }
+    if !a.has(Pick::Rsx) {
+        absent.push(
+            "#   rsx              no template engine; a page builds the String it returns"
                 .to_string(),
         );
     }
@@ -1153,9 +1230,10 @@ fn type_of(pick: Pick) -> &'static str {
         Pick::Sessions => "Sessions",
         Pick::Model => "Model",
         Pick::Config => "ConfigPlugin",
-        // Never reached: `plugins()` drops it before this is called, because
-        // commands are a binary beside the application, not a layer inside it.
-        Pick::Commands => unreachable!("commands is not a plugin"),
+        // Never reached: `plugins()` drops both before this is called.
+        // Commands are a binary beside the application rather than a layer
+        // inside it, and rsx is a macro the views call.
+        Pick::Commands | Pick::Rsx => unreachable!("{} is not a plugin", pick.key()),
     }
 }
 
@@ -1174,7 +1252,7 @@ fn main_serve_only_rs(a: &Answers) -> String {
 
 mod app;
 mod pages;
-{plugins}
+{plugins}{views}
 use std::process::ExitCode;
 
 fn main() -> ExitCode {{
@@ -1193,6 +1271,7 @@ fn main() -> ExitCode {{
         } else {
             "mod plugins;\n"
         },
+        views = if a.has(Pick::Rsx) { "mod views;\n" } else { "" },
     )
 }
 
@@ -1212,7 +1291,7 @@ fn main_with_commands_rs(a: &Answers) -> String {
 mod app;
 mod commands;
 mod pages;
-{plugins}
+{plugins}{views}
 fn main() -> brocanth_command::anyhow::Result<()> {{
     brocanth_command::main(brocanth_command::Context::boot()?)
 }}
@@ -1223,6 +1302,7 @@ fn main() -> brocanth_command::anyhow::Result<()> {{
         } else {
             "mod plugins;\n"
         },
+        views = if a.has(Pick::Rsx) { "mod views;\n" } else { "" },
     )
 }
 
@@ -1266,7 +1346,7 @@ run = "cargo run"
 run = "cargo test"
 "#;
 
-const PAGES_MOD_RS: &str = r##"//! The route table.
+const PAGES_MOD_RS_HEAD: &str = r##"//! The route table.
 //!
 //! One file is one route, and the path on disk is the URL: `index.rs` is `/`,
 //! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`. The framework does
@@ -1542,7 +1622,39 @@ pub fn router() -> Result<Router<Handler>, BuildError> {
     routes.build()
 }
 
-#[cfg(test)]
+"##;
+
+/// The bridge from a `.rsx` component to a response, written only when the
+/// project asked for templates.
+const PAGES_HTML_RS: &str = r##"/// Renders a template into a 200.
+///
+/// This is the whole bridge from a `.rsx` component to a response, and it
+/// returns the handler's own `Result` rather than a value: a template that
+/// bails propagates with `?` instead of turning into a blank 200. So a
+/// handler body is one line, with no `Ok(..)` around it:
+///
+/// ```ignore
+/// pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+///     html(views::index::Index { title: "Home" })
+/// }
+/// ```
+///
+/// For another status or a header, compose with the forms above:
+/// `Ok((html(tpl)?, 404))`, or `Ok(html(tpl)?.with_header("x-kind", "page"))`.
+///
+/// Deliberately a function and not `impl<T: rsx::Template> IntoResponse for T`.
+/// `()`, `Option<T>` and `Vec<T>` are templates, so a blanket impl overlaps
+/// the ones above and does not compile -- and an `into_response` that cannot
+/// fail would have to swallow a render error.
+pub fn html(template: impl rsx::Template) -> Result<Response, Error> {
+    // `render_to_string` builds into its own String, so a template that fails
+    // half way leaves nothing behind. There is no partial body to take back,
+    // which is the same property the rest of this file is built on.
+    Ok(Response::ok(template.render_to_string()?))
+}
+"##;
+
+const PAGES_MOD_RS_TESTS: &str = r##"#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1567,7 +1679,43 @@ mod tests {
 }
 "##;
 
+/// `src/pages/mod.rs`, in three parts so the rsx bridge can land before the
+/// test module rather than after it, which clippy refuses.
+fn pages_mod_rs(a: &Answers) -> String {
+    let mut out = String::from(PAGES_MOD_RS_HEAD);
+    if a.has(Pick::Rsx) {
+        out.push_str(PAGES_HTML_RS);
+        out.push('\n');
+    }
+    out.push_str(PAGES_MOD_RS_TESTS);
+    out
+}
+
 fn index_rs(a: &Answers) -> String {
+    if a.has(Pick::Rsx) {
+        return format!(
+            r##"//! `/` -- because the file is called `index.rs`.
+
+use crate::pages::{{html, Ctx, Error, IntoResponse}};
+use crate::views;
+
+/// GET. The framework reads the verb off the function name: `handle` is GET
+/// and `handle_post` is POST.
+///
+/// The whole body is the bridge. `html` takes a component and gives back this
+/// handler's own `Result`, so there is no `Ok(..)` to write and a template
+/// that bails is propagated rather than swallowed.
+///
+/// The markup is in `src/views/index.rsx`, compiled into this binary at build
+/// time: nothing is read from disk when a request arrives, and a template
+/// that does not parse is a compile error pointing at the `.rsx` line.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
+    html(views::index::Index {{ title: "{title}" }})
+}}
+"##,
+            title = a.title
+        );
+    }
     format!(
         r##"//! `/` -- because the file is called `index.rs`.
 
@@ -1593,6 +1741,29 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
 }
 
 fn about_rs(a: &Answers) -> String {
+    if a.has(Pick::Rsx) {
+        return format!(
+            r##"//! `/about` -- one file, one route.
+
+use crate::pages::{{html, Ctx, Error, IntoResponse}};
+use crate::views;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
+    // The context is the request, and a component's parameters are an
+    // ordinary struct: whatever the page needs, named, and type-checked
+    // against `src/views/about.rsx`. A field the component does not declare
+    // is a compile error, not a blank in the output.
+    let verb = ctx.verb.to_string();
+    html(views::about::About {{
+        title: "{title}",
+        verb: &verb,
+        path: &ctx.path,
+    }})
+}}
+"##,
+            title = a.title
+        );
+    }
     format!(
         r##"//! `/about` -- one file, one route.
 
@@ -1622,6 +1793,42 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
         title = a.title
     )
 }
+
+/// `src/pages/users/[id].rs`, which is where the scaffold shows that not
+/// every response is a page: the POST is a redirect and no template is
+/// involved.
+fn user_rs(a: &Answers) -> String {
+    if a.has(Pick::Rsx) {
+        return String::from(USER_RSX_RS);
+    }
+    String::from(USER_RS)
+}
+
+const USER_RSX_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are the parameter.
+
+use crate::pages::{html, Ctx, Error, IntoResponse, Response};
+use crate::views;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // `?` is why a handler returns `Result`. Anything that fails converts
+    // into `Error` through a blanket `From` -- a parse here, and a template
+    // that bails inside `html`, by the same route.
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    html(views::user::User { id })
+}
+
+/// POST to the same path. One file, one route, one handler per verb.
+///
+/// Not every response is a page, and this is the reason `html` is a function
+/// rather than something the framework does to every return: a redirect is a
+/// status and one header, with no markup anywhere near it.
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
+}
+"##;
 
 const USER_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are the parameter.
 //!
@@ -1656,6 +1863,104 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
 }
 "##;
+
+// -- the views ---------------------------------------------------------------
+
+/// `src/views/mod.rs`: one macro call, and the whole template tree.
+const VIEWS_MOD_RS: &str = r#"//! Every template in this application.
+//!
+//! `load_dir!` reads the tree while the crate is being compiled and emits one
+//! `pub mod` per file, so `index.rsx` is `views::index`. Nothing is read from
+//! disk when a request arrives, and a template that does not parse is a
+//! compile error on the `.rsx` line rather than a 500 on a Tuesday.
+//!
+//! The path is relative to the package root and not to this file, because a
+//! proc macro cannot learn where it was written on stable Rust. Each file is
+//! also `include_bytes!`d by the expansion, which is what makes cargo rebuild
+//! after an edit.
+
+rsx::load_dir!("src/views");
+"#;
+
+/// The shell. A layout is an ordinary component with an `Element` parameter,
+/// which is also how every other kind of nesting works.
+const LAYOUT_RSX: &str = r#"// The shell every page renders inside.
+//
+// A layout is not a special kind of thing here: it is a component with a
+// parameter of type `Element`, which is what a caller's children fill. So
+// layouts nest, take arguments, and are checked like anything else.
+
+pub fn Layout(title: &str, children: Element) -> Element {
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{title}</title>
+        </head>
+        <body>
+            <header><a href="/">{title}</a></header>
+            <main>{children}</main>
+        </body>
+    </html>
+}
+"#;
+
+const INDEX_RSX: &str = r#"use crate::views::layout::Layout;
+
+pub fn Index(title: &str) -> Element {
+    <Layout title={title}>
+        <h1>{title}</h1>
+        <p>
+            This file is <code>src/views/index.rsx</code> and it is compiled
+            into the binary. Edit it and cargo rebuilds; break it and the build
+            stops on the line you broke.
+        </p>
+        <p>
+            An interpolated value is escaped on the way out, always. Writing
+            markup verbatim needs a different and greppable hole, so an
+            injection is something you can search for rather than something you
+            have to remember.
+        </p>
+        <ul>
+            <li><a href="/about">/about</a></li>
+            <li><a href="/users/7">/users/7</a></li>
+        </ul>
+    </Layout>
+}
+"#;
+
+const ABOUT_RSX: &str = r#"use crate::views::layout::Layout;
+
+// The parameters are the page's contract with its handler. Rename one and
+// `src/pages/about.rs` stops compiling, which is the point.
+
+pub fn About(title: &str, verb: &str, path: &str) -> Element {
+    <Layout title={title}>
+        <h1>About</h1>
+        <p>
+            You asked for <code>{verb} {path}</code>. This page answers GET
+            and nothing else, so a DELETE to it is a 405 carrying
+            an <code>Allow</code> header rather than a 404.
+        </p>
+    </Layout>
+}
+"#;
+
+const USER_RSX: &str = r#"use crate::views::layout::Layout;
+
+pub fn User(id: u64) -> Element {
+    <Layout title="User">
+        <h1>User {id}</h1>
+        <p>
+            The <code>id</code> came out of the path. A component takes typed
+            parameters, so this one is a <code>u64</code> the whole way
+            from <code>src/pages/users/[id].rs</code>, never a string that
+            might not be a number.
+        </p>
+    </Layout>
+}
+"#;
 
 fn plugins_mod_rs(a: &Answers) -> String {
     let mut out = String::from(
@@ -2282,9 +2587,11 @@ mod tests {
         // The generated `router()` names three files. If one were not written
         // the application would not compile, which is a worse way to find out
         // than this test.
-        let files = scaffold(&answers(&Pick::ALL));
+        let a = answers(&Pick::ALL);
+        let table = pages_mod_rs(&a);
+        let files = scaffold(&a);
         for page in ["index.rs", "about.rs", "users/[id].rs"] {
-            assert!(PAGES_MOD_RS.contains(&format!("\"{page}\"")), "{page}");
+            assert!(table.contains(&format!("\"{page}\"")), "{page}");
             assert!(
                 files.iter().any(|(p, _)| p == &format!("src/pages/{page}")),
                 "the table names {page} but nothing writes it"
@@ -2302,6 +2609,101 @@ mod tests {
         ] {
             assert_eq!(route_for_file(file, "").unwrap().pattern(), expected);
         }
+    }
+
+    #[test]
+    fn without_rsx_nothing_names_a_template() {
+        let plain = paths(&[Pick::Logging, Pick::Config, Pick::Commands]);
+        assert!(
+            !plain.iter().any(|p| p.ends_with(".rsx")),
+            "a template nobody asked for: {plain:?}"
+        );
+        assert!(!plain.contains(&"src/views/mod.rs".to_string()));
+
+        let a = answers(&[Pick::Logging, Pick::Config, Pick::Commands]);
+        assert!(
+            !cargo_toml(&a).lines().any(|l| l.starts_with("rsx = ")),
+            "no template engine in the tree"
+        );
+        // And the bridge is not in the source either, so there is no function
+        // to call and no `rsx::` path to copy from.
+        assert!(!pages_mod_rs(&a).contains("pub fn html("));
+        assert!(!main_with_commands_rs(&a).contains("mod views;"));
+    }
+
+    #[test]
+    fn rsx_writes_a_view_per_page_and_a_layout_they_share() {
+        let files = paths(&[Pick::Rsx]);
+        for expected in [
+            "src/views/mod.rs",
+            "src/views/layout.rsx",
+            "src/views/index.rsx",
+            "src/views/about.rsx",
+            "src/views/user.rsx",
+        ] {
+            assert!(files.contains(&expected.to_string()), "{files:?}");
+        }
+        // Every template the pages reach for, and no page without one.
+        let a = answers(&[Pick::Rsx]);
+        for (page, view) in [
+            (index_rs(&a), "views::index::Index"),
+            (about_rs(&a), "views::about::About"),
+            (user_rs(&a), "views::user::User"),
+        ] {
+            assert!(page.contains(view), "{page}");
+        }
+    }
+
+    #[test]
+    fn a_handler_reaches_a_template_through_one_function_and_no_other() {
+        let a = answers(&[Pick::Rsx]);
+        let pages = pages_mod_rs(&a);
+        assert!(pages.contains("pub fn html(template: impl rsx::Template)"));
+        // It returns the handler's own Result, which is what lets a template
+        // that bails propagate instead of becoming a blank 200.
+        assert!(pages.contains("-> Result<Response, Error>"), "{pages}");
+
+        // So a page body is the call, with no `Ok(` wrapping it: that is the
+        // whole of the ergonomics claim, and it is checked rather than
+        // described.
+        let index = index_rs(&a);
+        assert!(
+            index.contains(&format!(
+                "    html(views::index::Index {{ title: {:?} }})",
+                a.title
+            )),
+            "{index}"
+        );
+        assert!(!index.contains("Ok(html("), "{index}");
+
+        // And not every response goes through it. The redirect does not.
+        let user = user_rs(&a);
+        assert!(user.contains("Response::empty(303)"), "{user}");
+    }
+
+    #[test]
+    fn the_bridge_lands_before_the_test_module() {
+        // `items_after_test_module` is a clippy error, and the three-part
+        // assembly of this file exists for no other reason.
+        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
+        let html = pages.find("pub fn html(").expect("the bridge is written");
+        let tests = pages.find("#[cfg(test)]").expect("the file has tests");
+        assert!(html < tests, "the bridge is after the test module");
+    }
+
+    #[test]
+    fn rsx_is_fetched_rather_than_pathed_even_with_a_local_checkout() {
+        // `--brocanth-path` points into the brocanth checkout and rsx is not
+        // in it, so a path would be wrong in a way cargo reports late.
+        let mut a = answers(&[Pick::Rsx]);
+        a.local = Some("/somewhere/brocanth/crates/brocanth".to_string());
+        let manifest = cargo_toml(&a);
+        let line = manifest
+            .lines()
+            .find(|l| l.starts_with("rsx = "))
+            .unwrap_or_else(|| panic!("{manifest}"));
+        assert!(line.contains("git = "), "{line}");
+        assert!(!line.contains("path = "), "{line}");
     }
 
     /// The scaffold, built for real.
@@ -2325,7 +2727,7 @@ mod tests {
         let a = Answers {
             name: "scaffold-test".into(),
             title: "Scaffold Test".into(),
-            picks: vec![Pick::Logging, Pick::Config, Pick::Sessions],
+            picks: vec![Pick::Logging, Pick::Config, Pick::Sessions, Pick::Rsx],
             local: Some(brocanth.display().to_string()),
             git: false,
         };

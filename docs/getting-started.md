@@ -1,6 +1,6 @@
 # Getting started
 
-Every command here was run against this checkout on 2026-10-13, and the output
+Every command here was run against this checkout on 2026-10-14, and the output
 is pasted rather than recalled. Where something is not built yet it says so
 instead of describing what it will do.
 
@@ -40,33 +40,34 @@ other answer has a default.
 What it writes:
 
 ```
-  blog/Cargo.toml                848 bytes
+  blog/Cargo.toml               1182 bytes
   blog/.gitignore                  8 bytes
   blog/rust-toolchain.toml        29 bytes
-  blog/mise.toml                 263 bytes
-  blog/src/main.rs              4944 bytes
-  blog/src/pages/mod.rs         3654 bytes
-  blog/src/pages/index.rs        622 bytes
-  blog/src/pages/about.rs        675 bytes
-  blog/src/pages/users/[id].rs  1143 bytes
+  blog/mise.toml                 211 bytes
+  blog/src/main.rs               564 bytes
+  blog/src/app.rs               6243 bytes
+  blog/src/pages/mod.rs         9365 bytes
+  blog/src/pages/index.rs        802 bytes
+  blog/src/pages/about.rs       1040 bytes
+  blog/src/pages/users/[id].rs  1421 bytes
   blog/src/plugins/mod.rs        263 bytes
-  blog/src/plugins/logging.rs   2364 bytes
+  blog/src/plugins/logging.rs   2388 bytes
   blog/config/development.toml   560 bytes
   blog/brocanth.toml              24 bytes
-  blog/.cargo/config.toml        110 bytes
-  blog/src/bin/manage.rs         556 bytes
-  blog/src/commands/mod.rs          551 bytes
-  blog/AGENTS.md                2696 bytes
+  blog/src/commands/mod.rs       392 bytes
+  blog/src/commands/serve.rs     592 bytes
+  blog/AGENTS.md                2595 bytes
 
     core      a router handing a request and a context to a handler
     logging   a line per request; the core assumes no log layer
     config    config/<env>.toml, merged; without it nothing links a TOML parser
-    commands     a `manage` binary; a struct with #[cmd] becomes a subcommand
+    commands  this project's own command line, `serve` plus whatever you add
     sessions  not asked for: absent from the source, the binary and the lock file
     model     not asked for: absent from the source, the binary and the lock file
+    rsx       not asked for: absent from the source, the binary and the lock file
 ```
 
-Those last two lines are the point of the whole design, not a progress
+Those last three lines are the point of the whole design, not a progress
 message. A capability nobody asked for is not compiled, not linked, and has no
 entry in `Cargo.lock`. `cargo tree` on a fresh project will not show an ORM or
 a SQL driver.
@@ -95,7 +96,7 @@ needs a test, and a map of the crates.
 ### Choosing what goes in
 
 ```
-brocanth create blog --with logging,config,commands,sessions,model
+brocanth create blog --with logging,config,commands,sessions,model,rsx
 brocanth create blog --core-only
 ```
 
@@ -109,6 +110,7 @@ and nothing else.
 | `sessions` | Cookie sessions, and a `Session` on the context. |
 | `model` | The model layer: SeaORM, validations and migrations. **Postgres by default** — see the warning at the end. |
 | `commands` | A `manage` binary whose subcommands are your own structs. |
+| `rsx` | HTML from `.rsx` templates, compiled into the binary. See below. |
 
 ## Run it
 
@@ -256,6 +258,124 @@ return is fixed-arity and this is the unbounded form:
 
 ```rust
 Ok(Response::empty(303).with_header("location", "/users/7"))
+```
+
+## HTML from templates: `--with rsx`
+
+Without it, a page builds the String it returns and the manifest says so:
+
+```
+#   rsx              no template engine; a page builds the String it returns
+```
+
+With it, markup moves into `src/views/*.rsx` and is compiled into the binary.
+
+**`src/views/layout.rsx`** — a layout is not a special kind of thing. It is a
+component with a parameter of type `Element`, which is what a caller's children
+fill:
+
+```
+pub fn Layout(title: &str, children: Element) -> Element {
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <title>{title}</title>
+        </head>
+        <body>
+            <header><a href="/">{title}</a></header>
+            <main>{children}</main>
+        </body>
+    </html>
+}
+```
+
+**`src/views/index.rsx`** — a page, calling it:
+
+```
+use crate::views::layout::Layout;
+
+pub fn Index(title: &str) -> Element {
+    <Layout title={title}>
+        <h1>{title}</h1>
+    </Layout>
+}
+```
+
+**`src/pages/index.rs`** — the handler. One line, and no `Ok(..)`:
+
+```rust
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html(views::index::Index { title: "Blog" })
+}
+```
+
+`html` is the only bridge, and it is a function rather than a trait impl for
+two reasons worth knowing:
+
+- **It returns the handler's own `Result`.** A template that bails propagates
+  with `?` instead of being swallowed into a blank 200. An `into_response` that
+  cannot fail would have had to swallow it.
+- **A blanket `impl<T: rsx::Template> IntoResponse for T` does not compile.**
+  `()`, `Option<T>` and `Vec<T>` are templates too, so it overlaps the impls in
+  the table above.
+
+For another status or a header, compose with those same shapes:
+
+```rust
+Ok((html(views::errors::NotFound {})?, 404))
+Ok(html(tpl)?.with_header("cache-control", "no-store"))
+```
+
+And not every response is a page. The generated POST is a redirect, with no
+template anywhere near it:
+
+```rust
+Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
+```
+
+### What the compiler catches here
+
+```
+src/views/mod.rs ->  rsx::load_dir!("src/views");
+```
+
+That macro reads the tree **while the crate is compiling**. So:
+
+| Mistake | When you find out |
+|---|---|
+| Template does not parse | build failure, on the `.rsx` line |
+| A field the component does not declare | build failure, naming the ones it takes |
+| Children given to a component with no `Element` parameter | build failure, with the signature to write |
+| A renamed component | build failure in the handler |
+
+Misspell a parameter and the build stops on the template, not on generated
+code:
+
+```
+error: component `Layout` has no parameter `titel`
+  --> blog/src/views/index.rsx:4:13
+   |
+ 4 |     <Layout titel={title}>
+   |             ^^^^^^^^^^^^^
+   = help: `Layout` accepts: title, children
+```
+
+That is a cross-file lookup: `Layout` is in `layout.rsx` and the call is in
+`index.rsx`. `load_dir!` compiles the tree as one unit, so it knows both.
+
+Nothing is read from disk when a request arrives, and there is no template
+directory to ship. The cost is that an edit needs a rebuild — each file is
+`include_bytes!`d by the expansion, which is what makes cargo notice.
+
+An interpolated value is escaped. Writing markup verbatim needs a different
+hole, so an injection is something you can grep for.
+
+**rsx comes from its own repository**, not from your brocanth checkout, so
+`--brocanth-path` does not apply to it and the generated manifest reads:
+
+```toml
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }
 ```
 
 ## Add a command
