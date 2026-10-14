@@ -808,6 +808,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-view"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

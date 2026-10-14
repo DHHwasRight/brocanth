@@ -1,0 +1,17 @@
+[package]
+name = "brocanth-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The `html!` macro: a page, inside the layouts its directory puts it in."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# No `syn`: the only input is an expression, which is passed through
+# untouched, and the only output is a nest of struct literals. Parsing the
+# expression would buy nothing and would reject valid Rust this macro never
+# needs to understand.
+proc-macro2 = "1"
+quote = "1"

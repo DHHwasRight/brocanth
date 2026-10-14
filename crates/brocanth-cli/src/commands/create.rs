@@ -802,42 +802,45 @@ compiles them all into the binary. One file is one module, under `views`, so
 and a page never names it: which layout wraps a page is a property of where
 the page is. That is the Crystal page_router's rule for `layout.cr`.
 
-They stack root to leaf. `src/pages/users/layout.rsx` wraps the pages under
-`users/` inside the root layout, and the stacking is one function in
-`src/pages/mod.rs`:
+They stack root to leaf, and **the chain is not written down anywhere**.
+`html!` is a macro: it knows which file it was written in, walks up to
+`src/`, and wraps the page in every `layout.rsx` it passes. So
+`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
+layout, and deleting that file removes exactly that layer with no other edit.
 
-```rust
-pub mod users {
-    pub fn html(content: impl rsx::Template) -> Result<Response, Error> {
-        super::html(views::users::layout::Layout { children: content })
-    }
-}
-```
+Every page uses the same import and the same call, whatever directory it is
+in. Do not add a chain of your own; if a page is wrapped wrongly, the
+directory tree is what to change.
 
-A page in that directory imports `crate::pages::users::html` instead of
-`crate::pages::html`, and that import is the only place the nesting shows.
-**A new `layout.rsx` does nothing until that function exists** — the chain is
-written, not read off the tree.
+A layout takes exactly one parameter, `children: Element`. `html!` fills that
+and nothing else, because it cannot know what a second parameter would mean.
+A value every page shares comes from a `const` -- the root layout reads
+`pages::TITLE` that way. A value belonging to one request belongs on the page
+component, which the handler builds and which already has the context.
 
 For a fragment that is not a document -- an htmx swap, a partial -- call
-`render` instead of `html`: same thing, no shell.
+`render` instead of `html!`: the same thing with no shell.
+
+**Adding a `layout.rsx` where there was none does not rebuild anything**,
+because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
+creating one. Editing or deleting an existing layout is noticed.
 
 A component is a function returning `Element`. Its parameters are its contract
 with the handler, and a caller fills them as struct fields, so a field the
 component does not declare is a compile error rather than a blank in the page.
 A parameter of type `Element` receives children, which is all a layout is.
 
-Reach a template from a handler with `html`, and with nothing else:
+Reach a template from a handler with `html!`, and with nothing else:
 
 ```rust
 pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html(views::index::Index { title: "Home" })
+    html!(views::index::Index { title: TITLE })
 }
 ```
 
-`html` returns the handler's own `Result`, so there is no `Ok(..)` to write and
-a template that bails propagates with `?`. For another status or a header,
-compose with the other return shapes: `Ok((html(tpl)?, 404))`.
+It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
+template that bails propagates with `?`. For another status or a header,
+compose with the other return shapes: `Ok((html!(tpl)?, 404))`.
 
 Adding a page with markup is two files in one directory -- `<name>.rs` and
 `<name>.rsx` -- plus the same two lines in `src/pages/mod.rs` as any other
@@ -908,6 +911,11 @@ fn cargo_toml(a: &Answers) -> String {
         if let Some(name) = pick.crate_name() {
             deps.push(source_of(a, name));
         }
+    }
+    if a.has(Pick::Rsx) {
+        // The `html!` macro, which reads the layouts out of the directory
+        // tree. A second crate because a proc macro has to be one.
+        deps.push(source_of(a, "brocanth-view"));
     }
     {
         // Every project serves, so every project gets a socket and a reactor.
@@ -1405,27 +1413,6 @@ pub mod users {
 }
 "##;
 
-const PAGES_USERS_MOD_RSX: &str = r##"
-pub mod users {
-    use super::{views, Error, Response};
-
-    // `[id].rs` is not a Rust identifier, so the module says where to look.
-    // The typed-route-table macro emits this; until it lands it is written
-    // once, here.
-    #[path = "[id].rs"]
-    pub mod id;
-
-    /// This directory's layout, wrapping every page in it.
-    ///
-    /// The stacking is the `super::html` call and nothing else: root first,
-    /// then this one, one line per level. A page in here calls this `html`
-    /// and gets both, which is why no page in the project names a layout.
-    pub fn html(content: impl rsx::Template) -> Result<Response, Error> {
-        super::html(views::users::layout::Layout { children: content })
-    }
-}
-"##;
-
 const PAGES_MOD_RS_BODY: &str = r##"
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
@@ -1710,45 +1697,40 @@ pub mod views {
 /// Renders a page inside the layouts that cover it.
 ///
 /// `layout.rsx` wraps every page in its directory and in every directory
-/// below, and a page never names it -- the Crystal page_router's rule, and
-/// the reason carries over: which layout wraps a page is a property of where
-/// the page is, not of what it says. So a handler body is one line, with no
-/// `Ok(..)` around it and no shell in sight:
+/// below it, and they stack from the root down. A page never names one,
+/// because which layout covers a page is a property of where the page is --
+/// the rule Crystal's page_router uses for `layout.cr`.
 ///
-/// ```ignore
-/// pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-///     html(views::index::Index { title: TITLE })
-/// }
-/// ```
+/// The macro reads that off the directory tree at compile time: it knows
+/// which file it was written in, walks up to `src/`, and wraps the page in
+/// every `layout.rsx` it passes. Add one to a directory and every page under
+/// it is wrapped, with nothing to register and no chain to keep in step.
 ///
-/// A directory with a `layout.rsx` of its own writes an `html` beside its
-/// pages that calls this one -- see `users` above. That is the one part the
-/// framework does not yet do for you: the chain is a line per layout rather
-/// than read off the directory tree.
+/// Re-exported here so a page imports it from the same place as everything
+/// else it uses, and so the layout rule lives beside the route table rather
+/// than in a crate name.
+pub use brocanth_view::html;
+
+/// A page with no layout at all: a fragment, a partial, an htmx swap.
+///
+/// What `html!` expands into, once it has wrapped the page, so this is also
+/// the escape hatch -- name a layout by hand and pass it here.
 ///
 /// It returns the handler's own `Result` rather than a value, so a template
 /// that bails propagates with `?` instead of turning into a blank 200. For
 /// another status or a header, compose with the forms above:
-/// `Ok((html(tpl)?, 404))`, or `Ok(html(tpl)?.with_header("x-kind", "page"))`.
+/// `Ok((html!(tpl)?, 404))`, or `Ok(html!(tpl)?.with_header("x-kind", "page"))`.
 ///
 /// Deliberately a function and not `impl<T: rsx::Template> IntoResponse for T`.
 /// `()`, `Option<T>` and `Vec<T>` are templates, so a blanket impl overlaps
 /// the ones above and does not compile -- and an `into_response` that cannot
 /// fail would have to swallow a render error. A blanket impl could not apply
 /// a layout either, since it would not know which page it was rendering.
-pub fn html(content: impl rsx::Template) -> Result<Response, Error> {
+pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // `render_to_string` builds into its own String, so a page that fails
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    render(views::layout::Layout {
-        title: TITLE,
-        children: content,
-    })
-}
-
-/// A page with no layout at all: a fragment, a partial, an htmx swap.
-pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     Ok(Response::ok(content.render_to_string()?))
 }
 "##;
@@ -1782,11 +1764,7 @@ mod tests {
 /// test module rather than after it, which clippy refuses.
 fn pages_mod_rs(a: &Answers) -> String {
     let mut out = String::from(PAGES_MOD_RS_HEAD);
-    out.push_str(if a.has(Pick::Rsx) {
-        PAGES_USERS_MOD_RSX
-    } else {
-        PAGES_USERS_MOD
-    });
+    out.push_str(PAGES_USERS_MOD);
     out.push_str(PAGES_MOD_RS_BODY);
     if a.has(Pick::Rsx) {
         // The root layout writes the name, so there is one place it is
@@ -1821,11 +1799,11 @@ use crate::pages::{html, views, Ctx, Error, IntoResponse, TITLE};
 /// the binary: nothing is read from disk when a request arrives, and a
 /// template that does not parse is a compile error on the `.rsx` line.
 ///
-/// Nothing here names a layout. `html` puts the page inside
-/// `src/pages/layout.rsx`, because that is the layout covering this
-/// directory.
+/// Nothing here names a layout. `html!` reads them off the directory tree:
+/// this file is in `src/pages`, so it is wrapped in `src/pages/layout.rsx`,
+/// and a page under `src/pages/users/` is wrapped in that one too.
 pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html(views::index::Index { title: TITLE })
+    html!(views::index::Index { title: TITLE })
 }
 "##,
         );
@@ -1867,7 +1845,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // against `src/pages/about.rsx` beside this file. A field the component
     // does not declare is a compile error, not a blank in the output.
     let verb = ctx.verb.to_string();
-    html(views::about::About {
+    html!(views::about::About {
         title: TITLE,
         verb: &verb,
         path: &ctx.path,
@@ -1918,11 +1896,7 @@ fn user_rs(a: &Answers) -> String {
 
 const USER_RSX_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are the parameter.
 
-// `users::html`, not `pages::html`: this directory has a `layout.rsx` of its
-// own, so a page here is wrapped in it and then in the root layout. The
-// import is the only place that shows, and no template names either one.
-use crate::pages::users::html;
-use crate::pages::{views, Ctx, Error, IntoResponse, Response};
+use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
 
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // `?` is why a handler returns `Result`. Anything that fails converts
@@ -1930,7 +1904,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // that bails inside `html`, by the same route.
     let id: u64 = ctx.require("id")?.parse()?;
 
-    html(views::users::_id_::User { id })
+    html!(views::users::_id_::User { id })
 }
 
 /// POST to the same path. One file, one route, one handler per verb.
@@ -1990,19 +1964,24 @@ const LAYOUT_RSX: &str = r#"// The document every page in this directory, and ev
 // property of where the page is, which is the rule the Crystal page_router
 // uses for layout.cr.
 //
-// A layout is an ordinary component with a parameter of type `Element`. That
-// is also how nesting works -- see users/layout.rsx.
+// A layout is an ordinary component with a parameter of type `Element`, and
+// `children` is the only parameter `html!` fills -- it cannot know what a
+// second one would mean. A value every page shares comes from a const, as
+// the title does here; a value belonging to one request belongs on the page
+// component, which the handler builds and which already has the context.
 
-pub fn Layout(title: &str, children: Element) -> Element {
+use crate::pages::TITLE;
+
+pub fn Layout(children: Element) -> Element {
     <!DOCTYPE html>
     <html lang="en">
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>{title}</title>
+            <title>{TITLE}</title>
         </head>
         <body>
-            <header><a href="/">{title}</a></header>
+            <header><a href="/">{TITLE}</a></header>
             <main>{children}</main>
         </body>
     </html>
@@ -2060,7 +2039,8 @@ pub fn About(title: &str, verb: &str, path: &str) -> Element {
 "#;
 
 const USER_RSX: &str = r#"// Two layouts wrap this one: the root, and users/layout.rsx beside it.
-// Neither is named here.
+// Neither is named here or anywhere else -- `html!` reads the directory
+// tree. Delete users/layout.rsx and this page is wrapped in one.
 
 pub fn User(id: u64) -> Element {
     <h1>User {id}</h1>
@@ -2792,34 +2772,48 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_wraps_a_page_that_does_not_name_it() {
+    fn nothing_the_scaffold_writes_names_a_layout() {
         // The Crystal page_router's rule: which layout wraps a page is a
-        // property of where the page is. So no page template may mention one.
+        // property of where the page is. `html!` reads that off the
+        // directory tree, so a chain written down anywhere would be a chain
+        // that can disagree with the tree.
+        let a = answers(&[Pick::Rsx]);
         for template in [INDEX_RSX, ABOUT_RSX, USER_RSX] {
             assert!(
                 !template.contains("<Layout"),
                 "a page names its own shell:\n{template}"
             );
         }
-        // The root layout is applied by `html` and by nothing else.
-        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
-        assert!(pages.contains("render(views::layout::Layout {"), "{pages}");
+        for page in [index_rs(&a), about_rs(&a), user_rs(&a)] {
+            assert!(
+                !page.contains("Layout"),
+                "a handler names a layout:\n{page}"
+            );
+        }
+        let pages = pages_mod_rs(&a);
+        assert!(
+            !pages.contains("layout::Layout"),
+            "the chain is written down somewhere: {pages}"
+        );
+
+        // Every page goes through the same import and the same call,
+        // whichever directory it is in and however deep the nesting there.
+        assert!(pages.contains("pub use brocanth_view::html;"), "{pages}");
+        for page in [index_rs(&a), about_rs(&a), user_rs(&a)] {
+            assert!(page.contains("use crate::pages::{html, "), "{page}");
+            assert!(page.contains("html!("), "{page}");
+        }
     }
 
     #[test]
-    fn layouts_stack_from_the_root_down() {
-        // A directory with a layout of its own wraps inside the one above
-        // rather than instead of it, and the stacking is the `super::html`
-        // call: one line per level, none of them in a page.
-        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
-        assert!(
-            pages.contains("super::html(views::users::layout::Layout { children: content })"),
-            "{pages}"
-        );
-        // A page under that directory reaches for the nearer one.
-        let user = user_rs(&answers(&[Pick::Rsx]));
-        assert!(user.contains("use crate::pages::users::html;"), "{user}");
-        assert!(!user.contains("use crate::pages::html;"), "{user}");
+    fn the_macro_that_reads_the_tree_arrives_only_with_the_views() {
+        let declared = |picks: &[Pick], name: &str| {
+            cargo_toml(&answers(picks))
+                .lines()
+                .any(|l| l.starts_with(&format!("{name} = ")))
+        };
+        assert!(declared(&[Pick::Rsx], "brocanth-view"));
+        assert!(!declared(&[Pick::Logging, Pick::Config], "brocanth-view"));
     }
 
     #[test]
@@ -2837,7 +2831,8 @@ mod tests {
     fn a_handler_reaches_a_template_through_one_function_and_no_other() {
         let a = answers(&[Pick::Rsx]);
         let pages = pages_mod_rs(&a);
-        assert!(pages.contains("pub fn html(content: impl rsx::Template)"));
+        assert!(pages.contains("pub use brocanth_view::html;"));
+        assert!(pages.contains("pub fn render(content: impl rsx::Template)"));
         // It returns the handler's own Result, which is what lets a template
         // that bails propagate instead of becoming a blank 200.
         assert!(pages.contains("-> Result<Response, Error>"), "{pages}");
@@ -2847,7 +2842,7 @@ mod tests {
         // described.
         let index = index_rs(&a);
         assert!(
-            index.contains("    html(views::index::Index { title: TITLE })"),
+            index.contains("    html!(views::index::Index { title: TITLE })"),
             "{index}"
         );
         // One place spells the application's name, and the layout reads it.
@@ -2867,7 +2862,9 @@ mod tests {
         // `items_after_test_module` is a clippy error, and the three-part
         // assembly of this file exists for no other reason.
         let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
-        let html = pages.find("pub fn html(").expect("the bridge is written");
+        let html = pages
+            .find("pub use brocanth_view::html;")
+            .expect("the bridge is written");
         let tests = pages.find("#[cfg(test)]").expect("the file has tests");
         assert!(html < tests, "the bridge is after the test module");
     }

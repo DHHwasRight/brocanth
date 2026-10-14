@@ -110,7 +110,7 @@ and nothing else.
 | `sessions` | Cookie sessions, and a `Session` on the context. |
 | `model` | The model layer: SeaORM, validations and migrations. **Postgres by default** — see the warning at the end. |
 | `commands` | A `manage` binary whose subcommands are your own structs. |
-| `rsx` | HTML from `.rsx` templates, compiled into the binary. See below. |
+| `rsx` | HTML from `.rsx` templates beside the pages, with layouts. See below. |
 
 ## Run it
 
@@ -318,29 +318,39 @@ pub fn Index(title: &str) -> Element {
 }
 ```
 
-**They stack, root to leaf.** `src/pages/users/layout.rsx` wraps the pages
-under `users/` *inside* the root layout, not instead of it, so `/users/7`
-comes back as root → users → page. The stacking is one function in
-`src/pages/mod.rs`:
+**They stack, root to leaf, and nothing declares the chain.**
+`src/pages/users/layout.rsx` wraps the pages under `users/` *inside* the root
+layout, not instead of it. `/users/7` comes back as root → users → page:
 
-```rust
-pub mod users {
-    /// This directory's layout, wrapping every page in it.
-    pub fn html(content: impl rsx::Template) -> Result<Response, Error> {
-        super::html(views::users::layout::Layout { children: content })
-    }
-}
+```html
+<main>
+  <section class="users">
+    <nav><a href="/">home</a></nav>
+    <h1>User 7</h1>
 ```
 
-and `src/pages/users/[id].rs` imports that `html` instead of the one above.
-That import is the only place the nesting is visible — no template mentions a
-layout, and no page mentions another page's.
+`/about` is not under `users/`, so it gets the root layout alone.
 
-> **The limit, stated where you would look for it.** Crystal's page_router
-> reads the chain off the directory tree. Here it is a line per layout, written
-> once. A new `layout.rsx` in a directory does nothing until that line exists.
-> Closing that gap is a framework feature (`PLAN.md`, "layouts nest by
-> directory"), not something the scaffold should fake.
+**There is no chain written down anywhere.** `html!` is a macro that reads
+the directory tree while the crate compiles: it knows which file it was
+written in, walks up to `src/`, and wraps the page in every `layout.rsx` it
+passes. So the proof is deleting one. Remove `src/pages/users/layout.rsx`,
+change nothing else, rebuild:
+
+```html
+<main>
+  <h1>User 7</h1>
+```
+
+One layer gone, no source edited. Three levels work the same way — a page in
+`src/pages/blog/archive/` with a `layout.rsx` in `blog/` and in `archive/`
+renders root → blog → archive → page, and the handler is still one line.
+
+> **The one thing cargo cannot see.** Adding a `layout.rsx` where there was
+> none does not rebuild anything, because nothing referenced the file yet.
+> `touch src/pages/mod.rs` and it is picked up. Editing or deleting an
+> existing one is noticed: each layout the macro uses is `include_bytes!`d by
+> the expansion.
 
 **`src/pages/index.rs`** — the handler. One line, and no `Ok(..)`:
 
@@ -350,15 +360,16 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 }
 ```
 
-`html` puts the page inside the layouts that cover it. For a fragment that is
-not a document at all — an htmx swap, a partial — `render` is the same thing
-with no shell:
+`html!` puts the page inside the layouts that cover it, and expands to
+`render`. For a fragment that is not a document at all — an htmx swap, a
+partial — call `render` directly and get no shell:
 
 ```rust
 render(views::users::row::Row { user })
 ```
 
-`html` is a function rather than a trait impl for three reasons worth knowing:
+`render` is a function rather than a trait impl for three reasons worth
+knowing:
 
 - **It returns the handler's own `Result`.** A template that bails propagates
   with `?` instead of being swallowed into a blank 200. An `into_response` that
@@ -368,6 +379,12 @@ render(views::users::row::Row { user })
   the table above.
 - **It is where the layout goes.** A blanket impl would not know which page it
   was rendering, so it could not choose one.
+
+A layout component takes exactly one parameter, `children: Element`, because
+`html!` cannot know what a second one would mean. A value every page shares
+comes from a `const` — the generated root layout reads `pages::TITLE` that way
+— and a value belonging to one request belongs on the page component, which
+the handler builds and which already has the context.
 
 For another status or a header, compose with those same shapes:
 
