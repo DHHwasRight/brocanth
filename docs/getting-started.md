@@ -268,11 +268,29 @@ Without it, a page builds the String it returns and the manifest says so:
 #   rsx              no template engine; a page builds the String it returns
 ```
 
-With it, markup moves into `src/views/*.rsx` and is compiled into the binary.
+With it, the markup for a route moves into a `.rsx` file **next to the page
+that renders it**, and is compiled into the binary:
 
-**`src/views/layout.rsx`** — a layout is not a special kind of thing. It is a
-component with a parameter of type `Element`, which is what a caller's children
-fill:
+```
+src/pages/layout.rsx          wraps this directory and everything below
+src/pages/index.rs            the handler
+src/pages/index.rsx           the markup
+src/pages/about.rs
+src/pages/about.rsx
+src/pages/users/layout.rsx    wraps this directory, inside the root layout
+src/pages/users/[id].rs
+src/pages/users/[id].rsx
+```
+
+That is the Crystal `page_router` layout, and both halves of it carry over: a
+route is a file, so the markup is the file beside it; and `layout.rsx` covers
+its directory and every directory below, so **a page never names its shell**.
+
+### Layouts
+
+**`src/pages/layout.rsx`** — a layout is not a special kind of thing. It is a
+component with a parameter of type `Element`, which is what the page below it
+fills:
 
 ```
 pub fn Layout(title: &str, children: Element) -> Element {
@@ -290,17 +308,39 @@ pub fn Layout(title: &str, children: Element) -> Element {
 }
 ```
 
-**`src/views/index.rsx`** — a page, calling it:
+**`src/pages/index.rsx`** — the page, and only the page. It does not know the
+document above exists:
 
 ```
-use crate::views::layout::Layout;
-
 pub fn Index(title: &str) -> Element {
-    <Layout title={title}>
-        <h1>{title}</h1>
-    </Layout>
+    <h1>{title}</h1>
+    <p>…</p>
 }
 ```
+
+**They stack, root to leaf.** `src/pages/users/layout.rsx` wraps the pages
+under `users/` *inside* the root layout, not instead of it, so `/users/7`
+comes back as root → users → page. The stacking is one function in
+`src/pages/mod.rs`:
+
+```rust
+pub mod users {
+    /// This directory's layout, wrapping every page in it.
+    pub fn html(content: impl rsx::Template) -> Result<Response, Error> {
+        super::html(views::users::layout::Layout { children: content })
+    }
+}
+```
+
+and `src/pages/users/[id].rs` imports that `html` instead of the one above.
+That import is the only place the nesting is visible — no template mentions a
+layout, and no page mentions another page's.
+
+> **The limit, stated where you would look for it.** Crystal's page_router
+> reads the chain off the directory tree. Here it is a line per layout, written
+> once. A new `layout.rsx` in a directory does nothing until that line exists.
+> Closing that gap is a framework feature (`PLAN.md`, "layouts nest by
+> directory"), not something the scaffold should fake.
 
 **`src/pages/index.rs`** — the handler. One line, and no `Ok(..)`:
 
@@ -310,8 +350,15 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 }
 ```
 
-`html` is the only bridge, and it is a function rather than a trait impl for
-two reasons worth knowing:
+`html` puts the page inside the layouts that cover it. For a fragment that is
+not a document at all — an htmx swap, a partial — `render` is the same thing
+with no shell:
+
+```rust
+render(views::users::row::Row { user })
+```
+
+`html` is a function rather than a trait impl for three reasons worth knowing:
 
 - **It returns the handler's own `Result`.** A template that bails propagates
   with `?` instead of being swallowed into a blank 200. An `into_response` that
@@ -319,6 +366,8 @@ two reasons worth knowing:
 - **A blanket `impl<T: rsx::Template> IntoResponse for T` does not compile.**
   `()`, `Option<T>` and `Vec<T>` are templates too, so it overlaps the impls in
   the table above.
+- **It is where the layout goes.** A blanket impl would not know which page it
+  was rendering, so it could not choose one.
 
 For another status or a header, compose with those same shapes:
 
@@ -336,9 +385,17 @@ Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
 
 ### What the compiler catches here
 
+`src/pages/mod.rs` gains one block:
+
+```rust
+pub mod views {
+    rsx::load_dir!("src/pages");
+}
 ```
-src/views/mod.rs ->  rsx::load_dir!("src/views");
-```
+
+A module of its own, because the generated `pub mod index` would otherwise
+collide with the `pub mod index;` naming the page. A file whose name is not an
+identifier gets the nearest one, so `users/[id].rsx` is `views::users::_id_`.
 
 That macro reads the tree **while the crate is compiling**. So:
 
@@ -354,7 +411,7 @@ code:
 
 ```
 error: component `Layout` has no parameter `titel`
-  --> blog/src/views/index.rsx:4:13
+  --> blog/src/pages/index.rsx:4:13
    |
  4 |     <Layout titel={title}>
    |             ^^^^^^^^^^^^^
@@ -363,6 +420,10 @@ error: component `Layout` has no parameter `titel`
 
 That is a cross-file lookup: `Layout` is in `layout.rsx` and the call is in
 `index.rsx`. `load_dir!` compiles the tree as one unit, so it knows both.
+
+Adding a page with markup is therefore three files in one directory and the
+same two lines in `src/pages/mod.rs` as before — the template needs no
+registration, because the directory is the registry.
 
 Nothing is read from disk when a request arrives, and there is no template
 directory to ship. The cost is that an edit needs a rebuild — each file is

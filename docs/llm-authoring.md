@@ -158,14 +158,23 @@ the file rather than the URL, so the table and the filesystem cannot drift.
 subcommand of the project's own binary, registered at link time. There is
 no list to add it to.
 
-**A view is a `.rsx` file, when the project asked for one.** `--with rsx`
-writes `src/views/*.rsx` and `rsx::load_dir!` compiles the tree into the
-binary. A component is a function returning `Element`; its parameters are
-struct fields at the call site, so a wrong one is a build failure naming the
-right ones. One function reaches them from a handler:
-`html(views::index::Index { title })`, which returns the handler's own
-`Result`. Without `--with rsx` there is no `html`, no `views` module and no
-template engine in the tree — check `Cargo.toml` before writing markup.
+**A view is a `.rsx` file beside the page it renders**, when the project asked
+for one. `--with rsx` writes `src/pages/index.rsx` next to `src/pages/index.rs`
+and `rsx::load_dir!("src/pages")` compiles the tree into the binary, so a
+template needs no registration: the directory is the registry. A component is a
+function returning `Element`; its parameters are struct fields at the call
+site, so a wrong one is a build failure naming the right ones. One function
+reaches them from a handler: `html(views::index::Index { title })`, which
+returns the handler's own `Result`.
+
+**A page never names its layout.** `layout.rsx` wraps every page in its
+directory and below, as `layout.cr` does in Crystal's page_router, and `html`
+applies it. Layouts stack root to leaf through one function per directory in
+`src/pages/mod.rs`; a new `layout.rsx` does nothing until that function exists.
+`render` is `html` with no layout, for a fragment.
+
+Without `--with rsx` there is no `html`, no `views` module and no template
+engine in the tree — check `Cargo.toml` before writing markup.
 
 ### The crates, and what each is for
 
