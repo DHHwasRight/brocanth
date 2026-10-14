@@ -5,13 +5,8 @@
 //! here prints; `main` renders what comes back, through the one [`crate::ui`]
 //! layer.
 
-pub mod build;
-pub mod check;
 pub mod create;
 pub mod delegate;
-pub mod dev;
-pub mod generate;
-pub mod routes;
 
 /// What every command returns.
 pub type Outcome = Result<std::process::ExitCode, Vec<crate::ui::Diagnostic>>;

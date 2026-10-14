@@ -30,12 +30,9 @@
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::io::{IsTerminal, Write};
-use std::rc::Rc;
-use std::time::Duration;
 
 use anstream::{AutoStream, ColorChoice};
 use anstyle::{AnsiColor, Color, Style};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use unicode_width::UnicodeWidthStr;
 
 /// The one accent, as the nearest ANSI slot rather than a truecolour triple --
@@ -147,36 +144,10 @@ impl Face {
 
 type Sink = AutoStream<Box<dyn Write>>;
 
-/// An in-memory transcript, for tests.
-///
-/// Test-only, and the reason the look is covered rather than hoped for: a
-/// `Ui` built on one of these produces the exact bytes a pipe would receive.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Default)]
-pub struct Transcript(Rc<RefCell<Vec<u8>>>);
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl Transcript {
-    pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.borrow()).into_owned()
-    }
-}
-
-impl Write for Transcript {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Everything the tool says, and the only thing that says it.
 pub struct Ui {
     face: Face,
     quiet: bool,
-    out: RefCell<Sink>,
     err: RefCell<Sink>,
 }
 
@@ -187,40 +158,11 @@ impl Ui {
         Self {
             face,
             quiet,
-            out: RefCell::new(AutoStream::new(
-                Box::new(std::io::stdout()) as Box<dyn Write>,
-                choice,
-            )),
             err: RefCell::new(AutoStream::new(
                 Box::new(std::io::stderr()) as Box<dyn Write>,
                 choice,
             )),
         }
-    }
-
-    /// A `Ui` writing into memory. Both streams share one buffer, so a test
-    /// reads the transcript in the order a human would have seen it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn capture(face: Face, quiet: bool) -> (Self, Transcript) {
-        let transcript = Transcript::default();
-        let choice = face.choice();
-        let sink = || {
-            RefCell::new(AutoStream::new(
-                Box::new(transcript.clone()) as Box<dyn Write>,
-                choice,
-            ))
-        };
-        let ui = Self {
-            face,
-            quiet,
-            out: sink(),
-            err: sink(),
-        };
-        (ui, transcript)
-    }
-
-    pub fn face(&self) -> Face {
-        self.face
     }
 
     /// Whether a prompt may be shown. False means every answer has to arrive
@@ -230,13 +172,6 @@ impl Ui {
     }
 
     // -- the raw writes -----------------------------------------------------
-
-    /// A line of the command's actual output. Stdout, always printed.
-    pub fn say(&self, text: impl Display) {
-        let mut out = self.out.borrow_mut();
-        let _ = writeln!(out, "{text}");
-        let _ = out.flush();
-    }
 
     /// A line of commentary: what is happening, not what was asked for.
     /// Stderr, so it never lands in a redirect, and silent under `--quiet`.
@@ -277,36 +212,12 @@ impl Ui {
         self.gap();
     }
 
-    /// Aligned columns, to stdout. See [`Table`].
-    pub fn table(&self, table: &Table) {
-        for line in table.render() {
-            self.say(line);
-        }
-    }
-
     /// Aligned columns, to stderr -- for a summary block, which is commentary
     /// on the work rather than the work's output.
     pub fn table_note(&self, table: &Table) {
         for line in table.render() {
             self.note(line);
         }
-    }
-
-    /// Output produced by a subprocess, forwarded unchanged.
-    ///
-    /// Cargo's own diagnostics come through here. They carry ANSI only when
-    /// the face is a terminal, because the face is what set `CARGO_TERM_COLOR`
-    /// on the child -- and the stream would strip them anyway if it were not.
-    pub fn verbatim(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let mut err = self.err.borrow_mut();
-        let _ = err.write_all(text.as_bytes());
-        if !text.ends_with('\n') {
-            let _ = writeln!(err);
-        }
-        let _ = err.flush();
     }
 
     /// A diagnostic in rustc's shape. Stderr, and never suppressed: `--quiet`
@@ -318,76 +229,6 @@ impl Ui {
         let _ = write!(err, "{}", d.render());
         let _ = writeln!(err);
         let _ = err.flush();
-    }
-
-    /// A run of phases, reported as they finish.
-    ///
-    /// `labels` is every label the caller will use, so the column can be
-    /// measured before the first one is printed. On a terminal the current
-    /// phase is a spinner that overwrites itself; everywhere else the same
-    /// lines appear with no animation and no cursor movement.
-    pub fn steps(&self, labels: &[&str]) -> Steps<'_> {
-        let width = labels.iter().copied().map(width_of).max().unwrap_or(0);
-        let bar = (self.face.can_paint() && !self.quiet).then(|| {
-            let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-            bar.set_style(
-                ProgressStyle::with_template("  {spinner:.cyan} {wide_msg}")
-                    .expect("static template")
-                    .tick_chars("\u{280b}\u{2819}\u{2839}\u{2838}\u{283c}\u{2834}\u{2826}\u{2827}\u{2807}\u{280f} "),
-            );
-            bar.enable_steady_tick(Duration::from_millis(80));
-            bar
-        });
-        Steps {
-            ui: self,
-            bar,
-            width,
-        }
-    }
-}
-
-/// A run of phases. Created by [`Ui::steps`].
-pub struct Steps<'a> {
-    ui: &'a Ui,
-    bar: Option<ProgressBar>,
-    width: usize,
-}
-
-impl Steps<'_> {
-    /// Names the phase now running. Visible only on a terminal; elsewhere the
-    /// record printed by [`Steps::done`] is the whole report, because a log
-    /// does not want both "starting" and "finished".
-    pub fn begin(&self, label: &str) {
-        if let Some(bar) = &self.bar {
-            bar.set_message(label.to_string());
-        }
-    }
-
-    /// Records a finished phase. One permanent line, columns aligned.
-    pub fn done(&self, label: &str, detail: impl Display) {
-        let pad = " ".repeat(self.width.saturating_sub(width_of(label)));
-        let line = format!(
-            "  {} {}{pad}  {}",
-            paint(OK, "\u{2714}"),
-            paint(PLAIN, label),
-            paint(DIM, detail)
-        );
-        self.print(line);
-    }
-
-    /// Prints above the spinner rather than through it.
-    fn print(&self, line: String) {
-        match &self.bar {
-            Some(bar) => bar.suspend(|| self.ui.note(line)),
-            None => self.ui.note(line),
-        }
-    }
-
-    /// Clears the spinner. Nothing after this writes to the phase area.
-    pub fn end(self) {
-        if let Some(bar) = &self.bar {
-            bar.finish_and_clear();
-        }
     }
 }
 
@@ -430,13 +271,6 @@ impl Cell {
             parts: vec![(text.into(), style)],
             align: Align::Left,
         }
-    }
-
-    /// Appends a run in another style -- a plain `/users/` before an accented
-    /// `{id}`, say, which has to be one cell so that one width is measured.
-    pub fn then(mut self, text: impl Into<String>, style: Style) -> Self {
-        self.parts.push((text.into(), style));
-        self
     }
 
     pub fn right(mut self) -> Self {
@@ -607,11 +441,6 @@ impl Diagnostic {
         self
     }
 
-    pub fn snippet(mut self, snippet: Snippet) -> Self {
-        self.snippet = Some(snippet);
-        self
-    }
-
     pub fn note(mut self, text: impl Into<String>) -> Self {
         self.notes.push(("note", text.into()));
         self
@@ -684,28 +513,6 @@ impl Diagnostic {
 
 // -- formatting -------------------------------------------------------------
 
-/// `0.52s`, `1m 03s`. Milliseconds below a second, because a check that needs
-/// no compiler should be able to say so in two digits.
-pub fn elapsed(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{}ms", d.as_millis())
-    } else if secs < 60.0 {
-        format!("{secs:.2}s")
-    } else {
-        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
-    }
-}
-
-/// `1 route`, `2 routes`. Counting is said once, here.
-pub fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
-
 /// `my-blog` -> `My Blog`.
 ///
 /// Here rather than beside either caller because both need it and they must
@@ -730,45 +537,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plain_face_emits_no_escape_sequences() {
-        let (ui, transcript) = Ui::capture(Face::Plain, false);
-        ui.done(format!("built {}", paint(ACCENT, "target/debug/blog")));
-        ui.warn("one route answers no verb");
-        assert_eq!(
-            transcript.text(),
-            "\u{2714} built target/debug/blog\n! one route answers no verb\n",
-            "the plain face must be the same text with the colour removed"
-        );
-    }
-
-    #[test]
-    fn a_terminal_face_emits_the_same_text_with_escape_sequences() {
-        let (ui, transcript) = Ui::capture(Face::Terminal, false);
-        ui.done("built target/debug/blog");
-        let text = transcript.text();
-        assert!(text.contains("\u{1b}["), "expected ANSI, got {text:?}");
-        // Strip and compare: one renderer, two transcripts.
-        let stripped = anstream::adapter::strip_str(&text).to_string();
-        assert_eq!(stripped, "\u{2714} built target/debug/blog\n");
-    }
-
-    #[test]
-    fn quiet_keeps_the_output_and_drops_the_commentary() {
-        let (ui, transcript) = Ui::capture(Face::Plain, true);
-        ui.note("scanning src/pages");
-        ui.done("7 routes");
-        ui.say("GET  /users/{id}");
-        ui.diagnostic(&Diagnostic::error("middleware/unknown", "nope"));
-        assert_eq!(
-            transcript.text(),
-            // The blank line after a diagnostic is rustc's, and it is part of
-            // the diagnostic rather than commentary, so --quiet keeps it.
-            "GET  /users/{id}\nerror[middleware/unknown]: nope\n\n",
-            "--quiet is 'only what was asked for and anything wrong'"
-        );
-    }
-
-    #[test]
     fn columns_are_measured_by_display_width_not_char_count() {
         // Two CJK characters are two chars and four columns. `{:<4}` would pad
         // them by two more and push the next column right.
@@ -776,25 +544,6 @@ mod tests {
         table.row(vec![Cell::new("\u{65e5}\u{672c}"), Cell::new("x")]);
         table.row(vec![Cell::new("abcd"), Cell::new("y")]);
         assert_eq!(table.render(), ["\u{65e5}\u{672c}  x", "abcd  y"]);
-    }
-
-    #[test]
-    fn a_styled_run_does_not_widen_its_column() {
-        let mut table = Table::new().indent(0);
-        table.row(vec![
-            Cell::styled("/users/", PLAIN).then("{id}", ACCENT),
-            Cell::new("x"),
-        ]);
-        table.row(vec![Cell::new("/a-much-longer-route"), Cell::new("y")]);
-        let lines: Vec<String> = table
-            .render()
-            .iter()
-            .map(|l| anstream::adapter::strip_str(l).to_string())
-            .collect();
-        assert_eq!(
-            lines,
-            ["/users/{id}           x", "/a-much-longer-route  y"]
-        );
     }
 
     #[test]
@@ -826,57 +575,6 @@ mod tests {
                 "  = note: src/pages/about.rs\n",
             )
         );
-    }
-
-    #[test]
-    fn a_diagnostic_with_a_span_is_rustc_shaped() {
-        let d = Diagnostic::error("middleware/unknown", "no plugin offers `sesion`")
-            .at("src/main.rs:24:9")
-            .snippet(Snippet {
-                line: 24,
-                column: 9,
-                text: "        s.router().mount(\"/admin/{*rest}\", \"sesion\");".into(),
-                span: 7,
-            })
-            .help("did you mean `session`?");
-        assert_eq!(
-            anstream::adapter::strip_str(&d.render()).to_string(),
-            concat!(
-                "error[middleware/unknown]: no plugin offers `sesion`\n",
-                "  --> src/main.rs:24:9\n",
-                "   |\n",
-                "24 |         s.router().mount(\"/admin/{*rest}\", \"sesion\");\n",
-                "   |         ^^^^^^^\n",
-                "   = help: did you mean `session`?\n",
-            )
-        );
-    }
-
-    #[test]
-    fn the_caret_lands_under_a_wide_character() {
-        let d = Diagnostic::warning("x", "y").snippet(Snippet {
-            line: 10,
-            column: 3,
-            text: "\u{65e5}\u{672c}\u{8a9e}".into(),
-            span: 2,
-        });
-        let text = anstream::adapter::strip_str(&d.render()).to_string();
-        // Two wide characters precede column 3, so four spaces, not two.
-        assert!(text.contains("   |     ^^\n"), "{text:?}");
-    }
-
-    #[test]
-    fn elapsed_switches_units_rather_than_printing_zero() {
-        assert_eq!(elapsed(Duration::from_millis(160)), "160ms");
-        assert_eq!(elapsed(Duration::from_millis(1840)), "1.84s");
-        assert_eq!(elapsed(Duration::from_secs(63)), "1m 03s");
-    }
-
-    #[test]
-    fn counting_says_one_route_not_one_routes() {
-        assert_eq!(plural(0, "route"), "0 routes");
-        assert_eq!(plural(1, "route"), "1 route");
-        assert_eq!(plural(2, "plugin"), "2 plugins");
     }
 
     #[test]

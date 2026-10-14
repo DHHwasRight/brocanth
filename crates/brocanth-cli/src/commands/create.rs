@@ -97,7 +97,7 @@ pub enum Pick {
     /// The model layer: SeaORM, validations and migrations
     Model,
     /// Project commands: a `manage` binary whose subcommands are your own structs
-    Tasks,
+    Commands,
 }
 
 impl Pick {
@@ -106,11 +106,11 @@ impl Pick {
         Pick::Config,
         Pick::Sessions,
         Pick::Model,
-        Pick::Tasks,
+        Pick::Commands,
     ];
     /// What a non-interactive run gets when no flag chose. Stated rather than
     /// guessed at: the command prints the flag that overrides it.
-    const DEFAULT: [Pick; 3] = [Pick::Logging, Pick::Config, Pick::Tasks];
+    const DEFAULT: [Pick; 3] = [Pick::Logging, Pick::Config, Pick::Commands];
 
     fn key(self) -> &'static str {
         match self {
@@ -118,7 +118,7 @@ impl Pick {
             Pick::Config => "config",
             Pick::Sessions => "sessions",
             Pick::Model => "model",
-            Pick::Tasks => "commands",
+            Pick::Commands => "commands",
         }
     }
 
@@ -130,7 +130,7 @@ impl Pick {
             Pick::Config => "config/<env>.toml, merged; without it nothing links a TOML parser",
             Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
             Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
-            Pick::Tasks => "a `manage` binary; a struct with #[cmd] becomes a subcommand",
+            Pick::Commands => "this project's own command line, `serve` plus whatever you add",
         }
     }
 
@@ -139,7 +139,7 @@ impl Pick {
         match self {
             Pick::Config => Some("brocanth-config"),
             Pick::Model => Some("brocanth-model"),
-            Pick::Tasks => Some("brocanth-command"),
+            Pick::Commands => Some("brocanth-command"),
             Pick::Logging | Pick::Sessions => None,
         }
     }
@@ -182,7 +182,7 @@ impl Answers {
             // Config is not a plugin instance, and Tasks is a second binary
             // rather than anything the application registers: neither belongs
             // in the list `main` mounts.
-            .filter(|p| *p != Pick::Config && *p != Pick::Tasks)
+            .filter(|p| *p != Pick::Config && *p != Pick::Commands)
             .collect()
     }
 
@@ -281,18 +281,21 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
         Cell::styled(format!("cd {}", answers.name), STRONG),
         Cell::new(""),
     ]);
-    next.row(vec![
-        Cell::styled("brocanth routes", STRONG),
-        Cell::styled("the table, and which middleware covers each row", DIM),
-    ]);
-    next.row(vec![
-        Cell::styled("brocanth check", STRONG),
-        Cell::styled("the mounts, the offers, then cargo", DIM),
-    ]);
-    next.row(vec![
-        Cell::styled("brocanth build", STRONG),
-        Cell::styled("compile, and report the budget it spent", DIM),
-    ]);
+    if answers.has(Pick::Commands) {
+        next.row(vec![
+            Cell::styled("brocanth serve", STRONG),
+            Cell::styled("start the server on 127.0.0.1:3000", DIM),
+        ]);
+        next.row(vec![
+            Cell::styled("brocanth commands", STRONG),
+            Cell::styled("every command this project defines", DIM),
+        ]);
+    } else {
+        next.row(vec![
+            Cell::styled("cargo run", STRONG),
+            Cell::styled("start the server on 127.0.0.1:3000", DIM),
+        ]);
+    }
     ui.table_note(&next);
     Ok(ExitCode::SUCCESS)
 }
@@ -444,12 +447,16 @@ fn virtual_manifest(dir: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
             "brocanth-path",
             format!("{} has no Cargo.toml", dir.display()),
         )
-        .help("pass the core crate's own directory, such as <checkout>/crates/brocanth")]);
+        .help(
+            "pass the core crate's own directory, such as <checkout>/crates/brocanth",
+        )]);
     };
 
     // A manifest with a `[workspace]` and no `[package]` describes a workspace
     // and not a crate, so nothing can depend on it by path.
-    let has_package = text.lines().any(|l| l.trim_start().starts_with("[package]"));
+    let has_package = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("[package]"));
     if has_package {
         return Ok(());
     }
@@ -463,7 +470,8 @@ fn virtual_manifest(dir: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
     if core.join("Cargo.toml").is_file() {
         error = error.help(format!("--brocanth-path {}", core.display()));
     } else {
-        error = error.help("pass the core crate's own directory, such as <checkout>/crates/brocanth");
+        error =
+            error.help("pass the core crate's own directory, such as <checkout>/crates/brocanth");
     }
     Err(vec![error])
 }
@@ -524,10 +532,21 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         // tools, not because one is a fallback.
         (
             "mise.toml".to_string(),
-            "[tools]\n# Must match the toolchain brocanth's proc-macro artifacts\n             # were built with: they are not compatible across patch releases.\n             rust = \"1.98\"\n\n             [commands.run]\nrun = \"cargo run\"\n\n             [commands.test]\nrun = \"cargo test\"\n"
-                .to_string(),
+            // Raw, because the `\n\` form this file used here kept the source's
+            // own indentation and wrote it into the TOML.
+            MISE_TOML.to_string(),
         ),
-        ("src/main.rs".to_string(), main_rs(a)),
+        (
+            "src/main.rs".to_string(),
+            if a.has(Pick::Commands) {
+                main_with_commands_rs(a)
+            } else {
+                main_serve_only_rs(a)
+            },
+        ),
+        // Always: it is the one answer to what this application is, and both
+        // shapes of `main` read it.
+        ("src/app.rs".to_string(), app_rs(a)),
         ("src/pages/mod.rs".to_string(), PAGES_MOD_RS.to_string()),
         ("src/pages/index.rs".to_string(), index_rs(a)),
         ("src/pages/about.rs".to_string(), about_rs(a)),
@@ -551,21 +570,22 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
             config_toml(a),
         ));
     }
-    if a.has(Pick::Tasks) {
+    if a.has(Pick::Commands) {
         // The marker the global `brocanth` binary walks up to find. Its
-        // presence is what makes a directory a project; nothing reads it yet.
+        // presence is what makes a directory a project.
         files.push((
             "brocanth.toml".to_string(),
             format!("[project]\nname = {:?}\n", a.name),
         ));
-        // `cargo manage seed_demo` from anywhere in the project. `--` stops
-        // cargo reading the command's own flags as its own.
+        // No cargo alias. A project's command line is a framework concern and
+        // cargo is the build tool; hooking one into the other conflates them.
+        // The ways in are `brocanth <command>` from anywhere inside the
+        // project, and the built binary itself.
         files.push((
-            ".cargo/config.toml".to_string(),
-            "[alias]\n# `cargo manage <command>` runs a command without naming the binary.\nmanage = \"run --quiet --bin manage --\"\n".to_string(),
+            "src/commands/mod.rs".to_string(),
+            COMMANDS_MOD_RS.to_string(),
         ));
-        files.push(("src/bin/manage.rs".to_string(), MANAGE_RS.to_string()));
-        files.push(("src/commands/mod.rs".to_string(), COMMANDS_MOD_RS.to_string()));
+        files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
     }
     files.push(("AGENTS.md".to_string(), agents_md(a)));
     files
@@ -601,7 +621,7 @@ fn agents_md(a: &Answers) -> String {
         )
     };
 
-    let commands = if a.has(Pick::Tasks) {
+    let commands = if a.has(Pick::Commands) {
         "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
          `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
          registration happens at link time and there is no list to add it to.\n\n\
@@ -683,28 +703,6 @@ fn agents_md(a: &Answers) -> String {
     )
 }
 
-/// The command runner binary: separate from the application, the way `bin/rails`
-/// is separate from the server. The application's `main` stays about serving.
-// Raw, for the reason given on COMMANDS_MOD_RS: `\n\` strips the next line's
-// indentation, which flattened the one indented line in this file.
-const MANAGE_RS: &str = r#"//! The command runner. Every subcommand is a struct in `src/commands/`.
-//!
-//! Nothing here lists them: `#[cmd]` registers each one at link time, so a
-//! new file under `src/commands/` is a new subcommand and this file never
-//! changes.
-//!
-//! A command living in a *third-party* crate needs that crate referenced here --
-//! `use their_crate as _;` -- or the linker drops it and the command silently
-//! never appears.
-
-#[path = "../commands/mod.rs"]
-mod commands;
-
-fn main() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main(brocanth_command::Context::boot()?)
-}
-"#;
-
 /// One command, as an example to copy.
 // A raw string, and deliberately: the `\n\` continuation used elsewhere in
 // this file eats the newline *and every leading space on the next line*, so an
@@ -714,26 +712,14 @@ fn main() -> brocanth_command::anyhow::Result<()> {
 // -- and nobody writes an unindented struct body.
 const COMMANDS_MOD_RS: &str = r#"//! Every command in this project.
 //!
-//! A command is a `clap::Args` struct with a `run` method. Put one in its own
-//! file, add a `mod` line here, and it is a subcommand of `manage`.
+//! The `mod` lines are the whole of it. A command registers itself through a
+//! link-time slice, so adding one is a file and a `mod`, and there is no list
+//! to keep in step.
+//!
+//! `serve` arrived with the scaffold and is ordinary code here: rename it,
+//! give it flags, or delete it. The framework does not own this command line.
 
-use brocanth_command::{anyhow, clap, cmd, Context, Command};
-
-/// Say hello, to prove the wiring works.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Greet {
-    /// Who to greet.
-    #[arg(long, default_value = "world")]
-    pub name: String,
-}
-
-impl Command for Greet {
-    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        println!("hello, {} (env: {})", self.name, ctx.env());
-        Ok(())
-    }
-}
+pub mod serve;
 "#;
 
 /// Where a brocanth crate comes from: a local checkout when one was named, the
@@ -768,6 +754,14 @@ fn cargo_toml(a: &Answers) -> String {
             deps.push(source_of(a, name));
         }
     }
+    {
+        // Every project serves, so every project gets a socket and a reactor.
+        deps.push(source_of(a, "brocanth-server"));
+        deps.push(
+            "tokio = { version = \"1\", features = [\"rt-multi-thread\"] }  # the reactor `serve` runs on"
+                .to_string(),
+        );
+    }
     if a.needs_serde() {
         deps.push(
             "serde = { version = \"1\", features = [\"derive\"] }  # the config plugin reads typed sections"
@@ -801,7 +795,7 @@ fn cargo_toml(a: &Answers) -> String {
     // `cargo run` answers "could not determine which binary to run" is a bad
     // first minute. Naming the default here costs one line and means the
     // obvious command works.
-    let default_run = if a.has(Pick::Tasks) {
+    let default_run = if a.has(Pick::Commands) {
         format!("default-run = {:?}\n", a.name)
     } else {
         String::new()
@@ -835,28 +829,28 @@ fn cargo_toml(a: &Answers) -> String {
 }
 
 /// `main`, which is the modularity claim written out as a numbered list.
-fn main_rs(a: &Answers) -> String {
+fn app_rs(a: &Answers) -> String {
     let upper = a.ident().to_uppercase();
     let plugins = a.plugins();
     let layered = a.has(Pick::Logging) || a.has(Pick::Sessions);
     let mut out = String::new();
 
     out.push_str(&format!(
-        "//! {title} -- a brocanth application.\n\
+        "//! {title} -- everything this binary contains, in the order it happens.\n\
          //!\n\
-         //! Everything this binary contains is named in `run` below, in the order it\n\
-         //! happens. That is the point rather than a style: a plugin that is not named\n\
-         //! here is not registered, and a plugin that is not in `Cargo.toml` is not\n\
-         //! compiled at all. \"The framework decided for you and you cannot see where\"\n\
-         //! is the thing this layout exists to make impossible.\n\
+         //! A plugin that is not named in [`build`] is not registered, and one that is\n\
+         //! not in `Cargo.toml` is not compiled at all. \"The framework decided for you\n\
+         //! and you cannot see where\" is the thing this layout exists to make\n\
+         //! impossible.\n\
+         //!\n\
+         //! `serve` and every other command read this, so there is one answer to what\n\
+         //! this application is.\n\
          \n\
-         mod pages;\n",
+         use std::sync::Arc;\n\
+         \n\
+         use brocanth::plugin_app::AppBuilder;\n",
         title = a.title
     ));
-    if !plugins.is_empty() {
-        out.push_str("mod plugins;\n");
-    }
-    out.push_str("\nuse std::process::ExitCode;\n\nuse brocanth::plugin_app::AppBuilder;\n");
     out.push_str(if layered {
         "use brocanth::routing::{Dispatch, MiddlewareStack, Next, Router, Verb};\n"
     } else {
@@ -865,25 +859,27 @@ fn main_rs(a: &Answers) -> String {
     if a.has(Pick::Config) {
         out.push_str("use brocanth_config::{AppBuilderConfigExt, Loader};\n");
     }
-    out.push_str("\nuse pages::{Ctx, Handler, IntoResponse, Response};\n\n");
+    out.push_str("\nuse crate::pages::{self, Ctx, Handler, IntoResponse, Response};\n");
+    if !plugins.is_empty() {
+        out.push_str("use crate::plugins;\n");
+    }
+    out.push('\n');
 
     out.push_str(&format!(
         "/// The application name. Every environment variable this binary reads is\n\
          /// `{upper}_<SUFFIX>`: one convention, derived once, whatever spelling the\n\
          /// name arrived in.\n\
-         const APP: &str = {name:?};\n\
+         pub const APP: &str = {name:?};\n\
          \n\
-         fn main() -> ExitCode {{\n\
-        \x20   match run() {{\n\
-        \x20       Ok(()) => ExitCode::SUCCESS,\n\
-        \x20       Err(message) => {{\n\
-        \x20           eprintln!(\"error: {{message}}\");\n\
-        \x20           ExitCode::FAILURE\n\
-        \x20       }}\n\
-        \x20   }}\n\
+         /// What a request needs, built once and shared by every connection.\n\
+         pub struct App {{\n\
+        \x20   pub router: Router<Handler>,\n\
+        \x20   pub stack: MiddlewareStack<Ctx, Response>,\n\
+        \x20   pub plugins: Vec<String>,\n\
          }}\n\
          \n\
-         fn run() -> Result<(), String> {{\n",
+         /// Builds it. The only place that decides what this binary is.\n\
+         pub fn build() -> Result<App, String> {{\n",
         name = a.name
     ));
 
@@ -1005,14 +1001,7 @@ fn main_rs(a: &Answers) -> String {
         );
     }
 
-    // 5: the roster and the context.
-    out.push_str(
-        "    // 5. What this binary contains, as the application itself sees it.\n\
-        \x20   eprintln!(\n\
-        \x20       \"{APP}: plugins: [{}]\",\n\
-        \x20       app.instance_names().collect::<Vec<_>>().join(\", \")\n\
-        \x20   );\n",
-    );
+    // 5: the context, where a plugin provided one.
     if a.has(Pick::Sessions) || a.has(Pick::Model) {
         out.push_str(
             "\n    // The per-request context. These lines compile only because the\n\
@@ -1037,35 +1026,51 @@ fn main_rs(a: &Answers) -> String {
     }
 
     out.push_str(
-        "\n    // 6. There is no HTTP server yet. Until there is, four in-process\n\
-        \x20   //    requests show the table, the chain and the status rules wired\n\
-        \x20   //    together -- a path that exists with a verb that does not is a 405\n\
-        \x20   //    carrying an `Allow` list, never a 404.\n\
-        \x20   for (verb, path) in [\n\
-        \x20       (Verb::Get, \"/\"),\n\
-        \x20       (Verb::Get, \"/users/7\"),\n\
-        \x20       (Verb::Delete, \"/about\"),\n\
-        \x20       (Verb::Get, \"/nowhere\"),\n\
-        \x20   ] {\n\
-        \x20       let response = dispatch(&router, &stack, verb, path);\n\
-        \x20       // Headers are printed too, or the 405 below looks empty:\n\
-        \x20       // `Allow` is a header now rather than a body, which is\n\
-        \x20       // what it always should have been.\n\
-        \x20       let shown: String = response\n\
-        \x20           .headers\n\
-        \x20           .iter()\n\
-        \x20           .map(|(k, v)| format!(\"{k}: {v} \"))\n\
-        \x20           .collect();\n\
-        \x20       println!(\n\
-        \x20           \"{:<7}{:<12}{} {}{}\",\n\
-        \x20           verb.as_str(),\n\
-        \x20           path,\n\
-        \x20           response.status,\n\
-        \x20           shown,\n\
-        \x20           response.body.chars().take(40).collect::<String>()\n\
-        \x20       );\n\
-        \x20   }\n\
-        \x20   Ok(())\n\
+        "    Ok(App {\n\
+        \x20       router,\n\
+        \x20       stack,\n\
+        \x20       plugins: app.instance_names().map(str::to_string).collect(),\n\
+        \x20   })\n\
+         }\n\
+         \n\
+         /// Serves until the process is stopped.\n\
+         ///\n\
+         /// Synchronous on the outside because the command that calls it is, and\n\
+         /// the runtime is built here rather than wrapped around `main`: a command\n\
+         /// that never serves should not start a reactor to run.\n\
+         pub fn serve(addr: &str) -> Result<(), String> {\n\
+        \x20   let app = Arc::new(build()?);\n\
+        \x20   eprintln!(\"{APP}: plugins: [{}]\", app.plugins.join(\", \"));\n\
+         \n\
+        \x20   let runtime = tokio::runtime::Builder::new_multi_thread()\n\
+        \x20       .enable_all()\n\
+        \x20       .build()\n\
+        \x20       .map_err(|e| e.to_string())?;\n\
+         \n\
+        \x20   runtime.block_on(async move {\n\
+        \x20       let server = brocanth_server::Server::bind(addr)\n\
+        \x20           .await\n\
+        \x20           .map_err(|e| e.to_string())?;\n\
+        \x20       let bound = server.local_addr().map_err(|e| e.to_string())?;\n\
+        \x20       eprintln!(\"{APP}: listening on http://{bound}\");\n\
+         \n\
+        \x20       server\n\
+        \x20           .run(move |request| {\n\
+        \x20               // Dispatch is synchronous and runs here, outside the\n\
+        \x20               // future, so what crosses the await is a finished\n\
+        \x20               // response and nothing borrowed.\n\
+        \x20               let answered = dispatch(&app, request.verb, &request.path);\n\
+        \x20               async move {\n\
+        \x20                   let mut out = brocanth_server::Response::html(answered.status, answered.body);\n\
+        \x20                   for (name, value) in &answered.headers {\n\
+        \x20                       out = out.with_header(name, value);\n\
+        \x20                   }\n\
+        \x20                   out\n\
+        \x20               }\n\
+        \x20           })\n\
+        \x20           .await\n\
+        \x20           .map_err(|e| e.to_string())\n\
+        \x20   })\n\
          }\n\
          \n\
          /// One request: the table, then the chain, then the handler.\n\
@@ -1073,20 +1078,15 @@ fn main_rs(a: &Answers) -> String {
          /// The chain runs only for a route that matched. A 404 has no route and\n\
          /// therefore no context, which is also why the request hooks the plan\n\
          /// reserves for a logger are the core's job and not a layer's.\n\
-         fn dispatch(\n\
-        \x20   router: &Router<Handler>,\n\
-        \x20   stack: &MiddlewareStack<Ctx, Response>,\n\
-        \x20   verb: Verb,\n\
-        \x20   path: &str,\n\
-         ) -> Response {\n\
-        \x20   match router.dispatch(verb, path) {\n\
+         pub fn dispatch(app: &App, verb: Verb, path: &str) -> Response {\n\
+        \x20   match app.router.dispatch(verb, path) {\n\
         \x20       Dispatch::Found { handler, matched } => {\n\
         \x20           let mut ctx = Ctx::new(verb, path, matched.params());\n\
         \x20           // The one place a failed handler becomes a response --\n\
         \x20           // what Echo calls an HTTPErrorHandler. It sits inside\n\
         \x20           // the chain's terminal, so a layer still sees what the\n\
         \x20           // error turned into and can rewrite it.\n\
-        \x20           stack.run(path, &mut ctx, |c| {\n\
+        \x20           app.stack.run(path, &mut ctx, |c| {\n\
         \x20               handler(c).unwrap_or_else(IntoResponse::into_response)\n\
         \x20           })\n\
         \x20       }\n\
@@ -1110,9 +1110,116 @@ fn type_of(pick: Pick) -> &'static str {
         Pick::Config => "ConfigPlugin",
         // Never reached: `plugins()` drops it before this is called, because
         // commands are a binary beside the application, not a layer inside it.
-        Pick::Tasks => unreachable!("commands is not a plugin"),
+        Pick::Commands => unreachable!("commands is not a plugin"),
     }
 }
+
+/// `mise.toml`. The sections are `[tasks.*]`, which is mise's spelling and not
+/// brocanth's -- a rename of brocanth's own vocabulary once turned these into
+/// `[commands.*]`, and mise answered `unknown field`.
+/// `src/main.rs` when the project has no command line: it serves, and that is
+/// all it does.
+fn main_serve_only_rs(a: &Answers) -> String {
+    format!(
+        r##"//! {title} -- a brocanth application.
+//!
+//! No command line was asked for, so this binary does one thing. Everything it
+//! contains is in `src/app.rs`; `brocanth create --with commands` turns this
+//! into a command line with `serve` as one of its commands.
+
+mod app;
+mod pages;
+{plugins}
+use std::process::ExitCode;
+
+fn main() -> ExitCode {{
+    match app::serve("127.0.0.1:3000") {{
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {{
+            eprintln!("error: {{message}}");
+            ExitCode::FAILURE
+        }}
+    }}
+}}
+"##,
+        title = a.title,
+        plugins = if a.plugins().is_empty() {
+            ""
+        } else {
+            "mod plugins;\n"
+        },
+    )
+}
+
+/// `src/main.rs` when the project has a command line: it is the command line.
+fn main_with_commands_rs(a: &Answers) -> String {
+    format!(
+        r##"//! {title} -- a brocanth application.
+//!
+//! This binary is the project's command line. `serve` is the one command the
+//! scaffold wrote; the rest are yours. A struct with `#[cmd]` under
+//! `src/commands/` is a subcommand, registered at link time, with no list to
+//! add it to.
+//!
+//! The wiring lives in `src/app.rs`, so `serve` and anything else that needs
+//! the router read the same thing.
+
+mod app;
+mod commands;
+mod pages;
+{plugins}
+fn main() -> brocanth_command::anyhow::Result<()> {{
+    brocanth_command::main(brocanth_command::Context::boot()?)
+}}
+"##,
+        title = a.title,
+        plugins = if a.plugins().is_empty() {
+            ""
+        } else {
+            "mod plugins;\n"
+        },
+    )
+}
+
+/// `src/commands/serve.rs`: the one command a new project gets.
+///
+/// Written into the project rather than built into the framework, because the
+/// command line is the project's and tuning it should not mean forking
+/// anything.
+const SERVE_RS: &str = r#"//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+"#;
+
+const MISE_TOML: &str = r#"[tools]
+# Must match the toolchain brocanth's proc-macro artifacts were built with:
+# they are not compatible across patch releases.
+rust = "1.98"
+
+[tasks.run]
+run = "cargo run"
+
+[tasks.test]
+run = "cargo test"
+"#;
 
 const PAGES_MOD_RS: &str = r##"//! The route table.
 //!
@@ -1974,8 +2081,8 @@ mod tests {
     }
 
     #[test]
-    fn main_names_every_plugin_and_mounts_what_no_plugin_may() {
-        let main = main_rs(&answers(&[Pick::Logging, Pick::Sessions, Pick::Config]));
+    fn app_names_every_plugin_and_mounts_what_no_plugin_may() {
+        let main = app_rs(&answers(&[Pick::Logging, Pick::Sessions, Pick::Config]));
         assert!(
             main.contains(".plugin_from_config::<plugins::logging::Logging>(\"logging\")"),
             "{main}"
@@ -1998,17 +2105,20 @@ mod tests {
     }
 
     #[test]
-    fn a_core_only_main_reads_no_file_and_registers_nothing() {
-        let main = main_rs(&answers(&[]));
+    fn a_core_only_app_reads_no_file_and_registers_nothing() {
+        let main = app_rs(&answers(&[]));
         assert!(!main.contains("Loader::new"), "{main}");
-        assert!(!main.contains(".plugin"), "{main}");
-        assert!(!main.contains("mod plugins;"), "{main}");
+        // `.plugin(` and not `.plugin`: `App` has a `plugins` field now, and
+        // an assertion that matches it is an assertion about nothing.
+        assert!(!main.contains(".plugin("), "{main}");
+        assert!(!main.contains(".plugin_from_config"), "{main}");
+        assert!(!main.contains("use crate::plugins;"), "{main}");
         assert!(!main.contains("brocanth_config"), "{main}");
     }
 
     #[test]
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
-        let main = main_rs(&answers(&[Pick::Logging]));
+        let main = app_rs(&answers(&[Pick::Logging]));
         assert!(
             main.contains(
                 ".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"

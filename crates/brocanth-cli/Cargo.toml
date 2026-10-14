@@ -23,10 +23,9 @@ clap = { version = "4", features = ["derive"] }
 # would be the only copyleft licence in the tree.
 anstyle = "1"
 anstream = "1"
-# Progress. Hides itself when piped, so CI needs no flag.
-indicatif = "0.18"
-# Display width, so a wide character does not shear a column. Zero new crates:
-# indicatif already depends on it.
+# Display width, so a wide character does not shear a column. Was free while
+# `indicatif` was here; `indicatif` went with the progress bars, which went
+# with the commands that had phases to report.
 unicode-width = "0.2"
 # The chooser `brocanth create` opens when an answer is missing. Default
 # features off: they pull in every widget plus three backends we never build

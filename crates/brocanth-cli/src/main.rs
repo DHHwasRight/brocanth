@@ -7,7 +7,6 @@
 //! `is_terminal`, or reads `NO_COLOR`.
 
 mod commands;
-mod project;
 mod tui;
 mod ui;
 
@@ -74,24 +73,14 @@ enum Command {
     /// default this command will tell you about.
     #[command(alias = "new")]
     Create(commands::create::CreateArgs),
-    /// Print the resolved route table
-    Routes(commands::routes::RoutesArgs),
-    /// Compile the application
-    Build(commands::build::BuildArgs),
-    /// Check the route table, the mounts and the plugins, then compile
-    Check(commands::check::CheckArgs),
-    /// Generate a page, a plugin or a model
-    Generate(commands::generate::GenerateArgs),
-    /// Serve the application and rebuild as it changes
-    Dev(commands::dev::DevArgs),
     /// A command defined in this project, run by the project's own binary
     ///
-    /// Anything this tool does not recognise is a command. `brocanth` is
-    /// installed once; the commands it can run live in a project and are
-    /// compiled into that project's binary, so they cannot be listed here.
-    /// Inside a project, `brocanth commands` lists them.
+    /// Everything this tool does not recognise is one. `brocanth` is
+    /// installed once and scaffolds; a project's commands live in that
+    /// project and are compiled into its binary, so they cannot be listed
+    /// here. Inside a project, `brocanth commands` lists them.
     #[command(external_subcommand)]
-    Task(Vec<OsString>),
+    Delegated(Vec<OsString>),
 }
 
 fn main() -> ExitCode {
@@ -103,12 +92,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Create(args) => commands::create::run(&ui, dir, args),
-        Command::Routes(args) => commands::routes::run(&ui, dir, args),
-        Command::Build(args) => commands::build::run(&ui, dir, args),
-        Command::Check(args) => commands::check::run(&ui, dir, args),
-        Command::Generate(args) => commands::generate::run(&ui, dir, args),
-        Command::Dev(args) => commands::dev::run(&ui, dir, args),
-        Command::Task(args) => commands::delegate::run(&ui, dir, args),
+        Command::Delegated(args) => commands::delegate::run(&ui, dir, args),
     };
 
     match result {
