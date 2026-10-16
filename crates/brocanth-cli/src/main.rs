@@ -7,6 +7,7 @@
 //! `is_terminal`, or reads `NO_COLOR`.
 
 mod commands;
+mod modules;
 mod tui;
 mod ui;
 

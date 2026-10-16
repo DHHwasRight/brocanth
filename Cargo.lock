@@ -633,6 +633,7 @@ dependencies = [
  "anstyle",
  "brocanth",
  "brocanth-config",
+ "brocanth-scaffold",
  "cargo_metadata",
  "clap",
  "ratatui",

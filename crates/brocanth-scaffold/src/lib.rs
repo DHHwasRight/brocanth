@@ -102,6 +102,14 @@ pub struct Manifest {
     pub after: Vec<&'static str>,
     /// What this choice puts in the generated project's dependency tree.
     pub crates: Vec<Dep>,
+    /// Why this choice is part of its parent, in one sentence, for the
+    /// diagnostic a flat command line produces when it is named alone.
+    pub because: &'static str,
+    /// What to say in the generated manifest when this choice was *not*
+    /// taken: the name of the thing that is absent, and what its absence
+    /// means. The receipt is read from both ends, so a project says what it
+    /// does not contain as plainly as what it does.
+    pub absent: Option<(&'static str, &'static str)>,
 }
 
 impl Manifest {
@@ -114,6 +122,8 @@ impl Manifest {
             on_with_parent: false,
             after: Vec::new(),
             crates: Vec::new(),
+            because: "",
+            absent: None,
         }
     }
 
@@ -142,6 +152,19 @@ impl Manifest {
         self.crates.push(dep);
         self
     }
+
+    /// Why this choice needs its parent. One sentence, and the real reason:
+    /// it is printed to somebody who typed the child's name on its own.
+    pub fn because(mut self, why: &'static str) -> Self {
+        self.because = why;
+        self
+    }
+
+    /// What the generated manifest says when this choice was not taken.
+    pub fn absent(mut self, what: &'static str, why: &'static str) -> Self {
+        self.absent = Some((what, why));
+        self
+    }
 }
 
 /// A dependency of the *generated* project, not of the CLI.
@@ -161,6 +184,9 @@ pub struct Dep {
     pub features: Vec<&'static str>,
     /// Whether `default-features = false` is written.
     pub defaults: bool,
+    /// A trailing comment on the dependency line. Short, and about why this
+    /// crate is here rather than what it is.
+    pub note: Option<&'static str>,
 }
 
 /// Where a generated project's dependency is fetched from.
@@ -202,6 +228,7 @@ impl Dep {
             source,
             features: Vec::new(),
             defaults: true,
+            note: None,
         }
     }
 
@@ -214,6 +241,12 @@ impl Dep {
     /// Write `default-features = false`.
     pub fn no_default_features(mut self) -> Self {
         self.defaults = false;
+        self
+    }
+
+    /// A trailing comment on the dependency line.
+    pub fn note(mut self, note: &'static str) -> Self {
+        self.note = Some(note);
         self
     }
 }

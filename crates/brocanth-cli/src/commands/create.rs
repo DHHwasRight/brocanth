@@ -31,7 +31,8 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use clap::{Args, ValueEnum};
+use brocanth_scaffold::{Dep, Source};
+use clap::Args;
 
 use crate::tui::{Choice, Draft};
 
@@ -40,11 +41,6 @@ use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 
 /// Where the generated `Cargo.toml` points for the framework itself.
 const REPOSITORY: &str = "https://github.com/DHHwasRight/brocanth.git";
-
-/// rsx lives in its own repository, so `--brocanth-path` does not reach it.
-/// That asymmetry is on purpose: brocanth is the thing being developed here
-/// and wants a path, rsx is an ordinary dependency and is fetched.
-const RSX_REPOSITORY: &str = "https://github.com/DHHwasRight/rsx.git";
 
 #[derive(Args)]
 pub struct CreateArgs {
@@ -55,14 +51,17 @@ pub struct CreateArgs {
     #[arg(long, value_name = "TEXT")]
     pub title: Option<String>,
     /// Plugins to include; repeat the flag or separate with commas
+    ///
+    /// The list is whatever modules this CLI was compiled with, so it grows
+    /// by adding a crate rather than by editing an enum here.
     #[arg(
         long = "with",
-        value_enum,
         value_name = "PLUGIN",
         value_delimiter = ',',
-        conflicts_with = "core_only"
+        conflicts_with = "core_only",
+        value_parser = offered()
     )]
-    pub with: Vec<Pick>,
+    pub with: Vec<String>,
     /// The core alone: a router, a context, and nothing else
     #[arg(long)]
     pub core_only: bool,
@@ -85,137 +84,42 @@ pub struct CreateArgs {
     pub force: bool,
 }
 
-/// The plugin set on offer.
+/// Every module this CLI has, as clap's possible values.
 ///
-/// Each one is a capability the core deliberately does not have. The core is a
-/// router handing a request and a context to a handler, with three
-/// dependencies; everything below is something an application opts into by
-/// naming it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub enum Pick {
-    /// A request logger. The core assumes no log layer at all
-    Logging,
-    /// TOML configuration: four sources, merged, typed per section
-    Config,
-    /// Cookie sessions, and a `Session` on the context
-    Sessions,
-    /// The model layer: SeaORM, validations and migrations
-    Model,
-    /// Project commands: a `manage` binary whose subcommands are your own structs
-    Commands,
-    /// HTML from `.rsx` templates, compiled into the binary by a macro
-    Rsx,
-    /// Tailwind, built from the classes in your `.rsx` and `.rs` files
-    #[value(name = "rsx-tailwind")]
-    Tailwind,
-    /// Partial navigation: dp-swap, a `<Link>`, and layouts the server can skip
-    #[value(name = "rsx-htmx")]
-    Htmx,
+/// Built from the registry rather than written out, so a CLI compiled with
+/// somebody's module offers it in `--help` with its own one-line gist and
+/// without a line changing here.
+fn offered() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        crate::modules::ALL
+            .iter()
+            .map(|module| {
+                let m = module.manifest();
+                clap::builder::PossibleValue::new(m.key).help(m.gist)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
-impl Pick {
-    const ALL: [Pick; 8] = [
-        Pick::Logging,
-        Pick::Config,
-        Pick::Sessions,
-        Pick::Model,
-        Pick::Commands,
-        Pick::Rsx,
-        Pick::Tailwind,
-        Pick::Htmx,
-    ];
-    /// What a non-interactive run gets when no flag chose. Stated rather than
-    /// guessed at: the command prints the flag that overrides it.
-    const DEFAULT: [Pick; 3] = [Pick::Logging, Pick::Config, Pick::Commands];
+/// What a non-interactive run gets when no flag chose.
+///
+/// Stated rather than guessed at: the command prints the flag that overrides
+/// it. Three keys rather than three modules, because this list outlives any
+/// particular registry -- a CLI compiled without one of them says so.
+const DEFAULT: [&str; 3] = ["logging", "config", "commands"];
 
-    fn key(self) -> &'static str {
-        match self {
-            Pick::Logging => "logging",
-            Pick::Config => "config",
-            Pick::Sessions => "sessions",
-            Pick::Model => "model",
-            Pick::Commands => "commands",
-            Pick::Rsx => "rsx",
-            // Prefixed, because the command line is flat. `--with rsx-htmx`
-            // says what it is part of where no indentation can.
-            Pick::Tailwind => "rsx-tailwind",
-            Pick::Htmx => "rsx-htmx",
-        }
-    }
-
-    /// The choice this one is part of, for the choices that are part of one.
-    ///
-    /// Tailwind reads class names out of `.rsx` files and `<Link>` is an
-    /// `.rsx` component, so neither has anything to do without templates.
-    /// The chooser nests them under their parent and the flags refuse them
-    /// without it.
-    fn parent(self) -> Option<Pick> {
-        match self {
-            Pick::Tailwind | Pick::Htmx => Some(Pick::Rsx),
-            _ => None,
-        }
-    }
-
-    /// Why, for the diagnostic. One sentence, and the real reason.
-    fn needs_parent_because(self) -> &'static str {
-        match self {
-            Pick::Tailwind => "the CSS build reads class names out of `.rsx` files",
-            Pick::Htmx => {
-                "`<Link>` is an `.rsx` component, and the partial it \
-                           asks for is a layout the templates define"
-            }
-            _ => "",
-        }
-    }
-
-    /// Whether the chooser starts with this one ticked once its parent is.
-    ///
-    /// On, both of them: a person in a terminal building an HTML application
-    /// nearly always wants styling and nearly always wants a click not to
-    /// reload the page. A script that wanted them would have said so, which
-    /// is why the flags do not default them on.
-    fn on_with_parent(self) -> bool {
-        self.parent().is_some()
-    }
-
-    /// The one line a reader needs to decide. The right-hand half is what the
-    /// binary pays, because that is the question §8 says to keep asking.
-    fn gist(self) -> &'static str {
-        match self {
-            Pick::Logging => "a line per request; the core assumes no log layer",
-            Pick::Config => "config/<env>.toml, merged; without it nothing links a TOML parser",
-            Pick::Sessions => "a cookie, and a `Session` the context hands a handler",
-            Pick::Model => "SeaORM, validations, migrations; without it no SQL driver at all",
-            Pick::Commands => "this project's own command line, `serve` plus whatever you add",
-            Pick::Rsx => {
-                "`.rsx` templates compiled into the binary; without it a page builds a String"
-            }
-            Pick::Tailwind => "a CSS build over the class names in your templates; needs node",
-            Pick::Htmx => {
-                "a click swaps what changed; the server renders from the shared layout down"
-            }
-        }
-    }
-
-    /// The crate a choice puts in the tree, if any.
-    fn crate_name(self) -> Option<&'static str> {
-        match self {
-            Pick::Config => Some("brocanth-config"),
-            Pick::Model => Some("brocanth-model"),
-            Pick::Commands => Some("brocanth-command"),
-            Pick::Rsx => Some("rsx"),
-            // Neither is a crate. Tailwind is node's, and dp-swap is a script
-            // this project serves to the browser.
-            Pick::Tailwind | Pick::Htmx => None,
-            Pick::Logging | Pick::Sessions => None,
-        }
-    }
+/// Everything the CLI was compiled with, in listing order.
+fn all() -> Vec<&'static str> {
+    crate::modules::keys()
 }
 
-impl std::fmt::Display for Pick {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:<12} -- {}", self.key(), self.gist())
-    }
+/// The manifest of a module this CLI has. Panics for a key it does not,
+/// which is a programming error here rather than anything a user can type:
+/// every key reaching this came from [`all`] or from a validated flag.
+fn about(key: &str) -> brocanth_scaffold::Manifest {
+    crate::modules::find(key)
+        .unwrap_or_else(|| unreachable!("`{key}` is not a module this CLI has"))
+        .manifest()
 }
 
 /// The answers, however they arrived.
@@ -224,15 +128,19 @@ struct Answers {
     name: String,
     /// The human name.
     title: String,
-    picks: Vec<Pick>,
+    picks: Vec<&'static str>,
     /// A local checkout to depend on, instead of the repository.
     local: Option<String>,
     git: bool,
 }
 
 impl Answers {
-    fn has(&self, pick: Pick) -> bool {
-        self.picks.contains(&pick)
+    fn has(&self, key: &str) -> bool {
+        debug_assert!(
+            crate::modules::find(key).is_some(),
+            "asked about `{key}`, which no module declares"
+        );
+        self.picks.contains(&key)
     }
 
     /// The command line that would have produced these answers with nothing
@@ -247,7 +155,7 @@ impl Answers {
         if self.picks.is_empty() {
             out.push_str(" --core-only");
         } else {
-            let names: Vec<&str> = self.picks.iter().map(|p| p.key()).collect();
+            let names: Vec<&str> = self.picks.clone();
             out.push_str(&format!(" --with {}", names.join(",")));
         }
         out.push_str(if self.git { " --git" } else { " --no-git" });
@@ -264,7 +172,7 @@ impl Answers {
     }
 
     /// Plugins that write a file under `src/plugins/`.
-    fn plugins(&self) -> Vec<Pick> {
+    fn plugins(&self) -> Vec<&'static str> {
         self.picks
             .iter()
             .copied()
@@ -274,7 +182,7 @@ impl Answers {
             // Named rather than subtracted: a plugin is a thing the
             // application registers in `build`, and only two of these are.
             // Adding a choice should not quietly add a plugin.
-            .filter(|p| matches!(p, Pick::Logging | Pick::Sessions | Pick::Model))
+            .filter(|p| ["logging", "sessions", "model"].contains(p))
             .collect()
     }
 
@@ -284,7 +192,7 @@ impl Answers {
     /// bounds the core imposes, so a plugin built from a literal in `main`
     /// needs no deserialiser and the scaffold derives none.
     fn needs_serde(&self) -> bool {
-        self.has(Pick::Config) && !self.plugins().is_empty()
+        self.has("config") && !self.plugins().is_empty()
     }
 }
 
@@ -346,13 +254,13 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
     ]);
     for pick in &answers.picks {
         contents.row(vec![
-            Cell::styled(pick.key(), ACCENT),
-            Cell::styled(pick.gist(), DIM),
+            Cell::styled(*pick, ACCENT),
+            Cell::styled(about(pick).gist, DIM),
         ]);
     }
-    for pick in Pick::ALL.iter().filter(|p| !answers.has(**p)) {
+    for pick in all().iter().filter(|p| !answers.has(p)) {
         contents.row(vec![
-            Cell::styled(pick.key(), DIM),
+            Cell::styled(*pick, DIM),
             Cell::styled(
                 "not asked for: absent from the source, the binary and the lock file",
                 DIM,
@@ -373,7 +281,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
         Cell::styled(format!("cd {}", answers.name), STRONG),
         Cell::new(""),
     ]);
-    if answers.has(Pick::Commands) {
+    if answers.has("commands") {
         next.row(vec![
             Cell::styled("brocanth serve", STRONG),
             Cell::styled("start the server on 127.0.0.1:3000", DIM),
@@ -441,16 +349,25 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
 ///
 /// Shared by both routes, so the chooser opens with its tick-boxes already
 /// matching what `--with` or `--core-only` asked for.
-fn picked(args: &CreateArgs) -> Vec<Pick> {
+fn picked(args: &CreateArgs) -> Vec<&'static str> {
     if args.core_only {
         Vec::new()
     } else if !args.with.is_empty() {
-        let mut picks = args.with.clone();
-        picks.sort();
+        // Back to the registry's own `&'static str`, because the rest of
+        // this file compares keys by value and a `String` from clap is the
+        // same word with a different lifetime. clap already refused
+        // anything that is not a module, so the lookup cannot miss.
+        let mut picks: Vec<&'static str> = args
+            .with
+            .iter()
+            .filter_map(|key| crate::modules::find(key))
+            .map(|module| module.manifest().key)
+            .collect();
+        picks.sort_unstable();
         picks.dedup();
         picks
     } else {
-        Pick::DEFAULT.to_vec()
+        DEFAULT.to_vec()
     }
 }
 
@@ -459,28 +376,25 @@ fn picked(args: &CreateArgs) -> Vec<Pick> {
 /// The chooser cannot produce this -- it hides a child whose parent is off --
 /// so it is only reachable from the flags, where it is nearly always a
 /// forgotten word rather than an intention.
-fn orphans(picks: &[Pick]) -> Result<(), Vec<Diagnostic>> {
+fn orphans(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
     let bad: Vec<Diagnostic> = picks
         .iter()
         .filter_map(|pick| {
-            let parent = pick.parent()?;
+            let parent = about(pick).parent?;
             if picks.contains(&parent) {
                 return None;
             }
             let with: Vec<&str> = picks
                 .iter()
-                .map(|p| p.key())
-                .chain(std::iter::once(parent.key()))
+                .copied()
+                .chain(std::iter::once(parent))
                 .collect();
             let mut with = with;
             with.sort_unstable();
             Some(
-                Diagnostic::error(
-                    pick.key(),
-                    format!("`{}` is part of `{}`", pick.key(), parent.key()),
-                )
-                .note(pick.needs_parent_because())
-                .help(format!("--with {}", with.join(","))),
+                Diagnostic::error(*pick, format!("`{pick}` is part of `{parent}`"))
+                    .note(about(pick).because)
+                    .help(format!("--with {}", with.join(","))),
             )
         })
         .collect();
@@ -497,21 +411,21 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
     let draft = Draft {
         name: String::new(),
         title: args.title.clone().unwrap_or_default(),
-        choices: Pick::ALL
+        choices: all()
             .iter()
             .map(|pick| Choice {
-                label: pick.key().to_string(),
-                blurb: pick.gist().to_string(),
+                label: pick.to_string(),
+                blurb: about(pick).gist.to_string(),
                 // A child starts ticked once its parent is, which is the
                 // asymmetry with the flags: somebody in a terminal building
                 // an HTML application wants styling and wants a click not to
                 // reload the page, and can see both and untick them. A
                 // script gets neither unless it asked, because a flag that
                 // quietly brings two more is a flag you cannot read.
-                on: preset.contains(pick) || pick.on_with_parent(),
-                under: pick
-                    .parent()
-                    .and_then(|parent| Pick::ALL.iter().position(|p| *p == parent)),
+                on: preset.contains(pick) || about(pick).on_with_parent,
+                under: about(pick)
+                    .parent
+                    .and_then(|parent| all().iter().position(|p| *p == parent)),
             })
             .collect(),
         // The chooser offers a repository and the flag route does not, and the
@@ -540,7 +454,7 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
     // `taken`, not `on`: a ticked child of an unticked parent is a tick
     // nobody can see, and the chooser must not return an answer the screen
     // did not show.
-    let picks = Pick::ALL
+    let picks = all()
         .iter()
         .enumerate()
         .filter(|(index, _)| draft.taken(*index))
@@ -685,7 +599,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         ("Cargo.toml".to_string(), cargo_toml(a)),
         (
             ".gitignore".to_string(),
-            if a.has(Pick::Tailwind) {
+            if a.has("rsx-tailwind") {
                 // `assets/css/site.css` is **not** ignored. It is embedded
                 // at compile time, so a checkout without it does not build,
                 // and "run npm first" is a worse answer than 3 kB in git.
@@ -713,7 +627,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         ),
         (
             "src/main.rs".to_string(),
-            if a.has(Pick::Commands) {
+            if a.has("commands") {
                 main_with_commands_rs(a)
             } else {
                 main_serve_only_rs(a)
@@ -727,7 +641,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         ("src/pages/about.rs".to_string(), about_rs(a)),
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         // Beside the page each one renders, and named after it. The Crystal
         // page_router does the same with `layout.cr`, and the reason carries
         // over: a route is a file, so the markup for a route is the file
@@ -741,10 +655,10 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         ));
         files.push(("src/pages/users/[id].rsx".to_string(), USER_RSX.to_string()));
     }
-    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         files.push(("src/assets.rs".to_string(), ASSETS_RS.to_string()));
     }
-    if a.has(Pick::Tailwind) {
+    if a.has("rsx-tailwind") {
         files.push((
             "assets/css/_tailwind.css".to_string(),
             TAILWIND_CSS.to_string(),
@@ -757,7 +671,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         files.push(("scripts/build-css.sh".to_string(), BUILD_CSS_SH.to_string()));
         files.push(("package.json".to_string(), package_json(a)));
     }
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         // Vendored into the brocanth binary, written out here. A project
         // that has to fetch a script to finish is a project that fails on a
         // train.
@@ -767,22 +681,22 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
     if !a.plugins().is_empty() {
         files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a)));
     }
-    if a.has(Pick::Logging) {
+    if a.has("logging") {
         files.push(("src/plugins/logging.rs".to_string(), logging_rs(a)));
     }
-    if a.has(Pick::Sessions) {
+    if a.has("sessions") {
         files.push(("src/plugins/sessions.rs".to_string(), sessions_rs(a)));
     }
-    if a.has(Pick::Model) {
+    if a.has("model") {
         files.push(("src/plugins/model.rs".to_string(), model_rs(a)));
     }
-    if a.has(Pick::Config) {
+    if a.has("config") {
         files.push((
             format!("config/{}.toml", brocanth_config::DEFAULT_ENV),
             config_toml(a),
         ));
     }
-    if a.has(Pick::Commands) {
+    if a.has("commands") {
         // The marker the global `brocanth` binary walks up to find. Its
         // presence is what makes a directory a project.
         files.push((
@@ -815,12 +729,12 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
 fn agents_md(a: &Answers) -> String {
     let mut chosen = vec!["`core`  the router, the context, the plugin seams".to_string()];
     for pick in &a.picks {
-        chosen.push(format!("`{}`  {}", pick.key(), pick.gist()));
+        chosen.push(format!("`{}`  {}", pick, about(pick).gist));
     }
-    let absent: Vec<String> = Pick::ALL
+    let absent: Vec<String> = all()
         .iter()
-        .filter(|p| !a.has(**p))
-        .map(|p| format!("`{}`", p.key()))
+        .filter(|p| !a.has(p))
+        .map(|p| format!("`{p}`"))
         .collect();
     let absent = if absent.is_empty() {
         "Nothing. Every capability was chosen.".to_string()
@@ -838,17 +752,17 @@ fn agents_md(a: &Answers) -> String {
     // writes it into the file, which in Markdown turns a paragraph into a
     // code block.
     let mut views = String::new();
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         views.push_str(AGENTS_VIEWS_MD);
     }
-    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         views.push_str(AGENTS_ASSETS_MD);
     }
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         views.push_str(AGENTS_PARTIAL_MD);
     }
 
-    let commands = if a.has(Pick::Commands) {
+    let commands = if a.has("commands") {
         "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
          `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
          registration happens at link time and there is no list to add it to.\n\n\
@@ -1073,12 +987,17 @@ pub mod serve;
 
 /// Where a brocanth crate comes from: a local checkout when one was named, the
 /// repository otherwise.
-fn source_of(a: &Answers, crate_name: &str) -> String {
-    // Not a brocanth crate, so `--brocanth-path` has nothing to say about it.
-    if crate_name == "rsx" {
-        return format!(
-            "rsx = {{ git = {RSX_REPOSITORY:?}, branch = \"main\" }}  # templates, compiled"
-        );
+fn source_of(a: &Answers, dep: &Dep) -> String {
+    let crate_name = dep.name;
+    let note = dep.note.map_or_else(String::new, |n| format!("  # {n}"));
+    match &dep.source {
+        // Not a brocanth crate, so `--brocanth-path` has nothing to say
+        // about where it comes from.
+        Source::Git { url, branch } => {
+            return format!("{crate_name} = {{ git = {url:?}, branch = {branch:?} }}{note}")
+        }
+        Source::Version(req) => return format!("{crate_name} = {{ version = {req:?} }}{note}"),
+        Source::Brocanth => {}
     }
     match &a.local {
         // `--brocanth-path` points at `crates/brocanth`; its siblings are the
@@ -1093,34 +1012,39 @@ fn source_of(a: &Answers, crate_name: &str) -> String {
                     .unwrap_or_else(|| Path::new(path).to_path_buf())
             };
             format!(
-                "{crate_name} = {{ path = {:?} }}",
+                "{crate_name} = {{ path = {:?} }}{note}",
                 dir.display().to_string()
             )
         }
-        None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}"),
+        None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}{note}"),
     }
+}
+
+/// One of brocanth's own crates, which every project gets whatever it chose.
+fn core(name: &'static str) -> Dep {
+    Dep::brocanth(name)
 }
 
 /// The manifest, and the comment that makes it a statement rather than a list.
 fn cargo_toml(a: &Answers) -> String {
-    let mut deps = vec![source_of(a, "brocanth")];
+    let mut deps = vec![source_of(a, &core("brocanth"))];
     for pick in &a.picks {
-        if let Some(name) = pick.crate_name() {
-            deps.push(source_of(a, name));
+        for dep in about(pick).crates {
+            deps.push(source_of(a, &dep));
         }
     }
     // The macros that read `src/pages`: the route table always, and the
     // layouts when there are any. Compile-time only -- a proc macro puts no
     // bytes in the binary, which is why this one is not a choice.
-    deps.push(source_of(a, "brocanth-pages"));
-    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+    deps.push(source_of(a, &core("brocanth-pages")));
+    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         // The static files, embedded. Also a proc macro, but this one does
         // put bytes in the binary -- the files themselves.
-        deps.push(source_of(a, "brocanth-assets"));
+        deps.push(source_of(a, &core("brocanth-assets")));
     }
     {
         // Every project serves, so every project gets a socket and a reactor.
-        deps.push(source_of(a, "brocanth-server"));
+        deps.push(source_of(a, &core("brocanth-server")));
         deps.push(
             "tokio = { version = \"1\", features = [\"rt-multi-thread\"] }  # the reactor `serve` runs on"
                 .to_string(),
@@ -1134,19 +1058,19 @@ fn cargo_toml(a: &Answers) -> String {
     }
 
     let mut absent: Vec<String> = Vec::new();
-    if !a.has(Pick::Model) {
+    if !a.has("model") {
         absent.push(
             "#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file"
                 .to_string(),
         );
     }
-    if !a.has(Pick::Config) {
+    if !a.has("config") {
         absent.push(
             "#   brocanth-config  no TOML parser; main builds each plugin from a literal"
                 .to_string(),
         );
     }
-    if !a.has(Pick::Rsx) {
+    if !a.has("rsx") {
         absent.push(
             "#   rsx              no template engine; a page builds the String it returns"
                 .to_string(),
@@ -1165,7 +1089,7 @@ fn cargo_toml(a: &Answers) -> String {
     // `cargo run` answers "could not determine which binary to run" is a bad
     // first minute. Naming the default here costs one line and means the
     // obvious command works.
-    let default_run = if a.has(Pick::Commands) {
+    let default_run = if a.has("commands") {
         format!("default-run = {:?}\n", a.name)
     } else {
         String::new()
@@ -1202,7 +1126,7 @@ fn cargo_toml(a: &Answers) -> String {
 fn app_rs(a: &Answers) -> String {
     let upper = a.ident().to_uppercase();
     let plugins = a.plugins();
-    let layered = a.has(Pick::Logging) || a.has(Pick::Sessions);
+    let layered = a.has("logging") || a.has("sessions");
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -1226,7 +1150,7 @@ fn app_rs(a: &Answers) -> String {
     } else {
         "use brocanth::routing::{Dispatch, MiddlewareStack, Router};\n"
     });
-    if a.has(Pick::Config) {
+    if a.has("config") {
         out.push_str("use brocanth_config::{AppBuilderConfigExt, Loader};\n");
     }
     out.push_str("\nuse crate::pages::{self, Ctx, Handler, IntoResponse, Response};\n");
@@ -1254,7 +1178,7 @@ fn app_rs(a: &Answers) -> String {
     ));
 
     // 1 and 2: the application and every plugin in it.
-    if a.has(Pick::Config) {
+    if a.has("config") {
         out.push_str(&format!(
             "    // 1. Configuration. The core takes already-built values; finding the\n\
             \x20   //    files, layering them and typing each section is `brocanth-config`'s\n\
@@ -1274,8 +1198,8 @@ fn app_rs(a: &Answers) -> String {
             out.push_str(&format!(
                 "        .plugin_from_config::<plugins::{key}::{ty}>({key:?})\n\
                 \x20       .map_err(|e| e.to_string())?\n",
-                key = pick.key(),
-                ty = type_of(*pick),
+                key = pick,
+                ty = type_of(pick),
             ));
         }
     } else {
@@ -1292,8 +1216,8 @@ fn app_rs(a: &Answers) -> String {
         for pick in &plugins {
             out.push_str(&format!(
                 "        .plugin(plugins::{key}::{ty}::new(plugins::{key}::Settings::default()))\n",
-                key = pick.key(),
-                ty = type_of(*pick),
+                key = pick,
+                ty = type_of(pick),
             ));
         }
     }
@@ -1304,10 +1228,10 @@ fn app_rs(a: &Answers) -> String {
         \x20           // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the\n\
         \x20           // pattern is a decision, and the decision is the application's.\n",
     );
-    if a.has(Pick::Logging) {
+    if a.has("logging") {
         out.push_str("            setup.router().mount(\"/{*rest}\", \"request_log\");\n");
     }
-    if a.has(Pick::Sessions) {
+    if a.has("sessions") {
         out.push_str("            setup.router().mount(\"/users/{*rest}\", \"session\");\n");
     }
     if !layered {
@@ -1339,10 +1263,10 @@ fn app_rs(a: &Answers) -> String {
             \x20       let layer: fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response =\n\
             \x20           match mount.middleware.as_str() {\n",
         );
-        if a.has(Pick::Logging) {
+        if a.has("logging") {
             out.push_str("                \"request_log\" => plugins::logging::layer,\n");
         }
-        if a.has(Pick::Sessions) {
+        if a.has("sessions") {
             out.push_str("                \"session\" => plugins::sessions::layer,\n");
         }
         // Wrapped the way rustfmt wants it. A scaffolded project should be
@@ -1372,7 +1296,7 @@ fn app_rs(a: &Answers) -> String {
     }
 
     // 5: the context, where a plugin provided one.
-    if a.has(Pick::Sessions) || a.has(Pick::Model) {
+    if a.has("sessions") || a.has("model") {
         out.push_str(
             "\n    // The per-request context. These lines compile only because the\n\
             \x20   // plugins that provide the values were registered in step 2: the\n\
@@ -1381,13 +1305,13 @@ fn app_rs(a: &Answers) -> String {
             \x20   // mechanism -- modularity enforced rather than documented.\n\
             \x20   let cx = app.context();\n",
         );
-        if a.has(Pick::Sessions) {
+        if a.has("sessions") {
             out.push_str(
                 "    let session: &plugins::sessions::Session = cx.extract();\n\
                 \x20   eprintln!(\"session cookie: {}\", session.cookie);\n",
             );
         }
-        if a.has(Pick::Model) {
+        if a.has("model") {
             out.push_str(
                 "    let db: &plugins::model::Db = cx.extract();\n\
                 \x20   eprintln!(\"database: {}\", db.url);\n",
@@ -1406,10 +1330,10 @@ fn app_rs(a: &Answers) -> String {
     );
 
     out.push_str(SENT_FN);
-    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         out.push_str(STATIC_FN);
     }
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         out.push_str(HOLDING_FN);
     }
 
@@ -1442,7 +1366,7 @@ fn app_rs(a: &Answers) -> String {
         \x20               // response and nothing borrowed.\n\
         \x20               let out = ",
     );
-    out.push_str(if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+    out.push_str(if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         // Static files never reach a page. They are bytes with a content
         // type, and the page contract carries a `String` body on purpose.
         "serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));\n"
@@ -1489,7 +1413,7 @@ fn app_rs(a: &Answers) -> String {
     // would be counting for nobody.
     out.replace(
         "@CTX@",
-        if a.has(Pick::Htmx) {
+        if a.has("rsx-htmx") {
             "Ctx::new(verb, path, matched.params()).holding(holding(request))"
         } else {
             "Ctx::new(verb, path, matched.params())"
@@ -1497,18 +1421,16 @@ fn app_rs(a: &Answers) -> String {
     )
 }
 
-fn type_of(pick: Pick) -> &'static str {
+fn type_of(pick: &str) -> &'static str {
     match pick {
-        Pick::Logging => "Logging",
-        Pick::Sessions => "Sessions",
-        Pick::Model => "Model",
-        Pick::Config => "ConfigPlugin",
+        "logging" => "Logging",
+        "sessions" => "Sessions",
+        "model" => "Model",
+        "config" => "ConfigPlugin",
         // Never reached: `plugins()` drops both before this is called.
         // Commands are a binary beside the application rather than a layer
         // inside it, and rsx is a macro the views call.
-        Pick::Commands | Pick::Rsx | Pick::Tailwind | Pick::Htmx => {
-            unreachable!("{} is not a plugin", pick.key())
-        }
+        _ => unreachable!("{pick} is not a plugin"),
     }
 }
 
@@ -1541,7 +1463,7 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
-        assets = if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
             "\nmod assets;"
         } else {
             ""
@@ -1576,7 +1498,7 @@ fn main() -> brocanth_command::anyhow::Result<()> {{
 }}
 "##,
         title = a.title,
-        assets = if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
             "\nmod assets;"
         } else {
             ""
@@ -1619,7 +1541,7 @@ impl Command for Serve {
 
 fn mise_toml(a: &Answers) -> String {
     let mut out = String::from(MISE_TOML);
-    if a.has(Pick::Tailwind) {
+    if a.has("rsx-tailwind") {
         out.push_str(
             "\n[tasks.css]\n\
              description = \"build assets/css/site.css from _tailwind.css\"\n\
@@ -2109,7 +2031,7 @@ fn pages_mod_rs(a: &Answers) -> String {
     // `html!` is the only reader, and it is written only with templates, so
     // without them these would be a field nobody sets and a method nobody
     // calls -- two warnings in a brand-new project.
-    let (field, init, methods) = if a.has(Pick::Rsx) {
+    let (field, init, methods) = if a.has("rsx") {
         (
             "\n    /// How many layout layers the client says it already holds.\n\
              \x20   ///\n\
@@ -2130,7 +2052,7 @@ fn pages_mod_rs(a: &Answers) -> String {
         ("", "", "")
     };
     // `holding` is the setter and only partial navigation ever calls it.
-    let setter = if a.has(Pick::Htmx) {
+    let setter = if a.has("rsx-htmx") {
         "\n\n\
          \x20   /// The same, for a request that said how much of the page it has.\n\
          \x20   #[must_use]\n\
@@ -2142,7 +2064,7 @@ fn pages_mod_rs(a: &Answers) -> String {
         ""
     };
     let mut out = String::from(PAGES_MOD_RS_HEAD);
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         // The root layout writes the name, so there is one place it is
         // spelled rather than one per page.
         out.push_str(&format!(
@@ -2160,7 +2082,7 @@ fn pages_mod_rs(a: &Answers) -> String {
 }
 
 fn index_rs(a: &Answers) -> String {
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         return String::from(
             r##"//! `/` -- because the file is called `index.rs`.
 
@@ -2211,7 +2133,7 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
 }
 
 fn about_rs(a: &Answers) -> String {
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         return String::from(
             r##"//! `/about` -- one file, one route.
 
@@ -2266,7 +2188,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
 /// every response is a page: the POST is a redirect and no template is
 /// involved.
 fn user_rs(a: &Answers) -> String {
-    if a.has(Pick::Rsx) {
+    if a.has("rsx") {
         return String::from(USER_RSX_RS);
     }
     String::from(USER_RS)
@@ -2343,7 +2265,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 /// parameter of type `Element`, which is what the page below it fills.
 fn layout_rsx(a: &Answers) -> String {
     let mut head = String::new();
-    if a.has(Pick::Tailwind) {
+    if a.has("rsx-tailwind") {
         // `assets::url`, never the path by hand: the published name carries
         // a content hash, so writing it would be writing a name that changes
         // every time the stylesheet does.
@@ -2351,17 +2273,17 @@ fn layout_rsx(a: &Answers) -> String {
             "            <link rel=\"stylesheet\" href={crate::assets::url(\"css/site.css\")}>\n",
         );
     }
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         head.push_str(
             "            <script src={crate::assets::url(\"dpswap.min.js\")} defer></script>\n",
         );
     }
-    let body_class = if a.has(Pick::Tailwind) {
+    let body_class = if a.has("rsx-tailwind") {
         " class=\"min-h-screen bg-white text-slate-900\""
     } else {
         ""
     };
-    let main_open = if a.has(Pick::Htmx) {
+    let main_open = if a.has("rsx-htmx") {
         // The marker dp-swap walks. It wraps exactly this layout's children
         // and nothing else, which is what lets the client find the deepest
         // layer both documents share.
@@ -2375,7 +2297,7 @@ fn layout_rsx(a: &Answers) -> String {
         .replace("@MAIN@", main_open)
         .replace(
             "@PARAMS@",
-            if a.has(Pick::Htmx) {
+            if a.has("rsx-htmx") {
                 "layout: &str, "
             } else {
                 ""
@@ -2444,7 +2366,7 @@ pub fn Link(to: &str, children: Element) -> Element {
 
 /// The layout one directory down, to show that they stack.
 fn users_layout_rsx(a: &Answers) -> String {
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         return USERS_LAYOUT_RSX
             .replace("@PARAMS@", "layout: &str, ")
             .replace("@MARK@", " dp-layout={layout}");
@@ -2473,7 +2395,7 @@ pub fn Layout(@PARAMS@children: Element) -> Element {
 "#;
 
 fn index_rsx(a: &Answers) -> String {
-    if a.has(Pick::Htmx) {
+    if a.has("rsx-htmx") {
         return INDEX_RSX
             .replace("@USE@", "use crate::pages::views::link::Link;\n\n")
             .replace(
@@ -2654,9 +2576,9 @@ fn plugins_mod_rs(a: &Answers) -> String {
          //! arrow points this way and never back.\n\
          \n",
     );
-    for pick in [Pick::Logging, Pick::Model, Pick::Sessions] {
+    for pick in ["logging", "model", "sessions"] {
         if a.has(pick) {
-            out.push_str(&format!("pub mod {};\n", pick.key()));
+            out.push_str(&format!("pub mod {pick};\n"));
         }
     }
     out
@@ -2668,7 +2590,7 @@ fn plugins_mod_rs(a: &Answers) -> String {
 /// deserialised and derives for it; without, nothing deserialises anything and
 /// the derive is not there to be compiled.
 fn settings_derive(a: &Answers, section: &str) -> (String, String) {
-    if a.has(Pick::Config) {
+    if a.has("config") {
         (
             "#[derive(Debug, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
                 .to_string(),
@@ -2976,10 +2898,10 @@ fn config_toml(a: &Answers) -> String {
         env = brocanth_config::DEFAULT_ENV,
         title = a.title,
     );
-    if a.has(Pick::Logging) {
+    if a.has("logging") {
         out.push_str("\n[logging]\nlevel = \"debug\"\n");
     }
-    if a.has(Pick::Sessions) {
+    if a.has("sessions") {
         out.push_str(&format!(
             "\n[sessions]\ncookie = \"_{ident}_session\"\n\
              # Development only. Anywhere a browser reaches over HTTPS, this is true.\n\
@@ -2987,7 +2909,7 @@ fn config_toml(a: &Answers) -> String {
             ident = a.ident()
         ));
     }
-    if a.has(Pick::Model) {
+    if a.has("model") {
         out.push_str("\n[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n");
     }
     out
@@ -2997,7 +2919,7 @@ fn config_toml(a: &Answers) -> String {
 mod tests {
     use super::*;
 
-    fn answers(picks: &[Pick]) -> Answers {
+    fn answers(picks: &[&'static str]) -> Answers {
         Answers {
             name: "my-blog".into(),
             title: "My Blog".into(),
@@ -3012,21 +2934,17 @@ mod tests {
     /// Not every combination -- there are 256 and most differ in nothing --
     /// but every one that exercises a branch: the empty project, the full
     /// one, the default, and each way the rsx family can be asked for.
-    const SHAPES: [(&str, &[Pick]); 7] = [
-        ("core-only", &[]),
-        (
-            "default",
-            &[Pick::Logging, Pick::Config, Pick::Commands] as &[Pick],
-        ),
-        ("everything", &Pick::ALL as &[Pick]),
-        ("rsx", &[Pick::Rsx] as &[Pick]),
-        ("rsx-tailwind", &[Pick::Rsx, Pick::Tailwind] as &[Pick]),
-        ("rsx-htmx", &[Pick::Rsx, Pick::Htmx] as &[Pick]),
-        (
-            "rsx-tailwind-htmx",
-            &[Pick::Rsx, Pick::Tailwind, Pick::Htmx] as &[Pick],
-        ),
-    ];
+    fn shapes() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            ("core-only", vec![]),
+            ("default", DEFAULT.to_vec()),
+            ("everything", all()),
+            ("rsx", vec!["rsx"]),
+            ("rsx-tailwind", vec!["rsx", "rsx-tailwind"]),
+            ("rsx-htmx", vec!["rsx", "rsx-htmx"]),
+            ("rsx-tailwind-htmx", vec!["rsx", "rsx-tailwind", "rsx-htmx"]),
+        ]
+    }
 
     /// One shape as one string: every file it writes, in order, with its path
     /// above it.
@@ -3034,7 +2952,7 @@ mod tests {
     /// One file per shape rather than a directory per shape, because the
     /// thing a reader does with this is read a diff, and a diff of one file
     /// shows a line moving between two generated files as one change.
-    fn snapshot(picks: &[Pick]) -> String {
+    fn snapshot(picks: &[&'static str]) -> String {
         let mut out = String::new();
         for (path, contents) in scaffold(&answers(picks)) {
             out.push_str(&format!("===== {path} =====\n{contents}"));
@@ -3065,8 +2983,8 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("golden directory");
         }
         let mut wrong = Vec::new();
-        for (name, picks) in SHAPES {
-            let have = snapshot(picks);
+        for (name, picks) in shapes() {
+            let have = snapshot(&picks);
             let file = dir.join(format!("{name}.txt"));
             if bless {
                 std::fs::write(&file, &have).expect("write snapshot");
@@ -3093,7 +3011,7 @@ mod tests {
         );
     }
 
-    fn paths(picks: &[Pick]) -> Vec<String> {
+    fn paths(picks: &[&'static str]) -> Vec<String> {
         scaffold(&answers(picks))
             .into_iter()
             .map(|(p, _)| p)
@@ -3131,7 +3049,7 @@ mod tests {
 
     #[test]
     fn a_plugin_writes_its_file_and_nobody_elses() {
-        let paths = paths(&[Pick::Logging]);
+        let paths = paths(&["logging"]);
         assert!(paths.contains(&"src/plugins/logging.rs".to_string()));
         assert!(!paths.contains(&"src/plugins/sessions.rs".to_string()));
         assert!(!paths.contains(&"src/plugins/model.rs".to_string()));
@@ -3157,15 +3075,15 @@ mod tests {
         );
 
         // Logging alone still links nothing new: its settings are a literal.
-        let logging = cargo_toml(&answers(&[Pick::Logging]));
+        let logging = cargo_toml(&answers(&["logging"]));
         assert!(!declared(&logging, "serde"), "{logging}");
         assert!(!declared(&logging, "brocanth-config"), "{logging}");
 
-        let configured = cargo_toml(&answers(&[Pick::Logging, Pick::Config]));
+        let configured = cargo_toml(&answers(&["logging", "config"]));
         assert!(declared(&configured, "brocanth-config"), "{configured}");
         assert!(declared(&configured, "serde"), "{configured}");
 
-        let with_model = cargo_toml(&answers(&[Pick::Model]));
+        let with_model = cargo_toml(&answers(&["model"]));
         assert!(declared(&with_model, "brocanth-model"), "{with_model}");
     }
 
@@ -3180,7 +3098,7 @@ mod tests {
             core.contains("no sea-orm anywhere in the lock file"),
             "{core}"
         );
-        let everything = cargo_toml(&answers(&Pick::ALL));
+        let everything = cargo_toml(&answers(&all()));
         assert!(
             !everything.contains("Not here, because"),
             "nothing is absent, so nothing is listed: {everything}"
@@ -3191,17 +3109,17 @@ mod tests {
     fn the_config_plugin_is_what_puts_a_deserialiser_in_the_source() {
         // "A feature that is off must mean the code is absent, not that a
         // branch returns early." Two scaffolds, and the difference is a derive.
-        let configured = logging_rs(&answers(&[Pick::Logging, Pick::Config]));
+        let configured = logging_rs(&answers(&["logging", "config"]));
         assert!(configured.contains("serde::Deserialize"), "{configured}");
         assert!(configured.contains("deny_unknown_fields"), "{configured}");
 
-        let literal = logging_rs(&answers(&[Pick::Logging]));
+        let literal = logging_rs(&answers(&["logging"]));
         assert!(!literal.contains("serde"), "{literal}");
     }
 
     #[test]
     fn app_names_every_plugin_and_mounts_what_no_plugin_may() {
-        let main = app_rs(&answers(&[Pick::Logging, Pick::Sessions, Pick::Config]));
+        let main = app_rs(&answers(&["logging", "sessions", "config"]));
         assert!(
             main.contains(".plugin_from_config::<plugins::logging::Logging>(\"logging\")"),
             "{main}"
@@ -3215,7 +3133,7 @@ mod tests {
             main.contains("setup.router().mount(\"/{*rest}\", \"request_log\")"),
             "{main}"
         );
-        let plugin = logging_rs(&answers(&[Pick::Logging]));
+        let plugin = logging_rs(&answers(&["logging"]));
         assert!(
             !plugin.contains(".mount("),
             "a plugin must not mount: {plugin}"
@@ -3237,7 +3155,7 @@ mod tests {
 
     #[test]
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
-        let main = app_rs(&answers(&[Pick::Logging]));
+        let main = app_rs(&answers(&["logging"]));
         assert!(
             main.contains(
                 ".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"
@@ -3252,19 +3170,14 @@ mod tests {
         // `validate_sections` rejects a section nothing claims, so a scaffold
         // that wrote `[sessions]` without the sessions plugin would fail on its
         // own first run. The real crate is asked, not a reimplementation.
-        for picks in [
-            vec![Pick::Config],
-            vec![Pick::Config, Pick::Logging],
-            Pick::ALL.to_vec(),
-        ] {
+        for picks in [vec!["config"], vec!["config", "logging"], all().to_vec()] {
             let a = answers(&picks);
             let toml = config_toml(&a);
             let config = brocanth_config::Config::from_toml(a.name.as_str(), "development", &toml)
                 .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
             // The instances the generated `main` registers: one per plugin,
             // plus `config` itself, which `with_config` adds.
-            let mut claimed: Vec<String> =
-                a.plugins().iter().map(|p| p.key().to_string()).collect();
+            let mut claimed: Vec<String> = a.plugins().iter().map(|p| (*p).to_string()).collect();
             claimed.push("config".to_string());
             config
                 .validate_sections(&claimed)
@@ -3276,7 +3189,7 @@ mod tests {
     fn the_chooser_reports_a_line_that_would_have_produced_the_same_answers() {
         // What `--debug` prints after the chooser closes. Every answer the
         // chooser collects has a flag, and this is that sentence made usable.
-        let mut answers = answers(&[Pick::Logging, Pick::Commands]);
+        let mut answers = answers(&["logging", "commands"]);
         answers.name = "blog".to_string();
         answers.title = "Blog".to_string();
         answers.git = true;
@@ -3322,7 +3235,7 @@ mod tests {
         // absent assumes the framework has it, writes against it, and gets a
         // compile error it then tries to fix by guessing harder. Naming the
         // gap is what turns that into "add the dependency first".
-        let only_logging = scaffold(&answers(&[Pick::Logging]));
+        let only_logging = scaffold(&answers(&["logging"]));
         let brief = &only_logging
             .iter()
             .find(|(p, _)| p == "AGENTS.md")
@@ -3339,7 +3252,7 @@ mod tests {
 
         // And the opposite end: with everything chosen there is nothing to
         // warn about, and the brief must not invent a gap.
-        let everything = scaffold(&answers(&Pick::ALL));
+        let everything = scaffold(&answers(&all()));
         let full = &everything
             .iter()
             .find(|(p, _)| p == "AGENTS.md")
@@ -3356,7 +3269,7 @@ mod tests {
         // There is no list of routes to go out of step, because there is no
         // list: `pages!` reads the directory. So what this checks is that
         // nothing crept back in.
-        let a = answers(&Pick::ALL);
+        let a = answers(&all());
         let table = pages_mod_rs(&a);
         assert!(
             table.contains(r#"brocanth_pages::pages!("src/pages");"#),
@@ -3401,14 +3314,14 @@ mod tests {
 
     #[test]
     fn without_rsx_nothing_names_a_template() {
-        let plain = paths(&[Pick::Logging, Pick::Config, Pick::Commands]);
+        let plain = paths(&["logging", "config", "commands"]);
         assert!(
             !plain.iter().any(|p| p.ends_with(".rsx")),
             "a template nobody asked for: {plain:?}"
         );
         assert!(!plain.iter().any(|p| p.contains("layout")));
 
-        let a = answers(&[Pick::Logging, Pick::Config, Pick::Commands]);
+        let a = answers(&["logging", "config", "commands"]);
         assert!(
             !cargo_toml(&a).lines().any(|l| l.starts_with("rsx = ")),
             "no template engine in the tree"
@@ -3423,7 +3336,7 @@ mod tests {
     fn a_template_sits_beside_the_page_it_renders() {
         // The Crystal page_router's layout: the markup for a route is the
         // file next to it, so there is no mirror tree to keep in step.
-        let files = paths(&[Pick::Rsx]);
+        let files = paths(&["rsx"]);
         for page in ["index", "about"] {
             assert!(files.contains(&format!("src/pages/{page}.rs")), "{files:?}");
             assert!(
@@ -3445,7 +3358,7 @@ mod tests {
 
         // Every page reaches the template beside it, under the one module
         // the macro writes.
-        let a = answers(&[Pick::Rsx]);
+        let a = answers(&["rsx"]);
         for (page, view) in [
             (index_rs(&a), "views::index::Index"),
             (about_rs(&a), "views::about::About"),
@@ -3460,7 +3373,7 @@ mod tests {
         // `load_dir!` emits `pub mod index` for `index.rsx` and `pages!`
         // emits one for `index.rs`. Both land in this file, so one of them
         // has to be nested or the scaffold does not compile.
-        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
+        let pages = pages_mod_rs(&answers(&["rsx"]));
         assert!(
             pages.contains("pub mod views {\n    rsx::load_dir!(\"src/pages\");\n}"),
             "{pages}"
@@ -3479,7 +3392,7 @@ mod tests {
         // property of where the page is. `html!` reads that off the
         // directory tree, so a chain written down anywhere would be a chain
         // that can disagree with the tree.
-        let a = answers(&[Pick::Rsx]);
+        let a = answers(&["rsx"]);
         for template in [INDEX_RSX, ABOUT_RSX, USER_RSX] {
             assert!(
                 !template.contains("<Layout"),
@@ -3512,7 +3425,7 @@ mod tests {
         // The chooser cannot produce an orphan -- it hides a child whose
         // parent is off -- so this is only reachable from the flags, where
         // it is nearly always a forgotten word.
-        let bad = orphans(&[Pick::Tailwind]).expect_err("tailwind alone is not a project");
+        let bad = orphans(&["rsx-tailwind"]).expect_err("tailwind alone is not a project");
         let text = format!("{bad:?}");
         assert!(text.contains("part of"), "{text}");
         assert!(
@@ -3520,41 +3433,17 @@ mod tests {
             "the fix is the message: {text}"
         );
 
-        orphans(&[Pick::Rsx, Pick::Tailwind, Pick::Htmx]).expect("together they are fine");
-        orphans(&Pick::DEFAULT).expect("the default set has no children in it");
+        orphans(&["rsx", "rsx-tailwind", "rsx-htmx"]).expect("together they are fine");
+        orphans(&DEFAULT).expect("the default set has no children in it");
     }
 
     #[test]
     fn every_generated_toml_line_starts_in_the_first_column() {
         // A stray indent in an assembled string is valid TOML and still
         // wrong: the reader cannot tell a continuation from a mistake.
-        for a in [answers(&[Pick::Rsx, Pick::Tailwind]), answers(&[])] {
+        for a in [answers(&["rsx", "rsx-tailwind"]), answers(&[])] {
             for line in mise_toml(&a).lines() {
                 assert_eq!(line, line.trim_start(), "indented: {line:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn a_child_choice_is_named_after_the_choice_it_is_part_of() {
-        // The command line is flat, so the name carries what the chooser
-        // carries with an indent. One name serves both: what the row says
-        // is what the flag takes.
-        for pick in Pick::ALL {
-            let prefixed = pick.key().contains('-');
-            assert_eq!(
-                prefixed,
-                pick.parent().is_some(),
-                "`{}` and its parent disagree",
-                pick.key()
-            );
-            if let Some(parent) = pick.parent() {
-                assert!(
-                    pick.key().starts_with(&format!("{}-", parent.key())),
-                    "`{}` is part of `{}` and should say so",
-                    pick.key(),
-                    parent.key()
-                );
             }
         }
     }
@@ -3564,19 +3453,19 @@ mod tests {
         // `--with rsx` is rsx. The chooser is where tailwind and htmx come
         // on by themselves, because there they are on the screen and can be
         // unticked; a flag that quietly brings two more cannot be read.
-        assert!(!Pick::DEFAULT.contains(&Pick::Tailwind));
-        assert!(!Pick::DEFAULT.contains(&Pick::Htmx));
+        assert!(!DEFAULT.contains(&"rsx-tailwind"));
+        assert!(!DEFAULT.contains(&"rsx-htmx"));
         let args = CreateArgs {
             name: Some("blog".into()),
             title: None,
-            with: vec![Pick::Rsx],
+            with: vec!["rsx".to_string()],
             core_only: false,
             brocanth_path: None,
             git: false,
             no_git: true,
             force: false,
         };
-        assert_eq!(picked(&args), vec![Pick::Rsx]);
+        assert_eq!(picked(&args), vec!["rsx"]);
     }
 
     #[test]
@@ -3584,7 +3473,7 @@ mod tests {
         // The one URL the scaffold writes by hand was the redirect. It is
         // the typed helper now, so the generated project demonstrates the
         // thing rather than only documenting it.
-        for page in [user_rs(&answers(&[])), user_rs(&answers(&[Pick::Rsx]))] {
+        for page in [user_rs(&answers(&[])), user_rs(&answers(&["rsx"]))] {
             assert!(page.contains("routes::users::id::path(id)"), "{page}");
             assert!(!page.contains(r#"format!("/users/{id}")"#), "{page}");
         }
@@ -3596,13 +3485,13 @@ mod tests {
         // so the macro that reads it is in every manifest. It is the one
         // dependency 8 does not ask about, because a proc macro runs at
         // build time and puts no bytes in the binary.
-        let declared = |picks: &[Pick], name: &str| {
+        let declared = |picks: &[&'static str], name: &str| {
             cargo_toml(&answers(picks))
                 .lines()
                 .any(|l| l.starts_with(&format!("{name} = ")))
         };
-        assert!(declared(&[Pick::Rsx], "brocanth-pages"));
-        assert!(declared(&[Pick::Logging, Pick::Config], "brocanth-pages"));
+        assert!(declared(&["rsx"], "brocanth-pages"));
+        assert!(declared(&["logging", "config"], "brocanth-pages"));
         assert!(declared(&[], "brocanth-pages"));
     }
 
@@ -3610,7 +3499,7 @@ mod tests {
     fn a_page_can_opt_out_of_every_layout() {
         // A fragment -- an htmx swap, a partial -- is not a document, and
         // wrapping one in a shell would be wrong rather than merely verbose.
-        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
+        let pages = pages_mod_rs(&answers(&["rsx"]));
         assert!(
             pages.contains("pub fn render(content: impl rsx::Template)"),
             "{pages}"
@@ -3619,7 +3508,7 @@ mod tests {
 
     #[test]
     fn a_handler_reaches_a_template_through_one_function_and_no_other() {
-        let a = answers(&[Pick::Rsx]);
+        let a = answers(&["rsx"]);
         let pages = pages_mod_rs(&a);
         assert!(pages.contains("pub use brocanth_pages::html;"));
         assert!(pages.contains("pub fn render(content: impl rsx::Template)"));
@@ -3651,7 +3540,7 @@ mod tests {
     fn the_bridge_lands_before_the_test_module() {
         // `items_after_test_module` is a clippy error, and the three-part
         // assembly of this file exists for no other reason.
-        let pages = pages_mod_rs(&answers(&[Pick::Rsx]));
+        let pages = pages_mod_rs(&answers(&["rsx"]));
         let html = pages
             .find("pub use brocanth_pages::html;")
             .expect("the bridge is written");
@@ -3663,7 +3552,7 @@ mod tests {
     fn rsx_is_fetched_rather_than_pathed_even_with_a_local_checkout() {
         // `--brocanth-path` points into the brocanth checkout and rsx is not
         // in it, so a path would be wrong in a way cargo reports late.
-        let mut a = answers(&[Pick::Rsx]);
+        let mut a = answers(&["rsx"]);
         a.local = Some("/somewhere/brocanth/crates/brocanth".to_string());
         let manifest = cargo_toml(&a);
         let line = manifest
@@ -3695,7 +3584,7 @@ mod tests {
         let a = Answers {
             name: "scaffold-test".into(),
             title: "Scaffold Test".into(),
-            picks: vec![Pick::Logging, Pick::Config, Pick::Sessions, Pick::Rsx],
+            picks: vec!["logging", "config", "sessions", "rsx"],
             local: Some(brocanth.display().to_string()),
             git: false,
         };
