@@ -619,6 +619,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-scaffold",
  "chrono",
  "sqlx",
  "thiserror 2.0.21",
@@ -632,6 +633,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "brocanth",
+ "brocanth-cache",
  "brocanth-config",
  "brocanth-scaffold",
  "cargo_metadata",

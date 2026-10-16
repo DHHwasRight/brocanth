@@ -15,6 +15,7 @@ default-run = "my-blog"
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -119,6 +120,8 @@ pub fn build() -> Result<App, String> {
         .plugin_from_config::<plugins::sessions::Sessions>("sessions")
         .map_err(|e| e.to_string())?
         .plugin_from_config::<plugins::model::Model>("model")
+        .map_err(|e| e.to_string())?
+        .plugin_from_config::<plugins::cache::Cache>("cache")
         .map_err(|e| e.to_string())?
         .setup(|setup| {
             // A plugin *offers* middleware and cannot mount it: a
@@ -958,6 +961,7 @@ pub fn Link(to: &str, children: Element) -> Element {
 //! there makes it run. The core depends on none of them, and the dependency
 //! arrow points this way and never back.
 
+pub mod cache;
 pub mod logging;
 pub mod model;
 pub mod sessions;
@@ -986,6 +990,9 @@ secure = false
 
 [model]
 url = "sqlite://db/development.sqlite?mode=rwc"
+
+[cache]
+url = "postgres://localhost/development"
 ===== brocanth.toml =====
 [project]
 name = "my-blog"
@@ -1020,6 +1027,119 @@ pub struct Serve {
 impl Command for Serve {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
         crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+===== src/plugins/cache.rs =====
+//! The cache, as this application registers it.
+//!
+//! The cache is a table, and the table is `UNLOGGED`: Postgres writes no
+//! write-ahead log for it, ships it to no replica, and truncates it on crash
+//! recovery. For any other table that is a catastrophe. For a cache it is the
+//! only state you can reason about, and it is what makes a cache in a
+//! relational database defensible at all. A deployment that already runs
+//! Postgres therefore gets a cache without running Redis.
+//!
+//! `brocanth-cache` is in `Cargo.toml` because this file is here, and through
+//! no other route. Delete the registration in `src/app.rs` and delete this
+//! file, and the application caches nothing and links nothing to do it with.
+//!
+//! The crate also ships `CachePlugin`, and this is not that. `CachePlugin` is
+//! handed a cache that is already open, because a pool is made asynchronously
+//! and `Plugin::new` is not async. An application whose cache is one URL wants
+//! the shorter road, so this plugin takes the URL, opens the pool at startup,
+//! and publishes the same `CacheHandle`. Hand-built caches -- a shared pool, a
+//! second namespace policy, a different backend -- are what `CachePlugin` is
+//! for, and swapping to it is a change in this file alone.
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth_cache::{CacheHandle, PgCache};
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[cache]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The Postgres URL the cache lives in. Postgres and nothing else, on
+    /// purpose: a cache for a SQLite deployment is a separate crate behind the
+    /// same `Cache` trait.
+    pub url: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            url: "postgres://localhost/development".to_string(),
+        }
+    }
+}
+
+pub struct Cache {
+    url: String,
+    /// Open at `before_start` and not before, so the field is an `Option` for
+    /// exactly the length of the build.
+    handle: Option<CacheHandle>,
+}
+
+impl Plugin for Cache {
+    type Config = Settings;
+    type Provides = ProvidesContext<CacheHandle>;
+    const NAME: &'static str = "cache";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            url: config.url,
+            handle: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.url.is_empty() {
+            return Err(PluginError::new(
+                "[cache] url is required; there is no default cache",
+            ));
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The lifecycle hooks are synchronous and opening a pool is not. This
+        // is the manoeuvre `CachePlugin` makes, for the same reason: a server
+        // process has a runtime, `block_in_place` is wrong on a current-thread
+        // one, so take the handle and block the builder on a scoped thread.
+        // This is startup, where blocking is what everybody expects.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            PluginError::new(format!(
+                "[cache] needs a Tokio runtime at startup to open its pool ({e})"
+            ))
+        })?;
+        let url = self.url.clone();
+        let cache = std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(async move { PgCache::connect(&url).await }))
+                .join()
+                .map_err(|_| PluginError::new("the cache connection thread panicked"))?
+                .map_err(|e| PluginError::new(format!("[cache] connecting: {e}")))
+        })?;
+        // The table is not created here. `brocanth-cache` can create it, and
+        // it is off there for the reason it is absent here: the generator
+        // proposes and the developer commits. `PgCache::schema_sql` hands out
+        // the statements for a migration you can read.
+        self.handle = Some(CacheHandle::new(Arc::new(cache)));
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `before_start` runs before the server is handed the application, so
+        // the handle is here by the time any request builds a context.
+        if let Some(handle) = &self.handle {
+            cx.insert(handle.clone());
+        }
     }
 }
 ===== src/plugins/logging.rs =====
@@ -1307,6 +1427,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `model`  SeaORM, validations, migrations; without it no SQL driver at all
+- `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node

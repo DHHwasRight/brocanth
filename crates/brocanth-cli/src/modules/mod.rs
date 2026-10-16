@@ -56,6 +56,9 @@ pub const ALL: &[&dyn Module] = &[
     &config::Config,
     &sessions::Sessions,
     &model::Model,
+    // From `brocanth-cache` itself, which is the point: a module can live in
+    // the crate it scaffolds, and joining the menu is still one line here.
+    &brocanth_cache::scaffold::Cache,
     &commands::Commands,
     &rsx::Rsx,
     &rsx::Tailwind,

@@ -168,6 +168,13 @@ pub mod sweep;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+/// The `brocanth create` module that writes this crate into a new project.
+///
+/// Behind the `scaffold` feature, which is off: the generator is the CLI's
+/// business and not an application's.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub use cache::{expires_at, Cache, DEFAULT_MAX_VALUE_BYTES};
 pub use clock::{from_millis, to_millis, Clock, ManualClock, SystemClock};
 pub use error::{CacheError, Result};

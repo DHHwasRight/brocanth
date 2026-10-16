@@ -181,9 +181,9 @@ impl Answers {
             // rather than anything the application registers, and rsx is a
             // macro the views call: none of the three is mounted.
             // Named rather than subtracted: a plugin is a thing the
-            // application registers in `build`, and only two of these are.
+            // application registers in `build`, and only some of these are.
             // Adding a choice should not quietly add a plugin.
-            .filter(|p| ["logging", "sessions", "model"].contains(p))
+            .filter(|p| ["logging", "sessions", "model", "cache"].contains(p))
             .collect()
     }
 }
@@ -1197,10 +1197,16 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          //! this application is.\n\
          \n\
          use std::sync::Arc;\n\
-         \n\
-         use brocanth::plugin_app::AppBuilder;\n",
+         \n",
         title = a.title
     ));
+    if any_plugin && !a.has("config") {
+        // `.plugin(Thing::new(..))` calls a trait method, so the trait has to
+        // be named here. With the config plugin there is no such line:
+        // `plugin_from_config` is the builder's own method.
+        out.push_str("use brocanth::plugin_api::Plugin;\n");
+    }
+    out.push_str("use brocanth::plugin_app::AppBuilder;\n");
     out.push_str(if layered {
         "use brocanth::routing::{Dispatch, MiddlewareStack, Next, Router};\n"
     } else {

@@ -47,6 +47,21 @@ sqlx = { version = "0.9", default-features = false, features = [
     "macros",
 ], optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `cache`. It lives beside the crate it writes into a project, and not in the
+# CLI, because what it must stay true to is this crate's own surface:
+# `PgCache::connect`, `CacheHandle`, the lifecycle hook that is synchronous
+# while connecting is not. A copy of that knowledge in the CLI rots the first
+# time a name here changes, and it rots in silence, because nothing compiles
+# the generator against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application that caches wants the cache and nothing
+# else. The one program that wants the generator is the CLI, which asks for
+# `features = ["scaffold"]`. So the code that writes a cache into a new
+# project is never linked into an application that merely has one.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
@@ -66,6 +81,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # that names it fails to compile with a message pointing at the name.
 default = ["postgres"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

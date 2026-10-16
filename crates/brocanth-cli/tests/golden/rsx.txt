@@ -738,7 +738,7 @@ request.
 - `core`  the router, the context, the plugin seams
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `commands`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `commands`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
