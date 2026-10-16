@@ -628,11 +628,14 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // against `src/pages/about.rsx` beside this file. A field the component
     // does not declare is a compile error, not a blank in the output.
     let verb = ctx.verb.to_string();
-    html!(ctx, views::about::About {
-        title: TITLE,
-        verb: &verb,
-        path: &ctx.path,
-    })
+    html!(
+        ctx,
+        views::about::About {
+            title: TITLE,
+            verb: &verb,
+            path: &ctx.path,
+        }
+    )
 }
 ===== src/pages/users/[id].rs =====
 //! `/users/{id}` -- the brackets in the file name are the parameter.

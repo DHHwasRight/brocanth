@@ -155,7 +155,6 @@ pub fn build() -> Result<App, String> {
             .map_err(|e| e.to_string())?;
     }
 
-
     // The per-request context. These lines compile only because the
     // plugins that provide the values were registered in step 2: the
     // installed provider set lives in the application's *type*. Delete a
@@ -691,11 +690,14 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // against `src/pages/about.rsx` beside this file. A field the component
     // does not declare is a compile error, not a blank in the output.
     let verb = ctx.verb.to_string();
-    html!(ctx, views::about::About {
-        title: TITLE,
-        verb: &verb,
-        path: &ctx.path,
-    })
+    html!(
+        ctx,
+        views::about::About {
+            title: TITLE,
+            verb: &verb,
+            path: &ctx.path,
+        }
+    )
 }
 ===== src/pages/users/[id].rs =====
 //! `/users/{id}` -- the brackets in the file name are the parameter.
@@ -959,6 +961,67 @@ pub fn Link(to: &str, children: Element) -> Element {
 pub mod logging;
 pub mod model;
 pub mod sessions;
+===== config/development.toml =====
+# The configuration of this environment.
+#
+# The framework owns `[app]` and `[server]`. Every other section is claimed by
+# the plugin instance registered under that name in src/main.rs, and a section
+# nothing claims stops the build rather than being silently ignored -- a
+# misspelt section must never build clean.
+#
+# Layered, highest precedence first: $MY_BLOG_CONFIG, /etc/my_blog/development.toml,
+# ./my_blog_development.toml, ./config/development.toml. $MY_BLOG_ENV picks the
+# environment; without it, development.
+
+[app]
+name = "My Blog"
+
+[logging]
+level = "debug"
+
+[sessions]
+cookie = "_my_blog_session"
+# Development only. Anywhere a browser reaches over HTTPS, this is true.
+secure = false
+
+[model]
+url = "sqlite://db/development.sqlite?mode=rwc"
+===== brocanth.toml =====
+[project]
+name = "my-blog"
+===== src/commands/mod.rs =====
+//! Every command in this project.
+//!
+//! The `mod` lines are the whole of it. A command registers itself through a
+//! link-time slice, so adding one is a file and a `mod`, and there is no list
+//! to keep in step.
+//!
+//! `serve` arrived with the scaffold and is ordinary code here: rename it,
+//! give it flags, or delete it. The framework does not own this command line.
+
+pub mod serve;
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
 ===== src/plugins/logging.rs =====
 //! Request logging.
 //!
@@ -1033,6 +1096,90 @@ pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
     let response = next.run(ctx);
     eprintln!("{verb} {path} -> {}", response.status);
     response
+}
+===== src/plugins/model.rs =====
+//! The model layer.
+//!
+//! The ORM is recommended and absent. SeaORM is the recommendation, it is not a
+//! dependency of the core and never will be, and it arrives through
+//! `brocanth-model` -- which is in `Cargo.toml` because this file is here and
+//! through no other route. An application that stores nothing pays nothing for
+//! it: not a crate in the lock file, not a section in the config, not a byte.
+//!
+//! The entity modules go under `src/models/`, from `brocanth generate model`.
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth_model::ModelRegistry;
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[model]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
+    pub url: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
+        }
+    }
+}
+
+/// The handle a handler asks the context for.
+pub struct Db {
+    pub url: String,
+}
+
+impl ContextItem for Db {}
+
+pub struct Model {
+    url: String,
+}
+
+impl Plugin for Model {
+    type Config = Settings;
+    type Provides = ProvidesContext<Db>;
+    const NAME: &'static str = "model";
+
+    fn new(config: Settings) -> Self {
+        Self { url: config.url }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.url.is_empty() {
+            return Err(PluginError::new(
+                "[model] url is required; there is no default database",
+            ));
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The pool opens here, at the last hook before the server is handed the
+        // application, and drains on the matching shutdown hook.
+        //
+        // The registry below is what makes the generators and an admin UI
+        // tractable: every entity compiled into this binary can be enumerated,
+        // with its columns, nullability and keys. It is empty until the first
+        // `brocanth generate model`, and the line is here so it is not a
+        // surprise when it fills.
+        let registry = ModelRegistry::new();
+        eprintln!("[model] {} entities registered", registry.names().len());
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Db {
+            url: self.url.clone(),
+        });
+    }
 }
 ===== src/plugins/sessions.rs =====
 //! Cookie sessions, and the one value they put on the context.
@@ -1131,151 +1278,6 @@ impl Plugin for Sessions {
 /// HTTP server; the seam is here and it is already the right shape.
 pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
     next.run(ctx)
-}
-===== src/plugins/model.rs =====
-//! The model layer.
-//!
-//! The ORM is recommended and absent. SeaORM is the recommendation, it is not a
-//! dependency of the core and never will be, and it arrives through
-//! `brocanth-model` -- which is in `Cargo.toml` because this file is here and
-//! through no other route. An application that stores nothing pays nothing for
-//! it: not a crate in the lock file, not a section in the config, not a byte.
-//!
-//! The entity modules go under `src/models/`, from `brocanth generate model`.
-
-use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_model::ModelRegistry;
-
-/// What this plugin is built from.
-///
-/// It derives `Deserialize` because this application reads it from
-/// `[model]` in a TOML file. Drop the config plugin and the derive goes
-/// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Settings {
-    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
-    pub url: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
-        }
-    }
-}
-
-/// The handle a handler asks the context for.
-pub struct Db {
-    pub url: String,
-}
-
-impl ContextItem for Db {}
-
-pub struct Model {
-    url: String,
-}
-
-impl Plugin for Model {
-    type Config = Settings;
-    type Provides = ProvidesContext<Db>;
-    const NAME: &'static str = "model";
-
-    fn new(config: Settings) -> Self {
-        Self { url: config.url }
-    }
-
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.url.is_empty() {
-            return Err(PluginError::new(
-                "[model] url is required; there is no default database",
-            ));
-        }
-        Ok(())
-    }
-
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The pool opens here, at the last hook before the server is handed the
-        // application, and drains on the matching shutdown hook.
-        //
-        // The registry below is what makes the generators and an admin UI
-        // tractable: every entity compiled into this binary can be enumerated,
-        // with its columns, nullability and keys. It is empty until the first
-        // `brocanth generate model`, and the line is here so it is not a
-        // surprise when it fills.
-        let registry = ModelRegistry::new();
-        eprintln!("[model] {} entities registered", registry.names().len());
-        Ok(())
-    }
-
-    fn provide(&self, cx: &mut ContextBuilder) {
-        cx.insert(Db {
-            url: self.url.clone(),
-        });
-    }
-}
-===== config/development.toml =====
-# The configuration of this environment.
-#
-# The framework owns `[app]` and `[server]`. Every other section is claimed by
-# the plugin instance registered under that name in src/main.rs, and a section
-# nothing claims stops the build rather than being silently ignored -- a
-# misspelt section must never build clean.
-#
-# Layered, highest precedence first: $MY_BLOG_CONFIG, /etc/my_blog/development.toml,
-# ./my_blog_development.toml, ./config/development.toml. $MY_BLOG_ENV picks the
-# environment; without it, development.
-
-[app]
-name = "My Blog"
-
-[logging]
-level = "debug"
-
-[sessions]
-cookie = "_my_blog_session"
-# Development only. Anywhere a browser reaches over HTTPS, this is true.
-secure = false
-
-[model]
-url = "sqlite://db/development.sqlite?mode=rwc"
-===== brocanth.toml =====
-[project]
-name = "my-blog"
-===== src/commands/mod.rs =====
-//! Every command in this project.
-//!
-//! The `mod` lines are the whole of it. A command registers itself through a
-//! link-time slice, so adding one is a file and a `mod`, and there is no list
-//! to keep in step.
-//!
-//! `serve` arrived with the scaffold and is ordinary code here: rename it,
-//! give it flags, or delete it. The framework does not own this command line.
-
-pub mod serve;
-===== src/commands/serve.rs =====
-//! `serve` -- the one command the scaffold wrote.
-//!
-//! It is ordinary project code: rename it, give it more flags, or delete it.
-//! The framework does not own this command line.
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Serve the application over HTTP.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Serve {
-    /// Address to bind.
-    #[arg(long, default_value = "127.0.0.1:3000")]
-    pub addr: String,
-}
-
-impl Command for Serve {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
-    }
 }
 ===== AGENTS.md =====
 # Working in My Blog

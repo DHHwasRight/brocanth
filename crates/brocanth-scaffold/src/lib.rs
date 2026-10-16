@@ -290,6 +290,12 @@ impl<'a> Project<'a> {
         self.on.contains(&key)
     }
 
+    /// `my-blog` -> `my_blog`: the crate identifier, and the prefix of every
+    /// environment variable the generated binary reads.
+    pub fn ident(&self) -> String {
+        self.name.replace('-', "_")
+    }
+
     /// Every key asked about that no module declares, for the CLI to report.
     pub fn unknown_keys(&self) -> Vec<String> {
         self.unknown.borrow().clone()
@@ -660,5 +666,45 @@ mod tests {
         };
         let caught = order(&keys, after).expect_err("a and b wait for each other");
         assert_eq!(caught.len(), 2);
+    }
+}
+
+/// Fragments a module writes into the project it is scaffolding.
+///
+/// Not sugar: each one is a place where two modules must agree, and the
+/// agreement belongs in one function rather than in each of them.
+pub mod snippet {
+    use super::Project;
+
+    /// The derive a settings struct carries, and the sentence explaining it.
+    ///
+    /// This is the modularity claim at its sharpest. With the config plugin
+    /// the struct is deserialised and derives for it; without, nothing
+    /// deserialises anything and the derive is not there to be compiled. A
+    /// module that wrote `serde::Deserialize` unconditionally would put a
+    /// parser in the tree of a project that asked for none.
+    ///
+    /// Returns the derive lines, and a sentence for the struct's own doc
+    /// comment that says why they are what they are.
+    pub fn settings_derive(project: &Project, section: &str) -> (String, String) {
+        if project.has("config") {
+            (
+                "#[derive(Debug, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
+                    .to_string(),
+                format!(
+                    "It derives `Deserialize` because this application reads it from\n\
+                     /// `[{section}]` in a TOML file. Drop the config plugin and the derive goes\n\
+                     /// with it: `Plugin::Config` carries no bounds the core imposes."
+                ),
+            )
+        } else {
+            (
+                "#[derive(Debug)]".to_string(),
+                "Nothing deserialises it: `main` builds it from a literal, and the\n\
+                 /// compiler checks that literal. `Plugin::Config` carries no bounds the\n\
+                 /// core imposes, so there is no deserialiser here to link."
+                    .to_string(),
+            )
+        }
     }
 }

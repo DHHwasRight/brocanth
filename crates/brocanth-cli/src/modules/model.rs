@@ -1,6 +1,7 @@
 //! `model` -- SeaORM, validations and migrations.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::snippet::settings_derive;
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The model layer.
 ///
@@ -21,7 +22,109 @@ impl Module for Model {
         )
     }
 
-    fn contribute(&self, _project: &Project, _scaffold: &mut Scaffold) {
-        // Still written by `create.rs`. Moving here next.
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        s.file("src/plugins/model.rs", plugin_rs(project));
+        s.at(Slot::PluginsMod).line("pub mod model;");
+        s.at(Slot::MainBuilder).block(if project.has("config") {
+            // Read from `[model]` in the file the config plugin loaded.
+            "        .plugin_from_config::<plugins::model::Model>(\"model\")\n\
+             \x20       .map_err(|e| e.to_string())?\n"
+        } else {
+            // No file to read, so `main` hands it a literal the compiler
+            // checks, and no deserialiser is linked.
+            "        .plugin(plugins::model::Model::new(plugins::model::Settings::default()))\n"
+        });
+        if project.has("config") {
+            s.at(Slot::ConfigSections).block(
+                "\n[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n".to_string(),
+            );
+        }
     }
+}
+
+pub(crate) fn plugin_rs(project: &Project) -> String {
+    let (derive, note) = settings_derive(project, "model");
+    format!(
+        r##"//! The model layer.
+//!
+//! The ORM is recommended and absent. SeaORM is the recommendation, it is not a
+//! dependency of the core and never will be, and it arrives through
+//! `brocanth-model` -- which is in `Cargo.toml` because this file is here and
+//! through no other route. An application that stores nothing pays nothing for
+//! it: not a crate in the lock file, not a section in the config, not a byte.
+//!
+//! The entity modules go under `src/models/`, from `brocanth generate model`.
+
+use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
+use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
+use brocanth_model::ModelRegistry;
+
+/// What this plugin is built from.
+///
+/// {note}
+{derive}
+pub struct Settings {{
+    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
+    pub url: String,
+}}
+
+impl Default for Settings {{
+    fn default() -> Self {{
+        Self {{
+            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
+        }}
+    }}
+}}
+
+/// The handle a handler asks the context for.
+pub struct Db {{
+    pub url: String,
+}}
+
+impl ContextItem for Db {{}}
+
+pub struct Model {{
+    url: String,
+}}
+
+impl Plugin for Model {{
+    type Config = Settings;
+    type Provides = ProvidesContext<Db>;
+    const NAME: &'static str = "model";
+
+    fn new(config: Settings) -> Self {{
+        Self {{ url: config.url }}
+    }}
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        if self.url.is_empty() {{
+            return Err(PluginError::new(
+                "[model] url is required; there is no default database",
+            ));
+        }}
+        Ok(())
+    }}
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        // The pool opens here, at the last hook before the server is handed the
+        // application, and drains on the matching shutdown hook.
+        //
+        // The registry below is what makes the generators and an admin UI
+        // tractable: every entity compiled into this binary can be enumerated,
+        // with its columns, nullability and keys. It is empty until the first
+        // `brocanth generate model`, and the line is here so it is not a
+        // surprise when it fills.
+        let registry = ModelRegistry::new();
+        eprintln!("[model] {{}} entities registered", registry.names().len());
+        Ok(())
+    }}
+
+    fn provide(&self, cx: &mut ContextBuilder) {{
+        cx.insert(Db {{
+            url: self.url.clone(),
+        }});
+    }}
+}}
+"##
+    )
 }

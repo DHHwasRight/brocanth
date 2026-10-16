@@ -588,6 +588,59 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! arrow points this way and never back.
 
 pub mod logging;
+===== config/development.toml =====
+# The configuration of this environment.
+#
+# The framework owns `[app]` and `[server]`. Every other section is claimed by
+# the plugin instance registered under that name in src/main.rs, and a section
+# nothing claims stops the build rather than being silently ignored -- a
+# misspelt section must never build clean.
+#
+# Layered, highest precedence first: $MY_BLOG_CONFIG, /etc/my_blog/development.toml,
+# ./my_blog_development.toml, ./config/development.toml. $MY_BLOG_ENV picks the
+# environment; without it, development.
+
+[app]
+name = "My Blog"
+
+[logging]
+level = "debug"
+===== brocanth.toml =====
+[project]
+name = "my-blog"
+===== src/commands/mod.rs =====
+//! Every command in this project.
+//!
+//! The `mod` lines are the whole of it. A command registers itself through a
+//! link-time slice, so adding one is a file and a `mod`, and there is no list
+//! to keep in step.
+//!
+//! `serve` arrived with the scaffold and is ordinary code here: rename it,
+//! give it flags, or delete it. The framework does not own this command line.
+
+pub mod serve;
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
 ===== src/plugins/logging.rs =====
 //! Request logging.
 //!
@@ -662,59 +715,6 @@ pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
     let response = next.run(ctx);
     eprintln!("{verb} {path} -> {}", response.status);
     response
-}
-===== config/development.toml =====
-# The configuration of this environment.
-#
-# The framework owns `[app]` and `[server]`. Every other section is claimed by
-# the plugin instance registered under that name in src/main.rs, and a section
-# nothing claims stops the build rather than being silently ignored -- a
-# misspelt section must never build clean.
-#
-# Layered, highest precedence first: $MY_BLOG_CONFIG, /etc/my_blog/development.toml,
-# ./my_blog_development.toml, ./config/development.toml. $MY_BLOG_ENV picks the
-# environment; without it, development.
-
-[app]
-name = "My Blog"
-
-[logging]
-level = "debug"
-===== brocanth.toml =====
-[project]
-name = "my-blog"
-===== src/commands/mod.rs =====
-//! Every command in this project.
-//!
-//! The `mod` lines are the whole of it. A command registers itself through a
-//! link-time slice, so adding one is a file and a `mod`, and there is no list
-//! to keep in step.
-//!
-//! `serve` arrived with the scaffold and is ordinary code here: rename it,
-//! give it flags, or delete it. The framework does not own this command line.
-
-pub mod serve;
-===== src/commands/serve.rs =====
-//! `serve` -- the one command the scaffold wrote.
-//!
-//! It is ordinary project code: rename it, give it more flags, or delete it.
-//! The framework does not own this command line.
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Serve the application over HTTP.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Serve {
-    /// Address to bind.
-    #[arg(long, default_value = "127.0.0.1:3000")]
-    pub addr: String,
-}
-
-impl Command for Serve {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
-    }
 }
 ===== AGENTS.md =====
 # Working in My Blog
