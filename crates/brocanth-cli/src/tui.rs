@@ -45,6 +45,14 @@ pub struct Choice {
     pub label: String,
     pub blurb: String,
     pub on: bool,
+    /// The choice this one is part of, by index, for a choice that is part
+    /// of one.
+    ///
+    /// A child is shown, reachable and counted only while its parent is
+    /// ticked. Hidden rather than disabled: a row you can land on but not
+    /// change is a row that looks broken, and the reason it will not change
+    /// is off screen.
+    pub under: Option<usize>,
 }
 
 /// Everything `create` needs, and nothing it does not.
@@ -58,9 +66,29 @@ pub struct Draft {
     pub git: bool,
 }
 
+impl Draft {
+    /// Whether a choice is on the screen at all.
+    ///
+    /// One level deep, deliberately: nothing here nests twice, and a
+    /// recursive answer would be code written for a case that does not
+    /// exist.
+    pub fn shown(&self, index: usize) -> bool {
+        match self.choices[index].under {
+            Some(parent) => self.choices[parent].on,
+            None => true,
+        }
+    }
+
+    /// Whether a choice is part of the answer. A ticked child of an unticked
+    /// parent is not: it is a tick nobody can see.
+    pub fn taken(&self, index: usize) -> bool {
+        self.choices[index].on && self.shown(index)
+    }
+}
+
 /// Where the cursor is. Derived from the draft each frame rather than stored,
 /// so the list length and the row set can never disagree.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
     Name,
     Title,
@@ -82,7 +110,11 @@ struct Model {
 impl Model {
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Name, Row::Title];
-        rows.extend((0..self.draft.choices.len()).map(Row::Choice));
+        rows.extend(
+            (0..self.draft.choices.len())
+                .filter(|i| self.draft.shown(*i))
+                .map(Row::Choice),
+        );
         rows.push(Row::Git);
         rows
     }
@@ -243,12 +275,25 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
         "  nothing unticked is compiled, linked, or in the lock file",
         dim(),
     )));
+    // The group a row belongs to, so a heading is written once, above the
+    // first row of each group, and not again.
+    let mut group: Option<usize> = None;
     for (i, choice) in model.draft.choices.iter().enumerate() {
-        lines.push(tick(
+        if !model.draft.shown(i) {
+            continue;
+        }
+        if choice.under != group {
+            if let Some(parent) = choice.under {
+                lines.push(subsection(&model.draft.choices[parent].label));
+            }
+            group = choice.under;
+        }
+        lines.push(nested(
             &choice.label,
             Some(&choice.blurb),
             choice.on,
             here == Row::Choice(i),
+            usize::from(choice.under.is_some()),
         ));
     }
 
@@ -297,11 +342,38 @@ fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
     Line::from(spans)
 }
 
+/// The heading over the rows that are part of the row above them.
+///
+/// Indentation alone is weak once a list is long: two steps of two columns
+/// read as a wrapped line. The heading names the group in the same dim voice
+/// as the heading over the whole list, and sits in the tick-box column, so
+/// the group has a top edge as well as an indent.
+fn subsection(parent: &str) -> Line<'static> {
+    Line::from(Span::styled(format!("      inside {parent}"), dim()))
+}
+
 /// A tick-box. `[x]` and `[ ]` rather than colour alone, so the state survives
 /// a monochrome terminal and colour-blindness both.
 fn tick<'a>(label: &'a str, blurb: Option<&'a str>, on: bool, active: bool) -> Line<'a> {
+    nested(label, blurb, on, active, 0)
+}
+
+/// The same row, `depth` levels in.
+///
+/// The cursor marker stays in the leftmost column at every depth, so the
+/// eye follows one line down the screen rather than stepping in and out,
+/// and the label's own padding shrinks so the blurbs still align.
+fn nested<'a>(
+    label: &'a str,
+    blurb: Option<&'a str>,
+    on: bool,
+    active: bool,
+    depth: usize,
+) -> Line<'a> {
+    let pad = 15usize.saturating_sub(2 * depth);
     let mut spans = vec![
         Span::raw(if active { "  > " } else { "    " }),
+        Span::raw("  ".repeat(depth)),
         Span::styled(
             if on { "[x] " } else { "[ ] " },
             if on {
@@ -311,7 +383,7 @@ fn tick<'a>(label: &'a str, blurb: Option<&'a str>, on: bool, active: bool) -> L
             },
         ),
         Span::styled(
-            format!("{label:<10}"),
+            format!("{label:<pad$}"),
             if active {
                 Style::new().fg(ACCENT)
             } else {
@@ -329,6 +401,63 @@ fn tick<'a>(label: &'a str, blurb: Option<&'a str>, on: bool, active: bool) -> L
 mod tests {
     use super::*;
 
+    /// A parent with one child, for the nesting tests.
+    fn nested_model() -> Model {
+        let mut m = model();
+        m.draft.choices[1].under = Some(0);
+        m.draft.choices[1].on = true;
+        m
+    }
+
+    #[test]
+    fn a_child_is_off_the_screen_while_its_parent_is_unticked() {
+        let mut m = nested_model();
+        assert_eq!(m.rows().len(), 5, "name, title, parent, child, git");
+        m.draft.choices[0].on = false;
+        assert!(
+            !m.rows().contains(&Row::Choice(1)),
+            "a row nobody can change must not be a row"
+        );
+    }
+
+    #[test]
+    fn a_tick_nobody_can_see_is_not_part_of_the_answer() {
+        // The child stays ticked so that re-ticking the parent restores what
+        // was there, but while the parent is off it is not an answer.
+        let mut m = nested_model();
+        assert!(m.draft.taken(1));
+        m.draft.choices[0].on = false;
+        assert!(m.draft.choices[1].on, "the tick is remembered");
+        assert!(!m.draft.taken(1), "but it is not taken");
+    }
+
+    #[test]
+    fn the_cursor_cannot_land_on_a_hidden_child() {
+        let mut m = nested_model();
+        m.draft.choices[0].on = false;
+        for _ in 0..12 {
+            m.step(1);
+            assert_ne!(m.here(), Row::Choice(1));
+        }
+    }
+
+    #[test]
+    fn a_group_has_one_heading_and_it_leaves_with_the_group() {
+        let mut m = nested_model();
+        let screen = render(&m, None, 72, 18);
+        assert_eq!(
+            screen.matches("inside config").count(),
+            1,
+            "one heading over the group, not one per row: {screen}"
+        );
+        m.draft.choices[0].on = false;
+        let screen = render(&m, None, 72, 18);
+        assert!(
+            !screen.contains("inside config"),
+            "a heading over no rows: {screen}"
+        );
+    }
+
     fn model() -> Model {
         Model {
             draft: Draft {
@@ -339,11 +468,13 @@ mod tests {
                         label: "config".into(),
                         blurb: String::new(),
                         on: true,
+                        under: None,
                     },
                     Choice {
                         label: "model".into(),
                         blurb: String::new(),
                         on: false,
+                        under: None,
                     },
                 ],
                 git: false,

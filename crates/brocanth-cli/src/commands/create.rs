@@ -105,16 +105,24 @@ pub enum Pick {
     Commands,
     /// HTML from `.rsx` templates, compiled into the binary by a macro
     Rsx,
+    /// Tailwind, built from the classes in your `.rsx` and `.rs` files
+    #[value(name = "rsx-tailwind")]
+    Tailwind,
+    /// Partial navigation: dp-swap, a `<Link>`, and layouts the server can skip
+    #[value(name = "rsx-htmx")]
+    Htmx,
 }
 
 impl Pick {
-    const ALL: [Pick; 6] = [
+    const ALL: [Pick; 8] = [
         Pick::Logging,
         Pick::Config,
         Pick::Sessions,
         Pick::Model,
         Pick::Commands,
         Pick::Rsx,
+        Pick::Tailwind,
+        Pick::Htmx,
     ];
     /// What a non-interactive run gets when no flag chose. Stated rather than
     /// guessed at: the command prints the flag that overrides it.
@@ -128,7 +136,46 @@ impl Pick {
             Pick::Model => "model",
             Pick::Commands => "commands",
             Pick::Rsx => "rsx",
+            // Prefixed, because the command line is flat. `--with rsx-htmx`
+            // says what it is part of where no indentation can.
+            Pick::Tailwind => "rsx-tailwind",
+            Pick::Htmx => "rsx-htmx",
         }
+    }
+
+    /// The choice this one is part of, for the choices that are part of one.
+    ///
+    /// Tailwind reads class names out of `.rsx` files and `<Link>` is an
+    /// `.rsx` component, so neither has anything to do without templates.
+    /// The chooser nests them under their parent and the flags refuse them
+    /// without it.
+    fn parent(self) -> Option<Pick> {
+        match self {
+            Pick::Tailwind | Pick::Htmx => Some(Pick::Rsx),
+            _ => None,
+        }
+    }
+
+    /// Why, for the diagnostic. One sentence, and the real reason.
+    fn needs_parent_because(self) -> &'static str {
+        match self {
+            Pick::Tailwind => "the CSS build reads class names out of `.rsx` files",
+            Pick::Htmx => {
+                "`<Link>` is an `.rsx` component, and the partial it \
+                           asks for is a layout the templates define"
+            }
+            _ => "",
+        }
+    }
+
+    /// Whether the chooser starts with this one ticked once its parent is.
+    ///
+    /// On, both of them: a person in a terminal building an HTML application
+    /// nearly always wants styling and nearly always wants a click not to
+    /// reload the page. A script that wanted them would have said so, which
+    /// is why the flags do not default them on.
+    fn on_with_parent(self) -> bool {
+        self.parent().is_some()
     }
 
     /// The one line a reader needs to decide. The right-hand half is what the
@@ -143,6 +190,10 @@ impl Pick {
             Pick::Rsx => {
                 "`.rsx` templates compiled into the binary; without it a page builds a String"
             }
+            Pick::Tailwind => "a CSS build over the class names in your templates; needs node",
+            Pick::Htmx => {
+                "a click swaps what changed; the server renders from the shared layout down"
+            }
         }
     }
 
@@ -153,6 +204,9 @@ impl Pick {
             Pick::Model => Some("brocanth-model"),
             Pick::Commands => Some("brocanth-command"),
             Pick::Rsx => Some("rsx"),
+            // Neither is a crate. Tailwind is node's, and dp-swap is a script
+            // this project serves to the browser.
+            Pick::Tailwind | Pick::Htmx => None,
             Pick::Logging | Pick::Sessions => None,
         }
     }
@@ -160,7 +214,7 @@ impl Pick {
 
 impl std::fmt::Display for Pick {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:<9}-- {}", self.key(), self.gist())
+        write!(f, "{:<12} -- {}", self.key(), self.gist())
     }
 }
 
@@ -217,7 +271,10 @@ impl Answers {
             // Config is not a plugin instance, Commands is a command line
             // rather than anything the application registers, and rsx is a
             // macro the views call: none of the three is mounted.
-            .filter(|p| *p != Pick::Config && *p != Pick::Commands && *p != Pick::Rsx)
+            // Named rather than subtracted: a plugin is a thing the
+            // application registers in `build`, and only two of these are.
+            // Adding a choice should not quietly add a plugin.
+            .filter(|p| matches!(p, Pick::Logging | Pick::Sessions | Pick::Model))
             .collect()
     }
 
@@ -339,6 +396,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
 
 fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
     let local = local_checkout(args)?;
+    orphans(&picked(args))?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -396,6 +454,43 @@ fn picked(args: &CreateArgs) -> Vec<Pick> {
     }
 }
 
+/// A choice that is part of another choice, named without it.
+///
+/// The chooser cannot produce this -- it hides a child whose parent is off --
+/// so it is only reachable from the flags, where it is nearly always a
+/// forgotten word rather than an intention.
+fn orphans(picks: &[Pick]) -> Result<(), Vec<Diagnostic>> {
+    let bad: Vec<Diagnostic> = picks
+        .iter()
+        .filter_map(|pick| {
+            let parent = pick.parent()?;
+            if picks.contains(&parent) {
+                return None;
+            }
+            let with: Vec<&str> = picks
+                .iter()
+                .map(|p| p.key())
+                .chain(std::iter::once(parent.key()))
+                .collect();
+            let mut with = with;
+            with.sort_unstable();
+            Some(
+                Diagnostic::error(
+                    pick.key(),
+                    format!("`{}` is part of `{}`", pick.key(), parent.key()),
+                )
+                .note(pick.needs_parent_because())
+                .help(format!("--with {}", with.join(","))),
+            )
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
+}
+
 /// The full-screen route. Returns the same [`Answers`] the flags produce.
 fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
     let preset = picked(args);
@@ -407,7 +502,16 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
             .map(|pick| Choice {
                 label: pick.key().to_string(),
                 blurb: pick.gist().to_string(),
-                on: preset.contains(pick),
+                // A child starts ticked once its parent is, which is the
+                // asymmetry with the flags: somebody in a terminal building
+                // an HTML application wants styling and wants a click not to
+                // reload the page, and can see both and untick them. A
+                // script gets neither unless it asked, because a flag that
+                // quietly brings two more is a flag you cannot read.
+                on: preset.contains(pick) || pick.on_with_parent(),
+                under: pick
+                    .parent()
+                    .and_then(|parent| Pick::ALL.iter().position(|p| *p == parent)),
             })
             .collect(),
         // The chooser offers a repository and the flag route does not, and the
@@ -433,11 +537,14 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
         )]);
     };
 
+    // `taken`, not `on`: a ticked child of an unticked parent is a tick
+    // nobody can see, and the chooser must not return an answer the screen
+    // did not show.
     let picks = Pick::ALL
         .iter()
-        .zip(&draft.choices)
-        .filter(|(_, choice)| choice.on)
-        .map(|(pick, _)| *pick)
+        .enumerate()
+        .filter(|(index, _)| draft.taken(*index))
+        .map(|(_, pick)| *pick)
         .collect();
 
     let answers = Answers {
@@ -576,7 +683,17 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 fn scaffold(a: &Answers) -> Vec<(String, String)> {
     let mut files = vec![
         ("Cargo.toml".to_string(), cargo_toml(a)),
-        (".gitignore".to_string(), "/target\n".to_string()),
+        (
+            ".gitignore".to_string(),
+            if a.has(Pick::Tailwind) {
+                // `assets/css/site.css` is **not** ignored. It is embedded
+                // at compile time, so a checkout without it does not build,
+                // and "run npm first" is a worse answer than 3 kB in git.
+                "/target\n/node_modules\n".to_string()
+            } else {
+                "/target\n".to_string()
+            },
+        ),
         // Without a pin, a generated application picks whatever rustc is on
         // PATH, and brocanth's proc-macro artifacts are not compatible across
         // patch releases: the failure is E0514, which names a crate the user
@@ -592,7 +709,7 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
             "mise.toml".to_string(),
             // Raw, because the `\n\` form this file used here kept the source's
             // own indentation and wrote it into the TOML.
-            MISE_TOML.to_string(),
+            mise_toml(a),
         ),
         (
             "src/main.rs".to_string(),
@@ -615,14 +732,37 @@ fn scaffold(a: &Answers) -> Vec<(String, String)> {
         // page_router does the same with `layout.cr`, and the reason carries
         // over: a route is a file, so the markup for a route is the file
         // next to it rather than a mirror tree to keep in step.
-        files.push(("src/pages/layout.rsx".to_string(), LAYOUT_RSX.to_string()));
-        files.push(("src/pages/index.rsx".to_string(), INDEX_RSX.to_string()));
+        files.push(("src/pages/layout.rsx".to_string(), layout_rsx(a)));
+        files.push(("src/pages/index.rsx".to_string(), index_rsx(a)));
         files.push(("src/pages/about.rsx".to_string(), ABOUT_RSX.to_string()));
         files.push((
             "src/pages/users/layout.rsx".to_string(),
-            USERS_LAYOUT_RSX.to_string(),
+            users_layout_rsx(a),
         ));
         files.push(("src/pages/users/[id].rsx".to_string(), USER_RSX.to_string()));
+    }
+    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        files.push(("src/assets.rs".to_string(), ASSETS_RS.to_string()));
+    }
+    if a.has(Pick::Tailwind) {
+        files.push((
+            "assets/css/_tailwind.css".to_string(),
+            TAILWIND_CSS.to_string(),
+        ));
+        // So the first `cargo build` works before anyone has run node.
+        files.push((
+            "assets/css/site.css".to_string(),
+            SITE_CSS_PLACEHOLDER.to_string(),
+        ));
+        files.push(("scripts/build-css.sh".to_string(), BUILD_CSS_SH.to_string()));
+        files.push(("package.json".to_string(), package_json(a)));
+    }
+    if a.has(Pick::Htmx) {
+        // Vendored into the brocanth binary, written out here. A project
+        // that has to fetch a script to finish is a project that fails on a
+        // train.
+        files.push(("public/dpswap.min.js".to_string(), DPSWAP_JS.to_string()));
+        files.push(("src/pages/link.rsx".to_string(), LINK_RSX.to_string()));
     }
     if !a.plugins().is_empty() {
         files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a)));
@@ -843,13 +983,13 @@ Reach a template from a handler with `html!`, and with nothing else:
 
 ```rust
 pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html!(views::index::Index { title: TITLE })
+    html!(ctx, views::index::Index { title: TITLE })
 }
 ```
 
 It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
 template that bails propagates with `?`. For another status or a header,
-compose with the other return shapes: `Ok((html!(tpl)?, 404))`.
+compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
 
 Adding a page with markup is two files in one directory -- `<name>.rs` and
 `<name>.rsx` -- plus the same two lines in `src/pages/mod.rs` as any other
@@ -925,6 +1065,11 @@ fn cargo_toml(a: &Answers) -> String {
     // layouts when there are any. Compile-time only -- a proc macro puts no
     // bytes in the binary, which is why this one is not a choice.
     deps.push(source_of(a, "brocanth-pages"));
+    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        // The static files, embedded. Also a proc macro, but this one does
+        // put bytes in the binary -- the files themselves.
+        deps.push(source_of(a, "brocanth-assets"));
+    }
     {
         // Every project serves, so every project gets a socket and a reactor.
         deps.push(source_of(a, "brocanth-server"));
@@ -1029,9 +1174,9 @@ fn app_rs(a: &Answers) -> String {
         title = a.title
     ));
     out.push_str(if layered {
-        "use brocanth::routing::{Dispatch, MiddlewareStack, Next, Router, Verb};\n"
+        "use brocanth::routing::{Dispatch, MiddlewareStack, Next, Router};\n"
     } else {
-        "use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};\n"
+        "use brocanth::routing::{Dispatch, MiddlewareStack, Router};\n"
     });
     if a.has(Pick::Config) {
         out.push_str("use brocanth_config::{AppBuilderConfigExt, Loader};\n");
@@ -1209,8 +1354,19 @@ fn app_rs(a: &Answers) -> String {
         \x20       plugins: app.instance_names().map(str::to_string).collect(),\n\
         \x20   })\n\
          }\n\
-         \n\
-         /// Serves until the process is stopped.\n\
+         \n",
+    );
+
+    out.push_str(SENT_FN);
+    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        out.push_str(STATIC_FN);
+    }
+    if a.has(Pick::Htmx) {
+        out.push_str(HOLDING_FN);
+    }
+
+    out.push_str(
+        "/// Serves until the process is stopped.\n\
          ///\n\
          /// Synchronous on the outside because the command that calls it is, and\n\
          /// the runtime is built here rather than wrapped around `main`: a command\n\
@@ -1236,14 +1392,17 @@ fn app_rs(a: &Answers) -> String {
         \x20               // Dispatch is synchronous and runs here, outside the\n\
         \x20               // future, so what crosses the await is a finished\n\
         \x20               // response and nothing borrowed.\n\
-        \x20               let answered = dispatch(&app, request.verb, &request.path);\n\
-        \x20               async move {\n\
-        \x20                   let mut out = brocanth_server::Response::html(answered.status, answered.body);\n\
-        \x20                   for (name, value) in &answered.headers {\n\
-        \x20                       out = out.with_header(name, value);\n\
-        \x20                   }\n\
-        \x20                   out\n\
-        \x20               }\n\
+        \x20               let out = ",
+    );
+    out.push_str(if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        // Static files never reach a page. They are bytes with a content
+        // type, and the page contract carries a `String` body on purpose.
+        "serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));\n"
+    } else {
+        "sent(dispatch(&app, &request));\n"
+    });
+    out.push_str(
+        "\x20               async move { out }\n\
         \x20           })\n\
         \x20           .await\n\
         \x20           .map_err(|e| e.to_string())\n\
@@ -1255,10 +1414,11 @@ fn app_rs(a: &Answers) -> String {
          /// The chain runs only for a route that matched. A 404 has no route and\n\
          /// therefore no context, which is also why the request hooks the plan\n\
          /// reserves for a logger are the core's job and not a layer's.\n\
-         pub fn dispatch(app: &App, verb: Verb, path: &str) -> Response {\n\
+         pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {\n\
+        \x20   let (verb, path) = (request.verb, request.path.as_str());\n\
         \x20   match app.router.dispatch(verb, path) {\n\
         \x20       Dispatch::Found { handler, matched } => {\n\
-        \x20           let mut ctx = Ctx::new(verb, path, matched.params());\n\
+        \x20           let mut ctx = @CTX@;\n\
         \x20           // The one place a failed handler becomes a response --\n\
         \x20           // what Echo calls an HTTPErrorHandler. It sits inside\n\
         \x20           // the chain's terminal, so a layer still sees what the\n\
@@ -1276,7 +1436,17 @@ fn app_rs(a: &Answers) -> String {
         \x20   }\n\
          }\n",
     );
-    out
+    // One of two shapes, and the difference is whether anything can skip a
+    // layout. Without templates there is no `html!`, so counting layers
+    // would be counting for nobody.
+    out.replace(
+        "@CTX@",
+        if a.has(Pick::Htmx) {
+            "Ctx::new(verb, path, matched.params()).holding(holding(request))"
+        } else {
+            "Ctx::new(verb, path, matched.params())"
+        },
+    )
 }
 
 fn type_of(pick: Pick) -> &'static str {
@@ -1288,7 +1458,9 @@ fn type_of(pick: Pick) -> &'static str {
         // Never reached: `plugins()` drops both before this is called.
         // Commands are a binary beside the application rather than a layer
         // inside it, and rsx is a macro the views call.
-        Pick::Commands | Pick::Rsx => unreachable!("{} is not a plugin", pick.key()),
+        Pick::Commands | Pick::Rsx | Pick::Tailwind | Pick::Htmx => {
+            unreachable!("{} is not a plugin", pick.key())
+        }
     }
 }
 
@@ -1305,7 +1477,7 @@ fn main_serve_only_rs(a: &Answers) -> String {
 //! contains is in `src/app.rs`; `brocanth create --with commands` turns this
 //! into a command line with `serve` as one of its commands.
 
-mod app;
+mod app;{assets}
 mod pages;
 {plugins}
 use std::process::ExitCode;
@@ -1321,6 +1493,11 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
+        assets = if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+            "\nmod assets;"
+        } else {
+            ""
+        },
         plugins = if a.plugins().is_empty() {
             ""
         } else {
@@ -1342,7 +1519,7 @@ fn main_with_commands_rs(a: &Answers) -> String {
 //! The wiring lives in `src/app.rs`, so `serve` and anything else that needs
 //! the router read the same thing.
 
-mod app;
+mod app;{assets}
 mod commands;
 mod pages;
 {plugins}
@@ -1351,6 +1528,11 @@ fn main() -> brocanth_command::anyhow::Result<()> {{
 }}
 "##,
         title = a.title,
+        assets = if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+            "\nmod assets;"
+        } else {
+            ""
+        },
         plugins = if a.plugins().is_empty() {
             ""
         } else {
@@ -1386,6 +1568,16 @@ impl Command for Serve {
     }
 }
 "#;
+
+fn mise_toml(a: &Answers) -> String {
+    let mut out = String::from(MISE_TOML);
+    if a.has(Pick::Tailwind) {
+        out.push_str(
+            "\n[tasks.css]\n             description = \"build assets/css/site.css from _tailwind.css\"\n             run = \"bash scripts/build-css.sh\"\n             \n             [tasks.\"css:watch\"]\n             description = \"the same, again on each change\"\n             run = \"bash scripts/build-css.sh --watch\"\n",
+        );
+    }
+    out
+}
 
 const MISE_TOML: &str = r#"[tools]
 # Must match the toolchain brocanth's proc-macro artifacts were built with:
@@ -1596,7 +1788,7 @@ impl IntoResponse for Error {
 pub struct Ctx {
     pub verb: Verb,
     pub path: String,
-    params: Vec<(String, String)>,
+    params: Vec<(String, String)>,@DEPTH_FIELD@
 }
 
 impl Ctx {
@@ -1607,9 +1799,9 @@ impl Ctx {
             params: params
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect(),
+                .collect(),@DEPTH_INIT@
         }
-    }
+    }@DEPTH_IMPL@
 
     /// A route parameter, or `None`.
     ///
@@ -1656,6 +1848,120 @@ where
 
 "##;
 
+/// dp-swap, the client half of partial navigation.
+///
+/// Embedded rather than fetched: `brocanth create` has to finish on a
+/// machine with no network, and a scaffold that sometimes leaves a file out
+/// is worse than a binary a few kilobytes larger. See `vendor/README.md`.
+const DPSWAP_JS: &str = include_str!("../../vendor/dpswap.min.js");
+
+/// How many layout layers the client says it holds, from `DP-Partial`.
+///
+/// Written only with partial navigation; without it every request takes the
+/// first arm of `html!` and this would be a function that always returns
+/// zero.
+const HOLDING_FN: &str = r#"/// How many layout layers the client already has, from `DP-Partial`.
+///
+/// `html!` leaves out that many layouts, counting from the root, so a
+/// navigation inside a section sends the section's contents and not the
+/// document around them. dp-swap sends the number; the header is absent on
+/// a first load, for a crawler, and whenever JavaScript is off, and then
+/// this is zero and the whole document goes out.
+///
+/// `true` is dp-swap's word for "a fragment, I did not count", which is one
+/// layer. Anything that does not parse is zero: a client that cannot say
+/// what it holds gets everything, which is always correct and only slower.
+fn holding(request: &brocanth_server::Request) -> u32 {
+    match request.header("dp-partial") {
+        None => 0,
+        Some("true") => 1,
+        Some(value) => value.parse().unwrap_or(0),
+    }
+}
+
+"#;
+
+/// A page's answer, as the server sends it. Always written: both shapes of
+/// `serve` go through it, so one place turns a `Response` into bytes.
+const SENT_FN: &str = r#"/// Turns a page's answer into the bytes the server writes.
+///
+/// `html` rather than a guess: every page returns markup, and a handler that
+/// wants another type says so with a `content-type` header, which is applied
+/// after and therefore wins.
+fn sent(answered: Response) -> brocanth_server::Response {
+    let mut out = brocanth_server::Response::html(answered.status, answered.body);
+    for (name, value) in &answered.headers {
+        out = out.with_header(name, value);
+    }
+    out
+}
+
+"#;
+
+/// The static-file half of `serve`, written only when there are assets.
+///
+/// Not a page, and not routed. A page returns a `Response` whose body is a
+/// `String`, which a font is not, so a static file answers before the router
+/// is consulted and never touches the page contract.
+const STATIC_FN: &str = r##"/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
+
+"##;
+
+/// `src/assets.rs`: two directories, embedded.
+const ASSETS_RS: &str = r#"//! Every static file this binary serves.
+//!
+//! Two directories, two rules. `assets/` is **fingerprinted** -- `site.css`
+//! is published at `/css/site.<hash>.css`, so it can be cached forever and a
+//! new build invalidates it by having a different name. `public/` is served
+//! **verbatim**, because `robots.txt`, `favicon.ico` and anything linked to
+//! from outside must keep the name they were given.
+//!
+//! Write a reference with `assets::url`, never by hand:
+//!
+//! ```ignore
+//! <link rel="stylesheet" href={assets::url("css/site.css")}>
+//! ```
+//!
+//! A name nothing publishes panics there rather than 404ing in a browser.
+//!
+//! Embedded, like the templates and the route table, so `serve` works from
+//! any directory and nothing can go missing after the build passed. A file
+//! added where there was none needs `touch src/assets.rs`, because nothing
+//! referenced it yet.
+
+brocanth_assets::assets!("assets", "public");
+"#;
+
 /// The templates and the bridge to them, written only when the project asked
 /// for them.
 const PAGES_RSX_RS: &str = r##"/// Every template in this application.
@@ -1701,7 +2007,7 @@ pub use brocanth_pages::html;
 /// It returns the handler's own `Result` rather than a value, so a template
 /// that bails propagates with `?` instead of turning into a blank 200. For
 /// another status or a header, compose with the forms above:
-/// `Ok((html!(tpl)?, 404))`, or `Ok(html!(tpl)?.with_header("x-kind", "page"))`.
+/// `Ok((html!(ctx, tpl)?, 404))`, or `Ok(html!(ctx, tpl)?.with_header("x-kind", "page"))`.
 ///
 /// Deliberately a function and not `impl<T: rsx::Template> IntoResponse for T`.
 /// `()`, `Option<T>` and `Vec<T>` are templates, so a blanket impl overlaps
@@ -1745,6 +2051,42 @@ mod tests {
 /// `src/pages/mod.rs`, in three parts so the rsx bridge can land before the
 /// test module rather than after it, which clippy refuses.
 fn pages_mod_rs(a: &Answers) -> String {
+    // The partial-navigation members exist only where something reads them.
+    // `html!` is the only reader, and it is written only with templates, so
+    // without them these would be a field nobody sets and a method nobody
+    // calls -- two warnings in a brand-new project.
+    let (field, init, methods) = if a.has(Pick::Rsx) {
+        (
+            "\n    /// How many layout layers the client says it already holds.\n\
+             \x20   ///\n\
+             \x20   /// Zero unless a request asked for less, so a first load, a crawler\n\
+             \x20   /// and a reader with JavaScript off all get the whole document.\n\
+             \x20   partial: u32,",
+            "\n            partial: 0,",
+            "\n\n\
+             \x20   /// What `html!` asks, to leave out the layouts the client has.\n\
+             \x20   ///\n\
+             \x20   /// A method rather than a public field so the number has one\n\
+             \x20   /// meaning: layers to skip, counted from the root.\n\
+             \x20   pub fn partial_depth(&self) -> u32 {\n\
+             \x20       self.partial\n\
+             \x20   }",
+        )
+    } else {
+        ("", "", "")
+    };
+    // `holding` is the setter and only partial navigation ever calls it.
+    let setter = if a.has(Pick::Htmx) {
+        "\n\n\
+         \x20   /// The same, for a request that said how much of the page it has.\n\
+         \x20   #[must_use]\n\
+         \x20   pub fn holding(mut self, layers: u32) -> Self {\n\
+         \x20       self.partial = layers;\n\
+         \x20       self\n\
+         \x20   }"
+    } else {
+        ""
+    };
     let mut out = String::from(PAGES_MOD_RS_HEAD);
     if a.has(Pick::Rsx) {
         // The root layout writes the name, so there is one place it is
@@ -1758,7 +2100,9 @@ fn pages_mod_rs(a: &Answers) -> String {
         out.push('\n');
     }
     out.push_str(PAGES_MOD_RS_TESTS);
-    out
+    out.replace("@DEPTH_FIELD@", field)
+        .replace("@DEPTH_INIT@", init)
+        .replace("@DEPTH_IMPL@", &format!("{setter}{methods}"))
 }
 
 fn index_rs(a: &Answers) -> String {
@@ -1782,8 +2126,8 @@ use crate::pages::{html, views, Ctx, Error, IntoResponse, TITLE};
 /// Nothing here names a layout. `html!` reads them off the directory tree:
 /// this file is in `src/pages`, so it is wrapped in `src/pages/layout.rsx`,
 /// and a page under `src/pages/users/` is wrapped in that one too.
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html!(views::index::Index { title: TITLE })
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html!(ctx, views::index::Index { title: TITLE })
 }
 "##,
         );
@@ -1825,7 +2169,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // against `src/pages/about.rsx` beside this file. A field the component
     // does not declare is a compile error, not a blank in the output.
     let verb = ctx.verb.to_string();
-    html!(views::about::About {
+    html!(ctx, views::about::About {
         title: TITLE,
         verb: &verb,
         path: &ctx.path,
@@ -1876,7 +2220,7 @@ fn user_rs(a: &Answers) -> String {
 
 const USER_RSX_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are the parameter.
 
-use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
+use crate::pages::{html, routes, views, Ctx, Error, IntoResponse, Response};
 
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // `?` is why a handler returns `Result`. Anything that fails converts
@@ -1884,7 +2228,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // that bails inside `html`, by the same route.
     let id: u64 = ctx.require("id")?.parse()?;
 
-    html!(views::users::_id_::User { id })
+    html!(ctx, views::users::_id_::User { id })
 }
 
 /// POST to the same path. One file, one route, one handler per verb.
@@ -1895,7 +2239,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let id: u64 = ctx.require("id")?.parse()?;
 
-    Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
+    Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 "##;
 
@@ -1906,7 +2250,7 @@ const USER_RS: &str = r##"//! `/users/{id}` -- the brackets in the file name are
 //! collector could not prove a captured parameter does not outlive the request.
 //! Here the parameters borrow the path, so the question does not arise.
 
-use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::pages::{routes, Ctx, Error, IntoResponse, Response};
 
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     // `?` is why a handler returns `Result`. Anything that fails converts
@@ -1926,10 +2270,14 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 /// the other form; this one stays readable when there are several headers,
 /// because Rust has no variadic generics and a tuple return is therefore
 /// fixed-arity.
+///
+/// The location is built rather than written. `routes` is generated from the
+/// directory alongside the table, so a link to a route that does not exist
+/// does not compile, and neither does one missing a parameter.
 pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let id: u64 = ctx.require("id")?.parse()?;
 
-    Ok(Response::empty(303).with_header("location", format!("/users/{id}")))
+    Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 "##;
 
@@ -1939,6 +2287,48 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 ///
 /// A layout is not a special kind of thing here. It is a component with a
 /// parameter of type `Element`, which is what the page below it fills.
+fn layout_rsx(a: &Answers) -> String {
+    let mut head = String::new();
+    if a.has(Pick::Tailwind) {
+        // `assets::url`, never the path by hand: the published name carries
+        // a content hash, so writing it would be writing a name that changes
+        // every time the stylesheet does.
+        head.push_str(
+            "            <link rel=\"stylesheet\" href={crate::assets::url(\"css/site.css\")}>\n",
+        );
+    }
+    if a.has(Pick::Htmx) {
+        head.push_str(
+            "            <script src={crate::assets::url(\"dpswap.min.js\")} defer></script>\n",
+        );
+    }
+    let body_class = if a.has(Pick::Tailwind) {
+        " class=\"min-h-screen bg-white text-slate-900\""
+    } else {
+        ""
+    };
+    let main_open = if a.has(Pick::Htmx) {
+        // The marker dp-swap walks. It wraps exactly this layout's children
+        // and nothing else, which is what lets the client find the deepest
+        // layer both documents share.
+        "<main dp-layout={layout} id=\"outlet\">"
+    } else {
+        "<main>"
+    };
+    LAYOUT_RSX
+        .replace("@HEAD@\n", &head)
+        .replace("@BODY_CLASS@", body_class)
+        .replace("@MAIN@", main_open)
+        .replace(
+            "@PARAMS@",
+            if a.has(Pick::Htmx) {
+                "layout: &str, "
+            } else {
+                ""
+            },
+        )
+}
+
 const LAYOUT_RSX: &str = r#"// The document every page in this directory, and every directory below it,
 // is rendered inside. A page never names it: which layout wraps a page is a
 // property of where the page is, which is the rule the Crystal page_router
@@ -1952,36 +2342,99 @@ const LAYOUT_RSX: &str = r#"// The document every page in this directory, and ev
 
 use crate::pages::TITLE;
 
-pub fn Layout(children: Element) -> Element {
+pub fn Layout(@PARAMS@children: Element) -> Element {
     <!DOCTYPE html>
     <html lang="en">
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>{TITLE}</title>
+@HEAD@
         </head>
-        <body>
+        <body@BODY_CLASS@>
             <header><a href="/">{TITLE}</a></header>
-            <main>{children}</main>
+            @MAIN@{children}</main>
         </body>
     </html>
 }
 "#;
 
-/// The layout one directory down, to show that they stack.
-const USERS_LAYOUT_RSX: &str = r#"// Wraps every page under src/pages/users/, inside the root layout rather
-// than instead of it. The stacking is one line in src/pages/mod.rs and
-// nothing in any page.
+/// `<Link>`: an anchor that swaps instead of reloading.
+///
+/// An ordinary `<a href>` first, enhanced second. With JavaScript off, with
+/// a crawler, or on the first load of any page, it is a link and the browser
+/// does what it always did. dp-swap turns it into a partial navigation only
+/// where it can.
+///
+/// `to` takes what the route helpers return, so a link to a route that does
+/// not exist does not compile -- `routes::users::id::path(7)`, never a
+/// string. That is Crystal page_router's `UserPage.path(123)`.
+const LINK_RSX: &str = r#"// An anchor that swaps instead of reloading the document.
+//
+// Written as a real <a href> and enhanced afterwards. With JavaScript off,
+// to a crawler, and on the first load of any page it is a link and the
+// browser does what it always did -- which is why `to` is required and why
+// there is no version of this that renders a <span> with a click handler.
+//
+// `to` takes what the route helpers return:
+//
+//     <Link to={routes::users::id::path(7)}>User 7</Link>
+//
+// never a string. A route that does not exist is then a compile error
+// rather than a 404 somebody finds later.
 
-pub fn Layout(children: Element) -> Element {
+pub fn Link(to: &str, children: Element) -> Element {
+    <a href={to} dp-boost>{children}</a>
+}
+"#;
+
+/// The layout one directory down, to show that they stack.
+fn users_layout_rsx(a: &Answers) -> String {
+    if a.has(Pick::Htmx) {
+        return USERS_LAYOUT_RSX
+            .replace("@PARAMS@", "layout: &str, ")
+            .replace("@MARK@", " dp-layout={layout}");
+    }
+    USERS_LAYOUT_RSX
+        .replace("@PARAMS@", "")
+        .replace("@MARK@", "")
+}
+
+const USERS_LAYOUT_RSX: &str = r#"// Wraps every page under src/pages/users/, inside the root layout rather
+// than instead of it. Nothing declares the stacking: `html!` reads it off
+// the directory tree.
+//
+// `layout` is the URL prefix this layout covers, filled in by `html!`, and
+// `dp-layout` is the marker dp-swap walks to find the deepest layer two
+// pages share. It goes on the element wrapping exactly the children and
+// nothing else: anything inside it is replaced along with them, so a
+// sidebar in here would lose its scroll position on every navigation.
+
+pub fn Layout(@PARAMS@children: Element) -> Element {
     <section class="users">
         <nav><a href="/">home</a></nav>
-        {children}
+        <div@MARK@>{children}</div>
     </section>
 }
 "#;
 
-const INDEX_RSX: &str = r#"// The page, and only the page. The document around it is layout.rsx, and
+fn index_rsx(a: &Answers) -> String {
+    if a.has(Pick::Htmx) {
+        return INDEX_RSX
+            .replace("@USE@", "use crate::pages::views::link::Link;\n\n")
+            .replace(
+                "<a href=\"/about\">/about</a>",
+                "<Link to=\"/about\">/about</Link>",
+            )
+            .replace(
+                "<a href=\"/users/7\">/users/7</a>",
+                "<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>",
+            );
+    }
+    INDEX_RSX.replace("@USE@", "")
+}
+
+const INDEX_RSX: &str = r#"@USE@// The page, and only the page. The document around it is layout.rsx, and
 // this file does not know it exists.
 
 pub fn Index(title: &str) -> Element {
@@ -2032,6 +2485,111 @@ pub fn User(id: u64) -> Element {
     </p>
 }
 "#;
+
+// -- tailwind ----------------------------------------------------------------
+
+/// The input of the CSS build. Never published: the leading underscore is
+/// the mark `assets!` reads for a file that is bundled into another.
+const TAILWIND_CSS: &str = r#"/* The input of the CSS build. Never published.
+ *
+ * The leading underscore marks an input: a file that is bundled into another
+ * and that `assets!` must not publish on its own. The build reads this file
+ * and writes assets/css/site.css, which is the one that ships:
+ *
+ *     mise run css          # once, minified
+ *     mise run css:watch    # again on each change
+ */
+
+@import "tailwindcss";
+
+/* Where the class names are.
+ *
+ * Tailwind resolves each path against this stylesheet and keeps its automatic
+ * detection on as well. These are explicit for two reasons: `.rsx` is not an
+ * extension Tailwind knows, and an explicit glob states the contract.
+ */
+
+/* The templates. A .rsx file is Rust with an HTML-shaped body. */
+@source "../../src/pages/**/*.rsx";
+
+/* Plain Rust holds class names too -- a helper that builds a class string,
+ * or a handler choosing one. */
+@source "../../src/**/*.rs";
+"#;
+
+/// Written so the first `cargo build` works before anyone has run node.
+///
+/// Without it `assets::url("css/site.css")` names a file nothing publishes,
+/// and a brand-new project would fail on its first request with a message
+/// about an asset rather than about node. depoth's build script writes
+/// placeholders for the same reason.
+const SITE_CSS_PLACEHOLDER: &str = "/* Written by `brocanth create` so the \
+                                    first build works.\n   `mise run css` \
+                                    replaces it with the real one. */\n";
+
+const BUILD_CSS_SH: &str = r##"#!/usr/bin/env bash
+#
+# Build assets/css/site.css from assets/css/_tailwind.css.
+#
+#   scripts/build-css.sh            once, minified
+#   scripts/build-css.sh --watch    again on each change
+#
+# Runs the Tailwind CLI out of node_modules and does not fall back to `npx`,
+# because npx downloads a package when the local one is absent and that hides
+# the real fault: nobody ran `npm install`.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+INPUT="assets/css/_tailwind.css"
+OUTPUT="assets/css/site.css"
+CLI="node_modules/.bin/tailwindcss"
+
+if [ ! -x "$CLI" ]; then
+  echo "error: the Tailwind CLI is absent at $ROOT/$CLI" >&2
+  echo "       run 'npm install' in $ROOT first." >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--watch" ]; then
+  exec "$CLI" --input "$INPUT" --output "$OUTPUT" --watch
+fi
+
+"$CLI" --input "$INPUT" --output "$OUTPUT" --minify
+
+if [ ! -s "$OUTPUT" ]; then
+  echo "error: the build wrote no CSS to $ROOT/$OUTPUT" >&2
+  exit 1
+fi
+
+# The stylesheet is embedded at compile time, so a new one is a new binary.
+# Touching the module that embeds it is what makes cargo notice.
+touch src/assets.rs
+
+echo "built $OUTPUT ($(wc -c < "$OUTPUT" | tr -d ' ') bytes)"
+"##;
+
+fn package_json(a: &Answers) -> String {
+    format!(
+        r#"{{
+  "name": {name:?},
+  "version": "0.0.0",
+  "private": true,
+  "description": "The CSS build. Nothing in the Rust binary needs node; this does.",
+  "scripts": {{
+    "css": "bash scripts/build-css.sh",
+    "css:watch": "bash scripts/build-css.sh --watch"
+  }},
+  "devDependencies": {{
+    "@tailwindcss/cli": "^4.1.14"
+  }}
+}}
+"#,
+        name = a.name
+    )
+}
 
 fn plugins_mod_rs(a: &Answers) -> String {
     let mut out = String::from(
@@ -2805,7 +3363,79 @@ mod tests {
         assert!(pages.contains("pub use brocanth_pages::html;"), "{pages}");
         for page in [index_rs(&a), about_rs(&a), user_rs(&a)] {
             assert!(page.contains("use crate::pages::{html, "), "{page}");
-            assert!(page.contains("html!("), "{page}");
+            assert!(page.contains("html!(ctx, "), "{page}");
+        }
+    }
+
+    #[test]
+    fn tailwind_and_htmx_are_part_of_rsx_and_the_flags_say_so() {
+        // The chooser cannot produce an orphan -- it hides a child whose
+        // parent is off -- so this is only reachable from the flags, where
+        // it is nearly always a forgotten word.
+        let bad = orphans(&[Pick::Tailwind]).expect_err("tailwind alone is not a project");
+        let text = format!("{bad:?}");
+        assert!(text.contains("part of"), "{text}");
+        assert!(
+            text.contains("--with rsx,rsx-tailwind"),
+            "the fix is the message: {text}"
+        );
+
+        orphans(&[Pick::Rsx, Pick::Tailwind, Pick::Htmx]).expect("together they are fine");
+        orphans(&Pick::DEFAULT).expect("the default set has no children in it");
+    }
+
+    #[test]
+    fn a_child_choice_is_named_after_the_choice_it_is_part_of() {
+        // The command line is flat, so the name carries what the chooser
+        // carries with an indent. One name serves both: what the row says
+        // is what the flag takes.
+        for pick in Pick::ALL {
+            let prefixed = pick.key().contains('-');
+            assert_eq!(
+                prefixed,
+                pick.parent().is_some(),
+                "`{}` and its parent disagree",
+                pick.key()
+            );
+            if let Some(parent) = pick.parent() {
+                assert!(
+                    pick.key().starts_with(&format!("{}-", parent.key())),
+                    "`{}` is part of `{}` and should say so",
+                    pick.key(),
+                    parent.key()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_flags_add_a_choice_and_never_imply_one() {
+        // `--with rsx` is rsx. The chooser is where tailwind and htmx come
+        // on by themselves, because there they are on the screen and can be
+        // unticked; a flag that quietly brings two more cannot be read.
+        assert!(!Pick::DEFAULT.contains(&Pick::Tailwind));
+        assert!(!Pick::DEFAULT.contains(&Pick::Htmx));
+        let args = CreateArgs {
+            name: Some("blog".into()),
+            title: None,
+            with: vec![Pick::Rsx],
+            core_only: false,
+            brocanth_path: None,
+            git: false,
+            no_git: true,
+            force: false,
+        };
+        assert_eq!(picked(&args), vec![Pick::Rsx]);
+    }
+
+    #[test]
+    fn a_link_is_built_rather_than_spelled() {
+        // The one URL the scaffold writes by hand was the redirect. It is
+        // the typed helper now, so the generated project demonstrates the
+        // thing rather than only documenting it.
+        for page in [user_rs(&answers(&[])), user_rs(&answers(&[Pick::Rsx]))] {
+            assert!(page.contains("routes::users::id::path(id)"), "{page}");
+            assert!(!page.contains(r#"format!("/users/{id}")"#), "{page}");
         }
     }
 
@@ -2851,7 +3481,7 @@ mod tests {
         // described.
         let index = index_rs(&a);
         assert!(
-            index.contains("    html!(views::index::Index { title: TITLE })"),
+            index.contains("    html!(ctx, views::index::Index { title: TITLE })"),
             "{index}"
         );
         // One place spells the application's name, and the layout reads it.

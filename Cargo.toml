@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/brocanth",
     "crates/brocanth-admin",
+    "crates/brocanth-assets",
     "crates/brocanth-auth",
     "crates/brocanth-cache",
     "crates/brocanth-cli",
@@ -38,4 +39,5 @@ brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
 brocanth-storage = { path = "crates/brocanth-storage", version = "0.1.0" }
 brocanth-resource = { path = "crates/brocanth-resource", version = "0.1.0" }
 brocanth-realtime = { path = "crates/brocanth-realtime", version = "0.1.0" }
+brocanth-assets = { path = "crates/brocanth-assets", version = "0.1.0" }
 brocanth-pages = { path = "crates/brocanth-pages", version = "0.1.0" }

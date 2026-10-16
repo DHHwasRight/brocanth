@@ -581,6 +581,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-assets"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "brocanth-auth"
 version = "0.1.0"
 dependencies = [
@@ -726,6 +735,7 @@ dependencies = [
 name = "brocanth-pages"
 version = "0.1.0"
 dependencies = [
+ "brocanth",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

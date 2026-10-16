@@ -17,4 +17,9 @@ quote = "1"
 #
 # `full` for item bodies, `parsing` is the default. No `printing`: nothing
 # here turns a `syn` type back into tokens.
+# The route helpers are the core's: `generate_helpers` already emits one
+# `path()` per route, taking exactly that route's parameters. Reimplementing
+# it here would be a second answer to "what is this route's URL", and the two
+# would disagree the first time a segment rule changed.
+brocanth = { path = "../brocanth", version = "0.1.0" }
 syn = { version = "2", default-features = false, features = ["full", "parsing", "proc-macro"] }

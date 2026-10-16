@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use brocanth::routing::{generate_helpers, RouteHelper, Verb};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
@@ -22,7 +23,7 @@ struct Page {
     /// Module names from the pages root down, already made into identifiers.
     module: Vec<String>,
     /// `(handler fn, Verb variant)`, in the order the file declares them.
-    handlers: Vec<(String, &'static str)>,
+    handlers: Vec<(String, &'static str, Verb)>,
 }
 
 /// `handle` is GET and `handle_<verb>` is that verb.
@@ -30,14 +31,14 @@ struct Page {
 /// Not a free-form convention: a name outside this list is an error naming
 /// the list, because the alternative is a handler that compiles, is never
 /// routed, and answers nothing.
-const VERBS: [(&str, &str); 7] = [
-    ("handle", "Get"),
-    ("handle_head", "Head"),
-    ("handle_post", "Post"),
-    ("handle_put", "Put"),
-    ("handle_patch", "Patch"),
-    ("handle_delete", "Delete"),
-    ("handle_options", "Options"),
+const VERBS: [(&str, &str, Verb); 7] = [
+    ("handle", "Get", Verb::Get),
+    ("handle_head", "Head", Verb::Head),
+    ("handle_post", "Post", Verb::Post),
+    ("handle_put", "Put", Verb::Put),
+    ("handle_patch", "Patch", Verb::Patch),
+    ("handle_delete", "Delete", Verb::Delete),
+    ("handle_options", "Options", Verb::Options),
 ];
 
 pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
@@ -73,7 +74,7 @@ pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
         let file = &page.route_file;
         let path = page.module.iter().map(|part| ident(part));
         let path: Vec<_> = path.collect();
-        page.handlers.iter().map(move |(handler, verb)| {
+        page.handlers.iter().map(move |(handler, verb, _)| {
             let handler = ident(handler);
             let verb = ident(verb);
             let path = path.iter();
@@ -93,10 +94,17 @@ pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
         )
     });
 
+    let helpers = match helpers(root, &pages) {
+        Ok(helpers) => helpers,
+        Err(message) => return error(&message),
+    };
+
     quote! {
         #mods
 
         #(#watched)*
+
+        #helpers
 
         /// The table, read off `src/pages` while this crate was compiled.
         ///
@@ -230,7 +238,7 @@ fn page(root: &Path, path: &Path) -> Result<Page, String> {
 /// Parsed rather than scanned for `pub fn handle`: that text appears in a doc
 /// comment in the file the scaffold writes, and a route table that depends on
 /// where a comment is would be a route table nobody could trust.
-fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str)>, String> {
+fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str, Verb)>, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     let file = syn::parse_file(&source)
@@ -248,12 +256,12 @@ fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str)>
         if !name.starts_with("handle") {
             continue;
         }
-        match VERBS.iter().find(|(candidate, _)| *candidate == name) {
-            Some((_, verb)) => found.push((name, *verb)),
+        match VERBS.iter().find(|(candidate, _, _)| *candidate == name) {
+            Some((_, verb, kind)) => found.push((name, *verb, *kind)),
             None => {
                 let known = VERBS
                     .iter()
-                    .map(|(name, _)| *name)
+                    .map(|(name, _, _)| *name)
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(format!(
@@ -266,6 +274,44 @@ fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str)>
         }
     }
     Ok(found)
+}
+
+/// `routes::users::id::path(7)`, one function per route.
+///
+/// The core already knows how to write these -- `generate_helpers` emits a
+/// signature taking exactly that route's parameters, so a wrong count is a
+/// compile error rather than a 500. All this does is hand it what `pages!`
+/// has already read, instead of making a `build.rs` read the tree a second
+/// time.
+///
+/// The Crystal page_router generates `UserPage.path(123)` from the file
+/// location for the same reason: a link is to a route, and a route is a
+/// file, so a link should not be a string anybody can mistype.
+fn helpers(root: &Path, pages: &[Page]) -> Result<TokenStream2, String> {
+    let base = root.to_string_lossy();
+    let mut routes = Vec::with_capacity(pages.len());
+    for page in pages {
+        let file = format!("{base}/{}", page.route_file);
+        let helper = RouteHelper::for_file(&file, &base)
+            .map_err(|e| format!("`{}` is not a route: {e}", page.route_file))?;
+        let verbs: Vec<Verb> = page.handlers.iter().map(|(_, _, verb)| *verb).collect();
+        routes.push(helper.with_verbs(verbs));
+    }
+
+    let source = generate_helpers(&routes).map_err(|e| e.to_string())?;
+    let body: TokenStream2 = source
+        .parse()
+        .map_err(|e| format!("the generated route helpers do not parse: {e}"))?;
+
+    Ok(quote! {
+        /// One function per route: `routes::users::id::path(7)`.
+        ///
+        /// Generated from the directory, so a link to a route that does not
+        /// exist does not compile, and neither does one missing a parameter.
+        pub mod routes {
+            #body
+        }
+    })
 }
 
 fn error(message: &str) -> TokenStream2 {
@@ -391,6 +437,30 @@ mod tests {
     fn an_empty_directory_is_a_server_that_answers_nothing() {
         let out = table(&[("layout.rsx", "pub fn Layout() -> Element { <p/> }")]);
         assert!(out.contains("no pages found"), "{out}");
+    }
+
+    #[test]
+    fn a_link_is_a_function_rather_than_a_string() {
+        // Crystal's page_router generates `UserPage.path(123)` from the file
+        // location. Same promise: a route is a file, so a link is not a
+        // string anybody can mistype.
+        let out = table(&[("index.rs", GET), ("users/[id].rs", GET)]);
+        assert!(out.contains("pub mod routes"), "{out}");
+        // Taking exactly that route's parameters, which is what makes a
+        // wrong count a compile error at the call site.
+        assert!(out.contains("pub fn path (id : impl"), "{out}");
+        assert!(out.contains(r#""/users/""#), "{out}");
+    }
+
+    #[test]
+    fn the_helpers_know_the_verbs_the_page_answers() {
+        let out = table(&[(
+            "users/[id].rs",
+            "pub fn handle(c: &mut Ctx) -> R { }\npub fn handle_post(c: &mut Ctx) -> R { }",
+        )]);
+        assert!(out.contains(r#""GET""#), "{out}");
+        assert!(out.contains(r#""POST""#), "{out}");
+        assert!(!out.contains(r#""DELETE""#), "{out}");
     }
 
     #[test]

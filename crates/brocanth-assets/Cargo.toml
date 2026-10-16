@@ -1,0 +1,17 @@
+[package]
+name = "brocanth-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Static files embedded at compile time: fingerprinted assets and a verbatim public directory."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+# Content hashes. Two digests for two jobs: SHA-256 truncated to eight hex
+# characters names the file, SHA-384 in base64 is what an `integrity`
+# attribute wants. Base64 is sixteen lines below rather than a dependency.
+sha2 = "0.10"
