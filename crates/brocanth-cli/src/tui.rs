@@ -25,9 +25,25 @@
 //! someone pressed Escape is the one unrecoverable mistake available here:
 //! the command's next act is to create a directory.
 //!
-//! The colour vocabulary is [`crate::ui`]'s, spelled in ratatui's types: one
-//! accent (cyan), dim for secondary, and the three states. A second accent
-//! would mean the first had stopped meaning anything.
+//! # The palette
+//!
+//! Richer than the rest of the CLI's, and deliberately. Elsewhere output is
+//! piped, grepped and pasted into issues, so one accent is right. This screen
+//! is only ever reached when both descriptors are a terminal -- `NO_COLOR`
+//! and a pipe both send the command down a rung that never gets here -- so
+//! it is the one place where colour is certain to arrive.
+//!
+//! Three hues, and each one means something:
+//!
+//! | | |
+//! |---|---|
+//! | [`MAGENTA`] | where you are, and what you are changing |
+//! | [`VIOLET`] | the frame: borders, headings, key names |
+//! | [`MINT`] | on |
+//!
+//! Colour is never the only carrier. A tick is `[x]` or `[ ]`, the cursor is
+//! a bar in the margin, and a group has a heading: read this screen in
+//! monochrome and nothing is lost but the pleasure.
 
 use std::io;
 
@@ -35,7 +51,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::ui::title_case;
@@ -238,19 +254,45 @@ fn drive(
 
 // -- the view ---------------------------------------------------------------
 
-const ACCENT: Color = Color::Cyan;
+/// Where you are, and what you are changing.
+pub const MAGENTA: Color = Color::Rgb(0xFF, 0x5F, 0xAF);
+/// The frame around the answers: borders, headings, the names of keys.
+pub const VIOLET: Color = Color::Rgb(0xA7, 0x8B, 0xFA);
+/// On. Green because every tick-box in the world is green.
+pub const MINT: Color = Color::Rgb(0x2B, 0xD9, 0xA0);
+/// Text on a filled badge, dark enough to read on magenta.
+const INK: Color = Color::Rgb(0x1A, 0x10, 0x33);
+/// Secondary text: blurbs, labels, the sentence under a heading.
+const SLATE: Color = Color::Rgb(0x8B, 0x92, 0xA6);
 
+/// The accent, kept under its old name for the rows that act on it.
+const ACCENT: Color = MAGENTA;
+
+/// Secondary text.
+///
+/// A colour rather than the DIM modifier: terminals disagree about how far
+/// dim goes, and a few drop it, so a grey that is actually grey keeps the
+/// three tones apart everywhere.
 fn dim() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
+    Style::new().fg(SLATE)
+}
+
+/// Tertiary: present, and not to be read unless looked for.
+fn faint() -> Style {
+    Style::new().fg(SLATE).add_modifier(Modifier::DIM)
 }
 
 fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             " brocanth create ",
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new()
+                .bg(MAGENTA)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
         ))
-        .border_style(dim());
+        .border_style(Style::new().fg(VIOLET).add_modifier(Modifier::DIM));
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -270,10 +312,13 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     lines.push(field("Name", &model.draft.title, here == Row::Title));
 
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("  what goes in the binary", dim())));
+    lines.push(Line::from(Span::styled(
+        "  what goes in the binary",
+        Style::new().fg(VIOLET).add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(Span::styled(
         "  nothing unticked is compiled, linked, or in the lock file",
-        dim(),
+        faint(),
     )));
     // The group a row belongs to, so a heading is written once, above the
     // first row of each group, and not again.
@@ -307,37 +352,50 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
 
     frame.render_widget(Paragraph::new(lines), body);
 
-    let keys = if matches!(here, Row::Name | Row::Title) {
-        "  \u{2191}\u{2193} move \u{b7} type to edit \u{b7} enter create \u{b7} esc cancel"
+    let second = if matches!(here, Row::Name | Row::Title) {
+        ("type", "to edit")
     } else {
-        "  \u{2191}\u{2193} move \u{b7} space toggle \u{b7} enter create \u{b7} esc cancel"
+        ("space", "toggle")
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(keys, dim()))),
-        footer,
-    );
+    let keys = [
+        ("\u{2191}\u{2193}", "move"),
+        second,
+        ("enter", "create"),
+        ("esc", "cancel"),
+    ];
+    let mut help = vec![Span::raw("  ")];
+    for (i, (key, what)) in keys.iter().enumerate() {
+        if i > 0 {
+            help.push(Span::styled(" \u{b7} ", faint()));
+        }
+        help.push(Span::styled(*key, Style::new().fg(VIOLET)));
+        help.push(Span::styled(format!(" {what}"), dim()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(help)), footer);
 }
 
 /// A labelled text field. The cursor is a reversed cell on the active row, so
 /// it needs no cursor positioning and survives a resize.
 fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
     let mut spans = vec![
-        Span::raw(if active { "  > " } else { "    " }),
-        Span::styled(format!("{label:<9} "), dim()),
+        Span::styled(
+            if active { " \u{258D}  " } else { "    " },
+            Style::new().fg(MAGENTA),
+        ),
+        Span::styled(format!("{label:<9} "), if active { dim() } else { faint() }),
         Span::styled(
             value,
             if active {
-                Style::new().fg(ACCENT)
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             },
         ),
     ];
     if active {
-        spans.push(Span::styled(
-            " ",
-            Style::new().add_modifier(Modifier::REVERSED),
-        ));
+        // The caret. A filled cell rather than a terminal cursor, so it
+        // needs no positioning and survives a resize.
+        spans.push(Span::styled(" ", Style::new().bg(MAGENTA)));
     }
     Line::from(spans)
 }
@@ -349,7 +407,13 @@ fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
 /// as the heading over the whole list, and sits in the tick-box column, so
 /// the group has a top edge as well as an indent.
 fn subsection(parent: &str) -> Line<'static> {
-    Line::from(Span::styled(format!("      inside {parent}"), dim()))
+    Line::from(vec![
+        Span::styled(
+            "      \u{2570} ",
+            Style::new().fg(VIOLET).add_modifier(Modifier::DIM),
+        ),
+        Span::styled(format!("inside {parent}"), Style::new().fg(VIOLET)),
+    ])
 }
 
 /// A tick-box. `[x]` and `[ ]` rather than colour alone, so the state survives
@@ -372,22 +436,27 @@ fn nested<'a>(
 ) -> Line<'a> {
     let pad = 15usize.saturating_sub(2 * depth);
     let mut spans = vec![
-        Span::raw(if active { "  > " } else { "    " }),
+        Span::styled(
+            if active { " \u{258D}  " } else { "    " },
+            Style::new().fg(MAGENTA),
+        ),
         Span::raw("  ".repeat(depth)),
         Span::styled(
             if on { "[x] " } else { "[ ] " },
             if on {
-                Style::new().fg(Color::Green)
+                Style::new().fg(MINT).add_modifier(Modifier::BOLD)
             } else {
-                dim()
+                faint()
             },
         ),
         Span::styled(
             format!("{label:<pad$}"),
-            if active {
-                Style::new().fg(ACCENT)
-            } else {
-                Style::new()
+            match (active, on) {
+                (true, _) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                // Lit when it is in, plain when it is not, so the list can be
+                // read down the left edge without reading the boxes.
+                (false, true) => Style::new(),
+                (false, false) => dim(),
             },
         ),
     ];
@@ -589,8 +658,9 @@ mod tests {
         // Both tick states, spelled rather than coloured.
         assert!(screen.contains("[x] config"), "{screen}");
         assert!(screen.contains("[ ] model"), "{screen}");
-        // The cursor, and the keys that move it.
-        assert!(screen.contains("  > "), "{screen}");
+        // The cursor, and the keys that move it. A bar in the margin, which
+        // is a glyph and not a colour, so it is here in the text.
+        assert!(screen.contains('\u{258D}'), "{screen}");
         assert!(screen.contains("esc cancel"), "{screen}");
     }
 
