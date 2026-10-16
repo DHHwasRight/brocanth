@@ -777,6 +777,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-scaffold"
+version = "0.1.0"
+
+[[package]]
 name = "brocanth-schema"
 version = "0.1.0"
 dependencies = [

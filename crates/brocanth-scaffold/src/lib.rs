@@ -1,0 +1,631 @@
+//! The contract a scaffold module implements.
+//!
+//! `brocanth create` writes a project. What goes in it is a list of choices,
+//! and this crate is how a choice that the CLI does not know about joins that
+//! list. A module is a crate implementing [`Module`]; the CLI depends on it
+//! and names it in one array; the capability is then on the menu.
+//!
+//! ```
+//! use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+//!
+//! pub struct Cache;
+//!
+//! impl Module for Cache {
+//!     fn manifest(&self) -> Manifest {
+//!         Manifest::new("cache", "a cache in Postgres, on an unlogged table")
+//!             .krate(Dep::brocanth("brocanth-cache"))
+//!             .after("config")
+//!     }
+//!
+//!     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+//!         s.file("src/plugins/cache.rs", "// ...\n");
+//!         s.at(Slot::PluginsMod).line("pub mod cache;");
+//!         s.at(Slot::MainBuilder)
+//!             .line(".plugin_from_config::<plugins::cache::Cache>(\"cache\")");
+//!     }
+//! }
+//! ```
+//!
+//! # Why a crate rather than a plugin directory
+//!
+//! A scaffold module writes Rust, and the conditions it writes it under are
+//! Rust conditions: what else was chosen, which database, whether this
+//! project has a command line. A template language that could express that
+//! would be a worse Rust, so the module is Rust, it is compiled into the CLI,
+//! and a module that does not compile is not a module anybody ships.
+//!
+//! # Why the CLI still names every module
+//!
+//! A distributed slice (`inventory`, `linkme`) would let a module register
+//! itself from anywhere in the dependency graph, and this crate deliberately
+//! does not use one. ADR 1 in `PLAN.md` gives the reasons for the framework;
+//! the first one applies here with more force, not less. Linking follows the
+//! *transitive* graph, so one contributed module that happens to depend on
+//! another would put a second entry on the menu that nobody added. The menu
+//! is the receipt for what a generated binary contains. A receipt that grows
+//! a line through a dependency is not a receipt.
+//!
+//! So adding somebody's module is two lines in the CLI -- a dependency and an
+//! entry in the array -- and both are lines a reader can delete.
+//!
+//! # What a module may not do
+//!
+//! It writes files it owns, and it writes into [slots](Slot) the generator
+//! published. It cannot edit a file another module wrote, invent a slot, or
+//! see the filesystem. Two modules claiming one path is an error that names
+//! both, rather than a last-writer-wins that depends on array order.
+
+#![forbid(unsafe_code)]
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// A capability `brocanth create` can offer.
+///
+/// Implementors are usually unit structs: a module holds no state, because it
+/// is asked once per run and everything it needs arrives in [`Project`].
+pub trait Module: Sync {
+    /// What this module is called, what it costs, and what it depends on.
+    fn manifest(&self) -> Manifest;
+
+    /// Write. Called only when this module was chosen, in dependency order.
+    fn contribute(&self, project: &Project, scaffold: &mut Scaffold);
+}
+
+// -- what a module says about itself ----------------------------------------
+
+/// The module's own description: everything the CLI needs before it decides
+/// whether to call [`Module::contribute`].
+#[derive(Debug, Clone)]
+pub struct Manifest {
+    /// The word on the command line and in the chooser. Lower case, and
+    /// hyphenated when it is part of another choice: `rsx-tailwind`.
+    pub key: &'static str,
+    /// One line a reader can decide from. The right-hand half says what the
+    /// binary pays, because that is the question the framework keeps asking.
+    pub gist: &'static str,
+    /// The choice this one is part of, for a choice that is part of one.
+    ///
+    /// The chooser nests it and hides it while the parent is off. The flags
+    /// refuse it without the parent, so a flat command line still says what
+    /// a screen says with an indent.
+    pub parent: Option<&'static str>,
+    /// Whether the chooser starts this ticked once its parent is. Ignored
+    /// without a parent, and never applied to the flags: a flag that quietly
+    /// brings two more is a flag nobody can read.
+    pub on_with_parent: bool,
+    /// Modules whose contributions must land before this one's.
+    ///
+    /// Declared rather than accidental. Two modules writing into one slot
+    /// otherwise depend on the order of the array in the CLI, which is a
+    /// thing nobody should have to know.
+    pub after: Vec<&'static str>,
+    /// What this choice puts in the generated project's dependency tree.
+    pub crates: Vec<Dep>,
+}
+
+impl Manifest {
+    /// A module with a key and a gist, and nothing else yet.
+    pub fn new(key: &'static str, gist: &'static str) -> Self {
+        Self {
+            key,
+            gist,
+            parent: None,
+            on_with_parent: false,
+            after: Vec::new(),
+            crates: Vec::new(),
+        }
+    }
+
+    /// Make this choice part of another, and ticked with it in the chooser.
+    pub fn part_of(mut self, parent: &'static str) -> Self {
+        self.parent = Some(parent);
+        self.on_with_parent = true;
+        self
+    }
+
+    /// Part of another choice, but off until it is asked for.
+    pub fn part_of_but_off(mut self, parent: &'static str) -> Self {
+        self.parent = Some(parent);
+        self.on_with_parent = false;
+        self
+    }
+
+    /// Contribute after another module, wherever both write.
+    pub fn after(mut self, key: &'static str) -> Self {
+        self.after.push(key);
+        self
+    }
+
+    /// A dependency this choice adds to the generated project.
+    pub fn krate(mut self, dep: Dep) -> Self {
+        self.crates.push(dep);
+        self
+    }
+}
+
+/// A dependency of the *generated* project, not of the CLI.
+///
+/// A module says which crate it needs and leaves the source alone, because
+/// where brocanth's own crates come from is one decision the CLI makes for
+/// every module at once -- the published repository normally, and a local
+/// checkout under `--brocanth-path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dep {
+    /// The crate name, as cargo spells it.
+    pub name: &'static str,
+    /// Where it comes from.
+    pub source: Source,
+    /// Features to turn on. Default features stay on; a module that needs
+    /// them off says so with [`Dep::no_default_features`].
+    pub features: Vec<&'static str>,
+    /// Whether `default-features = false` is written.
+    pub defaults: bool,
+}
+
+/// Where a generated project's dependency is fetched from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// One of brocanth's own crates. The CLI decides the source: the
+    /// repository, or the local checkout `--brocanth-path` names.
+    Brocanth,
+    /// A git repository and a branch.
+    Git {
+        /// The clone URL.
+        url: &'static str,
+        /// The branch to track.
+        branch: &'static str,
+    },
+    /// A version requirement from the registry.
+    Version(&'static str),
+}
+
+impl Dep {
+    /// One of brocanth's own crates.
+    pub fn brocanth(name: &'static str) -> Self {
+        Self::of(name, Source::Brocanth)
+    }
+
+    /// A crate from a git repository.
+    pub fn git(name: &'static str, url: &'static str, branch: &'static str) -> Self {
+        Self::of(name, Source::Git { url, branch })
+    }
+
+    /// A crate from the registry.
+    pub fn version(name: &'static str, req: &'static str) -> Self {
+        Self::of(name, Source::Version(req))
+    }
+
+    fn of(name: &'static str, source: Source) -> Self {
+        Self {
+            name,
+            source,
+            features: Vec::new(),
+            defaults: true,
+        }
+    }
+
+    /// Turn a feature on.
+    pub fn feature(mut self, feature: &'static str) -> Self {
+        self.features.push(feature);
+        self
+    }
+
+    /// Write `default-features = false`.
+    pub fn no_default_features(mut self) -> Self {
+        self.defaults = false;
+        self
+    }
+}
+
+// -- what a module is told --------------------------------------------------
+
+/// The answers, as a module may read them. Nothing here is writable: a module
+/// contributes through [`Scaffold`], so what it changed is in one place.
+pub struct Project<'a> {
+    /// The cargo package name, which is also the directory.
+    pub name: &'a str,
+    /// The human name, for prose and page titles.
+    pub title: &'a str,
+    on: &'a [&'a str],
+    known: &'a [&'a str],
+    /// Keys asked about that no module declares. Collected rather than
+    /// answered `false`, because a typo that reads as "the user did not want
+    /// it" is a bug that produces a working project with a piece missing.
+    unknown: std::cell::RefCell<Vec<String>>,
+}
+
+impl<'a> Project<'a> {
+    /// Build the view a module sees. `on` is every chosen key and `known` is
+    /// every key any registered module declares.
+    pub fn new(name: &'a str, title: &'a str, on: &'a [&'a str], known: &'a [&'a str]) -> Self {
+        Self {
+            name,
+            title,
+            on,
+            known,
+            unknown: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Whether another choice is part of this project.
+    pub fn has(&self, key: &str) -> bool {
+        if !self.known.contains(&key) {
+            self.unknown.borrow_mut().push(key.to_string());
+            return false;
+        }
+        self.on.contains(&key)
+    }
+
+    /// Every key asked about that no module declares, for the CLI to report.
+    pub fn unknown_keys(&self) -> Vec<String> {
+        self.unknown.borrow().clone()
+    }
+}
+
+// -- where a module may write -----------------------------------------------
+
+/// A place in a file the generator owns where a module may add lines.
+///
+/// A closed list, deliberately. The generator publishes seams rather than
+/// letting a module edit a file it did not write, which is the same rule the
+/// framework's core follows for plugins. A module that needs a seam this list
+/// does not have needs a change here, in the open, with a name and a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Slot {
+    /// `Cargo.toml`, after the dependencies the choices brought. For a
+    /// `[features]` table or anything else a dependency line cannot say.
+    CargoExtra,
+    /// `src/main.rs`, the `use` lines at the top.
+    MainUses,
+    /// `src/main.rs`, inside the `AppBuilder` chain. One `.method(..)` per
+    /// line, no trailing semicolon.
+    MainBuilder,
+    /// `src/main.rs`, inside `setup`, after the builder is done.
+    MainSetup,
+    /// `src/app.rs`, free items beside the dispatcher.
+    AppItems,
+    /// `src/app.rs`, inside `dispatch`, before the router is consulted. For
+    /// an answer that is not a route, such as a static file.
+    AppBeforeRouter,
+    /// `src/plugins/mod.rs`, one `pub mod` line per plugin.
+    PluginsMod,
+    /// `src/pages/mod.rs`, items the pages share.
+    PagesItems,
+    /// `config/<env>.toml`, one section per module that claims one.
+    ConfigSections,
+    /// `.gitignore`, one path per line.
+    GitIgnore,
+    /// `mise.toml`, one `[tasks.x]` table per task.
+    MiseTasks,
+    /// `package.json`, dependencies for a project that needs node.
+    NodeDependencies,
+    /// `AGENTS.md`, one `##` section per module that has a rule a coding
+    /// agent must follow.
+    AgentsSections,
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Slot::CargoExtra => "Cargo.toml",
+            Slot::MainUses => "src/main.rs (uses)",
+            Slot::MainBuilder => "src/main.rs (builder)",
+            Slot::MainSetup => "src/main.rs (setup)",
+            Slot::AppItems => "src/app.rs (items)",
+            Slot::AppBeforeRouter => "src/app.rs (before the router)",
+            Slot::PluginsMod => "src/plugins/mod.rs",
+            Slot::PagesItems => "src/pages/mod.rs",
+            Slot::ConfigSections => "config/<env>.toml",
+            Slot::GitIgnore => ".gitignore",
+            Slot::MiseTasks => "mise.toml",
+            Slot::NodeDependencies => "package.json",
+            Slot::AgentsSections => "AGENTS.md",
+        };
+        f.write_str(name)
+    }
+}
+
+/// A second thing to compile: another `[[bin]]` in the generated manifest.
+///
+/// A backoffice that is its own binary is the case this exists for. The
+/// module writes the source file as usual and declares the target here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binary {
+    /// The binary's name, and so the command that runs it.
+    pub name: String,
+    /// The source file, relative to the project root.
+    pub path: String,
+}
+
+// -- what a module writes ---------------------------------------------------
+
+/// Everything the modules contributed, and the complaints collected on the
+/// way.
+///
+/// The CLI makes one of these, hands it to each chosen module in order, and
+/// then assembles the files it owns around what came back.
+#[derive(Debug, Default)]
+pub struct Scaffold {
+    files: BTreeMap<String, Owned>,
+    slots: BTreeMap<Slot, Vec<Owned>>,
+    bins: Vec<(String, Binary)>,
+    problems: Vec<String>,
+    writing: String,
+}
+
+#[derive(Debug, Clone)]
+struct Owned {
+    by: String,
+    text: String,
+}
+
+impl Scaffold {
+    /// A new, empty one.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Say which module is writing. The CLI calls this before each module, so
+    /// a complaint can name the module rather than the line.
+    pub fn now_writing(&mut self, key: &str) {
+        self.writing = key.to_string();
+    }
+
+    /// Write a whole file the module owns.
+    ///
+    /// Two modules claiming one path is a problem rather than a last writer:
+    /// which one won would otherwise depend on the order of an array in the
+    /// CLI, and the loser's contribution would vanish in silence.
+    pub fn file(&mut self, path: impl Into<String>, contents: impl Into<String>) {
+        let path = path.into();
+        let mine = Owned {
+            by: self.writing.clone(),
+            text: contents.into(),
+        };
+        if let Some(theirs) = self.files.get(&path) {
+            self.problems.push(format!(
+                "`{}` and `{}` both write {path}",
+                theirs.by, mine.by
+            ));
+            return;
+        }
+        self.files.insert(path, mine);
+    }
+
+    /// Add to a slot. Returns a writer so several lines read as several
+    /// lines:
+    ///
+    /// ```
+    /// # use brocanth_scaffold::{Scaffold, Slot};
+    /// # let mut s = Scaffold::new();
+    /// s.at(Slot::PluginsMod).line("pub mod cache;");
+    /// ```
+    pub fn at(&mut self, slot: Slot) -> Writer<'_> {
+        Writer {
+            scaffold: self,
+            slot,
+        }
+    }
+
+    /// Declare a second compile target.
+    pub fn binary(&mut self, name: impl Into<String>, path: impl Into<String>) {
+        let bin = Binary {
+            name: name.into(),
+            path: path.into(),
+        };
+        if let Some((by, other)) = self.bins.iter().find(|(_, b)| b.name == bin.name) {
+            self.problems.push(format!(
+                "`{}` and `{}` both want a binary called `{}`",
+                by, self.writing, other.name
+            ));
+            return;
+        }
+        self.bins.push((self.writing.clone(), bin));
+    }
+
+    /// Complain about something only this module can know is wrong. The CLI
+    /// prints it and writes nothing.
+    pub fn refuse(&mut self, why: impl Into<String>) {
+        let why = why.into();
+        self.problems.push(if self.writing.is_empty() {
+            why
+        } else {
+            format!("`{}`: {why}", self.writing)
+        });
+    }
+
+    /// Every file the modules wrote, by path.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.files
+            .iter()
+            .map(|(path, owned)| (path.as_str(), owned.text.as_str()))
+    }
+
+    /// What landed in one slot, in the order the modules ran.
+    pub fn slot(&self, slot: Slot) -> impl Iterator<Item = &str> {
+        self.slots
+            .get(&slot)
+            .into_iter()
+            .flatten()
+            .map(|owned| owned.text.as_str())
+    }
+
+    /// Whether anything landed in a slot, without building the strings.
+    pub fn slot_is_empty(&self, slot: Slot) -> bool {
+        self.slots.get(&slot).is_none_or(Vec::is_empty)
+    }
+
+    /// Every second binary a module asked for.
+    pub fn binaries(&self) -> impl Iterator<Item = &Binary> {
+        self.bins.iter().map(|(_, bin)| bin)
+    }
+
+    /// Everything that was wrong, in the order it was found.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+}
+
+/// The handle [`Scaffold::at`] returns. Each call appends one contribution.
+pub struct Writer<'a> {
+    scaffold: &'a mut Scaffold,
+    slot: Slot,
+}
+
+impl Writer<'_> {
+    /// One line. A newline is added, and is not wanted in the argument.
+    pub fn line(&mut self, text: impl AsRef<str>) -> &mut Self {
+        let text = text.as_ref();
+        self.push(format!("{text}\n"))
+    }
+
+    /// Several lines, written as they are. Use this for a block that already
+    /// ends in a newline, such as a TOML section or a Markdown heading.
+    pub fn block(&mut self, text: impl Into<String>) -> &mut Self {
+        self.push(text.into())
+    }
+
+    fn push(&mut self, text: String) -> &mut Self {
+        let by = self.scaffold.writing.clone();
+        self.scaffold
+            .slots
+            .entry(self.slot)
+            .or_default()
+            .push(Owned { by, text });
+        self
+    }
+}
+
+// -- the registry -----------------------------------------------------------
+
+/// Put the chosen modules in the order they must contribute.
+///
+/// A module's `after` list is a promise the CLI keeps, so two modules writing
+/// into one slot do not depend on the order of the array they were listed in.
+/// Within that, the given order is kept, so a reader of the array can predict
+/// the output.
+///
+/// Returns the keys in order, or the keys caught in a cycle.
+pub fn order<'a>(
+    keys: &[&'a str],
+    after: impl Fn(&str) -> Vec<&'static str>,
+) -> Result<Vec<&'a str>, Vec<&'a str>> {
+    let mut done: Vec<&str> = Vec::with_capacity(keys.len());
+    let mut left: Vec<&str> = keys.to_vec();
+    while !left.is_empty() {
+        // One pass. Anything whose predecessors are all placed, or are not
+        // part of this project at all, can go now.
+        let ready: Vec<&str> = left
+            .iter()
+            .copied()
+            .filter(|key| {
+                after(key)
+                    .iter()
+                    .all(|need| !keys.contains(need) || done.contains(need))
+            })
+            .collect();
+        if ready.is_empty() {
+            return Err(left);
+        }
+        left.retain(|key| !ready.contains(key));
+        done.extend(ready);
+    }
+    Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Noop;
+    impl Module for Noop {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("noop", "nothing")
+        }
+        fn contribute(&self, _: &Project, _: &mut Scaffold) {}
+    }
+
+    #[test]
+    fn a_module_is_object_safe_so_the_registry_can_be_an_array() {
+        // The whole design rests on this: one array of trait objects, one
+        // line per module, and a line a reader can delete.
+        let all: &[&dyn Module] = &[&Noop];
+        assert_eq!(all[0].manifest().key, "noop");
+    }
+
+    #[test]
+    fn two_modules_writing_one_path_is_a_problem_naming_both() {
+        let mut s = Scaffold::new();
+        s.now_writing("cache");
+        s.file("src/plugins/thing.rs", "// cache\n");
+        s.now_writing("jobs");
+        s.file("src/plugins/thing.rs", "// jobs\n");
+        assert_eq!(s.problems().len(), 1);
+        let said = &s.problems()[0];
+        assert!(said.contains("cache") && said.contains("jobs"), "{said}");
+        // And the first writer still has its file: a problem stops the run,
+        // so the second write must not have silently replaced anything.
+        assert_eq!(
+            s.files().next(),
+            Some(("src/plugins/thing.rs", "// cache\n"))
+        );
+    }
+
+    #[test]
+    fn a_slot_keeps_the_order_the_modules_ran_in() {
+        let mut s = Scaffold::new();
+        s.now_writing("logging");
+        s.at(Slot::PluginsMod).line("pub mod logging;");
+        s.now_writing("sessions");
+        s.at(Slot::PluginsMod).line("pub mod sessions;");
+        let lines: Vec<&str> = s.slot(Slot::PluginsMod).collect();
+        assert_eq!(lines, ["pub mod logging;\n", "pub mod sessions;\n"]);
+    }
+
+    #[test]
+    fn asking_about_a_key_nobody_declares_is_reported_not_answered() {
+        // `has("tailwind")` after the key became `rsx-tailwind` would
+        // otherwise read as "the user did not want it", and the project
+        // would build with a piece missing and no complaint anywhere.
+        let known = ["rsx", "rsx-tailwind"];
+        let on = ["rsx"];
+        let p = Project::new("blog", "Blog", &on, &known);
+        assert!(p.has("rsx"));
+        assert!(!p.has("rsx-tailwind"));
+        assert!(p.unknown_keys().is_empty());
+        assert!(!p.has("tailwind"));
+        assert_eq!(p.unknown_keys(), ["tailwind"]);
+    }
+
+    #[test]
+    fn order_puts_a_module_after_the_one_it_named() {
+        let keys = ["cache", "config"];
+        let after = |key: &str| match key {
+            "cache" => vec!["config"],
+            _ => vec![],
+        };
+        assert_eq!(order(&keys, after).expect("no cycle"), ["config", "cache"]);
+    }
+
+    #[test]
+    fn order_ignores_a_predecessor_this_project_does_not_have() {
+        // `after` is "if both are here, this one second", not a dependency.
+        // A module that needs another to exist says so with `krate`.
+        let keys = ["cache"];
+        let after = |_: &str| vec!["config"];
+        assert_eq!(order(&keys, after).expect("no cycle"), ["cache"]);
+    }
+
+    #[test]
+    fn a_cycle_is_returned_rather_than_hung_on() {
+        let keys = ["a", "b"];
+        let after = |key: &str| match key {
+            "a" => vec!["b"],
+            "b" => vec!["a"],
+            _ => vec![],
+        };
+        let caught = order(&keys, after).expect_err("a and b wait for each other");
+        assert_eq!(caught.len(), 2);
+    }
+}

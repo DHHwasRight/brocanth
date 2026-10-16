@@ -1,0 +1,12 @@
+[package]
+name = "brocanth-scaffold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The contract a scaffold module implements, so `brocanth create` can offer a capability it does not know about."
+
+# No dependencies, and that is the point. Every crate that wants to be
+# offerable by `brocanth create` takes this one behind a feature, so it must
+# cost nothing: no serde, no syn, no transitive tree arriving in a web
+# framework because somebody wanted a menu entry.
+[dependencies]

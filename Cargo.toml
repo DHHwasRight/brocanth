@@ -19,6 +19,7 @@ members = [
     "crates/brocanth-server",
     "crates/brocanth-storage",
     "crates/brocanth-pages",
+    "crates/brocanth-scaffold",
     "crates/brocanth-command",
     "crates/brocanth-command-macros",
     "examples/demo-app",
@@ -41,3 +42,4 @@ brocanth-resource = { path = "crates/brocanth-resource", version = "0.1.0" }
 brocanth-realtime = { path = "crates/brocanth-realtime", version = "0.1.0" }
 brocanth-assets = { path = "crates/brocanth-assets", version = "0.1.0" }
 brocanth-pages = { path = "crates/brocanth-pages", version = "0.1.0" }
+brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
