@@ -837,11 +837,16 @@ fn agents_md(a: &Answers) -> String {
     // continuation used elsewhere here keeps the source's own indentation and
     // writes it into the file, which in Markdown turns a paragraph into a
     // code block.
-    let views = if a.has(Pick::Rsx) {
-        AGENTS_VIEWS_MD
-    } else {
-        ""
-    };
+    let mut views = String::new();
+    if a.has(Pick::Rsx) {
+        views.push_str(AGENTS_VIEWS_MD);
+    }
+    if a.has(Pick::Tailwind) || a.has(Pick::Htmx) {
+        views.push_str(AGENTS_ASSETS_MD);
+    }
+    if a.has(Pick::Htmx) {
+        views.push_str(AGENTS_PARTIAL_MD);
+    }
 
     let commands = if a.has(Pick::Commands) {
         "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
@@ -961,8 +966,9 @@ Every page uses the same import and the same call, whatever directory it is
 in. Do not add a chain of your own; if a page is wrapped wrongly, the
 directory tree is what to change.
 
-A layout takes exactly one parameter, `children: Element`. `html!` fills that
-and nothing else, because it cannot know what a second parameter would mean.
+A layout takes `children: Element`, and may also take `layout: &str`, which
+`html!` fills with the URL prefix that layout covers. Those two are the only
+parameters it fills, because it cannot know what a third one would mean.
 A value every page shares comes from a `const` -- the root layout reads
 `pages::TITLE` that way. A value belonging to one request belongs on the page
 component, which the handler builds and which already has the context.
@@ -992,9 +998,8 @@ template that bails propagates with `?`. For another status or a header,
 compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
 
 Adding a page with markup is two files in one directory -- `<name>.rs` and
-`<name>.rsx` -- plus the same two lines in `src/pages/mod.rs` as any other
-route. The template needs no line anywhere, because the directory is the
-registry.
+`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
+`src/pages/mod.rs`, because the directory is the registry.
 
 Not every response is a page. A redirect is `Response::empty(303)` with a
 header and no template anywhere near it.
@@ -1002,6 +1007,49 @@ header and no template anywhere near it.
 An interpolated value is escaped on the way out. Templates are read at
 **compile** time, so an edit needs a rebuild, and a template that does not
 parse is a build failure on its own line rather than a 500.
+"#;
+
+/// The static file rules, for a project that has files to serve.
+const AGENTS_ASSETS_MD: &str = r#"
+## Static files
+
+Two directories, and the difference matters. `assets/` is **fingerprinted**:
+`site.css` is published at `/css/site.<hash>.css` and cached for a year.
+`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
+`favicon.ico`, anything linked to from outside.
+
+Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
+logical path and returns the published one, and a name nothing publishes
+panics there rather than 404ing in a browser.
+
+A basename starting with `_` is an input and is never published, which is what
+`assets/css/_tailwind.css` is.
+
+Both directories are embedded in the binary. **Adding a file where there was
+none does not rebuild anything**; run `touch src/assets.rs` after creating one.
+"#;
+
+/// The partial navigation contract, for a project that asked for it.
+const AGENTS_PARTIAL_MD: &str = r#"
+## Partial navigation
+
+Link to a route with the `Link` component, never a bare `<a>`:
+
+```
+<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
+```
+
+`to` takes what a route helper returns, so a link to a route that does not
+exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
+so the page still works with no JavaScript.
+
+A layout marks what a swap may replace with `dp-layout={layout}`, on the
+element wrapping **exactly** the children. Anything inside that element is
+replaced with them, so a sidebar or a scroll position belongs outside it.
+
+A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
+`html!` resolves that into a `match` over the chain. A handler never reads the
+header and never changes for it.
 "#;
 
 /// One command, as an example to copy.
@@ -1573,7 +1621,13 @@ fn mise_toml(a: &Answers) -> String {
     let mut out = String::from(MISE_TOML);
     if a.has(Pick::Tailwind) {
         out.push_str(
-            "\n[tasks.css]\n             description = \"build assets/css/site.css from _tailwind.css\"\n             run = \"bash scripts/build-css.sh\"\n             \n             [tasks.\"css:watch\"]\n             description = \"the same, again on each change\"\n             run = \"bash scripts/build-css.sh --watch\"\n",
+            "\n[tasks.css]\n\
+             description = \"build assets/css/site.css from _tailwind.css\"\n\
+             run = \"bash scripts/build-css.sh\"\n\
+             \n\
+             [tasks.\"css:watch\"]\n\
+             description = \"the same, again on each change\"\n\
+             run = \"bash scripts/build-css.sh --watch\"\n",
         );
     }
     out
@@ -3382,6 +3436,17 @@ mod tests {
 
         orphans(&[Pick::Rsx, Pick::Tailwind, Pick::Htmx]).expect("together they are fine");
         orphans(&Pick::DEFAULT).expect("the default set has no children in it");
+    }
+
+    #[test]
+    fn every_generated_toml_line_starts_in_the_first_column() {
+        // A stray indent in an assembled string is valid TOML and still
+        // wrong: the reader cannot tell a continuation from a mistake.
+        for a in [answers(&[Pick::Rsx, Pick::Tailwind]), answers(&[])] {
+            for line in mise_toml(&a).lines() {
+                assert_eq!(line, line.trim_start(), "indented: {line:?}");
+            }
+        }
     }
 
     #[test]

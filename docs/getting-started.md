@@ -111,6 +111,12 @@ and nothing else.
 | `model` | The model layer: SeaORM, validations and migrations. **Postgres by default** — see the warning at the end. |
 | `commands` | A `manage` binary whose subcommands are your own structs. |
 | `rsx` | HTML from `.rsx` templates beside the pages, with layouts. See below. |
+| `rsx-tailwind` | A CSS build over the class names in your templates. Needs node. |
+| `rsx-htmx` | A click swaps what changed, instead of reloading the document. |
+
+The last two are part of `rsx` and are named for it, because a command line is
+flat: `--with rsx-htmx` has to say on its own what an indent says on a screen.
+Naming one without `rsx` is an error that prints the line that works.
 
 ## Run it
 
@@ -396,12 +402,14 @@ renders root → blog → archive → page, and the handler is still one line.
 
 ```rust
 pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html(views::index::Index { title: "Blog" })
+    html!(ctx, views::index::Index { title: "Blog" })
 }
 ```
 
 `html!` puts the page inside the layouts that cover it, and expands to
-`render`. For a fragment that is not a document at all — an htmx swap, a
+`render`. It takes the context because the request can ask for part of a
+document rather than all of it -- see `rsx-htmx` below; without that choice the
+context is read and the answer is always the whole thing. For a fragment that is not a document at all — an htmx swap, a
 partial — call `render` directly and get no shell:
 
 ```rust
@@ -420,8 +428,12 @@ knowing:
 - **It is where the layout goes.** A blanket impl would not know which page it
   was rendering, so it could not choose one.
 
-A layout component takes exactly one parameter, `children: Element`, because
-`html!` cannot know what a second one would mean. A value every page shares
+A layout component takes `children: Element`, and may also take
+`layout: &str`, which `html!` fills with the URL prefix that layout covers --
+`/` for the root one, `/users` for `src/pages/users/layout.rsx`. Those two are
+the only parameters `html!` fills, because it cannot know what a third one
+would mean. A layout that does not want the prefix does not declare it, and
+nothing is passed. A value every page shares
 comes from a `const` — the generated root layout reads `pages::TITLE` that way
 — and a value belonging to one request belongs on the page component, which
 the handler builds and which already has the context.
@@ -429,8 +441,8 @@ the handler builds and which already has the context.
 For another status or a header, compose with those same shapes:
 
 ```rust
-Ok((html(views::errors::NotFound {})?, 404))
-Ok(html(tpl)?.with_header("cache-control", "no-store"))
+Ok((html!(ctx, views::errors::NotFound {})?, 404))
+Ok(html!(ctx, tpl)?.with_header("cache-control", "no-store"))
 ```
 
 And not every response is a page. The generated POST is a redirect, with no
@@ -478,9 +490,9 @@ error: component `Layout` has no parameter `titel`
 That is a cross-file lookup: `Layout` is in `layout.rsx` and the call is in
 `index.rsx`. `load_dir!` compiles the tree as one unit, so it knows both.
 
-Adding a page with markup is therefore three files in one directory and the
-same two lines in `src/pages/mod.rs` as before — the template needs no
-registration, because the directory is the registry.
+Adding a page with markup is therefore two files in one directory and nothing
+else at all — neither the page nor the template is registered anywhere,
+because the directory is the registry.
 
 Nothing is read from disk when a request arrives, and there is no template
 directory to ship. The cost is that an edit needs a rebuild — each file is
@@ -495,6 +507,156 @@ hole, so an injection is something you can grep for.
 ```toml
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }
 ```
+
+## Inside rsx: `rsx-tailwind` and `rsx-htmx`
+
+```
+brocanth create blog --with rsx,rsx-tailwind,rsx-htmx
+```
+
+The chooser and the flags disagree here, deliberately:
+
+| | The chooser | `--with` |
+|---|---|---|
+| `rsx` ticked | both appear under it, already ticked | `--with rsx` is rsx and nothing else |
+| `rsx` unticked | both leave the screen; the tick is remembered, not counted | `--with rsx-tailwind` is an error |
+
+Somebody in a terminal building an HTML application nearly always wants
+styling and nearly always wants a click not to reload the page, and can see
+both rows and untick them. A script gets what it named, because a flag that
+quietly brings two more is a flag you cannot read.
+
+### Static files
+
+Both choices need files the browser fetches, so both bring `src/assets.rs`:
+
+```rust
+brocanth_assets::assets!("assets", "public");
+```
+
+Two directories, two rules:
+
+| File | Served at | `cache-control` |
+|---|---|---|
+| `assets/css/site.css` | `/css/site.cb1cb6eb.css` | `max-age=31536000, immutable` |
+| `public/dpswap.min.js` | `/dpswap.min.js` | `max-age=0, must-revalidate`, then **304** |
+
+`assets/` is fingerprinted with eight hex digits of the file's SHA-256, so it
+can be cached for a year and a new build invalidates it by having a different
+name. `public/` keeps the name it was given, because `robots.txt`,
+`favicon.ico` and anything linked to from outside cannot move.
+
+Write neither URL by hand:
+
+```
+<link rel="stylesheet" href={crate::assets::url("css/site.css")}>
+```
+
+`url` takes the logical path — what the file is called on disk — and returns
+the published one. A name nothing publishes panics there, with the fix in the
+message, rather than 404ing in a browser.
+
+A basename starting with `_` is an input and is never published:
+`assets/css/_tailwind.css` is read by the CSS build and has no URL.
+
+Both directories are embedded, like the templates and the route table, so
+`serve` works from any directory and nothing goes missing after the build
+passed. Static files are answered before the router runs, so a font never
+reaches a handler and never costs a route.
+
+> **The same thing cargo cannot see.** A file added where there was none does
+> not rebuild anything, because nothing referenced it yet. `touch
+> src/assets.rs` and it is picked up.
+
+### `rsx-tailwind`
+
+```
+assets/css/_tailwind.css   the input; never published
+assets/css/site.css        the output, and what the layout links to
+scripts/build-css.sh       runs the CLI out of node_modules
+package.json               one dev dependency, @tailwindcss/cli
+mise.toml                  mise run css, and mise run css:watch
+```
+
+The globs are written out rather than left to Tailwind to find:
+
+```css
+@source "../../src/pages/**/*.rsx";
+@source "../../src/**/*.rs";
+```
+
+`.rsx` is not an extension Tailwind knows, and a class name built in a Rust
+string is not one it would look for either. An explicit glob states the
+contract.
+
+The build script ends with `touch src/assets.rs`, because a new stylesheet is
+a new binary: the CSS is embedded, so nothing changes until the crate
+rebuilds. The script runs the CLI from `node_modules` and does **not** fall
+back to `npx`. A fallback that downloads some other version hides the one
+thing worth knowing, which is that nobody ran `npm install`.
+
+### `rsx-htmx`
+
+A click swaps what changed. Three parts, and the first is an anchor.
+
+**`<Link>`**, in `src/pages/link.rsx`:
+
+```
+<li><Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link></li>
+```
+
+```html
+<a href="/users/7" dp-boost>User 7</a>
+```
+
+A real link, enhanced second. With JavaScript off, to a crawler, and on the
+first load of any page the browser does what it always did. `to` takes what
+the route helpers return rather than a string, so a link to a route that does
+not exist is a compile error instead of a 404 somebody finds later.
+
+**`dp-layout`** marks the element a swap may replace. It goes on the element
+wrapping exactly the children and nothing else:
+
+```
+pub fn Layout(layout: &str, children: Element) -> Element {
+    <section class="users">
+        <nav><a href="/">home</a></nav>
+        <div dp-layout={layout}>{children}</div>
+    </section>
+}
+```
+
+The `<nav>` is outside it, so it survives a navigation within `users/`.
+Anything inside it is replaced along with the page — a sidebar in there would
+lose its scroll position on every click.
+
+**`DP-Partial`** is the answer. The script compares the page it is on with the
+page it is going to, finds the deepest layout they share, and asks for that
+much:
+
+| Request to `/users/7` | What comes back |
+|---|---|
+| no header | the whole document |
+| `DP-Partial: 1` | the `users/` layout, and the page inside it |
+| `DP-Partial: 2` | the page alone |
+
+Each step drops one more layer from the outside. `html!` already knows the
+chain at compile time, so it expands into a `match` over it and the server
+renders from the shared layout down. depoth builds a tree per depth ahead of
+time because it has no server to ask; this has one, so the depth is a number
+in a header and the answer is computed per request.
+
+You can see all three by hand:
+
+```
+curl -s localhost:3000/users/7
+curl -s -H "DP-Partial: 1" localhost:3000/users/7
+curl -s -H "DP-Partial: 2" localhost:3000/users/7
+```
+
+**dp-swap is vendored, not fetched.** `public/dpswap.min.js` is 13 kB and
+comes from the CLI's own `vendor/` directory, so `create` finishes on a
+machine with no network.
 
 ## Add a command
 

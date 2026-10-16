@@ -136,7 +136,8 @@ will not catch them**, and a model should flag them rather than assume them.
    referenced it yet, so cargo cannot see it — a new page does not route and
    a new `layout.rsx` does not wrap. `touch src/pages/mod.rs`. Editing or
    deleting an existing one is noticed, because every file the macros used is
-   `include_bytes!`d by the expansion.
+   `include_bytes!`d by the expansion. A file added under `assets/` or
+   `public/` is the same case, and the fix is `touch src/assets.rs`.
 6. **Test suites that need a database skip themselves.** They say so loudly on
    stderr, but a green run is not a run — check whether
    `BROCANTH_TEST_DATABASE_URL` was set before believing a Postgres suite
@@ -184,8 +185,9 @@ and `rsx::load_dir!("src/pages")` compiles the tree into the binary, so a
 template needs no registration: the directory is the registry. A component is a
 function returning `Element`; its parameters are struct fields at the call
 site, so a wrong one is a build failure naming the right ones. One macro
-reaches them from a handler: `html!(views::index::Index { title })`, which
-returns the handler's own `Result`.
+reaches them from a handler: `html!(ctx, views::index::Index { title })`,
+which returns the handler's own `Result`. It takes the context because the
+request can ask for part of a document; see `rsx-htmx` below.
 
 **A page never names its layout, and neither does anything else.**
 `layout.rsx` wraps every page in its directory and below, as `layout.cr` does
@@ -193,11 +195,29 @@ in Crystal's page_router. `html!` reads that off the directory tree while the
 crate compiles: it knows which file it was written in, walks up to `src/`, and
 wraps the page in every `layout.rsx` it passes. Layouts stack root to leaf,
 there is no chain to keep in step, and deleting a `layout.rsx` removes exactly
-that layer. A layout takes one parameter, `children: Element`. `render` is the
-same thing with no layout, for a fragment.
+that layer. A layout takes `children: Element`, and may also take
+`layout: &str`, which `html!` fills with the URL prefix that layout covers.
+Those two are the only parameters it fills. `render` is the same thing with no
+layout, for a fragment.
 
 Without `--with rsx` there is no `html!`, no `views` module and no template
 engine in the tree — check `Cargo.toml` before writing markup.
+
+**Two choices sit inside rsx, and are named for it**: `rsx-tailwind` and
+`rsx-htmx`. Either one brings `src/assets.rs`, where
+`brocanth_assets::assets!("assets", "public")` embeds every static file —
+`assets/` fingerprinted and cached for a year, `public/` verbatim with an
+ETag. Reference one with `assets::url("css/site.css")`, never by hand, and
+never add a `.css` to a page by writing a path. A basename starting with `_`
+is an input and is not published.
+
+**`rsx-htmx` makes a layout skippable.** `<Link to={routes::…::path(7)}>`
+renders a plain `<a href dp-boost>`, so `to` takes a route helper and a dead
+link does not compile. A layout marks what a swap may replace with
+`dp-layout={layout}` on the element wrapping exactly the children — nothing
+else, or that element is replaced too. A request carrying `DP-Partial: n`
+drops the outermost `n` layouts, which `html!` resolves as a `match` over the
+chain it already knows. A handler never reads the header.
 
 ### The crates, and what each is for
 
@@ -219,6 +239,7 @@ engine in the tree — check `Cargo.toml` before writing markup.
 | `brocanth-schema` | zod-shaped validation, feeding OpenAPI |
 | `brocanth-server` | the HTTP server, and its bridge to the core |
 | `brocanth-pages` | `pages!` and `html!`: the route table and the layouts, read off `src/pages` |
+| `brocanth-assets` | `assets!`: static files embedded, fingerprinted or verbatim |
 
 `rsx` is the one dependency in this list that is not a brocanth crate. It has
 its own repository, so `--brocanth-path` does not reach it and the generated
