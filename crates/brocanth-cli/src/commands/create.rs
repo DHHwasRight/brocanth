@@ -3007,6 +3007,92 @@ mod tests {
         }
     }
 
+    /// Every shape the generator can be asked for, named.
+    ///
+    /// Not every combination -- there are 256 and most differ in nothing --
+    /// but every one that exercises a branch: the empty project, the full
+    /// one, the default, and each way the rsx family can be asked for.
+    const SHAPES: [(&str, &[Pick]); 7] = [
+        ("core-only", &[]),
+        (
+            "default",
+            &[Pick::Logging, Pick::Config, Pick::Commands] as &[Pick],
+        ),
+        ("everything", &Pick::ALL as &[Pick]),
+        ("rsx", &[Pick::Rsx] as &[Pick]),
+        ("rsx-tailwind", &[Pick::Rsx, Pick::Tailwind] as &[Pick]),
+        ("rsx-htmx", &[Pick::Rsx, Pick::Htmx] as &[Pick]),
+        (
+            "rsx-tailwind-htmx",
+            &[Pick::Rsx, Pick::Tailwind, Pick::Htmx] as &[Pick],
+        ),
+    ];
+
+    /// One shape as one string: every file it writes, in order, with its path
+    /// above it.
+    ///
+    /// One file per shape rather than a directory per shape, because the
+    /// thing a reader does with this is read a diff, and a diff of one file
+    /// shows a line moving between two generated files as one change.
+    fn snapshot(picks: &[Pick]) -> String {
+        let mut out = String::new();
+        for (path, contents) in scaffold(&answers(picks)) {
+            out.push_str(&format!("===== {path} =====\n{contents}"));
+            if !contents.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The whole generator, held still.
+    ///
+    /// Every refactor of this file is a refactor of what other people's
+    /// projects are made of, and the only honest test of one is that the
+    /// bytes did not move. Rewrite the snapshots with:
+    ///
+    /// ```text
+    /// BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- generator_writes
+    /// ```
+    ///
+    /// Read the diff before committing it. A blessed snapshot nobody read is
+    /// a test that asserts whatever the bug does.
+    #[test]
+    fn the_generator_writes_what_it_wrote_yesterday() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        let bless = std::env::var_os("BROCANTH_BLESS").is_some();
+        if bless {
+            std::fs::create_dir_all(&dir).expect("golden directory");
+        }
+        let mut wrong = Vec::new();
+        for (name, picks) in SHAPES {
+            let have = snapshot(picks);
+            let file = dir.join(format!("{name}.txt"));
+            if bless {
+                std::fs::write(&file, &have).expect("write snapshot");
+                continue;
+            }
+            match std::fs::read_to_string(&file) {
+                Ok(want) if want == have => {}
+                Ok(want) => wrong.push(format!(
+                    "{name}: {} lines expected, {} written; first difference at line {}",
+                    want.lines().count(),
+                    have.lines().count(),
+                    want.lines()
+                        .zip(have.lines())
+                        .position(|(a, b)| a != b)
+                        .map_or_else(|| "the end".to_string(), |n| (n + 1).to_string())
+                )),
+                Err(e) => wrong.push(format!("{name}: {} ({e})", file.display())),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the generator changed:\n  {}\n\nRun with BROCANTH_BLESS=1 and read the diff.",
+            wrong.join("\n  ")
+        );
+    }
+
     fn paths(picks: &[Pick]) -> Vec<String> {
         scaffold(&answers(picks))
             .into_iter()
