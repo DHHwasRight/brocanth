@@ -37,9 +37,17 @@
 //!
 //! | | |
 //! |---|---|
-//! | [`MAGENTA`] | where you are, and what you are changing |
-//! | [`VIOLET`] | the frame: borders, headings, key names |
-//! | [`MINT`] | on |
+//! | [`PINK`] | where you are, and what you are changing |
+//! | [`PURPLE`] | the brand, as a background rather than a foreground |
+//! | [`FUCHSIA`] | headings, and the rule down the side of a group |
+//! | [`GREEN`] | on |
+//!
+//! The numbers are Lip Gloss's own, not an approximation of them: `#7D56F4`
+//! behind `#FAFAFA` is the title block every Bubble Tea tutorial opens with,
+//! and `#FF5F87` is what `huh` puts on the row the cursor is on. Copying the
+//! palette by eye produced something that was colourful and still not it;
+//! the look is in the numbers, the padding and the quiet border, and only
+//! then in the hues.
 //!
 //! Colour is never the only carrier. A tick is `[x]` or `[ ]`, the cursor is
 //! a bar in the margin, and a group has a heading: read this screen in
@@ -51,7 +59,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::ui::title_case;
@@ -254,19 +262,29 @@ fn drive(
 
 // -- the view ---------------------------------------------------------------
 
+// Charm's palette, by the numbers they publish rather than by eye. Lip
+// Gloss's own examples are the reference: #7D56F4 behind #FAFAFA is the
+// title block every Bubble Tea tutorial opens with, and #FF5F87 is the
+// colour `huh` puts on the row the cursor is on.
+
+/// The brand. A background far more often than a foreground.
+pub const PURPLE: Color = Color::Rgb(0x7D, 0x56, 0xF4);
 /// Where you are, and what you are changing.
-pub const MAGENTA: Color = Color::Rgb(0xFF, 0x5F, 0xAF);
-/// The frame around the answers: borders, headings, the names of keys.
-pub const VIOLET: Color = Color::Rgb(0xA7, 0x8B, 0xFA);
-/// On. Green because every tick-box in the world is green.
-pub const MINT: Color = Color::Rgb(0x2B, 0xD9, 0xA0);
-/// Text on a filled badge, dark enough to read on magenta.
-const INK: Color = Color::Rgb(0x1A, 0x10, 0x33);
-/// Secondary text: blurbs, labels, the sentence under a heading.
-const SLATE: Color = Color::Rgb(0x8B, 0x92, 0xA6);
+pub const PINK: Color = Color::Rgb(0xFF, 0x5F, 0x87);
+/// Headings, and the rule down the side of a group.
+pub const FUCHSIA: Color = Color::Rgb(0xEE, 0x6F, 0xF8);
+/// On.
+pub const GREEN: Color = Color::Rgb(0x43, 0xBF, 0x6D);
+/// Text on the brand block. Not white: white on purple glares.
+const CREAM: Color = Color::Rgb(0xFA, 0xFA, 0xFA);
+/// Secondary text. Charm's help grey, and it is darker than feels right
+/// until you see it next to the rest.
+const GREY: Color = Color::Rgb(0x62, 0x62, 0x62);
+/// A step up from the help grey, for text that is secondary and still read.
+const SILVER: Color = Color::Rgb(0x9B, 0x9B, 0x9B);
 
 /// The accent, kept under its old name for the rows that act on it.
-const ACCENT: Color = MAGENTA;
+const ACCENT: Color = PINK;
 
 /// Secondary text.
 ///
@@ -274,25 +292,19 @@ const ACCENT: Color = MAGENTA;
 /// dim goes, and a few drop it, so a grey that is actually grey keeps the
 /// three tones apart everywhere.
 fn dim() -> Style {
-    Style::new().fg(SLATE)
+    Style::new().fg(SILVER)
 }
 
 /// Tertiary: present, and not to be read unless looked for.
 fn faint() -> Style {
-    Style::new().fg(SLATE).add_modifier(Modifier::DIM)
+    Style::new().fg(GREY)
 }
 
 fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " brocanth create ",
-            Style::new()
-                .bg(MAGENTA)
-                .fg(INK)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::new().fg(VIOLET).add_modifier(Modifier::DIM));
+        .padding(Padding::new(2, 2, 1, 1))
+        .border_style(Style::new().fg(GREY));
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -302,10 +314,22 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     let mut lines: Vec<Line> = Vec::new();
     let here = model.here();
 
+    // The title block. Filled, padded, on its own line: the shape every Lip
+    // Gloss example opens with, and the reason is that a background says
+    // "this is the thing" in a way a bold foreground cannot.
+    lines.push(Line::from(Span::styled(
+        "  brocanth create  ",
+        Style::new()
+            .bg(PURPLE)
+            .fg(CREAM)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::raw(""));
+
     lines.push(field("Directory", &model.draft.name, here == Row::Name));
     if let Some(problem) = problem.filter(|_| model.complained) {
         lines.push(Line::from(vec![
-            Span::raw("             "),
+            Span::raw("            "),
             Span::styled(problem.to_string(), Style::new().fg(Color::Red)),
         ]));
     }
@@ -314,7 +338,7 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  what goes in the binary",
-        Style::new().fg(VIOLET).add_modifier(Modifier::BOLD),
+        Style::new().fg(FUCHSIA).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         "  nothing unticked is compiled, linked, or in the lock file",
@@ -366,10 +390,10 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
     let mut help = vec![Span::raw("  ")];
     for (i, (key, what)) in keys.iter().enumerate() {
         if i > 0 {
-            help.push(Span::styled(" \u{b7} ", faint()));
+            help.push(Span::styled(" \u{2022} ", faint()));
         }
-        help.push(Span::styled(*key, Style::new().fg(VIOLET)));
-        help.push(Span::styled(format!(" {what}"), dim()));
+        help.push(Span::styled(*key, Style::new().fg(SILVER)));
+        help.push(Span::styled(format!(" {what}"), faint()));
     }
     frame.render_widget(Paragraph::new(Line::from(help)), footer);
 }
@@ -379,8 +403,8 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
 fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
     let mut spans = vec![
         Span::styled(
-            if active { " \u{258D}  " } else { "    " },
-            Style::new().fg(MAGENTA),
+            if active { "\u{2502} " } else { "  " },
+            Style::new().fg(PINK),
         ),
         Span::styled(format!("{label:<9} "), if active { dim() } else { faint() }),
         Span::styled(
@@ -395,7 +419,7 @@ fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
     if active {
         // The caret. A filled cell rather than a terminal cursor, so it
         // needs no positioning and survives a resize.
-        spans.push(Span::styled(" ", Style::new().bg(MAGENTA)));
+        spans.push(Span::styled(" ", Style::new().bg(PINK)));
     }
     Line::from(spans)
 }
@@ -408,11 +432,8 @@ fn field<'a>(label: &'a str, value: &'a str, active: bool) -> Line<'a> {
 /// the group has a top edge as well as an indent.
 fn subsection(parent: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            "      \u{2570} ",
-            Style::new().fg(VIOLET).add_modifier(Modifier::DIM),
-        ),
-        Span::styled(format!("inside {parent}"), Style::new().fg(VIOLET)),
+        Span::styled("    \u{2570}\u{2500} ", Style::new().fg(FUCHSIA)),
+        Span::styled(format!("inside {parent}"), Style::new().fg(FUCHSIA)),
     ])
 }
 
@@ -437,14 +458,14 @@ fn nested<'a>(
     let pad = 15usize.saturating_sub(2 * depth);
     let mut spans = vec![
         Span::styled(
-            if active { " \u{258D}  " } else { "    " },
-            Style::new().fg(MAGENTA),
+            if active { "\u{2502} " } else { "  " },
+            Style::new().fg(PINK),
         ),
         Span::raw("  ".repeat(depth)),
         Span::styled(
-            if on { "[x] " } else { "[ ] " },
+            if on { "[\u{2713}] " } else { "[ ] " },
             if on {
-                Style::new().fg(MINT).add_modifier(Modifier::BOLD)
+                Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
             } else {
                 faint()
             },
@@ -656,11 +677,11 @@ mod tests {
         assert!(screen.contains("deploy-view"), "{screen}");
         assert!(screen.contains("Deploy View"), "{screen}");
         // Both tick states, spelled rather than coloured.
-        assert!(screen.contains("[x] config"), "{screen}");
+        assert!(screen.contains("[\u{2713}] config"), "{screen}");
         assert!(screen.contains("[ ] model"), "{screen}");
-        // The cursor, and the keys that move it. A bar in the margin, which
-        // is a glyph and not a colour, so it is here in the text.
-        assert!(screen.contains('\u{258D}'), "{screen}");
+        // The cursor, and the keys that move it. A rule against the row,
+        // which is a glyph and not a colour, so it is here in the text.
+        assert!(screen.contains('\u{2502}'), "{screen}");
         assert!(screen.contains("esc cancel"), "{screen}");
     }
 
