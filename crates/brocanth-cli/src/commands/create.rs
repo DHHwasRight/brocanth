@@ -1108,7 +1108,27 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // `cargo run` answers "could not determine which binary to run" is a bad
     // first minute. Naming the default here costs one line and means the
     // obvious command works.
-    let default_run = if a.has("commands") {
+    // A second compile target, where a module asked for one.
+    //
+    // A file under `src/bin/` needs no section: cargo finds it, and writing
+    // one as well is the duplicate-name error. A binary anywhere else is
+    // invisible to cargo and gets a section, which is also the only form a
+    // reader can see from the manifest alone.
+    let mut bins = String::new();
+    for bin in built.binaries() {
+        if bin.path == format!("src/bin/{}.rs", bin.name) {
+            continue;
+        }
+        bins.push_str(&format!(
+            "\n[[bin]]\nname = {:?}\npath = {:?}\n",
+            bin.name, bin.path
+        ));
+    }
+
+    // `cargo run` with two binaries and no default answers "could not
+    // determine which binary to run", which is a bad first minute. The
+    // command line is one second binary; a module's is another.
+    let default_run = if a.has("commands") || built.binaries().next().is_some() {
         format!("default-run = {:?}\n", a.name)
     } else {
         String::new()
@@ -1129,8 +1149,10 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
          # field on the context, no bytes in the binary.\n\
          {absent}\
          [dependencies]\n\
-         {deps}\n",
+         {deps}\n\
+         {bins}",
         name = a.name,
+        bins = bins,
         default_run = default_run,
         deps = deps.join("\n"),
         absent = if absent.contains("#   ") {
@@ -3263,6 +3285,37 @@ mod tests {
 
         orphans(&["rsx", "rsx-tailwind", "rsx-htmx"]).expect("together they are fine");
         orphans(&DEFAULT).expect("the default set has no children in it");
+    }
+
+    #[test]
+    fn a_second_binary_is_a_section_only_where_cargo_cannot_find_it() {
+        // Two shapes, and the difference is not cosmetic: a `[[bin]]` for a
+        // file cargo already discovered is the duplicate-name error, and no
+        // `[[bin]]` for one it cannot see is a file that never compiles.
+        let a = answers(&[]);
+
+        let mut found = Built::new();
+        found.now_writing("admin");
+        found.binary("admin", "src/bin/admin.rs");
+        let manifest = cargo_toml(&a, &found);
+        assert!(!manifest.contains("[[bin]]"), "cargo finds it: {manifest}");
+        assert!(
+            manifest.contains("default-run = \"my-blog\""),
+            "two binaries and no default: {manifest}"
+        );
+
+        let mut hidden = Built::new();
+        hidden.now_writing("admin");
+        hidden.binary("admin", "src/admin/main.rs");
+        let manifest = cargo_toml(&a, &hidden);
+        assert!(
+            manifest.contains("[[bin]]\nname = \"admin\"\npath = \"src/admin/main.rs\""),
+            "cargo cannot see it: {manifest}"
+        );
+
+        // And nothing at all when no module asked for one.
+        assert!(!cargo_toml(&a, &built(&[])).contains("[[bin]]"));
+        assert!(!cargo_toml(&a, &built(&[])).contains("default-run"));
     }
 
     #[test]
