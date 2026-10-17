@@ -35,12 +35,32 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `realtime`. It lives beside the crate it writes into a project, and not in
+# the CLI, because what it must stay true to is this crate's own surface:
+# `Broker::builder`, the four fields of `Config`, the three spellings of
+# `Overflow`. A copy of that knowledge in the CLI rots the first time a name
+# here changes, and it rots in silence, because nothing compiles the generator
+# against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application that broadcasts wants the broker and nothing
+# else. The one program that wants the generator is the CLI, which asks for
+# `features = ["scaffold"]`. So the code that writes a broker into a new
+# project is never linked into an application that merely has one.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [features]
 default = []
 # Multi-process realtime over Postgres `LISTEN/NOTIFY` (§10). Off by default
 # because a single-process deployment must not link a JSON codec to broadcast
 # in memory.
 listen-notify = ["dep:serde", "dep:serde_json"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

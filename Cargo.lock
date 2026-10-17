@@ -635,6 +635,7 @@ dependencies = [
  "brocanth",
  "brocanth-cache",
  "brocanth-config",
+ "brocanth-realtime",
  "brocanth-scaffold",
  "cargo_metadata",
  "clap",
@@ -760,6 +761,7 @@ version = "0.1.0"
 dependencies = [
  "brocanth-events",
  "brocanth-policy",
+ "brocanth-scaffold",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

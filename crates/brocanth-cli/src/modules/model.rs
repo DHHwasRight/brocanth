@@ -27,6 +27,11 @@ impl Module for Model {
         s.at(Slot::PluginsMod).line("pub mod model;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "model", "Model"));
+        s.at(Slot::AppContext).block(
+            "    let db: &plugins::model::Db = cx.extract();\n\
+            \x20   eprintln!(\"database: {}\", db.url);"
+                .to_string(),
+        );
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin

@@ -35,6 +35,11 @@ impl Module for Sessions {
         // is in `main` where it can be read and changed.
         s.at(Slot::AppSetup)
             .line(r#"            setup.router().mount("/users/{*rest}", "session");"#);
+        s.at(Slot::AppContext).block(
+            "    let session: &plugins::sessions::Session = cx.extract();\n\
+            \x20   eprintln!(\"session cookie: {}\", session.cookie);"
+                .to_string(),
+        );
         if project.has("config") {
             s.at(Slot::ConfigSections).block(format!(
                 "\n[sessions]\ncookie = \"_{ident}_session\"\n\

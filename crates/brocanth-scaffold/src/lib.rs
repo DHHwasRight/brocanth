@@ -325,6 +325,16 @@ pub enum Slot {
     /// `src/app.rs`, inside `setup`, after the builder is done. Where a
     /// middleware offer is mounted, at a pattern the application chooses.
     AppSetup,
+    /// `src/app.rs`, inside `setup`, one line per module that provides a
+    /// value on the per-request context.
+    ///
+    /// The generator writes `let cx = app.context();` above whatever lands
+    /// here, and only when something does. The lines are a demonstration
+    /// and they are load-bearing: the installed provider set lives in the
+    /// application's *type*, so an `extract` for a plugin nobody registered
+    /// does not compile. That is the modularity claim, checked by the
+    /// compiler rather than written in a README.
+    AppContext,
     /// `src/app.rs`, free items beside the dispatcher.
     AppItems,
     /// `src/app.rs`, inside `dispatch`, before the router is consulted. For
@@ -354,6 +364,7 @@ impl fmt::Display for Slot {
             Slot::AppUses => "src/app.rs (uses)",
             Slot::AppPlugins => "src/app.rs (the builder chain)",
             Slot::AppSetup => "src/app.rs (setup)",
+            Slot::AppContext => "src/app.rs (the context)",
             Slot::AppItems => "src/app.rs (items)",
             Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",

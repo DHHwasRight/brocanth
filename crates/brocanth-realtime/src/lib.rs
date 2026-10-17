@@ -195,6 +195,8 @@ pub mod mailbox;
 pub mod notify;
 pub mod reach;
 pub mod row;
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
 pub mod topic;
 
 pub use broker::{

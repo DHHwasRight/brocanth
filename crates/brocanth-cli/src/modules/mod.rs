@@ -59,6 +59,9 @@ pub const ALL: &[&dyn Module] = &[
     // From `brocanth-cache` itself, which is the point: a module can live in
     // the crate it scaffolds, and joining the menu is still one line here.
     &brocanth_cache::scaffold::Cache,
+    // The broker, and no transport: see its own module documentation for
+    // what the core must change before there is one.
+    &brocanth_realtime::scaffold::Realtime,
     &commands::Commands,
     &rsx::Rsx,
     &rsx::Tailwind,

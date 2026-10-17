@@ -1089,18 +1089,26 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // chosen and that has something to say about its own absence says it
     // here, in the order the chooser lists them -- so a contributed module
     // appears without a line changing in this file.
-    let mut absent: Vec<String> = Vec::new();
+    let mut absent: Vec<(&str, &str)> = Vec::new();
     for key in all().into_iter().filter(|key| !a.has(key)) {
-        if let Some((what, why)) = about(key).absent {
-            absent.push(format!("#   {what:<17}{why}"));
+        if let Some(pair) = about(key).absent {
+            absent.push(pair);
         }
     }
     if !needs_serde(a, built) {
-        absent.push("#   serde            nothing here is deserialised".to_string());
+        absent.push(("serde", "nothing here is deserialised"));
     }
+    // The column is measured rather than guessed. It was 17, which fitted
+    // every name until one was exactly 17 characters long and the reason
+    // arrived with no space in front of it.
+    let column = absent.iter().map(|(what, _)| what.len()).max().unwrap_or(0) + 2;
     let absent = format!(
         "#\n# Not here, because nothing asked for it:\n{}\n",
-        absent.join("\n")
+        absent
+            .iter()
+            .map(|(what, why)| format!("#   {what:<column$}{why}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // With commands there are two binaries, the application and `manage`, and
@@ -1358,8 +1366,10 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         );
     }
 
-    // 5: the context, where a plugin provided one.
-    if a.has("sessions") || a.has("model") {
+    // 5: the context, where a plugin provided one. Each line is the
+    // module's own -- the generator supplies the heading and knows no
+    // provider by name.
+    if !built.slot_is_empty(Slot::AppContext) {
         out.push_str(
             "    // The per-request context. These lines compile only because the\n\
             \x20   // plugins that provide the values were registered in step 2: the\n\
@@ -1368,17 +1378,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
             \x20   // mechanism -- modularity enforced rather than documented.\n\
             \x20   let cx = app.context();\n",
         );
-        if a.has("sessions") {
-            out.push_str(
-                "    let session: &plugins::sessions::Session = cx.extract();\n\
-                \x20   eprintln!(\"session cookie: {}\", session.cookie);\n",
-            );
-        }
-        if a.has("model") {
-            out.push_str(
-                "    let db: &plugins::model::Db = cx.extract();\n\
-                \x20   eprintln!(\"database: {}\", db.url);\n",
-            );
+        for line in built.slot(Slot::AppContext) {
+            out.push_str(line);
+            out.push('\n');
         }
     }
 
@@ -2745,6 +2747,11 @@ mod tests {
             ("plugin-no-config", vec!["logging"]),
             ("default", DEFAULT.to_vec()),
             ("everything", all()),
+            // A plugin that builds everything it provides in `configure`,
+            // and the one module whose settings carry a string the plugin
+            // has to translate. No config file either, so the literal
+            // branch of both is here.
+            ("realtime", vec!["realtime"]),
             ("rsx", vec!["rsx"]),
             ("rsx-tailwind", vec!["rsx", "rsx-tailwind"]),
             ("rsx-htmx", vec!["rsx", "rsx-htmx"]),
@@ -3376,6 +3383,25 @@ mod tests {
         for a in [answers(&["rsx", "rsx-tailwind"]), answers(&[])] {
             for line in mise_toml(&a).lines() {
                 assert_eq!(line, line.trim_start(), "indented: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_absent_column_keeps_a_gap_whatever_a_module_is_called() {
+        // The column was a hardcoded 17 until a crate was named in exactly
+        // seventeen characters, and then the receipt read
+        // `brocanth-realtimeno broker`. A contributed module can be called
+        // anything, so the width is measured.
+        for picks in [vec![], vec!["realtime"], DEFAULT.to_vec()] {
+            let manifest = cargo_toml(&answers(&picks), &built(&picks));
+            for line in manifest.lines().filter(|l| l.starts_with("#   ")) {
+                let reason = &line[4..];
+                let name = reason.split_whitespace().next().unwrap_or_default();
+                assert!(
+                    reason[name.len()..].starts_with("  "),
+                    "no gap after the name: {line:?}"
+                );
             }
         }
     }

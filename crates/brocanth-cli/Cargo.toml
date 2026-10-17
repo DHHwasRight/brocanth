@@ -23,6 +23,12 @@ brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
 # links a generator.
 brocanth-cache = { workspace = true, features = ["scaffold"] }
 
+# The broker, on the same terms. It offers `realtime` and no transport: the
+# core's `Response` is a finished `Vec<u8>` and every response hook is
+# specified to see one, so server-sent events are a change to the hook
+# contract rather than a module that can be written today.
+brocanth-realtime = { workspace = true, features = ["scaffold"] }
+
 # `string` so a command name discovered at run time -- a project's own, read
 # out of its built binary for `--help` -- can be an owned String.
 brocanth-scaffold.workspace = true

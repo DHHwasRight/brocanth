@@ -12,11 +12,12 @@ edition = "2021"
 # field on the context, no bytes in the binary.
 #
 # Not here, because nothing asked for it:
-#   brocanth-config  no TOML parser; main builds each plugin from a literal
-#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file
-#   brocanth-cache   no cache; every read does the work a hit would have skipped
-#   rsx              no template engine; a page builds the String it returns
-#   serde            nothing here is deserialised
+#   brocanth-config    no TOML parser; main builds each plugin from a literal
+#   brocanth-model     no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache     no cache; every read does the work a hit would have skipped
+#   brocanth-realtime  no broker; a write tells nobody, and a client finds out by asking again
+#   rsx                no template engine; a page builds the String it returns
+#   serde              nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -584,7 +585,7 @@ request.
 
 - `core`  the router, the context, the plugin seams
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `realtime`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
