@@ -23,6 +23,7 @@ members = [
     "crates/brocanth-command",
     "crates/brocanth-command-macros",
     "examples/demo-app",
+    "examples/nested-cards",
 ]
 
 [workspace.package]

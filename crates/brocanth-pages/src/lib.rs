@@ -133,8 +133,29 @@ pub fn html(input: TokenStream) -> TokenStream {
         );
     };
 
-    let layouts = layouts_above(&file);
+    let layouts = layouts_above(&within_package(&file));
     expand(&layouts, &ctx, &content).into()
+}
+
+/// The path of the calling file, relative to its own package.
+///
+/// `local_file` gives a path relative to the directory rustc was invoked
+/// from, which is the package only when the package is its own workspace
+/// root. Build the same crate as a member of a workspace and the path
+/// arrives as `examples/thing/src/pages/index.rs`, the join below lands
+/// outside the package, no `layout.rsx` is found, and every page renders
+/// with no layouts at all and no error. That is the worst shape a bug can
+/// have, so this is the one place the two cases are reconciled.
+fn within_package(file: &Path) -> PathBuf {
+    let absolute = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(file)
+    };
+    absolute
+        .strip_prefix(manifest_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or(absolute)
 }
 
 /// The first argument and the rest, split at the first top-level comma.

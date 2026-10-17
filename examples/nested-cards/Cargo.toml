@@ -1,0 +1,27 @@
+[package]
+name = "nested-cards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "prerender's nested-cards, served by brocanth: four layouts, and a click that replaces only what changed."
+publish = false
+
+# Exactly what was chosen when this application was scaffolded.
+#
+# The core is a router handing a request and a context to a handler, and it
+# depends on none of the rest. A capability that is not listed below is not
+# compiled, not linked, and contributes nothing: no section in the config, no
+# field on the context, no bytes in the binary.
+#
+# Not here, because nothing asked for it:
+#   brocanth-config  no TOML parser; main builds each plugin from a literal
+#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache   no cache; every read does the work a hit would have skipped
+#   serde            nothing here is deserialised
+[dependencies]
+brocanth.workspace = true
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
+brocanth-pages.workspace = true
+brocanth-assets.workspace = true
+brocanth-server.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }  # the reactor `serve` runs on
