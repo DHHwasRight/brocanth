@@ -9,7 +9,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::settings_derive;
+use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The cache, as a choice on the `brocanth create` menu.
@@ -38,22 +38,15 @@ impl Module for Cache {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/cache.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod cache;");
-        s.at(Slot::MainBuilder).block(if project.has("config") {
-            // Read from `[cache]` in the file the config plugin loaded.
-            "        .plugin_from_config::<plugins::cache::Cache>(\"cache\")\n\
-             \x20       .map_err(|e| e.to_string())?\n"
-        } else {
-            // No file to read, so `main` hands it a literal the compiler
-            // checks, and no deserialiser is linked.
-            //
-            // Written across three lines because that is what rustfmt makes
-            // of it: the argument is longer than `chain_width`, and a
-            // scaffold whose output a developer's first `cargo fmt` rewrites
-            // is a scaffold handing out a diff nobody wrote.
-            "        .plugin(plugins::cache::Cache::new(\n\
-             \x20           plugins::cache::Settings::default(),\n\
-             \x20       ))\n"
-        });
+        s.at(Slot::AppPlugins)
+            .block(plugin_line(project, "cache", "Cache"));
+        if !project.has("config") {
+            // The literal form calls `Plugin::new`, which is a trait
+            // method, so the trait has to be in scope. Every plugin
+            // module needs the same line, and `use` twice does not
+            // compile.
+            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
+        }
         if project.has("config") {
             s.at(Slot::ConfigSections)
                 .block("\n[cache]\nurl = \"postgres://localhost/development\"\n".to_string());

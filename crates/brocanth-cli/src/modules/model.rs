@@ -1,6 +1,6 @@
 //! `model` -- SeaORM, validations and migrations.
 
-use brocanth_scaffold::snippet::settings_derive;
+use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The model layer.
@@ -25,15 +25,15 @@ impl Module for Model {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/model.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod model;");
-        s.at(Slot::MainBuilder).block(if project.has("config") {
-            // Read from `[model]` in the file the config plugin loaded.
-            "        .plugin_from_config::<plugins::model::Model>(\"model\")\n\
-             \x20       .map_err(|e| e.to_string())?\n"
-        } else {
-            // No file to read, so `main` hands it a literal the compiler
-            // checks, and no deserialiser is linked.
-            "        .plugin(plugins::model::Model::new(plugins::model::Settings::default()))\n"
-        });
+        s.at(Slot::AppPlugins)
+            .block(plugin_line(project, "model", "Model"));
+        if !project.has("config") {
+            // The literal form calls `Plugin::new`, which is a trait
+            // method, so the trait has to be in scope. Every plugin
+            // module needs the same line, and `use` twice does not
+            // compile.
+            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
+        }
         if project.has("config") {
             s.at(Slot::ConfigSections).block(
                 "\n[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n".to_string(),

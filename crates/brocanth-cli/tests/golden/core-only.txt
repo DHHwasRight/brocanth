@@ -12,8 +12,9 @@ edition = "2021"
 # field on the context, no bytes in the binary.
 #
 # Not here, because nothing asked for it:
-#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file
 #   brocanth-config  no TOML parser; main builds each plugin from a literal
+#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache   no cache; every read does the work a hit would have skipped
 #   rsx              no template engine; a page builds the String it returns
 #   serde            nothing here is deserialised
 [dependencies]

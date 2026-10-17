@@ -14,6 +14,7 @@ default-run = "my-blog"
 #
 # Not here, because nothing asked for it:
 #   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache   no cache; every read does the work a hit would have skipped
 #   rsx              no template engine; a page builds the String it returns
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }

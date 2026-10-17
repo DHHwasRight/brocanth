@@ -1,6 +1,6 @@
 //! `logging` -- a line per request.
 
-use brocanth_scaffold::snippet::settings_derive;
+use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Slot};
 
 /// A request logger, written out into the project rather than linked.
@@ -21,19 +21,19 @@ impl Module for Logging {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/logging.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod logging;");
-        s.at(Slot::MainBuilder).block(if project.has("config") {
-            // Read from `[logging]` in the file the config plugin loaded.
-            "        .plugin_from_config::<plugins::logging::Logging>(\"logging\")\n\
-             \x20       .map_err(|e| e.to_string())?\n"
-        } else {
-            // No file to read, so `main` hands it a literal the compiler
-            // checks, and no deserialiser is linked.
-            "        .plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))\n"
-        });
+        s.at(Slot::AppPlugins)
+            .block(plugin_line(project, "logging", "Logging"));
+        if !project.has("config") {
+            // The literal form calls `Plugin::new`, which is a trait
+            // method, so the trait has to be in scope. Every plugin
+            // module needs the same line, and `use` twice does not
+            // compile.
+            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
+        }
         // A plugin *offers* middleware and cannot mount it. The pattern is
         // a decision, and the decision is the application's -- so the line
         // is in `main` where it can be read and changed.
-        s.at(Slot::MainSetup)
+        s.at(Slot::AppSetup)
             .line(r#"            setup.router().mount("/{*rest}", "request_log");"#);
         if project.has("config") {
             s.at(Slot::ConfigSections)

@@ -170,22 +170,6 @@ impl Answers {
     fn ident(&self) -> String {
         self.name.replace('-', "_")
     }
-
-    /// Plugins that write a file under `src/plugins/`.
-    #[cfg(test)]
-    fn plugins(&self) -> Vec<&'static str> {
-        self.picks
-            .iter()
-            .copied()
-            // Config is not a plugin instance, Commands is a command line
-            // rather than anything the application registers, and rsx is a
-            // macro the views call: none of the three is mounted.
-            // Named rather than subtracted: a plugin is a thing the
-            // application registers in `build`, and only some of these are.
-            // Adding a choice should not quietly add a plugin.
-            .filter(|p| ["logging", "sessions", "model", "cache"].contains(p))
-            .collect()
-    }
 }
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
@@ -1101,24 +1085,15 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
         );
     }
 
+    // The receipt, read from the other end. Every module that was not
+    // chosen and that has something to say about its own absence says it
+    // here, in the order the chooser lists them -- so a contributed module
+    // appears without a line changing in this file.
     let mut absent: Vec<String> = Vec::new();
-    if !a.has("model") {
-        absent.push(
-            "#   brocanth-model   no ORM, no SQL driver, no sea-orm anywhere in the lock file"
-                .to_string(),
-        );
-    }
-    if !a.has("config") {
-        absent.push(
-            "#   brocanth-config  no TOML parser; main builds each plugin from a literal"
-                .to_string(),
-        );
-    }
-    if !a.has("rsx") {
-        absent.push(
-            "#   rsx              no template engine; a page builds the String it returns"
-                .to_string(),
-        );
+    for key in all().into_iter().filter(|key| !a.has(key)) {
+        if let Some((what, why)) = about(key).absent {
+            absent.push(format!("#   {what:<17}{why}"));
+        }
     }
     if !needs_serde(a, built) {
         absent.push("#   serde            nothing here is deserialised".to_string());
@@ -1166,6 +1141,21 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     )
 }
 
+/// The modules that register a plugin instance in `build`.
+///
+/// Read off the slot rather than listed here. A module that wrote a line
+/// into the builder chain has registered an instance, by definition, and a
+/// list in this file would be a second copy of that fact for somebody to
+/// forget. The instance is named after the module, which is also the
+/// config section it claims.
+// Only a test asks, today. It is a function rather than a line inside that
+// test because the next thing to ask is the generated `main`, and the
+// question is about the project rather than about the assertion.
+#[cfg(test)]
+fn instances(built: &Built) -> Vec<&str> {
+    built.slot_owners(Slot::AppPlugins).collect()
+}
+
 /// Whether anything in this project deserialises.
 ///
 /// Only the config plugin makes that possible, and only a module that
@@ -1182,7 +1172,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     // A layer is a thing some module offered, so the import that names
     // `Next` follows from the slot rather than from a list of module names
     // this file would have to keep in step with the registry.
-    let layered = !built.slot_is_empty(Slot::MainSetup);
+    let layered = !built.slot_is_empty(Slot::AppSetup);
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -1200,11 +1190,12 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          \n",
         title = a.title
     ));
-    if any_plugin && !a.has("config") {
-        // `.plugin(Thing::new(..))` calls a trait method, so the trait has to
-        // be named here. With the config plugin there is no such line:
-        // `plugin_from_config` is the builder's own method.
-        out.push_str("use brocanth::plugin_api::Plugin;\n");
+    // Whatever the modules need in scope. Sorted, because rustfmt sorts
+    // `use` lines and a project must survive its own first `cargo fmt`.
+    let mut uses: Vec<&str> = built.slot(Slot::AppUses).collect();
+    uses.sort_unstable();
+    for line in uses {
+        out.push_str(line);
     }
     out.push_str("use brocanth::plugin_app::AppBuilder;\n");
     out.push_str(if layered {
@@ -1256,7 +1247,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
             \x20   let app = AppBuilder::new()\n\
             \x20       .with_config(config)\n",
         ));
-        for line in built.slot(Slot::MainBuilder) {
+        for line in built.slot(Slot::AppPlugins) {
             out.push_str(line);
         }
     } else {
@@ -1270,7 +1261,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
             \x20   //    a reader can delete; nothing registers itself.\n\
             \x20   let app = AppBuilder::new()\n",
         );
-        for line in built.slot(Slot::MainBuilder) {
+        for line in built.slot(Slot::AppPlugins) {
             out.push_str(line);
         }
     }
@@ -1281,7 +1272,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20           // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the\n\
         \x20           // pattern is a decision, and the decision is the application's.\n",
     );
-    for line in built.slot(Slot::MainSetup) {
+    for line in built.slot(Slot::AppSetup) {
         out.push_str(line);
     }
     if !layered {
@@ -2675,6 +2666,10 @@ mod tests {
     fn shapes() -> Vec<(&'static str, Vec<&'static str>)> {
         vec![
             ("core-only", vec![]),
+            // A plugin and no config file. Its own shape because the
+            // literal branch of every plugin module runs only here, and
+            // for as long as it was unsnapshotted it did not compile.
+            ("plugin-no-config", vec!["logging"]),
             ("default", DEFAULT.to_vec()),
             ("everything", all()),
             ("rsx", vec!["rsx"]),
@@ -2972,13 +2967,17 @@ mod tests {
     #[test]
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
         let main = app_rs(&answers(&["logging"]), &built(&["logging"]));
+        // Already wrapped, because it is longer than rustfmt's chain_width
+        // and a project must survive its own first `cargo fmt`.
         assert!(
-            main.contains(
-                ".plugin(plugins::logging::Logging::new(plugins::logging::Settings::default()))"
-            ),
+            main.contains(".plugin(plugins::logging::Logging::new(\n")
+                && main.contains("plugins::logging::Settings::default(),"),
             "{main}"
         );
         assert!(!main.contains("plugin_from_config"), "{main}");
+        // `Plugin::new` is a trait method, so this branch -- and only this
+        // branch -- needs the trait in scope.
+        assert!(main.contains("use brocanth::plugin_api::Plugin;"), "{main}");
     }
 
     #[test]
@@ -2993,7 +2992,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{picks:?}: {e}\n{toml}"));
             // The instances the generated `main` registers: one per plugin,
             // plus `config` itself, which `with_config` adds.
-            let mut claimed: Vec<String> = a.plugins().iter().map(|p| (*p).to_string()).collect();
+            let mut claimed: Vec<String> = instances(&built(&picks))
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect();
             claimed.push("config".to_string());
             config
                 .validate_sections(&claimed)

@@ -6,7 +6,7 @@
 //! and names it in one array; the capability is then on the menu.
 //!
 //! ```
-//! use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+//! use brocanth_scaffold::{snippet, Dep, Manifest, Module, Project, Scaffold, Slot};
 //!
 //! pub struct Cache;
 //!
@@ -17,11 +17,11 @@
 //!             .after("config")
 //!     }
 //!
-//!     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+//!     fn contribute(&self, project: &Project, s: &mut Scaffold) {
 //!         s.file("src/plugins/cache.rs", "// ...\n");
 //!         s.at(Slot::PluginsMod).line("pub mod cache;");
-//!         s.at(Slot::MainBuilder)
-//!             .line(".plugin_from_config::<plugins::cache::Cache>(\"cache\")");
+//!         s.at(Slot::AppPlugins)
+//!             .block(snippet::plugin_line(project, "cache", "Cache"));
 //!     }
 //! }
 //! ```
@@ -315,13 +315,16 @@ pub enum Slot {
     /// `Cargo.toml`, after the dependencies the choices brought. For a
     /// `[features]` table or anything else a dependency line cannot say.
     CargoExtra,
-    /// `src/main.rs`, the `use` lines at the top.
-    MainUses,
-    /// `src/main.rs`, inside the `AppBuilder` chain. One `.method(..)` per
-    /// line, no trailing semicolon.
-    MainBuilder,
-    /// `src/main.rs`, inside `setup`, after the builder is done.
-    MainSetup,
+    /// `src/app.rs`, the `use` lines at the top. Use
+    /// [`Writer::once`](crate::Writer::once), because two modules needing
+    /// one import is the normal case and `use` twice does not compile.
+    AppUses,
+    /// `src/app.rs`, inside the `AppBuilder` chain in `build`. One
+    /// `.method(..)` per line, no trailing semicolon.
+    AppPlugins,
+    /// `src/app.rs`, inside `setup`, after the builder is done. Where a
+    /// middleware offer is mounted, at a pattern the application chooses.
+    AppSetup,
     /// `src/app.rs`, free items beside the dispatcher.
     AppItems,
     /// `src/app.rs`, inside `dispatch`, before the router is consulted. For
@@ -348,9 +351,9 @@ impl fmt::Display for Slot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Slot::CargoExtra => "Cargo.toml",
-            Slot::MainUses => "src/main.rs (uses)",
-            Slot::MainBuilder => "src/main.rs (builder)",
-            Slot::MainSetup => "src/main.rs (setup)",
+            Slot::AppUses => "src/app.rs (uses)",
+            Slot::AppPlugins => "src/app.rs (the builder chain)",
+            Slot::AppSetup => "src/app.rs (setup)",
             Slot::AppItems => "src/app.rs (items)",
             Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",
@@ -490,6 +493,19 @@ impl Scaffold {
             .map(|owned| owned.text.as_str())
     }
 
+    /// Which modules wrote into a slot, in the order they ran.
+    ///
+    /// For the few questions that are about the module rather than the
+    /// text: which plugin instances exist, and therefore which config
+    /// sections something will claim.
+    pub fn slot_owners(&self, slot: Slot) -> impl Iterator<Item = &str> {
+        self.slots
+            .get(&slot)
+            .into_iter()
+            .flatten()
+            .map(|owned| owned.by.as_str())
+    }
+
     /// Whether anything landed in a slot, without building the strings.
     pub fn slot_is_empty(&self, slot: Slot) -> bool {
         self.slots.get(&slot).is_none_or(Vec::is_empty)
@@ -517,6 +533,26 @@ impl Writer<'_> {
     pub fn line(&mut self, text: impl AsRef<str>) -> &mut Self {
         let text = text.as_ref();
         self.push(format!("{text}\n"))
+    }
+
+    /// One line, unless an earlier module already wrote exactly it.
+    ///
+    /// For an import. Two modules both needing
+    /// `use brocanth::plugin_api::Plugin;` is the ordinary case, and a file
+    /// with it twice does not compile. Deliberately exact-match: two lines
+    /// that differ by a space are two lines, because a slot cannot know
+    /// what a near-miss meant.
+    pub fn once(&mut self, text: impl AsRef<str>) -> &mut Self {
+        let line = format!("{}\n", text.as_ref());
+        let already = self
+            .scaffold
+            .slots
+            .get(&self.slot)
+            .is_some_and(|lines| lines.iter().any(|owned| owned.text == line));
+        if already {
+            return self;
+        }
+        self.push(line)
     }
 
     /// Several lines, written as they are. Use this for a block that already
@@ -675,6 +711,47 @@ mod tests {
 /// agreement belongs in one function rather than in each of them.
 pub mod snippet {
     use super::Project;
+
+    /// The line that registers a plugin instance in the application.
+    ///
+    /// Two forms, and which one is right is not the module's choice: with
+    /// the config plugin the instance is built from a named section, and
+    /// without it `main` hands it a literal the compiler checks.
+    ///
+    /// It is here, and not written out in each module, for a duller reason
+    /// than that. The literal form is longer than rustfmt's `chain_width`,
+    /// so it has to arrive already broken across three lines or a
+    /// developer's first `cargo fmt` rewrites a file they never touched.
+    /// That is a fact about rustfmt, not about caching or logging, and
+    /// every module getting it right separately is every module getting it
+    /// wrong once.
+    ///
+    /// `key` is the module's key, which is also the plugin's module name
+    /// and its config section. `ty` is the plugin type in that module.
+    pub fn plugin_line(project: &Project, key: &str, ty: &str) -> String {
+        if project.has("config") {
+            format!(
+                "        .plugin_from_config::<plugins::{key}::{ty}>({key:?})\n\
+                 \x20       .map_err(|e| e.to_string())?\n"
+            )
+        } else {
+            format!(
+                "        .plugin(plugins::{key}::{ty}::new(\n\
+                 \x20           plugins::{key}::Settings::default(),\n\
+                 \x20       ))\n"
+            )
+        }
+    }
+
+    /// The import the literal form needs, and the configured form does not.
+    ///
+    /// `Plugin::new` is a trait method, so a file that calls it must have
+    /// the trait in scope; `plugin_from_config` is the builder's own method
+    /// and needs nothing. Write it with
+    /// [`Writer::once`](crate::Writer::once) into
+    /// [`Slot::AppUses`](crate::Slot::AppUses), because every plugin module
+    /// needs the same line and a file with it twice does not compile.
+    pub const PLUGIN_TRAIT_USE: &str = "use brocanth::plugin_api::Plugin;";
 
     /// The derive a settings struct carries, and the sentence explaining it.
     ///
