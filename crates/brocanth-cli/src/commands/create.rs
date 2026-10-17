@@ -95,7 +95,15 @@ fn offered() -> clap::builder::PossibleValuesParser {
             .iter()
             .map(|module| {
                 let m = module.manifest();
-                clap::builder::PossibleValue::new(m.key).help(m.gist)
+                // A listed module this build cannot make says so here as
+                // well as on the chooser's row. `--help` is the other way
+                // in, and a word it offers without a caveat is a word
+                // somebody types.
+                let help = match m.blocked {
+                    Some(_) => format!("{} -- not available yet", m.gist),
+                    None => m.gist.to_string(),
+                };
+                clap::builder::PossibleValue::new(m.key).help(help)
             })
             .collect::<Vec<_>>(),
     )
@@ -109,8 +117,21 @@ fn offered() -> clap::builder::PossibleValuesParser {
 const DEFAULT: [&str; 3] = ["logging", "config", "commands"];
 
 /// Everything the CLI was compiled with, in listing order.
+///
+/// Including the modules nobody can choose yet. They are on the chooser's
+/// screen with the reason on the row, and `--with` has to recognise the
+/// word to be able to print that reason, so the full list is what the two
+/// front doors read. Everything that then *writes* reads [`available`].
 fn all() -> Vec<&'static str> {
     crate::modules::keys()
+}
+
+/// The modules a project can actually be made of.
+fn available() -> Vec<&'static str> {
+    all()
+        .into_iter()
+        .filter(|key| about(key).blocked.is_none())
+        .collect()
 }
 
 /// The manifest of a module this CLI has. Panics for a key it does not,
@@ -234,7 +255,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
             Cell::styled(about(pick).gist, DIM),
         ]);
     }
-    for pick in all().iter().filter(|p| !answers.has(p)) {
+    for pick in available().iter().filter(|p| !answers.has(p)) {
         contents.row(vec![
             Cell::styled(*pick, DIM),
             Cell::styled(
@@ -280,6 +301,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
 
 fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
     let local = local_checkout(args)?;
+    unavailable(&picked(args))?;
     orphans(&picked(args))?;
 
     // The chooser is reached on one condition, and the condition is the single
@@ -348,6 +370,30 @@ fn picked(args: &CreateArgs) -> Vec<&'static str> {
     }
 }
 
+/// A choice this CLI lists and cannot make.
+///
+/// Checked before [`orphans`], because a blocked child named without its
+/// parent has two things wrong with it and only one of them matters: the
+/// parent would not help.
+fn unavailable(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
+    let bad: Vec<Diagnostic> = picks
+        .iter()
+        .filter_map(|pick| {
+            let why = about(pick).blocked?;
+            Some(
+                Diagnostic::error(*pick, format!("`{pick}` is not available yet"))
+                    .note(why)
+                    .help("brocanth create --help lists what this build can make"),
+            )
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
+}
+
 /// A choice that is part of another choice, named without it.
 ///
 /// The chooser cannot produce this -- it hides a child whose parent is off --
@@ -403,6 +449,7 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                 under: about(pick)
                     .parent
                     .and_then(|parent| all().iter().position(|p| *p == parent)),
+                blocked: about(pick).blocked.map(str::to_string),
             })
             .collect(),
         // The chooser offers a repository and the flag route does not, and the
@@ -759,7 +806,7 @@ fn agents_md(a: &Answers) -> String {
     for pick in &a.picks {
         chosen.push(format!("`{}`  {}", pick, about(pick).gist));
     }
-    let absent: Vec<String> = all()
+    let absent: Vec<String> = available()
         .iter()
         .filter(|p| !a.has(p))
         .map(|p| format!("`{p}`"))
@@ -1090,7 +1137,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // here, in the order the chooser lists them -- so a contributed module
     // appears without a line changing in this file.
     let mut absent: Vec<(&str, &str)> = Vec::new();
-    for key in all().into_iter().filter(|key| !a.has(key)) {
+    for key in available().into_iter().filter(|key| !a.has(key)) {
         if let Some(pair) = about(key).absent {
             absent.push(pair);
         }
@@ -2746,7 +2793,7 @@ mod tests {
             // for as long as it was unsnapshotted it did not compile.
             ("plugin-no-config", vec!["logging"]),
             ("default", DEFAULT.to_vec()),
-            ("everything", all()),
+            ("everything", available()),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin
             // has to translate. No config file either, so the literal
@@ -2986,7 +3033,7 @@ mod tests {
             core.contains("no sea-orm anywhere in the lock file"),
             "{core}"
         );
-        let everything = cargo_toml(&answers(&all()), &built(&all()));
+        let everything = cargo_toml(&answers(&available()), &built(&available()));
         assert!(
             !everything.contains("Not here, because"),
             "nothing is absent, so nothing is listed: {everything}"
@@ -3065,7 +3112,7 @@ mod tests {
         // `validate_sections` rejects a section nothing claims, so a scaffold
         // that wrote `[sessions]` without the sessions plugin would fail on its
         // own first run. The real crate is asked, not a reimplementation.
-        for picks in [vec!["config"], vec!["config", "logging"], all().to_vec()] {
+        for picks in [vec!["config"], vec!["config", "logging"], available()] {
             let a = answers(&picks);
             let toml = config_toml(&a, &built(&picks));
             let config = brocanth_config::Config::from_toml(a.name.as_str(), "development", &toml)
@@ -3150,7 +3197,7 @@ mod tests {
 
         // And the opposite end: with everything chosen there is nothing to
         // warn about, and the brief must not invent a gap.
-        let everything = written(&all());
+        let everything = written(&available());
         let full = &everything
             .iter()
             .find(|(p, _)| p == "AGENTS.md")
@@ -3167,7 +3214,7 @@ mod tests {
         // There is no list of routes to go out of step, because there is no
         // list: `pages!` reads the directory. So what this checks is that
         // nothing crept back in.
-        let a = answers(&all());
+        let a = answers(&available());
         let table = pages_mod_rs(&a);
         assert!(
             table.contains(r#"brocanth_pages::pages!("src/pages");"#),
@@ -3384,6 +3431,39 @@ mod tests {
             for line in mise_toml(&a).lines() {
                 assert_eq!(line, line.trim_start(), "indented: {line:?}");
             }
+        }
+    }
+
+    #[test]
+    fn a_module_this_build_cannot_make_is_refused_before_anything_is_written() {
+        // Twice over, because there are two front doors and a third way in
+        // for a test. The flags refuse by name with the reason; the module
+        // itself refuses if it is somehow reached anyway, so nothing can
+        // write half a project.
+        let flagged = unavailable(&["realtime", "realtime-sse"])
+            .expect_err("a transport this build has no core support for");
+        assert_eq!(flagged.len(), 1);
+
+        let reached = contributions(&answers(&["realtime", "realtime-sse"]))
+            .expect_err("the module refuses even when it is called");
+        assert!(
+            format!("{reached:?}").contains("hook contract"),
+            "the refusal does not say why: {reached:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_the_menu_cannot_make_is_listed_as_merely_absent() {
+        // The receipt means "you did not ask for this". A module nobody
+        // could have asked for does not belong in it, in either file.
+        let core = cargo_toml(&answers(&[]), &built(&[]));
+        let brief = agents_md(&answers(&[]));
+        for key in all() {
+            if about(key).blocked.is_none() {
+                continue;
+            }
+            assert!(!core.contains(key), "{key} is in the manifest's absent list");
+            assert!(!brief.contains(key), "{key} is in the brief's absent list");
         }
     }
 

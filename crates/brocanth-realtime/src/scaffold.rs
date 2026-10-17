@@ -40,7 +40,7 @@ impl Module for Realtime {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "realtime",
-            "a broker indexed by topic, so one write is a map lookup and not a query per subscriber",
+            "one write is a map lookup, not a query per subscriber; no transport yet",
         )
         .krate(Dep::brocanth("brocanth-realtime"))
         // Only for the order of the `[realtime]` section and the builder
@@ -79,6 +79,62 @@ impl Module for Realtime {
         if project.has("config") {
             s.at(Slot::ConfigSections).block(SECTION.to_string());
         }
+    }
+}
+
+/// Server-sent events, listed and not available.
+///
+/// On the menu rather than absent from it, because the question "where is
+/// SSE" has an answer and the place to read it is where it is asked. What
+/// the core must change is in this crate's own documentation, in three
+/// numbered points.
+pub struct Sse;
+
+impl Module for Sse {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "realtime-sse",
+            "one long response per subscriber, frames written as they are made",
+        )
+        .part_of_but_off("realtime")
+        .because("it writes the frames the broker makes, and the broker is realtime")
+        .blocked("the core's Response is finished before a hook sees it")
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        // Never reached while the CLI honours `Manifest::blocked`. Here so
+        // that a CLI which does not stops rather than writing a project
+        // whose pages cannot compile.
+        s.refuse(
+            "realtime-sse cannot be scaffolded: the core's response body is a complete              Vec<u8> and ResponseHook is specified to see one, so a streaming body is a              change to the hook contract rather than a change here",
+        );
+    }
+}
+
+/// Websockets, listed and not available.
+///
+/// A longer way off than [`Sse`]: everything server-sent events need, and
+/// then an upgrade out of the request/response shape, the frame protocol,
+/// and a second path for writes that no hook sees. The row says the part
+/// that is only true here, because a reason read beside a flag has no row
+/// above it to lean on.
+pub struct WebSocket;
+
+impl Module for WebSocket {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "realtime-websocket",
+            "a duplex socket per subscriber, frames both ways",
+        )
+        .part_of_but_off("realtime")
+        .because("it carries the frames the broker makes, and the broker is realtime")
+        .blocked("an upgrade out of the request/response shape, plus a frame codec")
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.refuse(
+            "realtime-websocket cannot be scaffolded: it needs everything server-sent              events need, and an upgrade out of the request/response shape on top, which              is a second exit from brocanth-server rather than a new body type",
+        );
     }
 }
 

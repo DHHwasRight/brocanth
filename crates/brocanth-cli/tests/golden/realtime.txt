@@ -782,7 +782,7 @@ request.
 ## What this binary contains
 
 - `core`  the router, the context, the plugin seams
-- `realtime`  a broker indexed by topic, so one write is a map lookup and not a query per subscriber
+- `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 
 **Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 

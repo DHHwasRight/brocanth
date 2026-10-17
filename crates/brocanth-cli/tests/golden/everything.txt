@@ -1675,7 +1675,7 @@ request.
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `model`  SeaORM, validations, migrations; without it no SQL driver at all
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
-- `realtime`  a broker indexed by topic, so one write is a map lookup and not a query per subscriber
+- `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node

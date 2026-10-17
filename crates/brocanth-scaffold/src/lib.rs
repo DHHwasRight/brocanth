@@ -105,6 +105,19 @@ pub struct Manifest {
     /// Why this choice is part of its parent, in one sentence, for the
     /// diagnostic a flat command line produces when it is named alone.
     pub because: &'static str,
+    /// Why this choice cannot be taken yet, for a module that is on the
+    /// menu and not available.
+    ///
+    /// A listed refusal rather than silence. The generated manifest already
+    /// says what a project does not contain and why; a chooser that hides
+    /// the two transports realtime has no core support for answers the same
+    /// question with nothing, and the person asks it again next month. So
+    /// the row is drawn, the reason is on it, and the cursor steps over it.
+    ///
+    /// [`Module::contribute`] is never called for one. Implement it as a
+    /// refusal anyway: a caller that does not honour this field should stop
+    /// rather than write half a project.
+    pub blocked: Option<&'static str>,
     /// What to say in the generated manifest when this choice was *not*
     /// taken: the name of the thing that is absent, and what its absence
     /// means. The receipt is read from both ends, so a project says what it
@@ -123,8 +136,16 @@ impl Manifest {
             after: Vec::new(),
             crates: Vec::new(),
             because: "",
+            blocked: None,
             absent: None,
         }
+    }
+
+    /// Mark this choice as listed and not available, and say why in a
+    /// phrase that fits on its row.
+    pub fn blocked(mut self, why: &'static str) -> Self {
+        self.blocked = Some(why);
+        self
     }
 
     /// Make this choice part of another, and ticked with it in the chooser.

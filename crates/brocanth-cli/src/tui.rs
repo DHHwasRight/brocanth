@@ -77,6 +77,14 @@ pub struct Choice {
     /// change is a row that looks broken, and the reason it will not change
     /// is off screen.
     pub under: Option<usize>,
+    /// Why this choice cannot be ticked, for a choice that cannot.
+    ///
+    /// Drawn and not hidden, which is the opposite of what [`Choice::under`]
+    /// does with a child, and for the reason stated there: a row you cannot
+    /// change looks broken when the reason is off screen. Here the reason is
+    /// the row's own blurb, so it is the first thing read. The cursor steps
+    /// over it, so nothing invites a key that would do nothing.
+    pub blocked: Option<String>,
 }
 
 /// Everything `create` needs, and nothing it does not.
@@ -106,7 +114,12 @@ impl Draft {
     /// Whether a choice is part of the answer. A ticked child of an unticked
     /// parent is not: it is a tick nobody can see.
     pub fn taken(&self, index: usize) -> bool {
-        self.choices[index].on && self.shown(index)
+        self.choices[index].on && self.shown(index) && !self.blocked(index)
+    }
+
+    /// Whether a choice is on the screen and cannot be ticked.
+    pub fn blocked(&self, index: usize) -> bool {
+        self.choices[index].blocked.is_some()
     }
 }
 
@@ -148,9 +161,25 @@ impl Model {
         rows[self.row.min(rows.len() - 1)]
     }
 
+    /// One row, in the direction asked, over any row that cannot be
+    /// changed.
+    ///
+    /// `by` is the direction as well as the distance, so stepping over a
+    /// blocked row keeps going the same way rather than bouncing. The name
+    /// and title rows are never blocked, so the walk always terminates.
     fn step(&mut self, by: isize) {
-        let n = self.rows().len() as isize;
-        self.row = (((self.row as isize + by) % n + n) % n) as usize;
+        let rows = self.rows();
+        let n = rows.len() as isize;
+        let direction = if by < 0 { -1 } else { 1 };
+        let wrap = |at: isize| ((at % n) + n) % n;
+        let mut at = wrap(self.row as isize + by);
+        for _ in 0..n {
+            match rows[at as usize] {
+                Row::Choice(i) if self.draft.blocked(i) => at = wrap(at + direction),
+                _ => break,
+            }
+        }
+        self.row = at as usize;
     }
 
     /// Text goes to the field under the cursor; a space on a tick-box toggles
@@ -344,6 +373,21 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
         "  nothing unticked is compiled, linked, or in the lock file",
         faint(),
     )));
+    // The column the blurbs start in, measured rather than fixed, so a
+    // module with a long name does not shear its own row out of line.
+    // Indent included: a child is two columns in, and the blurbs still have
+    // to agree across depths.
+    let column = model
+        .draft
+        .choices
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| model.draft.shown(*i))
+        .map(|(_, choice)| choice.label.chars().count() + 2 * usize::from(choice.under.is_some()))
+        .chain(std::iter::once("git".len()))
+        .max()
+        .unwrap_or(0)
+        + 1;
     // The group a row belongs to, so a heading is written once, above the
     // first row of each group, and not again.
     let mut group: Option<usize> = None;
@@ -357,12 +401,21 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
             }
             group = choice.under;
         }
+        // The reason replaces the gist rather than following it. What the
+        // row has to answer is why it is not available, and a row that
+        // answers two questions answers neither at this width.
+        let (blurb, state) = match &choice.blocked {
+            Some(why) => (why.as_str(), Box::Blocked),
+            None if choice.on => (choice.blurb.as_str(), Box::On),
+            None => (choice.blurb.as_str(), Box::Off),
+        };
         lines.push(nested(
             &choice.label,
-            Some(&choice.blurb),
-            choice.on,
+            Some(blurb),
+            state,
             here == Row::Choice(i),
             usize::from(choice.under.is_some()),
+            column,
         ));
     }
 
@@ -372,6 +425,7 @@ fn view(frame: &mut Frame, model: &Model, problem: Option<&str>) {
         Some("initialise a repository"),
         model.draft.git,
         here == Row::Git,
+        column,
     ));
 
     frame.render_widget(Paragraph::new(lines), body);
@@ -437,25 +491,63 @@ fn subsection(parent: &str) -> Line<'static> {
     ])
 }
 
-/// A tick-box. `[x]` and `[ ]` rather than colour alone, so the state survives
-/// a monochrome terminal and colour-blindness both.
-fn tick<'a>(label: &'a str, blurb: Option<&'a str>, on: bool, active: bool) -> Line<'a> {
-    nested(label, blurb, on, active, 0)
+/// What is in the box at the start of a row.
+///
+/// Three states and not a `bool`, because the third is not "off": a row
+/// nobody can tick is a different thing from a row nobody has ticked, and
+/// the glyph has to say which without colour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Box {
+    On,
+    Off,
+    Blocked,
+}
+
+impl Box {
+    /// Spelled rather than coloured, so the state survives a monochrome
+    /// terminal and colour-blindness both.
+    fn glyph(self) -> &'static str {
+        match self {
+            Box::On => "[\u{2713}] ",
+            Box::Off => "[ ] ",
+            Box::Blocked => "[\u{2013}] ",
+        }
+    }
+}
+
+/// A tick-box.
+fn tick<'a>(
+    label: &'a str,
+    blurb: Option<&'a str>,
+    on: bool,
+    active: bool,
+    column: usize,
+) -> Line<'a> {
+    nested(
+        label,
+        blurb,
+        if on { Box::On } else { Box::Off },
+        active,
+        0,
+        column,
+    )
 }
 
 /// The same row, `depth` levels in.
 ///
 /// The cursor marker stays in the leftmost column at every depth, so the
 /// eye follows one line down the screen rather than stepping in and out,
-/// and the label's own padding shrinks so the blurbs still align.
+/// and the label's own padding shrinks by the indent so the blurbs still
+/// align. `column` is where the blurbs start, counted from the label.
 fn nested<'a>(
     label: &'a str,
     blurb: Option<&'a str>,
-    on: bool,
+    state: Box,
     active: bool,
     depth: usize,
+    column: usize,
 ) -> Line<'a> {
-    let pad = 15usize.saturating_sub(2 * depth);
+    let pad = column.saturating_sub(2 * depth);
     let mut spans = vec![
         Span::styled(
             if active { "\u{2502} " } else { "  " },
@@ -463,21 +555,22 @@ fn nested<'a>(
         ),
         Span::raw("  ".repeat(depth)),
         Span::styled(
-            if on { "[\u{2713}] " } else { "[ ] " },
-            if on {
-                Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
-            } else {
-                faint()
+            state.glyph(),
+            match state {
+                Box::On => Style::new().fg(GREEN).add_modifier(Modifier::BOLD),
+                Box::Off | Box::Blocked => faint(),
             },
         ),
         Span::styled(
             format!("{label:<pad$}"),
-            match (active, on) {
+            match (active, state) {
                 (true, _) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 // Lit when it is in, plain when it is not, so the list can be
                 // read down the left edge without reading the boxes.
-                (false, true) => Style::new(),
-                (false, false) => dim(),
+                (false, Box::On) => Style::new(),
+                (false, Box::Off) => dim(),
+                // Fainter than unticked: it is not a thing to decide about.
+                (false, Box::Blocked) => faint(),
             },
         ),
     ];
@@ -548,6 +641,46 @@ mod tests {
         );
     }
 
+    /// A parent with a child nobody can tick.
+    fn blocked_model() -> Model {
+        let mut m = nested_model();
+        m.draft.choices[1].blocked = Some("the core's response body is finished".into());
+        m
+    }
+
+    #[test]
+    fn a_row_nobody_can_tick_is_on_the_screen_with_the_reason_on_it() {
+        // Hidden is what a child of an unticked parent gets, and it is the
+        // wrong answer here: "where is SSE" is a question somebody asks
+        // once a month until the menu answers it.
+        let screen = render(&blocked_model(), None, 72, 16);
+        assert!(screen.contains("[\u{2013}] model"), "{screen}");
+        assert!(
+            screen.contains("the core's response body is finished"),
+            "the row does not say why:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_steps_over_a_row_it_cannot_change() {
+        // A row you can land on but not change looks broken.
+        let mut m = blocked_model();
+        m.row = 2; // the parent
+        m.step(1);
+        assert_eq!(m.here(), Row::Git, "it landed on the blocked child");
+        m.step(-1);
+        assert_eq!(m.here(), Row::Choice(0), "going back, it landed on it");
+    }
+
+    #[test]
+    fn a_tick_nobody_could_have_made_is_not_part_of_the_answer() {
+        // The flags and the chooser share `Draft`, so a caller that set
+        // `on` by mistake must not get the module anyway.
+        let mut m = blocked_model();
+        m.draft.choices[1].on = true;
+        assert!(!m.draft.taken(1));
+    }
+
     fn model() -> Model {
         Model {
             draft: Draft {
@@ -559,12 +692,14 @@ mod tests {
                         blurb: String::new(),
                         on: true,
                         under: None,
+                        blocked: None,
                     },
                     Choice {
                         label: "model".into(),
                         blurb: String::new(),
                         on: false,
                         under: None,
+                        blocked: None,
                     },
                 ],
                 git: false,
@@ -653,6 +788,45 @@ mod tests {
     /// ```text
     /// cargo test -p brocanth-cli --bin brocanth -- --ignored --nocapture look
     /// ```
+    /// The real registry, as the chooser would show it, with the parent of
+    /// each subsection ticked so every child is on screen.
+    ///
+    /// ```text
+    /// cargo test -p brocanth-cli --bin brocanth -- --ignored --nocapture menu
+    /// ```
+    #[test]
+    #[ignore = "prints a frame, asserts nothing"]
+    fn menu() {
+        let keys = crate::modules::keys();
+        let choices = keys
+            .iter()
+            .map(|key| {
+                let m = crate::modules::find(key).expect("registered").manifest();
+                Choice {
+                    label: m.key.to_string(),
+                    blurb: m.gist.to_string(),
+                    on: m.parent.is_none(),
+                    under: m
+                        .parent
+                        .and_then(|parent| keys.iter().position(|k| *k == parent)),
+                    blocked: m.blocked.map(str::to_string),
+                }
+            })
+            .collect();
+        let m = Model {
+            draft: Draft {
+                name: "deploy-view".into(),
+                title: "Deploy View".into(),
+                choices,
+                git: true,
+            },
+            row: 2,
+            title_is_mine: false,
+            complained: false,
+        };
+        println!("\n{}\n", render(&m, None, 112, 30));
+    }
+
     #[test]
     #[ignore = "prints a frame, asserts nothing"]
     fn look() {

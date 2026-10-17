@@ -22,6 +22,15 @@
 //! cargo install --path crates/brocanth-cli
 //! ```
 //!
+//! # A module that is listed and not available
+//!
+//! `Manifest::blocked` puts a module on the menu with the reason it cannot
+//! be chosen on its own row, and the cursor steps over it. That is not the
+//! same as leaving it out. The generated manifest already says what a
+//! project does not contain and why; a chooser that silently omits the two
+//! transports realtime has no core support for answers "where is SSE" with
+//! nothing, and somebody asks again next month.
+//!
 //! There is no distributed slice and no plugin directory scanned at run time.
 //! `brocanth_scaffold`'s own documentation gives the argument; the short form
 //! is that linking follows the transitive graph, so a module that registered
@@ -62,6 +71,11 @@ pub const ALL: &[&dyn Module] = &[
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,
+    // Listed and not available, both of them. The reason is on the row:
+    // the core's response body is finished before a hook sees it, so a
+    // transport that streams is a change to the hook contract.
+    &brocanth_realtime::scaffold::Sse,
+    &brocanth_realtime::scaffold::WebSocket,
     &commands::Commands,
     &rsx::Rsx,
     &rsx::Tailwind,
@@ -132,6 +146,36 @@ mod tests {
                 }
                 None => assert!(!m.key.contains('-'), "`{}` is part of nothing", m.key),
             }
+        }
+    }
+
+    #[test]
+    fn a_module_nobody_can_choose_says_why_on_its_own_row() {
+        for module in ALL {
+            let m = module.manifest();
+            let Some(why) = m.blocked else { continue };
+            assert!(
+                !why.is_empty(),
+                "`{}` is blocked and does not say why",
+                m.key
+            );
+            // It is read in a row beside a label, not in a paragraph.
+            assert!(
+                why.len() <= 80 && !why.contains('\n'),
+                "`{}`'s reason has to fit on its row: {why:?}",
+                m.key
+            );
+            assert!(
+                !m.on_with_parent,
+                "`{}` cannot be ticked, so it must not start ticked",
+                m.key
+            );
+            assert!(
+                m.absent.is_none(),
+                "`{}` is not absent from a project, it is unavailable: the manifest \
+                 must not list it as a thing that was not asked for",
+                m.key
+            );
         }
     }
 
