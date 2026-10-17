@@ -186,7 +186,12 @@ fn layouts_above(file: &Path) -> Vec<Layout> {
             found.push(Layout {
                 module: module_path_from(current),
                 prefix: prefix_of(current),
-                wants_prefix: declares_prefix(&candidate),
+                wants_prefix: declares(&candidate, "Layout", "layout"),
+                wants_path: declares(&candidate, "Layout", "path"),
+                oob: defines(&candidate, "Oob").then(|| Wants {
+                    prefix: declares(&candidate, "Oob", "layout"),
+                    path: declares(&candidate, "Oob", "path"),
+                }),
                 file: candidate,
             });
         }
@@ -206,11 +211,38 @@ struct Layout {
     /// The URL prefix this layout covers: `/` at the root, `/users` one
     /// directory down. Passed to the component when it declares a `layout`
     /// parameter, which is what dp-swap marks its outlet with.
+    ///
+    /// A directory whose name is a parameter contributes `{name}` rather
+    /// than its own spelling, so `src/pages/[section]` is `/{section}` and
+    /// the expansion fills it from the request. A marker reading
+    /// `/[section]` would be the same string under `/alpha` and `/beta`,
+    /// and the client would conclude the two pages share a layer they do
+    /// not.
     prefix: String,
     /// Whether the component declares `layout`. Read off the signature
     /// rather than assumed, so a layout that does not care about partial
     /// navigation does not have to take a parameter it ignores.
     wants_prefix: bool,
+    /// Whether the component declares `path`, the URL of the request being
+    /// answered. A layout that marks the link it is currently under needs
+    /// it, and nothing else does.
+    wants_path: bool,
+    /// Whether the file also defines `Oob`, and what that component asks
+    /// for.
+    ///
+    /// A skipped layout is not re-sent, which is the point of asking for a
+    /// partial, and the reason its own chrome goes stale: the sidebar still
+    /// highlights the section you came from. `Oob` renders a replacement
+    /// for exactly the parts that depend on which page is showing, and the
+    /// client applies it by id before the swap.
+    oob: Option<Wants>,
+}
+
+/// Which of the parameters the framework fills a component declares.
+#[derive(Clone, Copy, Default)]
+struct Wants {
+    prefix: bool,
+    path: bool,
 }
 
 /// `src/pages` -> `/`, `src/pages/users` -> `/users`.
@@ -228,7 +260,14 @@ fn prefix_of(dir: &Path) -> String {
             }
             continue;
         }
-        parts.push(name);
+        // `[section]` is a parameter, not a directory anybody visits, so
+        // the prefix carries the hole and the expansion fills it.
+        parts.push(
+            match name.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
+                Some(param) => format!("{{{param}}}"),
+                None => name,
+            },
+        );
     }
     // The first part past `src` is the pages directory itself, which is the
     // site root rather than a path segment.
@@ -238,25 +277,49 @@ fn prefix_of(dir: &Path) -> String {
     }
 }
 
+/// The prefix a layout covers, as an expression.
+///
+/// A prefix with a hole in it is built per request; one without is a literal
+/// the compiler can see.
+fn prefix_expr(layout: &Layout, ctx: &TokenStream2) -> TokenStream2 {
+    let prefix = &layout.prefix;
+    if prefix.contains('{') {
+        quote!(&crate::pages::prefix(#ctx, #prefix))
+    } else {
+        quote!(#prefix)
+    }
+}
+
 /// Whether a `layout.rsx` declares a `layout` parameter.
 ///
 /// Read off the signature rather than assumed, so a layout with no interest
 /// in partial navigation does not have to take a parameter it ignores. A
 /// `.rsx` file is not Rust that `syn` will parse -- the body is markup --
 /// but the parameter list is, and it is on one line.
-fn declares_prefix(file: &Path) -> bool {
+fn defines(file: &Path, func: &str) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|source| source.contains(&format!("fn {func}(")))
+}
+
+/// Whether a component in this file declares one of the parameters the
+/// framework fills.
+fn declares(file: &Path, func: &str, wanted: &str) -> bool {
     let Ok(source) = std::fs::read_to_string(file) else {
         return false;
     };
-    source
-        .lines()
-        .filter_map(|line| line.split_once("fn Layout("))
-        .filter_map(|(_, rest)| rest.split_once(')'))
-        .any(|(params, _)| {
-            params
-                .split(',')
-                .any(|param| param.trim().split(':').next().unwrap_or("").trim() == "layout")
-        })
+    let opener = format!("fn {func}(");
+    // The signature may be wrapped over several lines, so the scan is over
+    // the whole file between `fn Layout(` and the matching `)`. A `.rsx`
+    // file is not Rust that `syn` will parse -- the body is markup -- so
+    // this is text, and it is why a parameter list is read and not a type.
+    let Some((_, rest)) = source.split_once(opener.as_str()) else {
+        return false;
+    };
+    let Some((params, _)) = rest.split_once(')') else {
+        return false;
+    };
+    params
+        .split(',')
+        .any(|param| param.trim().split(':').next().unwrap_or("").trim() == wanted)
 }
 
 /// `src/pages/users` -> `["pages", "views", "users"]`.
@@ -291,15 +354,50 @@ fn expand(layouts: &[Layout], ctx: &TokenStream2, content: &TokenStream2) -> Tok
     // depoth's partial navigation: depoth prebuilds a tree per depth because
     // it has no server, and this renders the depth that was asked for.
     let arms = (0..=layouts.len()).map(|depth| {
+        // The deepest layout the client keeps, and only that one.
+        //
+        // A layer that is shared means everything it scopes is unchanged:
+        // if the section layout is kept then the section did not change,
+        // so the sidebar above it that marks the current section cannot be
+        // stale. Only the innermost kept layer sits across the boundary
+        // where something moved, so it is the only one with anything to
+        // correct. Sending the rest would be re-sending what the client
+        // already has, which is the thing a partial exists to avoid.
+        let out_of_band: Vec<TokenStream2> = layouts[..depth]
+            .iter()
+            .skip(depth.saturating_sub(1))
+            .filter_map(|layout| {
+                let wants = layout.oob?;
+                let path = layout.module.iter().map(|part| ident(part));
+                let mut fields = quote!();
+                if wants.prefix {
+                    let prefix = prefix_expr(layout, ctx);
+                    fields = quote!(layout: #prefix,);
+                }
+                if wants.path {
+                    fields = quote!(#fields path: &(#ctx).path,);
+                }
+                Some(quote! {
+                    rsx::Template::render_to_string(
+                        crate:: #(#path ::)* layout::Oob { #fields }
+                    )?
+                })
+            })
+            .collect();
+
         let mut nested = quote!(#content);
         for layout in layouts[depth..].iter().rev() {
             let path = layout.module.iter().map(|part| ident(part));
-            let prefix = &layout.prefix;
-            let fields = if layout.wants_prefix {
-                quote!(layout: #prefix, children: #nested)
-            } else {
-                quote!(children: #nested)
-            };
+            // A prefix with a hole in it is built per request; one without
+            // is a literal the compiler can see.
+            let prefix = prefix_expr(layout, ctx);
+            let mut fields = quote!(children: #nested);
+            if layout.wants_path {
+                fields = quote!(path: &(#ctx).path, #fields);
+            }
+            if layout.wants_prefix {
+                fields = quote!(layout: #prefix, #fields);
+            }
             nested = quote! {
                 crate:: #(#path ::)* layout::Layout { #fields }
             };
@@ -313,7 +411,16 @@ fn expand(layouts: &[Layout], ctx: &TokenStream2, content: &TokenStream2) -> Tok
             let depth = depth as u32;
             quote!(#depth)
         };
-        quote!(#pattern => crate::pages::render(#nested),)
+        let body = if out_of_band.is_empty() {
+            quote!(crate::pages::render(#nested))
+        } else {
+            // Leading, as the static version writes them: the client reads
+            // the whole body before it swaps anything, so the order is a
+            // convention rather than a requirement, and one convention is
+            // better than two.
+            quote!(crate::pages::render_with(vec![#(#out_of_band),*], #nested))
+        };
+        quote!(#pattern => #body,)
     });
 
     // The same trick rsx uses: a file nothing references is a file cargo does
@@ -355,13 +462,15 @@ fn error(message: &str) -> TokenStream {
 mod tests {
     use super::*;
 
-    /// A layout at a directory, with no `layout` parameter. The file does
-    /// not exist, which is what `declares_prefix` answers `false` to.
+    /// A layout at a directory, declaring neither parameter. The file does
+    /// not exist, which is what `declares` answers `false` to.
     fn layout(dir: &str) -> Layout {
         Layout {
             module: module_path_from(Path::new(dir)),
             prefix: prefix_of(Path::new(dir)),
             wants_prefix: false,
+            wants_path: false,
+            oob: None,
             file: PathBuf::from("/tmp/layout.rsx"),
         }
     }
@@ -374,6 +483,96 @@ mod tests {
             prefix_of(Path::new("src/pages/blog/archive")),
             "/blog/archive"
         );
+    }
+
+    #[test]
+    fn a_directory_named_after_a_parameter_is_a_hole_in_the_prefix() {
+        // `/[section]` would be the same marker under `/alpha` and
+        // `/beta`, and the client would conclude the two pages share a
+        // layer they do not.
+        assert_eq!(prefix_of(Path::new("src/pages/[section]")), "/{section}");
+        assert_eq!(
+            prefix_of(Path::new("src/pages/[section]/[card]")),
+            "/{section}/{card}"
+        );
+        assert_eq!(
+            prefix_of(Path::new("src/pages/blog/[slug]")),
+            "/blog/{slug}"
+        );
+    }
+
+    #[test]
+    fn a_prefix_with_a_hole_is_filled_from_the_request() {
+        let mut dynamic = layout("src/pages/[section]");
+        dynamic.wants_prefix = true;
+        let out = expand(&[dynamic], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(
+            out.contains("crate :: pages :: prefix"),
+            "built per request: {out}"
+        );
+        assert!(out.contains("\"/{section}\""), "{out}");
+
+        // And a prefix without one stays a literal the compiler can see.
+        let mut fixed = layout("src/pages/users");
+        fixed.wants_prefix = true;
+        let out = expand(&[fixed], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(!out.contains("prefix"), "no call is needed: {out}");
+        assert!(out.contains("layout : \"/users\""), "{out}");
+    }
+
+    #[test]
+    fn a_layout_is_handed_the_path_only_when_it_asks() {
+        let mut wants = layout("src/pages");
+        wants.wants_path = true;
+        let out = expand(&[wants], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(out.contains("path : & (ctx) . path"), "{out}");
+
+        let out = expand(&[layout("src/pages")], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(!out.contains("path :"), "nothing asked: {out}");
+    }
+
+    #[test]
+    fn a_skipped_layout_sends_a_replacement_for_its_own_chrome() {
+        // The shell is never in a partial, so its sidebar would keep the
+        // highlight of the section you came from. `Oob` is how it corrects
+        // exactly that and nothing else.
+        let mut shell = layout("src/pages");
+        shell.oob = Some(Wants {
+            prefix: false,
+            path: true,
+        });
+        let inner = layout("src/pages/users");
+        let out = expand(&[shell, inner], &quote!(ctx), &quote!(Page {})).to_string();
+
+        // Depth 0 keeps the shell, so there is nothing to correct.
+        let arms: Vec<&str> = out.split("=>").collect();
+        assert!(
+            arms[1].contains("render (") && !arms[1].contains("render_with"),
+            "the whole document needs no correction: {out}"
+        );
+        // Depth 1 keeps the shell and nothing else, so the shell is the
+        // deepest kept layer and sends its fragment. Deeper than that the
+        // section layout is kept too, and a kept section means the sidebar
+        // that marks the section cannot be stale.
+        assert_eq!(
+            out.matches("render_with").count(),
+            1,
+            "only the deepest kept layer corrects itself: {out}"
+        );
+        assert!(out.contains("layout :: Oob"), "{out}");
+        assert!(out.contains("render_to_string"), "{out}");
+    }
+
+    #[test]
+    fn a_layout_with_no_oob_sends_no_fragment() {
+        let out = expand(
+            &[layout("src/pages"), layout("src/pages/users")],
+            &quote!(ctx),
+            &quote!(Page {}),
+        )
+        .to_string();
+        assert!(!out.contains("render_with"), "{out}");
+        assert!(!out.contains("Oob"), "{out}");
     }
 
     #[test]

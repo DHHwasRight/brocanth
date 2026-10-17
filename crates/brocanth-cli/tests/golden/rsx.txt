@@ -507,6 +507,57 @@ pub mod views {
 /// than in a crate name.
 pub use brocanth_pages::html;
 
+/// The URL prefix a layout covers, for a layout under a parameter.
+///
+/// `html!` passes a layout the prefix it wraps, which is the marker dp-swap
+/// reads to work out how much of a page two URLs share. A directory named
+/// after a parameter has no prefix of its own until a request arrives, so
+/// the macro hands this function the template and the request fills it:
+/// `/{section}` under `/alpha/card-2` is `/alpha`.
+///
+/// Called only from the expansion, and only for a layout that sits under a
+/// parameter. A marker reading `/[section]` would be the same string on
+/// every section, and the client would conclude that two pages share a
+/// layer they do not.
+pub fn prefix(ctx: &Ctx, template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        // A parameter the router did not match cannot happen: this template
+        // is built from the directory the route was read out of, so the
+        // name is one the pattern declares.
+        out.push_str(ctx.param(&rest[open + 1..open + close]).unwrap_or_default());
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A partial, and the replacements for the chrome it left behind.
+///
+/// A layout the client keeps is a layout this answer does not contain, which
+/// is the point of asking for a partial and the reason its chrome goes
+/// stale: the sidebar still marks the section you came from. A layout that
+/// has something to correct defines `Oob` beside its `Layout`, and `html!`
+/// renders one per skipped layer and passes them here.
+///
+/// They lead, because the static version of this writes them that way. The
+/// client reads the whole body before it swaps anything, so the order is a
+/// convention rather than a requirement, and one convention is better than
+/// two.
+pub fn render_with(
+    out_of_band: Vec<String>,
+    content: impl rsx::Template,
+) -> Result<Response, Error> {
+    let mut body = out_of_band.concat();
+    body.push_str(&content.render_to_string()?);
+    Ok(Response::ok(body))
+}
+
 /// A page with no layout at all: a fragment, a partial, an htmx swap.
 ///
 /// What `html!` expands into, once it has wrapped the page, so this is also

@@ -137,6 +137,10 @@ struct Node {
     children: std::collections::BTreeMap<String, Node>,
     /// The file name, for the `#[path]` on a leaf.
     file: Option<String>,
+    /// The directory this module stands for, where that is not its own
+    /// name. `[section]` is not an identifier, so the module is `_section_`
+    /// and the directory has to be said out loud.
+    dir: Option<String>,
 }
 
 impl Node {
@@ -144,8 +148,22 @@ impl Node {
         let mut root = Node::default();
         for page in pages {
             let mut node = &mut root;
-            for part in &page.module {
+            // The module names and the directory names run in step: the
+            // last module is the file, and the ones before it are the
+            // directories above it.
+            let dirs: Vec<String> = Path::new(&page.route_file)
+                .parent()
+                .map(|p| {
+                    p.components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (depth, part) in page.module.iter().enumerate() {
                 node = node.children.entry(part.clone()).or_default();
+                if let Some(dir) = dirs.get(depth) {
+                    node.dir = Some(dir.clone());
+                }
             }
             node.file = Some(
                 Path::new(&page.route_file)
@@ -167,7 +185,13 @@ impl Node {
                 },
                 None => {
                     let inner = child.render(&[]);
+                    // `#[path]` on an inline module is what sets the
+                    // directory its own children are looked for in, which
+                    // is the only way a module called `_section_` can hold
+                    // the files in `[section]/`.
+                    let dir = child.dir.clone().unwrap_or_else(|| name.clone());
                     quote! {
+                        #[path = #dir]
                         pub mod #module {
                             #inner
                         }
