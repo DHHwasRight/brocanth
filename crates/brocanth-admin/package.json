@@ -1,0 +1,13 @@
+{
+  "name": "brocanth-admin-style",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The CSS build for the admin's own templates. Nothing an application needs: src/admin.css is committed.",
+  "scripts": {
+    "css": "tailwindcss --input style/admin.css --output src/admin.css --minify",
+    "css:watch": "tailwindcss --input style/admin.css --output src/admin.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14"
+  }
+}

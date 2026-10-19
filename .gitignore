@@ -1,3 +1,7 @@
 target/
 .env
 *.db
+
+# The admin's and the jobs panel's CSS builds. `src/admin.css` is
+# committed; what builds it is not.
+node_modules/

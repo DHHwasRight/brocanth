@@ -128,6 +128,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod assets;
+
 pub mod adapter;
 pub mod admin;
 pub mod config;

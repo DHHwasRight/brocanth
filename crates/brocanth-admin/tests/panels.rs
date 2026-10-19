@@ -125,26 +125,43 @@ fn a_panel_renders_inside_the_admins_chrome() {
     assert!(html.contains("page 2"), "{html}");
     // ...inside the layout, with the nav the models are in.
     assert!(html.contains("Background jobs"), "{html}");
-    assert!(html.contains("rail-nav"), "{html}");
-    assert!(html.contains("/admin/post"), "{html}");
+    assert!(html.contains("/admin/post"), "the models are still in the nav: {html}");
 }
 
 #[test]
 fn a_panel_is_a_tab_and_knows_when_it_is_the_current_one() {
     let admin = admin_with_panel(true);
+    // `aria-current` and not a class name. Which screen you are on is a
+    // fact about the page; a class is a fact about the stylesheet, and a
+    // test that asserts on one breaks every time somebody restyles.
     let page = get(&admin, "/admin/jobs", "");
     let html = page.html().expect("a page");
     assert!(
-        html.contains(r#"href="/admin/jobs" class="rail-link is-current""#),
-        "the panel's own tab is marked current: {html}"
+        current_tabs(html) == ["/admin/jobs"],
+        "the panel's own tab, and only it, is current: {html}"
     );
-    // And it is not current from a model screen.
+
     let page = get(&admin, "/admin/post", "");
     let html = page.html().expect("a page");
     assert!(
-        html.contains(r#"href="/admin/jobs" class="rail-link""#),
-        "{html}"
+        current_tabs(html) == ["/admin/post"],
+        "and from a model screen the model is: {html}"
     );
+}
+
+/// The `href` of every nav link carrying `aria-current`.
+fn current_tabs(html: &str) -> Vec<String> {
+    html.split("<a ")
+        .skip(1)
+        .filter_map(|tag| {
+            let open = tag.split('>').next()?;
+            if !open.contains(r#"aria-current="page""#) {
+                return None;
+            }
+            let rest = open.split(r#"href=""#).nth(1)?;
+            Some(rest.split('"').next()?.to_string())
+        })
+        .collect()
 }
 
 #[test]

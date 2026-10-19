@@ -1,0 +1,46 @@
+/* The admin's stylesheet, authored here and built into `src/admin.css`.
+ *
+ * Built here and not in your project, for the reason `dpswap.min.js` is
+ * vendored rather than fetched: this crate's templates live in this crate,
+ * so a Tailwind build in an application could only reach them through a
+ * path into the cargo registry. The output is committed, `include_str!`d
+ * into the layout, and an application that mounts the admin needs no node
+ * and no network.
+ *
+ * To rebuild it, see style/README.md.
+ */
+
+@import "tailwindcss";
+
+/* Where the class names are. `.rsx` is not an extension Tailwind knows. */
+@source "../src/templates/**/*.rsx";
+
+/* Stripe's documentation, as close as a token set gets to it: a white
+ * stage on pale blue-grey, navy text rather than black, one violet accent,
+ * borders light enough to read as separation rather than as lines, and the
+ * two-layer shadow that is the one thing people recognise it by.
+ */
+@theme {
+    --color-ink: #0a2540;
+    --color-ink-soft: #425466;
+    --color-ink-faint: #8792a2;
+    --color-accent: #635bff;
+    --color-accent-dark: #4b45c6;
+    --color-line: #e6ebf1;
+    --color-stage: #f6f9fc;
+    --color-danger: #c62828;
+
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    --radius-card: 8px;
+    --radius-control: 6px;
+
+    /* Stripe's shadow is two shadows: a wide soft one tinted toward the
+     * background, and a tight dark one. One shadow never looks like it. */
+    --shadow-card: 0 2px 5px -1px rgba(50, 50, 93, 0.25),
+        0 1px 3px -1px rgba(0, 0, 0, 0.3);
+    --shadow-raised: 0 13px 27px -5px rgba(50, 50, 93, 0.25),
+        0 8px 16px -8px rgba(0, 0, 0, 0.3);
+}

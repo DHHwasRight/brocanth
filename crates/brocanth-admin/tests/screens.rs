@@ -294,9 +294,11 @@ fn an_overridden_rsx_component_is_used_in_place_of_the_default() {
     );
     assert!(!overridden.contains("<table"), "the default did not run");
 
-    // One screen was replaced; the rest are still the shipped ones.
+    // One screen was replaced; the rest are still the shipped ones. The
+    // layout is what put the document around it, so assert on that rather
+    // than on a class name the stylesheet owns.
     assert!(
-        overridden.contains("rail"),
+        overridden.contains("<!DOCTYPE html>") && overridden.contains("<nav"),
         "the shipped layout still wraps it"
     );
     let detail = html(block_on(admin.detail(Principal::anonymous(), "post", "1")).unwrap());
