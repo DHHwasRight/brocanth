@@ -23,12 +23,12 @@ impl Module for Model {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/model.rs", plugin_rs(project));
+        s.file("src/plugins/model/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod model;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "model", "Model"));
         s.at(Slot::AppContext).block(
-            "    let db: &plugins::model::Db = cx.extract();\n\
+            "    let db: &crate::plugins::model::Db = cx.extract();\n\
             \x20   eprintln!(\"database: {}\", db.url);"
                 .to_string(),
         );

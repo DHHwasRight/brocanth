@@ -641,6 +641,7 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "ratatui",
+ "toml_edit",
  "unicode-width",
 ]
 
@@ -5096,6 +5097,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

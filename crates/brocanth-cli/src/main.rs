@@ -8,6 +8,7 @@
 
 mod commands;
 mod modules;
+mod owned;
 mod tui;
 mod ui;
 
@@ -83,6 +84,12 @@ enum Command {
     /// default this command will tell you about.
     #[command(alias = "new")]
     Create(commands::create::CreateArgs),
+    /// Put a module into a project that already exists
+    ///
+    /// The same generator `create` runs, with one more entry on the list in
+    /// `brocanth.toml`. It rewrites what it owns, appends to `Cargo.toml`
+    /// and the config, and refuses rather than overwrite a file of yours.
+    Add(commands::add::AddArgs),
     /// A command defined in this project, run by the project's own binary
     ///
     /// Everything this tool does not recognise is one. `brocanth` is
@@ -171,6 +178,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::create::CreateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("add", m)) => commands::add::run(
+            &ui,
+            dir,
+            commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         // Everything else belongs to the project: the ones listed in the help
         // and the ones added since it was last built take the same path.

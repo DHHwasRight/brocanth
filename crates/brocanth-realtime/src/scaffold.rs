@@ -54,7 +54,7 @@ impl Module for Realtime {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/realtime.rs", plugin_rs(project));
+        s.file("src/plugins/realtime/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod realtime;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "realtime", "Realtime"));
@@ -62,7 +62,7 @@ impl Module for Realtime {
         // a field nothing touches: a generated application that warns on
         // its first build is a bad first minute.
         s.at(Slot::AppContext).block(
-            "    let realtime: &plugins::realtime::Broadcast = cx.extract();\n\
+            "    let realtime: &crate::plugins::realtime::Broadcast = cx.extract();\n\
             \x20   eprintln!(\n\
             \x20       \"realtime: up to {} clients\",\n\
             \x20       realtime.broker.config().max_clients\n\

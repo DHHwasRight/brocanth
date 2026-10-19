@@ -46,11 +46,14 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
 //! My Blog -- a brocanth application.
 //!
 //! No command line was asked for, so this binary does one thing. Everything it
-//! contains is in `src/app.rs`; `brocanth create --with commands` turns this
-//! into a command line with `serve` as one of its commands.
+//! contains is in `src/app.rs`; `brocanth add commands` turns this into a
+//! command line with `serve` as one of its commands.
 
 mod app;
 mod pages;
@@ -67,20 +70,25 @@ fn main() -> ExitCode {
         }
     }
 }
+
+// brocanth-digest: 54be3755a6887e81
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
-//! A plugin that is not named in [`build`] is not registered, and one that is
-//! not in `Cargo.toml` is not compiled at all. "The framework decided for you
-//! and you cannot see where" is the thing this layout exists to make
-//! impossible.
+//! This file is yours. `brocanth add` does not rewrite it: what it would
+//! have to say is in `src/plugins/mod.rs`, which is generated, and this one
+//! only asks that file three questions.
+//!
+//! A plugin that is not named in `plugins::register!` is not registered, and
+//! one that is not in `Cargo.toml` is not compiled at all. "The framework
+//! decided for you and you cannot see where" is the thing this layout exists
+//! to make impossible.
 //!
 //! `serve` and every other command read this, so there is one answer to what
 //! this application is.
 
 use std::sync::Arc;
 
-use brocanth::plugin_api::Plugin;
 use brocanth::plugin_app::AppBuilder;
 use brocanth::routing::{Dispatch, MiddlewareStack, Router};
 
@@ -101,21 +109,16 @@ pub struct App {
 
 /// Builds it. The only place that decides what this binary is.
 pub fn build() -> Result<App, String> {
-    // 1. Configuration. No file lookup, no merge order, no TOML parser: the
-    //    core takes values that are already built, so each plugin below is
-    //    handed a literal the compiler checks. Add the config plugin when a
-    //    file is wanted; nothing else changes.
-
-    // 2. The application, and every plugin it contains. Each line is a line
-    //    a reader can delete; nothing registers itself.
-    let app = AppBuilder::new()
-        .plugin(plugins::realtime::Realtime::new(
-            plugins::realtime::Settings::default(),
-        ))
+    // 1. The application, and every plugin it contains. The chain is in
+    //    `src/plugins/mod.rs`, one line per plugin and each one a line a
+    //    reader can delete. It is there rather than here because the
+    //    generator rewrites it whenever the module list changes.
+    let app = plugins::register!(AppBuilder::new())
         .setup(|setup| {
             // A plugin *offers* middleware and cannot mount it: a
             // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
-            // pattern is a decision, and the decision is the application's.
+            // pattern is a decision, and the decision is the application's --
+            // which is why these lines are here, in the file you own.
             // Nothing in this binary offers middleware, so nothing is mounted.
             let _ = setup.router();
             Ok(())
@@ -123,26 +126,29 @@ pub fn build() -> Result<App, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // 3. The route table: the shape of src/pages and nothing else. A file is
+    // 2. The route table: the shape of src/pages and nothing else. A file is
     //    a route, and `pages::router` is the only place that says so.
     let router = pages::router().map_err(|e| e.to_string())?;
 
-    // 4. The chain. Nothing offered middleware, so the stack is empty --
-    //    and an empty stack costs nothing: `run` allocates only when a
-    //    layer matches the path.
-    let stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();
+    // 3. The chain, from exactly what the block above mounted. A name this
+    //    binary has no layer for stops the application rather than silently
+    //    not running.
+    let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();
+    for mount in app.router_plan().mounts() {
+        let layer = plugins::layer(&mount.middleware).ok_or_else(|| {
+            format!(
+                "`{}` is mounted, but this binary has no layer for it",
+                mount.middleware
+            )
+        })?;
+        stack
+            .use_at(&mount.pattern, layer)
+            .map_err(|e| e.to_string())?;
+    }
 
-    // The per-request context. These lines compile only because the
-    // plugins that provide the values were registered in step 2: the
-    // installed provider set lives in the application's *type*. Delete a
-    // registration above and this stops compiling, which is the whole
-    // mechanism -- modularity enforced rather than documented.
-    let cx = app.context();
-    let realtime: &plugins::realtime::Broadcast = cx.extract();
-    eprintln!(
-        "realtime: up to {} clients",
-        realtime.broker.config().max_clients
-    );
+    // 4. What the plugins put on the per-request context, said once.
+    plugins::announce!(&app);
+
     Ok(App {
         router,
         stack,
@@ -593,14 +599,90 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! The plugins this application contains.
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
-//! Each one is also named in `main`: being here makes it compile, being named
-//! there makes it run. The core depends on none of them, and the dependency
-//! arrow points this way and never back.
+//! The plugins this application contains, and the three things `src/app.rs`
+//! asks this file for.
+//!
+//! Each plugin is also named in `register!`: being here makes it compile,
+//! being named there makes it run. The core depends on none of them, and the
+//! dependency arrow points this way and never back.
+//!
+//! The registration chain sits here and not in `src/app.rs` because the
+//! generator rewrites it every time the module list changes, and `src/app.rs`
+//! is yours.
 
 pub mod realtime;
-===== src/plugins/realtime.rs =====
+
+use brocanth::routing::Next;
+
+use crate::pages::{Ctx, Response};
+
+/// Every plugin this application contains, in dependency order.
+///
+/// A macro and not a function, and the reason is the builder's type:
+/// registering a plugin that provides a context item widens
+/// `AppBuilder`'s type-level provider list, so the type this chain ends
+/// on is one nested associated type per plugin. A function would have to
+/// spell that type out and re-spell it on every change. The macro expands
+/// at its one call site in `src/app.rs`, where the compiler works it out
+/// and nobody has to read it.
+///
+/// Each registration is still one line, and a line a reader can delete.
+macro_rules! register {
+    ($builder:expr) => {{
+        use brocanth::plugin_api::Plugin;
+
+        // No file lookup, no merge order, no TOML parser: the core takes
+        // values that are already built, so each plugin below is handed a
+        // literal the compiler checks. Add the config plugin when a file is
+        // wanted; nothing else changes.
+        let builder = $builder;
+        let builder = builder.plugin(crate::plugins::realtime::Realtime::new(
+            crate::plugins::realtime::Settings::default(),
+        ));
+        builder
+    }};
+}
+pub(crate) use register;
+
+/// What this binary puts on the context, said once at startup.
+///
+/// The lines are a demonstration and they are load-bearing: the installed
+/// provider set lives in the application's *type*, so an `extract` for a
+/// plugin nobody registered does not compile. That is the modularity claim,
+/// checked by the compiler rather than written in a README.
+///
+/// A macro for the reason `register!` is one: the context's type is the
+/// builder's type, and neither is worth spelling.
+macro_rules! announce {
+    ($app:expr) => {{
+        let cx = $app.context();
+        let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
+        eprintln!(
+            "realtime: up to {} clients",
+            realtime.broker.config().max_clients
+        );
+    }};
+}
+pub(crate) use announce;
+
+/// The function behind a middleware name the application mounted.
+///
+/// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
+/// decision and the decision is the application's. Which function answers
+/// to `"request_log"` is not a decision, so it is here, where adding a
+/// plugin can write it.
+pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response> {
+    // Nothing in this binary offers middleware, so nothing can be
+    // mounted and nothing is ever looked up.
+    let _ = name;
+    None
+}
+
+// brocanth-digest: 9c1a98d37a002a1c
+===== src/plugins/realtime/mod.rs =====
 //! The realtime broker, as this application registers it.
 //!
 //! A subscription is an index entry, not a query. `brocanth-policy` is a
@@ -774,9 +856,11 @@ impl Plugin for Realtime {
     }
 }
 ===== AGENTS.md =====
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
-A brief for a coding agent. Written by `brocanth create`, so the lists
+A brief for a coding agent. Written by `brocanth`, so the lists
 below are this project's and not the framework's in general.
 
 ## Check your work
@@ -843,3 +927,24 @@ unlikely.
 `docs/llm-authoring.md` in the brocanth checkout is the full brief: what
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
+
+<!-- brocanth-digest: 0a8d432e2692e442 -->
+===== brocanth.toml =====
+# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+# Change the module list with `brocanth add`, not here.
+#
+# What this project is made of. Every other generated file follows from it.
+
+[project]
+name = "my-blog"
+title = "My Blog"
+
+[modules]
+enabled = ["realtime"]
+
+[modules.realtime]
+files = ["src/plugins/realtime/"]
+config = []
+crates = ["brocanth-realtime"]
+
+# brocanth-digest: a7bf6e1de5144e39

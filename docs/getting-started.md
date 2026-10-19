@@ -40,34 +40,37 @@ other answer has a default.
 What it writes:
 
 ```
-  blog/Cargo.toml               1182 bytes
-  blog/.gitignore                  8 bytes
-  blog/rust-toolchain.toml        29 bytes
-  blog/mise.toml                 211 bytes
-  blog/src/main.rs               564 bytes
-  blog/src/app.rs               6243 bytes
-  blog/src/pages/mod.rs         9365 bytes
-  blog/src/pages/index.rs        802 bytes
-  blog/src/pages/about.rs       1040 bytes
-  blog/src/pages/users/[id].rs  1421 bytes
-  blog/src/plugins/mod.rs        263 bytes
-  blog/src/plugins/logging.rs   2388 bytes
-  blog/config/development.toml   560 bytes
-  blog/brocanth.toml              24 bytes
-  blog/src/commands/mod.rs       392 bytes
-  blog/src/commands/serve.rs     592 bytes
-  blog/AGENTS.md                2595 bytes
+  blog/Cargo.toml                  1455 bytes
+  blog/.gitignore                     8 bytes
+  blog/rust-toolchain.toml           29 bytes
+  blog/mise.toml                    492 bytes
+  blog/src/main.rs                  756 bytes
+  blog/src/app.rs                  6595 bytes
+  blog/src/pages/mod.rs            8838 bytes
+  blog/src/pages/index.rs           802 bytes
+  blog/src/pages/about.rs          1040 bytes
+  blog/src/pages/users/[id].rs     1656 bytes
+  blog/src/plugins/mod.rs          3197 bytes
+  blog/config/development.toml      560 bytes
+  blog/src/commands/mod.rs          582 bytes
+  blog/src/commands/serve.rs        592 bytes
+  blog/src/plugins/logging/mod.rs  2388 bytes
+  blog/AGENTS.md                   3351 bytes
+  blog/brocanth.toml                609 bytes
 
-    core      a router handing a request and a context to a handler
-    logging   a line per request; the core assumes no log layer
-    config    config/<env>.toml, merged; without it nothing links a TOML parser
-    commands  this project's own command line, `serve` plus whatever you add
-    sessions  not asked for: absent from the source, the binary and the lock file
-    model     not asked for: absent from the source, the binary and the lock file
-    rsx       not asked for: absent from the source, the binary and the lock file
+    core          a router handing a request and a context to a handler
+    logging       a line per request; the core assumes no log layer
+    config        config/<env>.toml, merged; without it nothing links a TOML parser
+    commands      this project's own command line, `serve` plus whatever you add
+    sessions      not asked for: absent from the source, the binary and the lock file
+    model         not asked for: absent from the source, the binary and the lock file
+    cache         not asked for: absent from the source, the binary and the lock file
+    jobs          not asked for: absent from the source, the binary and the lock file
+    realtime      not asked for: absent from the source, the binary and the lock file
+    rsx           not asked for: absent from the source, the binary and the lock file
 ```
 
-Those last three lines are the point of the whole design, not a progress
+Those last lines are the point of the whole design, not a progress
 message. A capability nobody asked for is not compiled, not linked, and has no
 entry in `Cargo.lock`. `cargo tree` on a fresh project will not show an ORM or
 a SQL driver.
@@ -117,6 +120,66 @@ and nothing else.
 The last two are part of `rsx` and are named for it, because a command line is
 flat: `--with rsx-htmx` has to say on its own what an indent says on a screen.
 Naming one without `rsx` is an error that prints the line that works.
+
+### Adding a module later
+
+```
+cd blog
+brocanth add jobs
+cargo build
+```
+
+`add` is the same generator, with one more entry on the list in
+`brocanth.toml`. That file is the project's record of what it is made of:
+
+```toml
+[project]
+name = "blog"
+title = "Blog"
+
+[modules]
+enabled = ["logging", "config", "jobs", "commands"]
+
+[modules.jobs]
+files = ["src/plugins/jobs/"]
+config = ["jobs"]
+crates = ["brocanth-jobs"]
+```
+
+Four kinds of file come out of a run, and which is which is fixed:
+
+| File | What `add` does |
+|---|---|
+| `src/plugins/mod.rs`, `src/commands/mod.rs`, `src/main.rs`, `brocanth.toml`, `AGENTS.md` | Rewrites it. Each carries a digest, and an edited one stops the command. |
+| `Cargo.toml`, `config/<env>.toml` | Appends. Every other byte stays where it was, comments and all. |
+| `src/plugins/<name>/`, `src/pages/`, `src/app.rs` | Yours. Written when absent, never rewritten. |
+
+An owned file you have edited stops the run, with a diff of what would have
+gone. `--force` discards the edit, after you have seen it.
+
+A module whose arrival would change a file of yours is refused, and the
+command says which file and shows the change. `config` is the clear case: it
+decides whether every *other* plugin's settings struct derives `Deserialize`,
+and those structs are yours. Adding it to a project that already has plugins
+means making that change by hand, and the command prints it.
+
+`src/app.rs` is the exception. What lands there is a middleware mount, and a
+mount is a decision -- the pattern is the application's to choose, which is
+why that file is yours. So the line is printed for you to place, and the
+project compiles and runs without it:
+
+```
+! src/app.rs is yours, and one line belongs in it
+  a mount is a decision, so the generator does not make it
+
+                  setup.router().mount("/{*rest}", "request_log");
+    +             setup.router().mount("/users/{*rest}", "session");
+                  Ok(())
+```
+
+There is no `brocanth remove` yet. The per-module record above is written so
+that there can be one: it says what each module put in the project, so a
+later `remove` deletes what was written rather than what a rule guesses.
 
 ## Run it
 

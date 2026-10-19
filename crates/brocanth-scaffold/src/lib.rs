@@ -18,7 +18,7 @@
 //!     }
 //!
 //!     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-//!         s.file("src/plugins/cache.rs", "// ...\n");
+//!         s.file("src/plugins/cache/mod.rs", "// ...\n");
 //!         s.at(Slot::PluginsMod).line("pub mod cache;");
 //!         s.at(Slot::AppPlugins)
 //!             .block(snippet::plugin_line(project, "cache", "Cache"));
@@ -373,21 +373,36 @@ pub enum Slot {
     /// `Cargo.toml`, after the dependencies the choices brought. For a
     /// `[features]` table or anything else a dependency line cannot say.
     CargoExtra,
-    /// `src/app.rs`, the `use` lines at the top. Use
+    /// The `use` lines the registration chain needs. Use
     /// [`Writer::once`](crate::Writer::once), because two modules needing
     /// one import is the normal case and `use` twice does not compile.
+    ///
+    /// They land inside `plugins::register!`, in `src/plugins/mod.rs`, and
+    /// the macro expands in `src/app.rs`. The name is the old one because
+    /// renaming it would break every module outside this repository for a
+    /// word, and the slot still means what it meant: whatever the builder
+    /// chain needs in scope.
     AppUses,
-    /// `src/app.rs`, inside the `AppBuilder` chain in `build`. One
-    /// `.method(..)` per line, no trailing semicolon.
+    /// Inside the `AppBuilder` chain. One `.method(..)` per line, no
+    /// trailing semicolon.
+    ///
+    /// The chain is `plugins::register!` in `src/plugins/mod.rs`, which is
+    /// a file the generator rewrites. It used to be written straight into
+    /// `src/app.rs`, and that put a generated chain in the one file the
+    /// developer owns, so `brocanth add` could not touch it.
     AppPlugins,
     /// `src/app.rs`, inside `setup`, after the builder is done. Where a
     /// middleware offer is mounted, at a pattern the application chooses.
     AppSetup,
-    /// `src/app.rs`, inside `setup`, one line per module that provides a
-    /// value on the per-request context.
+    /// One line per module that provides a value on the per-request
+    /// context.
     ///
-    /// The generator writes `let cx = app.context();` above whatever lands
-    /// here, and only when something does. The lines are a demonstration
+    /// They land inside `plugins::announce!`, in `src/plugins/mod.rs`. The
+    /// generator writes `let cx = $app.context();` above them. A path a
+    /// module writes here is read in `src/app.rs`, where the macro
+    /// expands, so spell it from the crate root: `crate::plugins::..`.
+    ///
+    /// The lines are a demonstration
     /// and they are load-bearing: the installed provider set lives in the
     /// application's *type*, so an `extract` for a plugin nobody registered
     /// does not compile. That is the modularity claim, checked by the
@@ -400,6 +415,14 @@ pub enum Slot {
     AppBeforeRouter,
     /// `src/plugins/mod.rs`, one `pub mod` line per plugin.
     PluginsMod,
+    /// `src/plugins/mod.rs`, one arm of `layer`, for a module that offers
+    /// middleware: `"request_log" => Some(logging::layer),`.
+    ///
+    /// The arm used to be written in `src/app.rs` by a generator that knew
+    /// two module keys by name. Mounting a layer is the application's
+    /// decision and stays in `src/app.rs`; *finding* the function for a
+    /// mounted name is mechanism, and mechanism the generator owns.
+    PluginsLayers,
     /// `src/pages/mod.rs`, items the pages share.
     PagesItems,
     /// `config/<env>.toml`, one section per module that claims one.
@@ -419,13 +442,14 @@ impl fmt::Display for Slot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Slot::CargoExtra => "Cargo.toml",
-            Slot::AppUses => "src/app.rs (uses)",
-            Slot::AppPlugins => "src/app.rs (the builder chain)",
+            Slot::AppUses => "src/plugins/mod.rs (uses)",
+            Slot::AppPlugins => "src/plugins/mod.rs (the builder chain)",
             Slot::AppSetup => "src/app.rs (setup)",
-            Slot::AppContext => "src/app.rs (the context)",
+            Slot::AppContext => "src/plugins/mod.rs (the context)",
             Slot::AppItems => "src/app.rs (items)",
             Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",
+            Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesItems => "src/pages/mod.rs",
             Slot::ConfigSections => "config/<env>.toml",
             Slot::GitIgnore => ".gitignore",
@@ -484,6 +508,15 @@ impl Scaffold {
     }
 
     /// Write a whole file the module owns.
+    ///
+    /// # A module owns a directory, not a file
+    ///
+    /// A plugin goes in `src/plugins/<key>/mod.rs`, never
+    /// `src/plugins/<key>.rs`. Rust accepts both and the difference is not
+    /// about Rust: a module that owns a directory can be removed by
+    /// deleting it, and a developer who adds a second file beside the
+    /// first does not move anything to do it. Once projects exist in the
+    /// world the choice cannot be revisited, so it is made here.
     ///
     /// Two modules claiming one path is a problem rather than a last writer:
     /// which one won would otherwise depend on the order of an array in the
@@ -781,33 +814,48 @@ mod tests {
 pub mod snippet {
     use super::Project;
 
-    /// The line that registers a plugin instance in the application.
+    /// The statement that registers a plugin instance in the application.
     ///
     /// Two forms, and which one is right is not the module's choice: with
     /// the config plugin the instance is built from a named section, and
-    /// without it `main` hands it a literal the compiler checks.
+    /// without it the generator hands it a literal the compiler checks.
     ///
     /// It is here, and not written out in each module, for a duller reason
-    /// than that. The literal form is longer than rustfmt's `chain_width`,
-    /// so it has to arrive already broken across three lines or a
-    /// developer's first `cargo fmt` rewrites a file they never touched.
-    /// That is a fact about rustfmt, not about caching or logging, and
-    /// every module getting it right separately is every module getting it
-    /// wrong once.
+    /// than that. Both forms are longer than rustfmt's `chain_width`, so
+    /// they have to arrive already broken or a developer's first
+    /// `cargo fmt` rewrites a file they never touched. That is a fact
+    /// about rustfmt, not about caching or logging, and every module
+    /// getting it right separately is every module getting it wrong once.
+    ///
+    /// # Why a rebinding `let` and not one builder chain
+    ///
+    /// It was a chain, written straight into `src/app.rs`. The chain now
+    /// lives in `plugins::register!`, and a chain of exactly one call --
+    /// a project with one plugin, which is the common first project -- is
+    /// one rustfmt folds back onto its receiver. One statement per
+    /// registration is formatted on its own, so what the generator writes
+    /// does not depend on how many other modules were chosen.
+    ///
+    /// Each one still reads as one line a reader can delete.
+    ///
+    /// The paths are spelled from the crate root because the macro these
+    /// land in expands in `src/app.rs`, not in the file they are written
+    /// into.
     ///
     /// `key` is the module's key, which is also the plugin's module name
     /// and its config section. `ty` is the plugin type in that module.
     pub fn plugin_line(project: &Project, key: &str, ty: &str) -> String {
         if project.has("config") {
             format!(
-                "        .plugin_from_config::<plugins::{key}::{ty}>({key:?})\n\
-                 \x20       .map_err(|e| e.to_string())?\n"
+                "        let builder = builder\n\
+                 \x20           .plugin_from_config::<crate::plugins::{key}::{ty}>({key:?})\n\
+                 \x20           .map_err(|e| e.to_string())?;\n"
             )
         } else {
             format!(
-                "        .plugin(plugins::{key}::{ty}::new(\n\
-                 \x20           plugins::{key}::Settings::default(),\n\
-                 \x20       ))\n"
+                "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
+                 \x20           crate::plugins::{key}::Settings::default(),\n\
+                 \x20       ));\n"
             )
         }
     }

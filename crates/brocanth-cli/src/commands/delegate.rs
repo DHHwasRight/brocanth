@@ -26,7 +26,7 @@ use crate::commands::Outcome;
 use crate::ui::{Diagnostic, Ui, ACCENT};
 
 /// The marker that says "a project starts here".
-const MARKER: &str = "brocanth.toml";
+pub const MARKER: &str = "brocanth.toml";
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {
@@ -40,6 +40,17 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     };
 
     let root = project_root(&start)?;
+    if !has_command_line(&root) {
+        return Err(vec![Diagnostic::error(
+            "no-commands",
+            "this project has no command line, so it defines no commands",
+        )
+        .note(format!(
+            "{} says so in [modules]",
+            root.join(MARKER).display()
+        ))
+        .help("`brocanth add commands` gives it one, with `serve` to start")]);
+    }
     ui.note(format!(
         "{} {}",
         crate::ui::paint(ACCENT, root.display()),
@@ -52,7 +63,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
 }
 
 /// The nearest ancestor of `start` holding [`MARKER`].
-fn project_root(start: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
+///
+/// `brocanth add` asks the same question and gets the same answer here:
+/// two rules for where a project starts is one rule too many.
+pub fn project_root(start: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
     start
         .ancestors()
         .find(|dir| dir.join(MARKER).is_file())
@@ -65,6 +79,35 @@ fn project_root(start: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
             .note(format!("looked upward from {}", start.display()))
             .help("`brocanth create <NAME>` makes a project, or cd into one")]
         })
+}
+
+/// Whether this project's binary is a command line at all.
+///
+/// Every project has a `brocanth.toml` now -- it is where the module list
+/// lives -- so its presence no longer means there is something to delegate
+/// to. A project without the `commands` module has one binary that ignores
+/// its arguments and serves, and handing it `--help` would start a server
+/// and never come back.
+fn has_command_line(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root.join(MARKER)) else {
+        return false;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        // Unreadable rather than absent. A project whose marker this tool
+        // cannot parse still gets the old behaviour, which is to try.
+        return true;
+    };
+    match doc
+        .get("modules")
+        .and_then(|m| m.get("enabled"))
+        .and_then(|e| e.as_array())
+    {
+        Some(listed) => listed.iter().any(|v| v.as_str() == Some("commands")),
+        // Scaffolded before the marker held the list. Before that it was
+        // only written for a project that had a command line, so its
+        // presence alone is the answer.
+        None => true,
+    }
 }
 
 /// Builds the project, with cargo's own output passed through.
@@ -208,6 +251,9 @@ pub fn listed(dir: Option<&Path>) -> Option<Vec<(String, String)>> {
         None => std::env::current_dir().ok()?,
     };
     let root = project_root(&start).ok()?;
+    if !has_command_line(&root) {
+        return None;
+    }
     let binary = binary_path(&root).ok()?;
 
     let out = Command::new(&binary)
@@ -298,6 +344,36 @@ Options:
     fn a_help_page_with_no_commands_yields_nothing() {
         let listed = parse_help("Usage: blog [OPTIONS]\n\nOptions:\n  -h, --help  Print help\n");
         assert!(listed.is_empty(), "{listed:?}");
+    }
+
+    #[test]
+    fn a_project_with_no_command_line_is_not_asked_what_its_commands_are() {
+        // `--help` on the serve-only binary would bind a port and never
+        // return. The marker is in every project now, so its presence is
+        // no longer the question.
+        let base = std::env::temp_dir().join(format!("brocanth-serve-only-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        std::fs::write(
+            base.join(MARKER),
+            "[project]\nname = \"x\"\n\n[modules]\nenabled = [\"logging\"]\n",
+        )
+        .unwrap();
+        assert!(!has_command_line(&base));
+
+        std::fs::write(
+            base.join(MARKER),
+            "[project]\nname = \"x\"\n\n[modules]\nenabled = [\"logging\", \"commands\"]\n",
+        )
+        .unwrap();
+        assert!(has_command_line(&base));
+
+        // And a marker from before the list existed, which was only ever
+        // written for a project that had one.
+        std::fs::write(base.join(MARKER), "[project]\nname = \"x\"\n").unwrap();
+        assert!(has_command_line(&base));
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

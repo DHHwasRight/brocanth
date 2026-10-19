@@ -5,6 +5,7 @@
 //! here prints; `main` renders what comes back, through the one [`crate::ui`]
 //! layer.
 
+pub mod add;
 pub mod create;
 pub mod delegate;
 

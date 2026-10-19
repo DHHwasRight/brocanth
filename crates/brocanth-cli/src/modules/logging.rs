@@ -19,7 +19,7 @@ impl Module for Logging {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/logging.rs", plugin_rs(project));
+        s.file("src/plugins/logging/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod logging;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "logging", "Logging"));
@@ -35,6 +35,11 @@ impl Module for Logging {
         // is in `main` where it can be read and changed.
         s.at(Slot::AppSetup)
             .line(r#"            setup.router().mount("/{*rest}", "request_log");"#);
+        // What `src/app.rs` reaches for once that mount is read back. The
+        // mount is the application's decision; which function answers to
+        // the name is not, so it is written here and not there.
+        s.at(Slot::PluginsLayers)
+            .line(r#"        "request_log" => Some(logging::layer),"#);
         if project.has("config") {
             s.at(Slot::ConfigSections)
                 .block("\n[logging]\nlevel = \"debug\"\n".to_string());

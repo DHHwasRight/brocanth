@@ -53,6 +53,12 @@ ratatui = { version = "0.30.2", default-features = false, features = [
     "underline-color",
 ] }
 cargo_metadata = "0.23.1"
+# `brocanth add` appends to `Cargo.toml` and `config/<env>.toml` rather than
+# rewriting them: both are files the developer also writes in, so the only
+# honest edit is one that leaves every other byte alone. That rules out
+# parse-and-reserialise, which is what `toml` would give. Already in the lock
+# file through cargo_metadata, so it costs the build nothing new.
+toml_edit = "0.25"
 
 # `vendor/dpswap.min.js` is embedded with include_str! rather than listed
 # here. See vendor/README.md: a scaffold that needs the network to finish is

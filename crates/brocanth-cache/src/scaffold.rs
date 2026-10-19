@@ -36,7 +36,7 @@ impl Module for Cache {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/cache.rs", plugin_rs(project));
+        s.file("src/plugins/cache/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod cache;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "cache", "Cache"));

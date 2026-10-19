@@ -19,7 +19,7 @@ impl Module for Sessions {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/sessions.rs", plugin_rs(project));
+        s.file("src/plugins/sessions/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod sessions;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "sessions", "Sessions"));
@@ -35,8 +35,10 @@ impl Module for Sessions {
         // is in `main` where it can be read and changed.
         s.at(Slot::AppSetup)
             .line(r#"            setup.router().mount("/users/{*rest}", "session");"#);
+        s.at(Slot::PluginsLayers)
+            .line(r#"        "session" => Some(sessions::layer),"#);
         s.at(Slot::AppContext).block(
-            "    let session: &plugins::sessions::Session = cx.extract();\n\
+            "    let session: &crate::plugins::sessions::Session = cx.extract();\n\
             \x20   eprintln!(\"session cookie: {}\", session.cookie);"
                 .to_string(),
         );
