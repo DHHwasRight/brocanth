@@ -39,6 +39,10 @@ brocanth-command = { path = "crates/brocanth-command", version = "0.1.0" }
 brocanth-cache = { path = "crates/brocanth-cache", version = "0.1.0" }
 brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
 brocanth-admin = { path = "crates/brocanth-admin", version = "0.1.0" }
+brocanth-auth = { path = "crates/brocanth-auth", version = "0.1.0" }
+brocanth-config = { path = "crates/brocanth-config", version = "0.1.0" }
+brocanth-openapi = { path = "crates/brocanth-openapi", version = "0.1.0" }
+brocanth-schema = { path = "crates/brocanth-schema", version = "0.1.0" }
 brocanth-model = { path = "crates/brocanth-model", version = "0.1.0" }
 brocanth-admin-model = { path = "crates/brocanth-admin-model", version = "0.1.0" }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
