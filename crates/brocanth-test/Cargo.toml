@@ -1,0 +1,51 @@
+[package]
+name = "brocanth-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An HTTP test client for brocanth: drives a built App through a request and answers questions about the page it produced."
+
+# Two dependencies, and the second is the first one's own.
+#
+# No tokio. A route that waits is driven by `src/rt.rs`, thirty lines of
+# `std`, the same manoeuvre and for the same reason as `brocanth-admin`'s
+# `rt.rs`: a dependency that appears only to make a test compile is still a
+# dependency in the tree. The limit is stated at `TestClient::send` -- a route
+# that waits on a reactor needs `send_async` and the caller's own runtime.
+[dependencies]
+brocanth.workspace = true
+
+# Because this crate *builds* a request rather than only reading one. The
+# core's `Request` and `Response` are aliases for `http`'s, and the two
+# constructors a client needs -- `Request::builder()` and
+# `Response::builder()` -- live in `impl Request<()>`, which a fully applied
+# alias cannot reach. Same version as the core and as `brocanth-admin`, which
+# names it for the same kind of reason, so there is one copy in the tree.
+http = "1"
+
+# No HTML parser, and the argument is in `src/html.rs`. The short version:
+# every assertion these tests need is "find the tags called `a`, read their
+# `href`" -- tag, attribute, inner text, and a region scoped by an attribute.
+# That is a scanner, not a parser. A spec parser (`scraper` and its fifteen
+# transitive crates, or `html5ever` alone) buys CSS selectors and tree repair,
+# and tree repair is a liability here: it invents the `<tbody>` the framework
+# did not emit and closes the `<a>` a template left open, so a test passes on
+# markup a browser would show differently. The scanner reads what was written.
+#
+# The line to change if that stops being true: an assertion that genuinely
+# needs descendant combinators or `nth-child` is the point at which `scraper`
+# earns its place in `[dev-dependencies]` of whoever needs it -- not here.
+
+[dev-dependencies]
+# The admin is the crate whose tests this client exists to rewrite, so its
+# panels are what the evidence is built from. A dev-dependency, so nothing
+# that depends on `brocanth-test` links the admin.
+brocanth-admin.workspace = true
+
+# Only to write the `Panel` under test: `Panel::render` is an `async fn` in a
+# trait that is held behind a `dyn`, which is `brocanth-admin`'s own reason
+# for the same dependency.
+async-trait = "0.1"
+
+[lints.rust]
+missing_docs = "warn"

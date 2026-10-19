@@ -862,6 +862,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-test"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-admin",
+ "http",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
