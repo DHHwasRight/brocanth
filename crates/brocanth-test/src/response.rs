@@ -40,7 +40,11 @@ impl TestResponse {
         TestResponse {
             status,
             headers,
-            body: response.into_body(),
+            // The one place in this crate that reads a core `Response`,
+            // which is why a streaming body changed this line and no
+            // assertion above it. A stream is collected here, because a
+            // test holds bytes and asserts on them.
+            body: collect(response.into_body()),
             chain: Vec::new(),
         }
     }
@@ -260,4 +264,40 @@ fn truncate(text: &str) -> String {
         cut -= 1;
     }
     format!("{}\n… and {} more bytes", &text[..cut], text.len() - cut)
+}
+
+/// Every byte of a body, whichever shape it arrived in.
+///
+/// A buffered body is already the answer. A streaming one is driven to its
+/// end on this thread, because a test holds a whole response and asserts on
+/// it — a client that handed back a half-read stream would make every
+/// assertion racy.
+///
+/// It parks between chunks rather than giving up on `Pending`. An SSE body
+/// fed by a broker on another thread is pending most of the time, and a
+/// collector that stopped there would silently return a prefix. A stream
+/// that never ends hangs the test, which is the honest failure: a response
+/// that never ends is what the handler wrote.
+fn collect(body: brocanth::plugin_body::Body) -> Vec<u8> {
+    use brocanth::plugin_body::Body;
+    use core::task::Poll;
+
+    match body {
+        Body::Buffered(bytes) => bytes,
+        Body::Streaming(mut stream) => {
+            let mut out = Vec::new();
+            crate::rt::block_on(core::future::poll_fn(move |cx| loop {
+                match stream.poll_chunk(cx) {
+                    Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
+                    // An error mid-body is not a status a test can see:
+                    // the headers are long gone. What arrived is what a
+                    // client would have had.
+                    Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
+                        return Poll::Ready(core::mem::take(&mut out))
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }))
+        }
+    }
 }

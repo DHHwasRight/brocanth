@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use brocanth::plugin_api::{Plugin, PluginError};
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::{Base, NoContext};
+use brocanth::plugin_body::Body;
 use brocanth::plugin_hooks::{
     Both, Flow, HookFamilies, HookRegistrar, HookSource, OnRequest, OnResponse, Request,
     RequestHook, RequestState, Response, ResponseHook,
@@ -70,7 +71,7 @@ impl RequestHook for Hooks {
     ) -> Result<Flow, PluginError> {
         self.seen.push(format!("before {}", request.uri().path()));
         if request.uri().path() == "/stop" {
-            let mut short = Response::new(b"a hook answered".to_vec());
+            let mut short = Response::new(Body::from(b"a hook answered".to_vec()));
             *short.status_mut() = http::StatusCode::ACCEPTED;
             return Ok(Flow::respond(short));
         }
@@ -84,14 +85,17 @@ impl RequestHook for Hooks {
 }
 
 impl ResponseHook for Hooks {
-    fn on_response(
+    // The header half, which runs for every response including a
+    // streaming one. Stamping a status is a header, so it belongs here.
+    fn on_headers(
         &self,
         _request: &Request,
-        response: &mut Response,
+        head: &mut brocanth::plugin_hooks::ResponseHead,
+        _body: brocanth::plugin_hooks::BodyShape<'_>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
-        let status = response.status().as_u16();
-        response.headers_mut().insert(
+        let status = head.status.as_u16();
+        head.headers.insert(
             "x-seen",
             http::HeaderValue::from_str(&status.to_string()).expect("a number is a header value"),
         );
@@ -150,7 +154,7 @@ fn screen<E>() -> Handler<E> {
 
 fn redirect<E>() -> Handler<E> {
     Box::new(|_cx: &mut RouteCx<'_, E>| {
-        let mut response = Response::new(Vec::new());
+        let mut response = Response::new(Body::empty());
         *response.status_mut() = http::StatusCode::SEE_OTHER;
         response
             .headers_mut()
@@ -175,7 +179,7 @@ fn html(status: u16, body: &str) -> Response {
     http::Response::builder()
         .status(status)
         .header("content-type", "text/html; charset=utf-8")
-        .body(body.as_bytes().to_vec())
+        .body(Body::from(body.as_bytes().to_vec()))
         .expect("a response")
 }
 

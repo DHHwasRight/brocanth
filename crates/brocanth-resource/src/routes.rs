@@ -48,6 +48,7 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
+use brocanth::plugin_body::Body;
 use brocanth::plugin_hooks::{HandlerError, Response};
 use brocanth::plugin_routes::{Handler, RouteBundle, RouteCx, RouteSource};
 use brocanth_policy::Value;
@@ -395,7 +396,7 @@ fn refuse(action: Action, failure: Failure) -> Result<Response, HandlerError> {
 }
 
 fn json_response(status: u16, body: Vec<u8>, location: Option<String>) -> Response {
-    let mut response = Response::new(body);
+    let mut response = Response::new(Body::from(body));
     *response.status_mut() =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     response.headers_mut().insert(
@@ -411,7 +412,7 @@ fn json_response(status: u16, body: Vec<u8>, location: Option<String>) -> Respon
 }
 
 fn empty(status: u16) -> Response {
-    let mut response = Response::new(Vec::new());
+    let mut response = Response::new(Body::empty());
     *response.status_mut() =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     response

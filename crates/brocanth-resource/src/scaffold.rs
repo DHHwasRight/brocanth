@@ -74,9 +74,16 @@ use brocanth_scaffold::{Manifest, Module, Project, Scaffold};
 ///
 /// A unit struct, because a module is asked once per run and everything it
 /// needs arrives in [`Project`].
-pub struct Resource;
+/// Named `Records` and not `Resource`, which is what it scaffolds.
+///
+/// `brocanth_resource::Resource` is this crate's own trait. A second item
+/// under that name in the same crate makes rustc print the fully qualified
+/// path in every error that mentions it — which broke a UI test pinning
+/// that message the moment this feature was enabled. PocketBase calls them
+/// records; so does this.
+pub struct Records;
 
-impl Module for Resource {
+impl Module for Records {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "resource",

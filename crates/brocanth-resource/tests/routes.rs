@@ -85,7 +85,8 @@ fn request(method: &str, uri: &str, who: Option<&str>, body: Vec<u8>) -> Request
 }
 
 fn body_of(response: &Response) -> String {
-    String::from_utf8(response.body().clone()).expect("UTF-8")
+    String::from_utf8(response.body().buffered().expect("a buffered body").to_vec())
+        .expect("UTF-8")
 }
 
 #[test]

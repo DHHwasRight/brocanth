@@ -453,7 +453,7 @@ fn plain(status: u16, body: &'static str) -> Response {
     http::Response::builder()
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
-        .body(body.as_bytes().to_vec())
+        .body(brocanth::plugin_body::Body::from(body.as_bytes().to_vec()))
         .expect("a response this crate wrote")
 }
 
@@ -466,6 +466,6 @@ fn method_not_allowed(allow: Allow) -> Response {
         .status(405)
         .header("content-type", "text/plain; charset=utf-8")
         .header("allow", allow.header_value())
-        .body(b"Method Not Allowed".to_vec())
+        .body(brocanth::plugin_body::Body::from(b"Method Not Allowed".to_vec()))
         .expect("a response this crate wrote")
 }
