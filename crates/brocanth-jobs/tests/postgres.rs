@@ -97,6 +97,11 @@ async fn every_statement_is_valid_postgres() {
     queue.stats().await.expect("stats");
     queue.inspect(id.id()).await.expect("inspect");
     queue.dead_jobs(10, 0).await.expect("dead jobs");
+    // The three operator reads. Here and not only in `queue.rs`, because
+    // that suite runs on SQLite and this test's whole job is the dialect.
+    queue.retries(10, 0).await.expect("retries");
+    queue.scheduled(10, 0).await.expect("scheduled");
+    queue.busy(10, 0).await.expect("busy");
     queue
         .reclaim_orphans(Duration::from_secs(60))
         .await
@@ -468,9 +473,11 @@ async fn a_worker_sleeps_until_the_next_job_is_due() {
         .start()
         .expect("the worker started");
 
-    wait_for("the scheduled job to run", Duration::from_secs(10), || async {
-        !log(&token).is_empty()
-    })
+    wait_for(
+        "the scheduled job to run",
+        Duration::from_secs(10),
+        || async { !log(&token).is_empty() },
+    )
     .await;
 
     let waited = started.elapsed();

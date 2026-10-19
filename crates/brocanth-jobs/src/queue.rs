@@ -12,7 +12,9 @@ use crate::cron::Cron;
 use crate::error::{Error, Result};
 use crate::events::{JobEvent, JobEvents, Silent};
 use crate::job::{Job, JobId};
-use crate::store::{schema, Backend, DeadJob, Enqueued, NewJob, Stats, Store};
+use crate::store::{
+    schema, Backend, DeadJob, Enqueued, NewJob, RunningJob, Stats, Store, WaitingJob,
+};
 
 /// What a recurring schedule does about occurrences it slept through.
 ///
@@ -263,6 +265,41 @@ impl Queue {
         self.store
             .dead_jobs(i64::from(limit), i64::from(offset))
             .await
+    }
+
+    /// Jobs that ran, failed, and are waiting for their backoff to pass.
+    ///
+    /// Separate from [`Queue::scheduled`] by `attempts`, and that is the
+    /// only thing separating them. A job waiting for its first run has
+    /// none; a job waiting after a failure has some. Sidekiq keeps two
+    /// sorted sets to tell those apart, because a Redis set is the index
+    /// and a second kind of waiting needs a second set. Here it is a
+    /// column, and the two screens are one query with one predicate
+    /// changed.
+    pub async fn retries(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
+        let now = to_millis(self.clock.now());
+        self.store
+            .retries(now, i64::from(limit), i64::from(offset))
+            .await
+    }
+
+    /// Jobs that have never run and are waiting for their time.
+    pub async fn scheduled(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
+        let now = to_millis(self.clock.now());
+        self.store
+            .scheduled(now, i64::from(limit), i64::from(offset))
+            .await
+    }
+
+    /// What every worker is holding right now, oldest claim first.
+    ///
+    /// A worker holding nothing does not appear, which is right: there is
+    /// nothing to show about it and nothing to do to it. `heartbeat_at`
+    /// against [`WorkerConfig::stale_after`](crate::WorkerConfig) is how a
+    /// screen tells a busy worker from a dead one whose jobs have not been
+    /// reclaimed yet.
+    pub async fn busy(&self, limit: u32, offset: u32) -> Result<Vec<RunningJob>> {
+        self.store.busy(i64::from(limit), i64::from(offset)).await
     }
 
     /// One dead job by its dead-letter id.

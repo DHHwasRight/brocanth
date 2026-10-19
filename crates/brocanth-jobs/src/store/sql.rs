@@ -458,6 +458,64 @@ pub(crate) fn orphan_requeue(dialect: Dialect) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Looking at what is waiting
+// ---------------------------------------------------------------------------
+//
+// Three reads an operator wants and a worker never does. They are here and
+// not on the claim path, so none of them takes a lock or orders by anything
+// the claim index cares about.
+//
+// Retries and scheduled jobs split on `attempts`, which is the whole reason
+// this table needs no fourth state. A job waiting for its first run has
+// attempts = 0; a job waiting after a failure has more. Sidekiq needs two
+// sorted sets to tell those apart because Redis has no columns to ask.
+
+/// Jobs that ran, failed and are waiting for their backoff. `$1` now,
+/// `$2` limit, `$3` offset.
+#[cfg(feature = "postgres")]
+pub(crate) const RETRIES_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND attempts > 0 AND run_at > $1 \
+     ORDER BY run_at, id LIMIT $2 OFFSET $3";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const RETRIES_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND attempts > 0 AND run_at > ? \
+     ORDER BY run_at, id LIMIT ? OFFSET ?";
+
+/// Jobs that have never run and are waiting for their time.
+#[cfg(feature = "postgres")]
+pub(crate) const SCHEDULED_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND attempts = 0 AND run_at > $1 \
+     ORDER BY run_at, id LIMIT $2 OFFSET $3";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const SCHEDULED_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND attempts = 0 AND run_at > ? \
+     ORDER BY run_at, id LIMIT ? OFFSET ?";
+
+/// What every worker is holding right now, oldest claim first.
+///
+/// `locked_by` and not a worker table: a worker is only ever known by the
+/// jobs it holds, so the jobs are where the answer is. A worker with
+/// nothing in flight is invisible here, which is correct -- there is
+/// nothing to show about it and nothing an operator can do to it.
+#[cfg(feature = "postgres")]
+pub(crate) const BUSY_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, locked_by, locked_at, \
+     heartbeat_at FROM brocanth_jobs WHERE state = 'running' ORDER BY locked_at, id \
+     LIMIT $1 OFFSET $2";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const BUSY_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, locked_by, locked_at, \
+     heartbeat_at FROM brocanth_jobs WHERE state = 'running' ORDER BY locked_at, id \
+     LIMIT ? OFFSET ?";
+
+// ---------------------------------------------------------------------------
 // The dead letter
 // ---------------------------------------------------------------------------
 

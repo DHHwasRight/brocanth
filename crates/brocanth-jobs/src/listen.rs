@@ -49,9 +49,9 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::events::JobEvents;
 #[cfg(feature = "postgres")]
 use crate::events::JobEvent;
+use crate::events::JobEvents;
 
 /// The shared "something happened" bell a worker waits on.
 ///

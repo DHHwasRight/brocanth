@@ -723,3 +723,120 @@ async fn migrate_is_safe_from_several_connections_at_once() {
         .await
         .expect("the schedules are there");
 }
+
+// ---------------------------------------------------------------------------
+// Looking at what is waiting
+// ---------------------------------------------------------------------------
+
+/// Retries and scheduled jobs are one table and different `attempts`.
+///
+/// This is the test that pays for there being no fourth state. If a column
+/// could not tell these apart, the table would need one.
+#[tokio::test]
+async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts() {
+    let (queue, _dir) = sqlite_queue().await;
+    let t = token("waiting");
+
+    // Never run, due in an hour.
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_(Duration::from_secs(3600))
+        .await
+        .expect("scheduled");
+
+    // Runs, fails, and is put back with a backoff ahead of it.
+    queue
+        .enqueue(AlwaysFails { token: t.clone() })
+        .await
+        .expect("enqueued");
+    let worker = Worker::builder(&queue)
+        .concurrency(1)
+        .poll_interval(Duration::from_millis(20))
+        .register::<AlwaysFails>()
+        .register::<Echo>()
+        .start()
+        .expect("started");
+    wait_for("the first failure", Duration::from_secs(5), || async {
+        !log(&t).is_empty()
+    })
+    .await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+
+    let scheduled = queue.scheduled(50, 0).await.expect("scheduled");
+    let retries = queue.retries(50, 0).await.expect("retries");
+
+    assert_eq!(
+        scheduled
+            .iter()
+            .map(|j| j.job_name.as_str())
+            .collect::<Vec<_>>(),
+        ["echo"],
+        "never run, so it is scheduled and not a retry"
+    );
+    assert!(scheduled.iter().all(|j| j.attempts == 0));
+
+    assert_eq!(
+        retries
+            .iter()
+            .map(|j| j.job_name.as_str())
+            .collect::<Vec<_>>(),
+        ["always_fails"],
+        "ran and failed, so it is a retry and not scheduled"
+    );
+    assert!(retries[0].attempts > 0);
+    // And a retry carries why, which is the column the screen exists for.
+    assert!(
+        retries[0].last_error.is_some(),
+        "a retry says what went wrong: {:?}",
+        retries[0]
+    );
+}
+
+/// A worker holding a job shows up as busy, and says which worker.
+#[tokio::test]
+async fn busy_names_the_worker_holding_each_job() {
+    let (queue, _dir) = sqlite_queue().await;
+    let t = token("busy");
+
+    assert!(
+        queue.busy(50, 0).await.expect("busy").is_empty(),
+        "nothing is running yet"
+    );
+
+    queue
+        .enqueue(Slow {
+            token: t.clone(),
+            millis: 2_000,
+        })
+        .await
+        .expect("enqueued");
+    let worker = Worker::builder(&queue)
+        .id("worker-under-test")
+        .concurrency(1)
+        .poll_interval(Duration::from_millis(20))
+        .register::<Slow>()
+        .start()
+        .expect("started");
+
+    wait_for("the job to be claimed", Duration::from_secs(5), || {
+        let queue = queue.clone();
+        async move { !queue.busy(50, 0).await.expect("busy").is_empty() }
+    })
+    .await;
+
+    let busy = queue.busy(50, 0).await.expect("busy");
+    assert_eq!(busy.len(), 1);
+    assert_eq!(busy[0].job_name, "slow");
+    assert_eq!(busy[0].attempts, 1, "the attempt that is running");
+    assert_eq!(busy[0].locked_by.as_deref(), Some("worker-under-test"));
+    assert!(busy[0].locked_at.is_some(), "how long it has been running");
+    assert!(
+        busy[0].heartbeat_at.is_some(),
+        "and whether it is still alive"
+    );
+
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+}

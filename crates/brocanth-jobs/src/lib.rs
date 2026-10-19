@@ -186,7 +186,7 @@ pub use panic_hook::capture_backtraces;
 pub use plugin::{JobsConfig, JobsPlugin};
 pub use queue::{Enqueue, JobState, Misfire, Queue, Reclaimed, Recurring};
 pub use registry::JobRegistry;
-pub use store::{Backend, DeadJob, Enqueued, QueueDepth, Stats};
+pub use store::{Backend, DeadJob, Enqueued, QueueDepth, RunningJob, Stats, WaitingJob};
 pub use worker::{ShutdownReport, Worker, WorkerBuilder, WorkerConfig, WorkerHandle};
 
 /// Everything an application that enqueues and runs jobs needs, in one `use`.

@@ -150,6 +150,24 @@ macro_rules! execute {
     }};
 }
 
+/// `fetch_all` into a row type, in whichever dialect.
+///
+/// The read counterpart of `execute!`, and there for the same reason: one
+/// bind list, two `Arguments` types, each arm expanded and type-checked
+/// separately.
+macro_rules! query_all {
+    ($backend:expr, $row:ty, $pg:expr, $lite:expr $(, $arg:expr)* $(,)?) => {{
+        match $backend {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => sqlx::query_as::<_, $row>($pg)$(.bind($arg))*
+                .fetch_all(pool).await?,
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(pool) => sqlx::query_as::<_, $row>($lite)$(.bind($arg))*
+                .fetch_all(pool).await?,
+        }
+    }};
+}
+
 /// Multi-statement work, in a transaction that is `IMMEDIATE` on SQLite.
 macro_rules! transaction {
     ($backend:expr, |$tx:ident, $dialect:ident| $body:block) => {{
@@ -193,6 +211,55 @@ pub(crate) struct JobRow {
     pub(crate) attempts: i64,
     pub(crate) max_attempts: i64,
     pub(crate) created_at: i64,
+}
+
+/// A job that is waiting: either for its first run, or for a retry.
+///
+/// One type for both, because the only difference is `attempts`, and a
+/// screen that shows the two separately still wants the same columns.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct WaitingJob {
+    /// The row.
+    pub id: i64,
+    /// Which queue it waits on.
+    pub queue: String,
+    /// Its [`Job::NAME`](crate::Job::NAME).
+    pub job_name: String,
+    /// The payload, verbatim.
+    pub payload: String,
+    /// Attempts used. Zero means it has never run.
+    pub attempts: i64,
+    /// Attempts allowed.
+    pub max_attempts: i64,
+    /// When it becomes runnable.
+    pub run_at: i64,
+    /// When it was enqueued.
+    pub created_at: i64,
+    /// Why the last attempt failed, for a retry.
+    pub last_error: Option<String>,
+}
+
+/// A job a worker is holding right now.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct RunningJob {
+    /// The row.
+    pub id: i64,
+    /// Which queue it came from.
+    pub queue: String,
+    /// Its [`Job::NAME`](crate::Job::NAME).
+    pub job_name: String,
+    /// The payload, verbatim.
+    pub payload: String,
+    /// Which attempt is running, counting from 1.
+    pub attempts: i64,
+    /// Attempts allowed.
+    pub max_attempts: i64,
+    /// Which worker holds it.
+    pub locked_by: Option<String>,
+    /// When it was claimed, which is how long it has been running.
+    pub locked_at: Option<i64>,
+    /// When that worker last said it was alive.
+    pub heartbeat_at: Option<i64>,
 }
 
 /// A job that used up every attempt.
@@ -712,10 +779,12 @@ impl Store {
         }
         match &self.backend {
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => Ok(sqlx::query_scalar::<_, Option<i64>>(sql::NEXT_RUN_AT_PG)
-                .bind(queues)
-                .fetch_one(pool)
-                .await?),
+            Backend::Postgres(pool) => {
+                Ok(sqlx::query_scalar::<_, Option<i64>>(sql::NEXT_RUN_AT_PG)
+                    .bind(queues)
+                    .fetch_one(pool)
+                    .await?)
+            }
             #[cfg(feature = "sqlite")]
             Backend::Sqlite(pool) => {
                 let statement = sql::next_run_at_sqlite(queues.len());
@@ -742,6 +811,53 @@ impl Store {
         }
     }
 
+    /// Jobs that failed and are waiting for a retry.
+    pub(crate) async fn retries(
+        &self,
+        now: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<WaitingJob>> {
+        Ok(query_all!(
+            &self.backend,
+            WaitingJob,
+            sql::RETRIES_PG,
+            sql::RETRIES_SQLITE,
+            now,
+            limit,
+            offset
+        ))
+    }
+
+    /// Jobs that have never run and are waiting for their time.
+    pub(crate) async fn scheduled(
+        &self,
+        now: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<WaitingJob>> {
+        Ok(query_all!(
+            &self.backend,
+            WaitingJob,
+            sql::SCHEDULED_PG,
+            sql::SCHEDULED_SQLITE,
+            now,
+            limit,
+            offset
+        ))
+    }
+
+    /// What every worker is holding right now.
+    pub(crate) async fn busy(&self, limit: i64, offset: i64) -> Result<Vec<RunningJob>> {
+        Ok(query_all!(
+            &self.backend,
+            RunningJob,
+            sql::BUSY_PG,
+            sql::BUSY_SQLITE,
+            limit,
+            offset
+        ))
+    }
 
     /// Marks every job this worker holds as still alive.
     pub(crate) async fn heartbeat(&self, worker: &str, now: i64) -> Result<u64> {
