@@ -192,6 +192,13 @@ pub mod value;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
+/// What `brocanth create` writes when somebody asks for validation.
+///
+/// Behind an off-by-default feature, so an application that validates never
+/// links the code that writes validation into a new project.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub use crate::array::{array, ArraySchema};
 pub use crate::datetime::{
     date, datetime, time, Date, DateError, DateSchema, DateTime, DateTimeSchema, Time, TimeSchema,

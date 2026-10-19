@@ -14,3 +14,27 @@ description = "An OpenAPI 3.1 document derived from a brocanth route table, plus
 brocanth.workspace = true
 http = "1"
 thiserror = "2"
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `openapi`. It lives beside the crate it writes into a project, and not in
+# the CLI, because everything it writes is a statement about this crate: that
+# `SpecBuilder` takes a `Router` and gives a `Document`, that `OpenApiConfig`
+# holds a whole document and so cannot come out of a TOML file, that
+# `OpenApiPlugin::configure` is where an invalid document becomes a build
+# failure. A copy of that in the CLI rots the first time a name here changes,
+# and it rots in silence, because nothing compiles the generator against this
+# crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application that publishes a document wants the document
+# and nothing else. The one program that wants the generator is the CLI, which
+# asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[features]
+default = []
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]

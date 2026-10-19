@@ -751,6 +751,7 @@ name = "brocanth-openapi"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-scaffold",
  "http",
  "thiserror 2.0.21",
 ]
@@ -794,6 +795,7 @@ dependencies = [
  "brocanth",
  "brocanth-events",
  "brocanth-policy",
+ "brocanth-scaffold",
  "http",
  "sqlx",
  "thiserror 2.0.21",
@@ -810,6 +812,7 @@ name = "brocanth-schema"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-scaffold",
  "brocanth-schema-derive",
  "regex",
  "serde",

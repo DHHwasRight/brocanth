@@ -122,6 +122,13 @@ pub mod plugin;
 pub mod schema;
 pub mod spec;
 
+/// What `brocanth create` writes when somebody asks for a document.
+///
+/// Behind an off-by-default feature, so an application that publishes a
+/// document never links the code that writes one into a new project.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub use crate::adapter::{schema_for, SchemaNode};
 pub use crate::document::{
     ApiKeyIn, ComponentError, Components, Contact, Document, ExternalDocs, Header, Info, License,
