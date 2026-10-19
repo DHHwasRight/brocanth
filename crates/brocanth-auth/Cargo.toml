@@ -68,6 +68,22 @@ reqwest = { version = "0.13", default-features = false, features = [
     "form",
 ], optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `auth`. It lives beside the crate it writes into a project, and not in the
+# CLI, because what it must stay true to is this crate's own surface:
+# `AuthConfig`'s fields are values the application built rather than text a
+# TOML file can carry, `SigningKey::parse` refuses anything that is not 32
+# bytes, and `MemoryStore` is still the only `AuthStore` there is. A copy of
+# that knowledge in the CLI rots the first time a name here changes, and it
+# rots in silence, because nothing compiles the generator against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application with accounts wants the accounts and nothing
+# else. The one program that wants the generator is the CLI, which asks for
+# `features = ["scaffold"]`. So the code that writes authentication into a new
+# project is never linked into an application that merely has it.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 # The only thing the tests need that the library does not already provide: a
 # runtime to drive the async store and HTTP traits.
@@ -90,6 +106,11 @@ trybuild = "1.0.122"
 # application already holds.
 default = []
 reqwest-client = ["dep:reqwest"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

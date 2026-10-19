@@ -21,6 +21,24 @@ description = "A typed predicate over an entity's columns, with two interpretati
 #   build when a fourth kind arrives. Nothing here is reachable from it.
 thiserror = "2"
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `policy`. It lives beside the crate it writes into a project, and not in the
+# CLI, because what it must stay true to is this crate's own surface: that a
+# comparison takes a `Column` and never a string, that `Bound::or_deny` is the
+# word an author writes for an absent value, that `Ident::must` rejects a
+# table name while the program is being built, and that the two `Dialect`s
+# compile the same meaning rather than the same text. A copy of that knowledge
+# in the CLI rots the first time a name here changes, and it rots in silence,
+# because nothing compiles the generator against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application with rules wants the algebra and nothing
+# else -- and this crate's whole claim is that it drags nothing else in. The
+# one program that wants the generator is the CLI, which asks for
+# `features = ["scaffold"]`. So the code that writes authorisation into a new
+# project is never linked into an application that merely has it.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dependencies.proptest]
 # Optional, and off. PLAN.md §9 obligation 1 says opting into `eval()`
 # generates a property test asserting `eval(row) == (row in query(condition))`.
@@ -56,6 +74,11 @@ proptest = "1"
 default = []
 # The property-test harness of PLAN.md §9 obligation 1.
 agreement-proptest = ["dep:proptest"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"
