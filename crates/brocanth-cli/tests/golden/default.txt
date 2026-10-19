@@ -15,6 +15,7 @@ default-run = "my-blog"
 # Not here, because nothing asked for it:
 #   brocanth-model     no ORM, no SQL driver, no sea-orm anywhere in the lock file
 #   brocanth-cache     no cache; every read does the work a hit would have skipped
+#   brocanth-jobs      no queue; slow work happens inside the request that asked for it
 #   brocanth-realtime  no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                no template engine; a page builds the String it returns
 [dependencies]
@@ -760,7 +761,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `sessions`, `model`, `cache`, `realtime`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `sessions`, `model`, `cache`, `jobs`, `realtime`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`

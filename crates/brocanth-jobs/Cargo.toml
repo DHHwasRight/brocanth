@@ -24,6 +24,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `jobs`. It lives beside the crate it writes into a project, and not in the
+# CLI, because everything it writes is a statement about this crate: that
+# `Queue::connect` is async while `Plugin::new` is not, that a worker needs a
+# registry of job types the project owns, that `JobsConfig` holds a live
+# `Queue` and therefore cannot come out of a TOML file. A copy of that in the
+# CLI rots the first time a name here changes, and it rots in silence.
+#
+# Optional and off, because two different people read this dependency line.
+# An application that runs jobs wants the queue and nothing else. The one
+# program that wants the generator is the CLI, which asks for
+# `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
@@ -86,6 +100,11 @@ brocanth-jobs = { path = ".", default-features = false, features = ["sqlite"] }
 default = ["postgres"]
 postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring"]
 sqlite = ["sqlx/sqlite-bundled"]
+
+# The scaffold module, for `brocanth create`. Off by default, for the reason
+# in the dependency comment: writing a queue into a new project is the CLI's
+# business and not an application's.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

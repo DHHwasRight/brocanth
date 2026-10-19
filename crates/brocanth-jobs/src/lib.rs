@@ -168,6 +168,8 @@ pub mod listen;
 pub mod plugin;
 pub mod queue;
 pub mod registry;
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
 pub mod worker;
 
 mod error;

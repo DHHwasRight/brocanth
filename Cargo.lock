@@ -635,6 +635,7 @@ dependencies = [
  "brocanth",
  "brocanth-cache",
  "brocanth-config",
+ "brocanth-jobs",
  "brocanth-realtime",
  "brocanth-scaffold",
  "cargo_metadata",
@@ -691,6 +692,7 @@ version = "0.1.0"
 dependencies = [
  "brocanth",
  "brocanth-jobs",
+ "brocanth-scaffold",
  "chrono",
  "serde",
  "serde_json",

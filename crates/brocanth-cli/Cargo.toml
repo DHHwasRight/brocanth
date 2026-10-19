@@ -27,6 +27,7 @@ brocanth-cache = { workspace = true, features = ["scaffold"] }
 # core's `Response` is a finished `Vec<u8>` and every response hook is
 # specified to see one, so server-sent events are a change to the hook
 # contract rather than a module that can be written today.
+brocanth-jobs = { workspace = true, features = ["scaffold"] }
 brocanth-realtime = { workspace = true, features = ["scaffold"] }
 
 # `string` so a command name discovered at run time -- a project's own, read

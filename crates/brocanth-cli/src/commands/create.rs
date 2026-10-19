@@ -2943,6 +2943,9 @@ mod tests {
             // has to translate. No config file either, so the literal
             // branch of both is here.
             ("realtime", vec!["realtime"]),
+            // The queue, with a config file, which is the shape that opens
+            // a pool and starts a worker from a TOML section.
+            ("jobs", vec!["config", "jobs"]),
             ("rsx", vec!["rsx"]),
             // `commands` and not because this shape is about a command
             // line: the CSS build is a subcommand, so tailwind cannot be
