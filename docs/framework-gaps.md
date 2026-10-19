@@ -303,4 +303,237 @@ database-stored settings (P32) and backups (P30). §9 argues that P7's rules
 are not an expression language but a string compiled to SQL, and §11 takes
 P37's field-id diffing. Those are settled; Part 3 does not reopen them.
 
-<!-- DJANGO SECTION PLACEHOLDER -->
+### 1.5 Django
+
+**Version checked: Django 5.2 LTS.** Docs at `docs.djangoproject.com/en/5.2`.
+Django is the oldest of the five and the one brocanth borrows the most shapes
+from, so this list is the closest thing here to a specification.
+
+| # | Capability | What it needs at runtime |
+|---|---|---|
+| D1 | `models.Model` with field classes, `Meta`, and a per-model manager | Server |
+| D2 | Migrations: `makemigrations` writes a numbered file from a model diff, `migrate` applies it, `sqlmigrate` prints the SQL, `showmigrations` lists state | Server, plus a migration history table |
+| D3 | `RunPython` / `RunSQL` data migrations, with `reverse_code` | Server |
+| D4 | A query set that is lazy, chainable and sliceable, with `select_related` / `prefetch_related` for the N+1 | Server |
+| D5 | `full_clean()`, per-field `validators`, `clean_<field>()` and model-wide `clean()` raising `ValidationError` with a field map | Server |
+| D6 | `ModelForm`: a form derived from a model, with `fields` / `exclude`, per-field widgets, and `is_valid()` populating `form.errors` | Server |
+| D7 | A form rendered to HTML by the framework, re-rendered on failure with the submitted values and the errors beside each input | Server, no client JS |
+| D8 | `django.contrib.admin`: `ModelAdmin` with `list_display`, `list_filter`, `search_fields`, `ordering`, `readonly_fields`, `inlines`, `actions` | Server |
+| D9 | Admin auto-discovery through `admin.site.register` and `apps.py` | Server |
+| D10 | `django.contrib.auth`: `User`, password hashing with a pluggable hasher, `authenticate()`, `login()`, `logout()`, `@login_required`, permissions and groups | Server |
+| D11 | Sessions through a pluggable backend: database, cache, signed cookie, file | Server |
+| D12 | CSRF: a per-session token, `{% csrf_token %}`, and middleware that rejects a POST without it | Server, no client JS |
+| D13 | The template language: `{% extends %}`, `{% block %}`, `{% include %}`, filters, auto-escaping, custom tags | Server |
+| D14 | Class-based views: `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`, `FormView`, each with a mixin chain | Server |
+| D15 | URL routing: `path()` / `re_path()` in a `urlpatterns` list, `include()`, named routes, `reverse()` and `{% url %}` | Server; **resolved at run time, not checked by a compiler** |
+| D16 | Middleware as a list of callables in settings, each wrapping the next | Server |
+| D17 | The app registry: an installed app is a package with models, migrations, templates, static files and an `AppConfig`; `startapp` scaffolds one | Server |
+| D18 | `manage.py` and custom commands: a `Command` class under `management/commands/` | Server |
+| D19 | The cache framework: `cache.get/set`, a per-view decorator, template fragment caching, and backends for memcached, Redis, database and local memory | Server |
+| D20 | Signals: `pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed`, and custom ones | Server, in process |
+| D21 | `settings.py` with `DEBUG`, `INSTALLED_APPS`, `DATABASES`, and a `DJANGO_SETTINGS_MODULE` switch per environment | Server |
+| D22 | `collectstatic`, `ManifestStaticFilesStorage` for content-hashed names, and `{% static %}` | Server, build step |
+| D23 | `check` and the deployment checklist (`check --deploy`), which refuses to start on some misconfigurations | Server |
+| D24 | i18n: `gettext`, `.po` files, `{% trans %}`, `LocaleMiddleware`, per-language URLs | Server |
+| D25 | The test client: `self.client.get()`, `assertContains`, `assertRedirects`, plus `TestCase` wrapping each test in a transaction | Server |
+| D26 | `django-admin shell` / `shell_plus`, and `dbshell` | Server |
+| D27 | Fixtures: `loaddata` / `dumpdata` as JSON or YAML | Server |
+| D28 | `contrib.postgres`: array, range and `jsonb` fields, full-text search, trigram similarity | Server, Postgres only |
+
+
+---
+
+## Part 2 — what brocanth has
+
+Measured by reading the checkout at `be93223`, plus the crate sizes and the
+dependency graph. A crate in `Cargo.toml` is not evidence, so each row says
+what was read.
+
+### 2.1 The crates, and whether anything uses them
+
+| Crate | Source lines | Test files | Crates that depend on it | On the `create` menu |
+|---|---:|---:|---:|---|
+| `brocanth` (core) | — | many | every plugin | n/a |
+| `brocanth-pages` | — | yes | generated projects | always |
+| `brocanth-model` | — | 4 | admin-model | `model` |
+| `brocanth-admin` | 5,842 | 9 | admin-model | **no** |
+| `brocanth-admin-model` | ~450 | 1 | — | **no** |
+| `brocanth-jobs` | ~7,000 | 5 | — | `jobs` |
+| `brocanth-cache` | — | yes | — | `cache` |
+| `brocanth-realtime` | — | yes | — | `realtime` |
+| `brocanth-auth` | 8,875 | 12 | 2 | **no** |
+| `brocanth-openapi` | 5,873 | 1 | 1 | **no** |
+| `brocanth-schema` | 4,832 | 3 | **0** | **no** |
+| `brocanth-storage` | 4,384 | **0** | 2 | **no** |
+| `brocanth-policy` | 3,290 | 8 | 2 | **no** |
+| `brocanth-resource` | 2,167 | 7 | **0** | **no** |
+| `brocanth-events` | 846 | **0** | 2 | **no** |
+
+Three findings in that table.
+
+**Nothing is a stub.** The seven crates I had not read are 846 to 8,875 lines
+with real module-level arguments. `auth` is the largest crate in the
+repository after the CLI.
+
+**Two crates nothing depends on.** `schema` (4,832 lines) and `resource`
+(2,167 lines) are built and wired to nothing. `resource`'s own documentation
+says it answers `docs/pocketbase-surface.md` §2, which makes it the PocketBase
+records API — written, and unreachable from any application.
+
+**Two crates with no tests at all.** `storage` writes files to disk and has
+no test file. `events` is the seam the model layer and realtime are both
+supposed to meet at, and has none either.
+
+**Nine of fifteen capability crates are not on the menu.** `brocanth create`
+offers logging, config, sessions, model, cache, jobs, realtime, commands and
+the rsx trio. Everything in the lower half of that table is a library an
+application must wire by hand, which by the third constraint in the preamble
+means it is not yet a feature.
+
+### 2.2 Against the five inventories
+
+| Capability | brocanth | Where |
+|---|---|---|
+| File-based routing, params, rest params (A6, A7, N3) | **yes** | `brocanth-pages`, `[id].rs` and `[...rest].rs` |
+| Layouts, nested (A12, N5) | **yes** | `.rsx` layouts, `DP-Partial` renders from the shared layout down |
+| Templates compiled, no client runtime (A1) | **yes** | rsx |
+| Islands / client components (A3, A4, N8) | **no, and unreachable** | no client-side component runtime exists; constraint 2 |
+| Server islands, deferred fragments (A5) | **no** | needs a mutating fetch; constraint 1 |
+| View transitions / client router (A21) | **partial** | dp-swap boosts links and swaps by layout depth |
+| Prefetch (A22) | **no** | dp-swap has no prefetch strategy |
+| Actions / typed RPC from a form (A16, N12) | **no** | the gap dp-swap's missing `dp-post` names |
+| Middleware (A18, N6, D16) | **yes** | `MiddlewareStack`, mounted at a pattern the application picks |
+| Endpoints returning a Response (A19) | **yes** | `pages!` handlers |
+| Sessions (A17, D11) | **yes** | the `sessions` module, cookie-backed |
+| Route caching with tags (A15) | **no** | `brocanth-cache` is a key/value cache, not a route cache |
+| Streaming / Suspense (N9) | **no, and blocked** | `Response` is `http::Response<Vec<u8>>` |
+| ORM, lazy queries, N+1 help (D1, D4) | **yes** | `brocanth-model`, `Probe` detects N+1 |
+| Migrations from a model diff (D2, D3) | **partial** | SeaORM migrations exist; no `makemigrations` diffing |
+| Model validation with a field map (D5) | **yes** | `#[validates]`, `Errors::entries()` |
+| ModelForm, re-rendered with errors (D6, D7) | **yes** | `brocanth-admin`'s `Form`, built from the schema |
+| Admin with list/filter/search/ordering (D8) | **yes** | `brocanth-admin`, plus `Panel` for tabs no model owns |
+| Admin auto-discovery (D9) | **partial** | discovery reads the entity registry; entities are named once in `admin_source!` |
+| Auth: hashing, login, permissions (D10) | **yes, unwired** | `brocanth-auth`, 8,875 lines, not on the menu |
+| CSRF (D12) | **unknown** | not audited; `auth` is the likely home |
+| Class-based CRUD views (D14) | **yes, unwired** | `brocanth-resource`, nothing depends on it |
+| Named routes, `reverse()` (D15) | **better** | route helpers are generated and checked by the compiler |
+| App registry, `startapp` (D17) | **yes, and further** | the module system plus `brocanth add` |
+| `manage.py` custom commands (D18) | **yes** | `brocanth-command`, `#[cmd]` registers at link time |
+| Cache framework (D19) | **partial** | key/value only; no per-view or fragment caching |
+| Signals (D20) | **partial** | `brocanth-events` exists, has no tests, and nothing subscribes |
+| Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
+| Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
+| Deployment checks that refuse to start (D23) | **partial** | a plugin's `configure` can refuse; no `check --deploy` |
+| i18n (D24) | **no** | nothing in the tree |
+| Test client with transactional tests (D25) | **partial** | `Harness` wraps a database; no HTTP test client |
+| Shell / dbshell (D26) | **no** | |
+| Fixtures (D27) | **no** | |
+| Background jobs with retries and a dead letter | **yes, and further** | `brocanth-jobs`; Rails and Django both need a second product for this |
+| Single binary, embedded database (PocketBase) | **branch** | `brocanth-pgserver`, unmerged |
+| Realtime subscriptions (PocketBase) | **broker only** | no transport; blocked on the buffered `Response` |
+| OpenAPI document (PocketBase) | **yes, unwired** | `brocanth-openapi`, 5,873 lines, one test file |
+
+---
+
+## Part 3 — the gaps, ranked
+
+Ranked by what unblocks the most, not by size.
+
+### G1. The response body cannot stream
+
+`plugin_hooks.rs` declares `pub type Response = http::Response<Vec<u8>>`, and
+`ResponseHook::on_response` is specified to see a complete body.
+`brocanth-server`'s own `Response` is buffered too.
+
+**Blocks:** SSE and WebSocket (`brocanth-realtime` has a broker and no
+transport), Next.js streaming and Suspense (N9), Astro's server islands (A5),
+and any large download that should not be held in memory.
+
+**Cost:** three changes, enumerated in `brocanth-realtime/src/lib.rs`. A body
+that can be a stream; `ResponseHook` split into a header hook that runs for
+streams and a body hook that does not; ADR 2's two-phase shutdown taught about
+open streams. WebSocket needs three more on top, including an HTTP upgrade,
+which is a second exit from `brocanth-server`.
+
+**Depends on:** nothing. It is the bottom of the stack.
+
+### G2. dp-swap has no mutating verb
+
+The bundle has `dp-get` and no `dp-post`. PLAN.md §5 says this is deliberate
+and lists what the server half owes: form serialisation, CSRF injection, the
+422-with-errors re-render path, response-header control, out-of-band emission,
+and `DP-Partial` as a rendering mode.
+
+**Blocks:** every interactive write in every interface built here. Today the
+admin's delete, the jobs panel's retry and every form reload the whole page.
+It also blocks Astro actions (A16) and Next.js server actions (N12), which are
+the same idea.
+
+**Cost:** PLAN.md §5 items 1–4. The rendering mode (§5 item 4) already falls
+out of the route table and the layout chain and is described there as the
+cleanest thing in the design.
+
+**Depends on:** nothing, though out-of-band emission over SSE wants G1.
+
+### G3. Nine capability crates are not reachable
+
+`auth`, `policy`, `resource`, `events`, `schema`, `storage`, `openapi`,
+`admin` and `admin-model` have no `Module`. An application wires each by hand
+from its documentation.
+
+**Cost:** one `src/scaffold.rs` per crate, behind an off-by-default `scaffold`
+feature, plus one line in the CLI's registry. `brocanth-cache`,
+`brocanth-jobs` and `brocanth-realtime` are three worked examples.
+
+**Depends on:** nothing, and this is the highest ratio of reach to effort in
+the list. It is also the one place where parallel work collides: every module
+touches `create.rs`, `modules/mod.rs` and all ten golden files.
+
+### G4. `storage` and `events` have no tests
+
+4,384 lines that write files to disk, and 846 lines that are the seam the
+model layer and realtime are both supposed to meet at. Neither has a test
+file. `events` additionally has no subscriber, so Django's signals (D20) are
+present as a type and absent as a behaviour.
+
+### G5. `resource` and `schema` are wired to nothing
+
+7,000 lines across two crates that no other crate depends on. `resource` is
+the PocketBase records API by its own documentation. Either they reach
+applications through G3 or they are deleted; carrying them unreferenced is
+the worst of the three.
+
+### G6. No HTTP test client
+
+`Harness` gives a transactional database. Nothing gives Django's
+`self.client.get()` with `assertContains` and `assertRedirects`. Every test in
+this repository that exercises a screen calls `dispatch` directly, which is
+why three rounds of tests in one afternoon asserted on CSS class names: there
+was no level at which to assert on behaviour instead.
+
+### G7. No migration diffing
+
+SeaORM migrations are hand-written. Django's `makemigrations` reads the model
+diff and writes the file. §4.3 says the generator proposes and the developer
+commits, which is an argument for *writing* the file rather than applying it,
+not an argument against diffing.
+
+### G8. The cache is key/value only
+
+No per-view cache, no fragment cache, no tag invalidation (A15, D19). The
+`Cache` trait and the unlogged-table backend are the hard half; a route cache
+is a `ResponseHook` away — once G1 settles what a hook sees.
+
+### G9. Smaller, and genuinely absent
+
+i18n (D24), fixtures (D27), a shell (D26), prefetch (A22), `check --deploy`
+(D23). None blocks anything else.
+
+### Out of scope, already decided
+
+PLAN.md §5 refuses a LiveView-style stateful process per connection, and the
+preamble's constraint 2 refuses anything needing a client-side component
+runtime — which is Astro's islands (A3, A4) and Next.js's client components
+(N8). §9 settles that policy rules compile to SQL rather than being an
+expression language. §11 takes PocketBase's field-id diffing. Part 3 does not
+reopen any of them.
