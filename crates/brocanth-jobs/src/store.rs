@@ -859,6 +859,34 @@ impl Store {
         ))
     }
 
+    /// Makes a waiting job runnable now. `false` if it is not waiting.
+    pub(crate) async fn run_now(&self, id: i64, now: i64) -> Result<bool> {
+        let queue: Option<String> = match &self.backend {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => {
+                sqlx::query_scalar(sql::RUN_NOW_PG)
+                    .bind(now)
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(pool) => {
+                sqlx::query_scalar(sql::RUN_NOW_SQLITE)
+                    .bind(now)
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        Ok(queue.is_some())
+    }
+
+    /// Throws a waiting job away. `false` if it is not waiting.
+    pub(crate) async fn discard(&self, id: i64) -> Result<bool> {
+        Ok(execute!(&self.backend, sql::DISCARD_PG, sql::DISCARD_SQLITE, id) > 0)
+    }
+
     /// Marks every job this worker holds as still alive.
     pub(crate) async fn heartbeat(&self, worker: &str, now: i64) -> Result<u64> {
         Ok(execute!(

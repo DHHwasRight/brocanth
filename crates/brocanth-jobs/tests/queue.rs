@@ -840,3 +840,72 @@ async fn busy_names_the_worker_holding_each_job() {
 
     worker.shutdown(Duration::from_secs(5)).await.expect("stop");
 }
+
+/// The operator's override, and the one thing it must not touch.
+#[tokio::test]
+async fn run_now_moves_a_waiting_job_and_leaves_a_running_one_alone() {
+    let (queue, _dir) = sqlite_queue().await;
+    let t = token("run-now");
+
+    let later = queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_(Duration::from_secs(3600))
+        .await
+        .expect("scheduled")
+        .id();
+
+    assert_eq!(queue.scheduled(50, 0).await.expect("scheduled").len(), 1);
+    assert!(
+        queue.run_now(later).await.expect("run now"),
+        "it was waiting"
+    );
+    assert!(
+        queue.scheduled(50, 0).await.expect("scheduled").is_empty(),
+        "no longer waiting for its time"
+    );
+
+    let worker = Worker::builder(&queue)
+        .concurrency(1)
+        .poll_interval(Duration::from_millis(20))
+        .register::<Echo>()
+        .start()
+        .expect("started");
+    wait_for("the job to run", Duration::from_secs(5), || async {
+        !log(&t).is_empty()
+    })
+    .await;
+    assert_eq!(log(&t), ["ran 1"]);
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+
+    // And a job that is gone is not a job that was moved.
+    assert!(!queue.run_now(later).await.expect("run now"));
+}
+
+/// Discarding is not dead-lettering, and the dead letter must not collect
+/// jobs somebody deliberately threw away.
+#[tokio::test]
+async fn discard_removes_a_waiting_job_without_a_dead_letter_row() {
+    let (queue, _dir) = sqlite_queue().await;
+    let t = token("discard");
+
+    let id = queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_(Duration::from_secs(3600))
+        .await
+        .expect("scheduled")
+        .id();
+
+    assert!(queue.discard(id).await.expect("discard"));
+    assert!(queue.scheduled(50, 0).await.expect("scheduled").is_empty());
+    assert!(
+        queue.dead_jobs(50, 0).await.expect("dead").is_empty(),
+        "a deliberate deletion is not a failure and must not look like one"
+    );
+    assert!(!queue.discard(id).await.expect("discard"), "already gone");
+}

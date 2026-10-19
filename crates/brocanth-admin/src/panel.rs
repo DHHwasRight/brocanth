@@ -78,6 +78,18 @@ pub struct PanelRequest<'a> {
     /// it here, and the admin has already asked the policy about
     /// [`Action::ActOnPanel`](crate::policy::Action::ActOnPanel).
     pub post: bool,
+    /// Whether this person may press this panel's buttons.
+    ///
+    /// Told, not asked: a panel never reaches the policy. The admin
+    /// answers [`Action::ActOnPanel`](crate::policy::Action::ActOnPanel)
+    /// on every request, not only on a POST, because a reader who may not
+    /// act should be shown a screen with no buttons on it rather than
+    /// buttons that 403.
+    ///
+    /// It is a courtesy and not the enforcement. A panel that ignores it
+    /// and draws the buttons anyway is still safe, because the POST those
+    /// buttons make is refused before the panel runs.
+    pub can_act: bool,
     /// The form body, for a POST.
     pub submission: &'a Submission,
     /// Where this panel is mounted, so a panel can write its own links:

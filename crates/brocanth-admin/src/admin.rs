@@ -596,7 +596,11 @@ impl Admin {
         if !self.allows(principal, Request::new(Action::ViewPanel, key)) {
             return self.refuse(principal, Action::ViewPanel);
         }
-        if post && !self.allows(principal, Request::new(Action::ActOnPanel, key)) {
+        // Asked on every request and not only on a POST, so a panel can
+        // draw a screen with no buttons for somebody who may not press
+        // them. The refusal below is the enforcement; this is the courtesy.
+        let can_act = self.allows(principal, Request::new(Action::ActOnPanel, key));
+        if post && !can_act {
             return self.refuse(principal, Action::ActOnPanel);
         }
         let mount = self.panel_url(key);
@@ -604,6 +608,7 @@ impl Admin {
             path: rest,
             query,
             post,
+            can_act,
             submission,
             mount: &mount,
         };

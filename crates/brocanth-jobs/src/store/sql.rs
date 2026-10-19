@@ -515,6 +515,38 @@ pub(crate) const BUSY_SQLITE: &str =
      heartbeat_at FROM brocanth_jobs WHERE state = 'running' ORDER BY locked_at, id \
      LIMIT ? OFFSET ?";
 
+/// Make a waiting job runnable now. `$1` now, `$2` id.
+///
+/// Scoped to `state = 'pending'` so the button cannot touch a job a worker
+/// is holding: that one is already running, and moving its `run_at` would
+/// change nothing and look like it had.
+///
+/// It announces, through the same `RETURNING` trick the reclaim uses. The
+/// point of the button is that the job runs *now*, and a worker asleep
+/// until its next due job would otherwise make "now" mean "in five
+/// seconds".
+#[cfg(feature = "postgres")]
+pub(crate) const RUN_NOW_PG: &str =
+    "UPDATE brocanth_jobs SET run_at = $1 WHERE id = $2 AND state = 'pending' \
+     RETURNING queue, pg_notify('brocanth_jobs', queue)";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const RUN_NOW_SQLITE: &str =
+    "UPDATE brocanth_jobs SET run_at = ? WHERE id = ? AND state = 'pending' RETURNING queue";
+
+/// Throw a waiting job away. `$1` id.
+///
+/// Pending only, for the same reason, and no dead-letter row: this is
+/// somebody deciding the job should not happen, which is a different event
+/// from a job that ran out of attempts. The dead letter is a record of
+/// failure and must not fill up with deliberate deletions.
+#[cfg(feature = "postgres")]
+pub(crate) const DISCARD_PG: &str = "DELETE FROM brocanth_jobs WHERE id = $1 AND state = 'pending'";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const DISCARD_SQLITE: &str =
+    "DELETE FROM brocanth_jobs WHERE id = ? AND state = 'pending'";
+
 // ---------------------------------------------------------------------------
 // The dead letter
 // ---------------------------------------------------------------------------

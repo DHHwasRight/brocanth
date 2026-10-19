@@ -302,6 +302,28 @@ impl Queue {
         self.store.busy(i64::from(limit), i64::from(offset)).await
     }
 
+    /// Makes a waiting job runnable now, whatever its `run_at` said.
+    ///
+    /// The operator's override: a retry whose backoff is an hour away, or a
+    /// job scheduled for tonight that should go out immediately. `false`
+    /// means the job is not waiting -- it is already running, or gone.
+    ///
+    /// A worker is told, so "now" means now rather than at the next tick.
+    pub async fn run_now(&self, id: JobId) -> Result<bool> {
+        let now = to_millis(self.clock.now());
+        self.store.run_now(id.0, now).await
+    }
+
+    /// Throws a waiting job away without running it.
+    ///
+    /// No dead-letter row, on purpose. The dead letter records jobs that
+    /// ran out of attempts, and a deliberate deletion is a different event;
+    /// mixing them makes the record of failure useless. `false` means the
+    /// job is not waiting.
+    pub async fn discard(&self, id: JobId) -> Result<bool> {
+        self.store.discard(id.0).await
+    }
+
     /// One dead job by its dead-letter id.
     pub async fn dead_job(&self, dead_id: i64) -> Result<Option<DeadJob>> {
         self.store.dead_job(dead_id).await

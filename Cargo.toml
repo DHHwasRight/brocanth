@@ -37,6 +37,7 @@ brocanth-server = { path = "crates/brocanth-server", version = "0.1.0" }
 brocanth-command = { path = "crates/brocanth-command", version = "0.1.0" }
 brocanth-cache = { path = "crates/brocanth-cache", version = "0.1.0" }
 brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
+brocanth-admin = { path = "crates/brocanth-admin", version = "0.1.0" }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
 brocanth-storage = { path = "crates/brocanth-storage", version = "0.1.0" }

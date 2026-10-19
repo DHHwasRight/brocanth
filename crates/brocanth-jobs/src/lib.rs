@@ -159,6 +159,8 @@ compile_error!(
      development is the trap this crate exists to avoid."
 );
 
+#[cfg(feature = "admin")]
+pub mod admin;
 pub mod backoff;
 pub mod clock;
 pub mod cron;
@@ -168,6 +170,17 @@ pub mod listen;
 pub mod plugin;
 pub mod queue;
 pub mod registry;
+
+/// The panel's screens, compiled in by rsx at macro expansion: nothing is
+/// read from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own
+/// `use` line names this path. Private, like the admin's own template
+/// module, which is also what keeps `missing_docs` off generated items.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 pub mod worker;

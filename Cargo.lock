@@ -690,10 +690,13 @@ dependencies = [
 name = "brocanth-jobs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "brocanth",
+ "brocanth-admin",
  "brocanth-jobs",
  "brocanth-scaffold",
  "chrono",
+ "rsx",
  "serde",
  "serde_json",
  "sqlx",

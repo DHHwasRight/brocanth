@@ -38,6 +38,26 @@ thiserror = "2"
 # `features = ["scaffold"]`.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `src/admin.rs` is the queue's tab in the backoffice: a dashboard, what is
+# running, the retry set, the scheduled set and the dead letter.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and no SQL driver, and intends to keep it that way. A jobs
+# panel written there would put the queue in the binary of every
+# application that has a backoffice. The admin owns the seam and this crate
+# owns the screens.
+#
+# Optional and off, so a worker process links neither the admin nor rsx.
+brocanth-admin = { workspace = true, optional = true }
+
+# The templates, compiled in by the macro. Only reachable through `admin`:
+# a queue does not render HTML.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
+# The panel's trait is async and object-safe, which `async fn` in a trait
+# still is not. Same spelling the admin uses, so one copy is linked.
+async-trait = { version = "0.1", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
@@ -56,7 +76,10 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio"]
 # the file-backed harness is always there for tests, examples and benches, and
 # never for a library build. The ordinary dependency tree is unaffected: a
 # published build of this crate links the Postgres driver and nothing else.
-brocanth-jobs = { path = ".", default-features = false, features = ["sqlite"] }
+# `admin` as well, so the panel's tests render the real screens through the
+# real admin rather than asserting on a context struct. A screen that
+# compiles and produces the wrong page is the failure worth catching.
+brocanth-jobs = { path = ".", default-features = false, features = ["sqlite", "admin"] }
 
 [features]
 # The backend is a compile-time choice made in `Cargo.toml`, which is the whole
@@ -105,6 +128,9 @@ sqlite = ["sqlx/sqlite-bundled"]
 # in the dependency comment: writing a queue into a new project is the CLI's
 # business and not an application's.
 scaffold = ["dep:brocanth-scaffold"]
+
+# The backoffice tab. Off, like every other way out of this crate.
+admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
 
 [lints.rust]
 missing_docs = "warn"

@@ -38,7 +38,17 @@ impl Panel for Queue {
         match r.path {
             "" => Ok(Some(PanelPage::body(
                 "Dashboard",
-                format!("<p>page {}</p>", r.param("page").unwrap_or_default()),
+                format!(
+                    "<p>page {}</p>{}",
+                    r.param("page").unwrap_or_default(),
+                    // What `can_act` is for: the button is drawn only for
+                    // somebody who may press it.
+                    if r.can_act {
+                        "<button>Empty</button>"
+                    } else {
+                        ""
+                    }
+                ),
             ))),
             "retries" => Ok(Some(PanelPage::body("Retries", "<p>two waiting</p>"))),
             // Anything else is this panel's own 404.
@@ -169,7 +179,15 @@ fn reading_a_panel_and_pressing_its_buttons_are_two_questions() {
             })),
     );
     let staff = Staff;
-    assert_eq!(get(&admin, "/admin/jobs", "").status(), 200);
+    let page = get(&admin, "/admin/jobs", "");
+    assert_eq!(page.status(), 200);
+    assert!(
+        !page
+            .html()
+            .expect("a page")
+            .contains("<button>Empty</button>"),
+        "a reader who may not act is told so, and draws no button"
+    );
 
     let posted = block_on(admin.dispatch(
         Principal::new(&staff),

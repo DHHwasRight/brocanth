@@ -647,10 +647,16 @@ concurrency = 5
 //!
 //! `Welcome` is here so that this file compiles into something that runs.
 //! Move it, and whatever follows it, into `src/jobs/` once there is more
-//! than one -- the only thing that must stay here is the `register` call,
-//! because a worker runs the types it was given and nothing else. A job
-//! enqueued with no registration is not lost: it waits in the table until a
-//! worker that knows the name claims it.
+//! than one -- the only thing that must stay here is the `register` call.
+//!
+//! **Register every job type before anything enqueues it.** A worker claims
+//! by queue and not by name, so it will take a job whose name it does not
+//! know, and a name it cannot resolve is a terminal failure: the row goes
+//! straight to the dead letter rather than waiting for a worker that knows
+//! it. The payload is kept and `Queue::requeue_dead` replays it, so nothing
+//! is lost -- but the job does not run when you expected it to. During a
+//! rolling deploy that means the old workers, so ship the registration
+//! before you ship the first enqueue.
 //!
 //! The crate also ships `JobsPlugin`, and this is not that. `JobsPlugin` is
 //! handed a queue that is already open, which is what an application with a
