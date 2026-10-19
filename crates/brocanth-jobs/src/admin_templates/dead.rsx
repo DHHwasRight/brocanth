@@ -1,4 +1,5 @@
 use crate::admin::DeadCtx;
+use crate::admin_templates::parts;
 use crate::admin_templates::tabs::Tabs;
 
 // Jobs that used up every attempt.
@@ -9,40 +10,49 @@ use crate::admin_templates::tabs::Tabs;
 
 pub fn Dead(ctx: &DeadCtx) -> Element {
     <Tabs tabs={&ctx.tabs} />
-    <h1>Dead</h1>
+    <h1 class={parts::heading()}>Dead</h1>
 
     if ctx.rows.is_empty() {
-        <div class="card"><div class="empty">Nothing has run out of attempts.</div></div>
+        <div class={parts::card()}>
+            <div class={parts::empty()}>Nothing has run out of attempts.</div>
+        </div>
     } else {
-        <div class="card">
-            <table>
+        <div class={parts::card()}>
+            <table class={parts::table()}>
                 <thead>
                     <tr>
-                        <th>Job</th><th>Queue</th><th>Attempts</th><th>Failed</th>
+                        <th class={parts::th()}>Job</th>
+                        <th class={parts::th()}>Queue</th>
+                        <th class={parts::th()}>Attempts</th>
+                        <th class={parts::th()}>Failed</th>
                         if ctx.can_act {
-                            <th></th>
+                            <th class={parts::th()} aria-label="Actions"></th>
                         }
                     </tr>
                 </thead>
                 <tbody>
                     for row in &ctx.rows {
-                        <tr>
-                            <td>
-                                <span class="mono">{&row.job_name}</span>
-                                <span class="jobs-err">{&row.error}</span>
-                                <span class="mono muted">{&row.payload}</span>
+                        <tr class="hover:bg-stage/60">
+                            <td class={parts::td()}>
+                                <span class="font-mono text-xs">{&row.job_name}</span>
+                                <span class="block mt-1 max-w-[46ch] text-xs text-danger [overflow-wrap:anywhere]">
+                                    {&row.error}
+                                </span>
+                                <span class="block mt-1 max-w-[60ch] font-mono text-xs text-ink-faint [overflow-wrap:anywhere]">
+                                    {&row.payload}
+                                </span>
                             </td>
-                            <td>{&row.queue}</td>
-                            <td class="muted">{&row.attempts}</td>
-                            <td class="muted">{&row.failed}</td>
+                            <td class={parts::td()}>{&row.queue}</td>
+                            <td class={parts::td_muted()}>{&row.attempts}</td>
+                            <td class={parts::td_muted()}>{&row.failed}</td>
                             if ctx.can_act {
-                                <td>
-                                    <form class="jobs-act" method="post" action={&row.retry_href}>
-                                        <button type="submit">Retry</button>
+                                <td class="text-right px-3.5 py-2.5 border-b border-line align-top whitespace-nowrap">
+                                    <form class="inline m-0" method="post" action={&row.retry_href}>
+                                        <button class={parts::row_button()} type="submit">Retry</button>
                                     </form>
-                                    <span class="muted"> · </span>
-                                    <form class="jobs-act" method="post" action={&row.delete_href}>
-                                        <button type="submit" class="danger">Delete</button>
+                                    <span class="text-ink-faint"> · </span>
+                                    <form class="inline m-0" method="post" action={&row.delete_href}>
+                                        <button class={parts::row_button_danger()} type="submit">Delete</button>
                                     </form>
                                 </td>
                             }

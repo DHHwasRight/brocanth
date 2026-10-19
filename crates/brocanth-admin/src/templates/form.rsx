@@ -1,4 +1,5 @@
 use crate::form::{Field, Widget};
+use crate::templates::parts;
 use crate::view::FormCtx;
 
 /// The create and the edit screen, which are the same screen.
@@ -7,50 +8,64 @@ use crate::view::FormCtx;
 /// after a rejected write — never a value read back from the database. That is
 /// the whole reason this screen takes a built `Form` rather than a row.
 pub fn FormPage(ctx: &FormCtx) -> Element {
-    <p class="crumbs">
-        <a href={&ctx.chrome.base_path}>{&ctx.chrome.title}</a> <span> / </span> <a href={&ctx.model.href}>{&ctx.model.plural}</a> <span> / </span> {action_word(ctx)}
+    <p class={parts::crumbs()}>
+        <a class={parts::action()} href={&ctx.chrome.base_path} dp-boost>{&ctx.chrome.title}</a>
+        <span>/</span>
+        <a class={parts::action()} href={&ctx.model.href} dp-boost>{&ctx.model.plural}</a>
+        <span>/</span>
+        <span>{action_word(ctx)}</span>
     </p>
-    <h1>{heading(ctx)}</h1>
+    <h1 class={parts::heading()}>{heading(ctx)}</h1>
 
     for message in &ctx.form.errors {
-        <div class="alert">{message}</div>
+        <div class="mt-4 max-w-2xl rounded-control border border-danger/30 bg-danger/5 px-3.5 py-2.5 text-sm text-danger">
+            {message}
+        </div>
     }
 
-    <form method="post" action={&ctx.action}>
+    // No `dp-` anything on this form. dp-swap enhances navigation and
+    // leaves mutating verbs to the server, so this posts and reloads.
+    <form class="mt-5" method="post" action={&ctx.action}>
         for field in &ctx.form.fields {
             <FormField field={field} />
         }
-        <div class="actions">
-            <button class="btn btn-primary" type="submit">{&ctx.submit_label}</button>
-            <a class="btn" href={&ctx.cancel_href}>Cancel</a>
+        <div class="flex items-center gap-2 mt-6">
+            <button class={parts::button_primary()} type="submit">{&ctx.submit_label}</button>
+            <a class={parts::button()} href={&ctx.cancel_href} dp-boost>Cancel</a>
         </div>
     </form>
 }
 
 /// One labelled input, with its errors under it.
 pub fn FormField(field: &Field) -> Element {
-    <div class={field_class(field)}>
-        <label for={&field.name}>{&field.label}{required_mark(field)}</label>
+    <div class="mb-4 max-w-2xl">
+        <label class="block mb-1 text-sm font-medium text-ink" for={&field.name}>
+            {&field.label}
+            if field.required {
+                <span class="text-danger" aria-hidden="true"> *</span>
+            }
+        </label>
         match field.widget {
             Widget::Textarea => {
-                <textarea id={&field.name} name={&field.name} rows="6">{&field.value}</textarea>
+                <textarea class={control_class(field)} id={&field.name} name={&field.name} rows="6">{&field.value}</textarea>
             }
             Widget::Json => {
-                <textarea id={&field.name} name={&field.name} rows="6" spellcheck="false" class="mono">{&field.value}</textarea>
+                <textarea class={json_class(field)} id={&field.name} name={&field.name} rows="6" spellcheck="false">{&field.value}</textarea>
             }
             Widget::Checkbox => {
-                <input type="checkbox" id={&field.name} name={&field.name} value="on" checked?={field.checked} />
+                <input class="size-4 rounded border-line text-accent accent-[var(--color-accent)]" type="checkbox" id={&field.name} name={&field.name} value="on" checked?={field.checked} />
             }
             Widget::Select => <Options field={field} />,
             Widget::ForeignKey => <Options field={field} />,
             Widget::ReadOnly => {
-                <output class="readonly" id={&field.name}>{readonly_text(field)}</output>
+                <output class="block rounded-control border border-line bg-stage px-2.5 py-2 text-sm text-ink-soft" id={&field.name}>{readonly_text(field)}</output>
             }
             Widget::Hidden => {
                 <input type="hidden" name={&field.name} value={&field.value} />
             }
             _ => {
                 <input
+                    class={control_class(field)}
                     type={field.widget.input_type()}
                     id={&field.name}
                     name={&field.name}
@@ -60,10 +75,10 @@ pub fn FormField(field: &Field) -> Element {
             }
         }
         if !field.help.is_empty() {
-            <p class="help">{&field.help}</p>
+            <p class="mt-1 text-xs text-ink-faint">{&field.help}</p>
         }
         for message in &field.errors {
-            <p class="error">{message}</p>
+            <p class="mt-1 text-xs text-danger">{message}</p>
         }
     </div>
 }
@@ -73,7 +88,7 @@ pub fn FormField(field: &Field) -> Element {
 /// A foreign key's options carry the target record's label, which is the one
 /// thing an admin must never render as an integer.
 pub fn Options(field: &Field) -> Element {
-    <select id={&field.name} name={&field.name} required?={field.required}>
+    <select class={control_class(field)} id={&field.name} name={&field.name} required?={field.required}>
         if !field.required {
             <option value="">—</option>
         }
@@ -83,19 +98,22 @@ pub fn Options(field: &Field) -> Element {
     </select>
 }
 
-fn field_class(field: &Field) -> &'static str {
+fn control_class(field: &Field) -> &'static str {
     if field.has_errors() {
-        "field has-error"
+        parts::control_error()
     } else {
-        "field"
+        parts::control()
     }
 }
 
-fn required_mark(field: &Field) -> &'static str {
-    if field.required {
-        " *"
+/// The same control, in the typeface JSON has to be read in.
+fn json_class(field: &Field) -> &'static str {
+    if field.has_errors() {
+        "w-full rounded-control border border-danger bg-white px-2.5 py-2 font-mono text-xs \
+         text-ink focus:outline-none focus:ring-2 focus:ring-danger/20"
     } else {
-        ""
+        "w-full rounded-control border border-line bg-white px-2.5 py-2 font-mono text-xs \
+         text-ink focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
     }
 }
 

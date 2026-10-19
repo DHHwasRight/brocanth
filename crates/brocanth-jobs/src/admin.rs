@@ -45,6 +45,10 @@ use crate::clock::from_millis;
 use crate::queue::Queue;
 use crate::store::{DeadJob, RunningJob, WaitingJob};
 
+/// The panel's stylesheet, built from `style/panel.css`. Inlined by the
+/// tab strip, which every screen draws. See `style/README.md`.
+pub(crate) const STYLE: &str = include_str!("admin.css");
+
 /// How many rows a screen shows. No paging yet: the screens that can grow
 /// without bound are the dead letter and the retry set, and both are
 /// ordered so the rows that matter are first.

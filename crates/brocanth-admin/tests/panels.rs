@@ -125,7 +125,10 @@ fn a_panel_renders_inside_the_admins_chrome() {
     assert!(html.contains("page 2"), "{html}");
     // ...inside the layout, with the nav the models are in.
     assert!(html.contains("Background jobs"), "{html}");
-    assert!(html.contains("/admin/post"), "the models are still in the nav: {html}");
+    assert!(
+        html.contains("/admin/post"),
+        "the models are still in the nav: {html}"
+    );
 }
 
 #[test]
@@ -149,9 +152,18 @@ fn a_panel_is_a_tab_and_knows_when_it_is_the_current_one() {
     );
 }
 
-/// The `href` of every nav link carrying `aria-current`.
+/// The `href` of every link in the rail carrying `aria-current`.
+///
+/// Scoped to the rail, because a pagination link in a list is also the
+/// current page and says so the same way. Both are correct HTML; only one
+/// of them answers "which section am I in".
 fn current_tabs(html: &str) -> Vec<String> {
-    html.split("<a ")
+    let rail = html
+        .split(r#"aria-label="Sections""#)
+        .nth(1)
+        .and_then(|rest| rest.split("</nav>").next())
+        .unwrap_or("");
+    rail.split("<a ")
         .skip(1)
         .filter_map(|tag| {
             let open = tag.split('>').next()?;

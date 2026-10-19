@@ -75,8 +75,10 @@ async fn the_dashboard_counts_what_is_in_the_queue() {
     assert!(html.contains("Background jobs"), "the tab's own label");
     assert!(html.contains("Enqueued"), "{html}");
     assert!(html.contains("Scheduled"), "{html}");
-    // The queue table, with the default queue in it.
-    assert!(html.contains("<td>default</td>"), "{html}");
+    // The queue table, with the default queue in it. Asserting on the
+    // text and not on a cell's classes: a restyle must not fail a test
+    // about what is in the queue.
+    assert!(html.contains(">default<"), "{html}");
     // And the number that actually says a queue is in trouble.
     assert!(html.contains("Oldest runnable job"), "{html}");
 }
@@ -119,8 +121,9 @@ async fn retries_and_scheduled_are_two_screens_of_one_table() {
         !retries.contains(">echo<"),
         "a scheduled job is not a retry"
     );
-    // A retry says why, which is the column the screen exists for.
-    assert!(retries.contains("jobs-err"), "{retries}");
+    // A retry says why, which is the column the screen exists for, and
+    // the words are the job's own.
+    assert!(retries.contains("nope, attempt"), "{retries}");
 
     let scheduled = get(&a, "/admin/jobs/scheduled");
     assert!(scheduled.contains("echo"), "{scheduled}");
@@ -228,7 +231,10 @@ async fn every_tab_renders() {
     let a = admin(&queue, true);
     for path in ["", "/queues", "/busy", "/retries", "/scheduled", "/dead"] {
         let html = get(&a, &format!("/admin/jobs{path}"));
-        assert!(html.contains("jobs-tabs"), "{path} has the tab strip");
+        assert!(
+            html.contains(r#"aria-label="Queue""#),
+            "{path} has the tab strip"
+        );
     }
     // And a path the panel does not serve is the admin's 404.
     let who = Operator;

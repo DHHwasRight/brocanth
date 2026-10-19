@@ -1,21 +1,26 @@
 use crate::admin::DashboardCtx;
+use crate::admin_templates::parts;
 use crate::admin_templates::tabs::Tabs;
 
 // What is in the queue, and how far behind it is.
 //
 // Sidekiq's dashboard also plots processed and failed over time. There is no
 // graph here, and that is not an omission: this queue deletes the row when
-// the job succeeds, so the history the graph plots does not exist. Drawing
-// one means a counters table, which is a decision and not a template.
+// the job succeeds, on purpose, so the history the graph needs does not
+// exist. Drawing one means a counters table, which is a decision to take on
+// its own rather than smuggle in behind a chart.
 
 pub fn Dashboard(ctx: &DashboardCtx) -> Element {
     <Tabs tabs={&ctx.tabs} />
 
-    <div class="jobs-counts">
+    <div class="grid gap-2.5 mb-5 [grid-template-columns:repeat(auto-fit,minmax(130px,1fr))]">
         for count in &ctx.counts {
-            <a class="jobs-count" href={&count.href}>
-                <span class="jobs-count-value">{count.value}</span>
-                <span class="jobs-count-label">{&count.label}</span>
+            <a class="block bg-white border border-line rounded-card p-3.5 no-underline text-ink shadow-card hover:border-accent"
+               href={&count.href} dp-boost>
+                <span class="block text-2xl font-semibold leading-none">{count.value}</span>
+                <span class="block mt-1 text-[11px] font-medium uppercase tracking-wider text-ink-faint">
+                    {&count.label}
+                </span>
             </a>
         }
     </div>
@@ -23,28 +28,31 @@ pub fn Dashboard(ctx: &DashboardCtx) -> Element {
     // Depth does not tell you a queue is in trouble: ten thousand jobs that
     // drain in a second are fine, and three where the oldest has waited an
     // hour are not. This is the number that does.
-    <p class="muted">Oldest runnable job: {&ctx.oldest}</p>
+    <p class="text-sm text-ink-soft">Oldest runnable job: {&ctx.oldest}</p>
 
-    <h2>Queues</h2>
+    <h2 class="mt-6 mb-2 text-base font-semibold text-ink">Queues</h2>
     if ctx.queues.is_empty() {
-        <div class="card"><div class="empty">Nothing on any queue.</div></div>
+        <div class={parts::card()}><div class={parts::empty()}>Nothing on any queue.</div></div>
     } else {
-        <div class="card">
-            <table>
+        <div class={parts::card()}>
+            <table class={parts::table()}>
                 <thead>
                     <tr>
-                        <th>Queue</th><th>Enqueued</th><th>Running</th>
-                        <th>Scheduled</th><th>Latency</th>
+                        <th class={parts::th()}>Queue</th>
+                        <th class={parts::th()}>Enqueued</th>
+                        <th class={parts::th()}>Running</th>
+                        <th class={parts::th()}>Scheduled</th>
+                        <th class={parts::th()}>Latency</th>
                     </tr>
                 </thead>
                 <tbody>
                     for row in &ctx.queues {
-                        <tr>
-                            <td>{&row.queue}</td>
-                            <td>{row.ready}</td>
-                            <td>{row.running}</td>
-                            <td>{row.scheduled}</td>
-                            <td class="muted">{&row.latency}</td>
+                        <tr class="hover:bg-stage/60">
+                            <td class={parts::td()}>{&row.queue}</td>
+                            <td class={parts::td()}>{row.ready}</td>
+                            <td class={parts::td()}>{row.running}</td>
+                            <td class={parts::td()}>{row.scheduled}</td>
+                            <td class={parts::td_muted()}>{&row.latency}</td>
                         </tr>
                     }
                 </tbody>

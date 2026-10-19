@@ -27,7 +27,7 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
                        href={&ctx.chrome.base_path} dp-boost>
                         {&ctx.chrome.title}
                     </a>
-                    <nav class="flex flex-col gap-0.5 px-3">
+                    <nav class="flex flex-col gap-0.5 px-3" aria-label="Sections">
                         for item in &ctx.chrome.nav {
                             // `aria-current` and not only a class: it is
                             // what tells a screen reader which screen this

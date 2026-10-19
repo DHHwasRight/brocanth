@@ -1,29 +1,39 @@
+use crate::templates::parts;
 use crate::view::DetailCtx;
 
 /// One record, field by field.
 pub fn Detail(ctx: &DetailCtx) -> Element {
-    <p class="crumbs">
-        <a href={&ctx.chrome.base_path}>{&ctx.chrome.title}</a> <span> / </span> <a href={&ctx.model.href}>{&ctx.model.plural}</a> <span> / </span> {&ctx.label}
+    <p class={parts::crumbs()}>
+        <a class={parts::action()} href={&ctx.chrome.base_path} dp-boost>{&ctx.chrome.title}</a>
+        <span>/</span>
+        <a class={parts::action()} href={&ctx.model.href} dp-boost>{&ctx.model.plural}</a>
+        <span>/</span>
+        <span class="text-ink-soft">{&ctx.label}</span>
     </p>
-    <div class="bar">
-        <h1>{&ctx.label}</h1>
-        <span class="bar-fill"></span>
+    <div class={parts::bar()}>
+        <h1 class={parts::heading()}>{&ctx.label}</h1>
+        <span class="flex-1"></span>
         if let Some(href) = &ctx.edit_href {
-            <a class="btn btn-primary" href={href}>Edit</a>
+            <a class={parts::button_primary()} href={href} dp-boost>Edit</a>
         }
         if let Some(href) = &ctx.delete_href {
-            <a class="btn btn-danger" href={href}>Delete</a>
+            <a class={parts::button_danger()} href={href} dp-boost>Delete</a>
         }
     </div>
-    <div class="card">
-        <table>
+    <div class={parts::card()}>
+        <table class={parts::table()}>
             <tbody>
                 for row in &ctx.rows {
                     <tr>
-                        <th scope="row">{&row.label}</th>
-                        <td>
+                        // The label column is a `th`, because it names the
+                        // row rather than holding data.
+                        <th scope="row"
+                            class="w-52 text-left px-3.5 py-2.5 border-b border-line align-top font-medium text-ink-soft">
+                            {&row.label}
+                        </th>
+                        <td class={parts::td()}>
                             if let Some(href) = &row.href {
-                                <a href={href}>{&row.text}</a>
+                                <a class={parts::action()} href={href} dp-boost>{&row.text}</a>
                             } else {
                                 <span>{&row.text}</span>
                             }
