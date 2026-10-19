@@ -1,0 +1,70 @@
+[package]
+name = "brocanth-admin-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The admin's data source over SeaORM: one macro, one line per entity, every write through an ActiveModel."
+
+# A crate of its own, and that is the whole point of it.
+#
+# `brocanth-admin` has four dependencies and no SQL driver, no ORM, no serde,
+# and says so in its own documentation. A SeaORM data source written there
+# would put the ORM in the binary of every application with a backoffice.
+# `brocanth-model` is the other candidate and is worse: an ORM that knows
+# about a backoffice has the arrow pointing the wrong way.
+#
+# So the bridge is a third crate that depends on both. Neither of them
+# depends on it, an application that wants the admin over SeaORM takes it,
+# and an application that has its own storage implements `AdminData` and
+# never sees this.
+[dependencies]
+brocanth-admin.workspace = true
+
+# The ORM, through the layer that owns it. The version, the runtime and the
+# registry are `brocanth-model`'s decisions and are not restated here.
+brocanth-model.workspace = true
+
+# And one feature that is this crate's decision rather than the model
+# layer's. `set_from_json` and `into_json` are both behind `with-json`, and
+# they are the entire bridge between a dynamic admin and a static ORM.
+#
+# Declared rather than inherited. It was already on in this workspace,
+# through another crate taking sea-orm with its default features, which
+# means it would have gone away the day that crate stopped. A crate that
+# cannot compile without a feature names the feature.
+#
+# `default-features = false` and nothing else listed, so this adds
+# `with-json` to what `brocanth-model` already asked for and decides
+# nothing it had decided. `macros` is for the test, where another crate's
+# fixture spells `sea_orm::model` directly.
+sea-orm = { version = "=2.0.4", default-features = false, features = [
+    "with-json",
+    "macros",
+] }
+
+# The seam between a dynamic admin and a static ORM. `ActiveModel`'s
+# `set_from_json` takes one of these and a `Select`'s `into_json` returns
+# them, which is what lets a column named by a runtime string reach a typed
+# entity at all.
+serde_json = "1"
+
+# The bounds `set_from_json` carries: an entity round-trips through JSON,
+# so its `Model` has to be `Serialize` and `Deserialize`. Named here
+# because this crate writes those bounds out.
+serde = "1"
+
+# `AdminData` is an async trait held behind `Arc<dyn AdminData>`, and
+# `async fn` in a trait is still not object-safe. Same spelling the admin
+# uses, so one copy is linked.
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# The test runs against a real database, and the smallest real database is
+# an in-memory SQLite one. `Harness::sqlite` is behind this feature.
+brocanth-model = { workspace = true, features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+
+[lints.rust]
+missing_docs = "warn"
