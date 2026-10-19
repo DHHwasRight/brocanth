@@ -576,6 +576,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "http",
  "rsx",
  "thiserror 2.0.21",
 ]

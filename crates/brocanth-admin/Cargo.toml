@@ -18,10 +18,15 @@ description = "A Django-admin-shaped backoffice for brocanth, with every screen 
 # and §8.2 says a feature that is off means the code is absent. With `plugin`
 # off, `brocanth` is not in the tree at all.
 default = ["plugin"]
-plugin = ["dep:brocanth"]
+plugin = ["dep:brocanth", "dep:http"]
 
 [dependencies]
 brocanth = { workspace = true, optional = true }
+
+# Only with `plugin`, and only because the routes this crate contributes
+# answer with an `http::Response` -- the core's `Response` is an alias for
+# one. Same major version as the core, so there is one copy in the binary.
+http = { version = "1", optional = true }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
 async-trait = "0.1"
 thiserror = "2"

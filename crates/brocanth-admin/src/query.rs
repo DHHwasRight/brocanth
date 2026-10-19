@@ -184,6 +184,28 @@ impl ListQuery {
 /// Byte-level throughout. Slicing the `&str` instead would panic on `%` in
 /// front of a multi-byte character, because the two bytes after the `%` can
 /// fall inside one.
+/// Every name/value pair of a urlencoded body or query string, decoded.
+///
+/// `+` is a space here and not in a path, which is why this is not the
+/// same function as the one a router would use.
+///
+/// Only the plugin reads a body: `Admin::dispatch` takes a `Submission`
+/// somebody else built. With `plugin` off the function is absent rather
+/// than unused, which is what §8.2 asks of a feature that is off.
+#[cfg(feature = "plugin")]
+pub(crate) fn pairs(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, raw) = pair.split_once('=').unwrap_or((pair, ""));
+            (
+                percent_decode(&key.replace('+', " ")),
+                percent_decode(&raw.replace('+', " ")),
+            )
+        })
+        .collect()
+}
+
 /// One parameter out of a query string, decoded.
 ///
 /// `ListQuery::parse` knows the five keys the model screens use. A panel
