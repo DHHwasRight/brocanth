@@ -399,13 +399,20 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(patterns, ["/", "/about", "/users/{id}"]);
+        // This example's own routes. The assertion arrived with the file
+        // the scaffold wrote and still named that project's pages, so it
+        // asserted `/about` and `/users/{id}` against a directory holding
+        // neither, and had been failing since the example was added.
+        assert_eq!(
+            patterns,
+            ["/", "/{section}", "/{section}/{card}", "/{section}/{card}/{tab}"]
+        );
     }
 
     #[test]
     fn a_path_that_exists_with_a_verb_that_does_not_is_a_405() {
         let router = router().expect("the pages produce a table");
-        let allow = router.allow_for("/about").expect("/about is a route");
+        let allow = router.allow_for("/").expect("/ is a route");
         assert_eq!(allow.to_string(), "GET, HEAD");
     }
 }
