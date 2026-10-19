@@ -611,6 +611,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "brocanth",
+ "brocanth-scaffold",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "http",
@@ -769,6 +770,7 @@ dependencies = [
 name = "brocanth-policy"
 version = "0.1.0"
 dependencies = [
+ "brocanth-scaffold",
  "proptest",
  "sqlx",
  "thiserror 2.0.21",

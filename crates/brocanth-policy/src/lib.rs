@@ -110,6 +110,14 @@ pub mod eval;
 pub mod mask;
 pub mod policy;
 pub mod pred;
+
+/// The `brocanth create` module that writes this crate into a new project.
+///
+/// Behind the `scaffold` feature, which is off: the generator is the CLI's
+/// business and not an application's.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub mod sql;
 pub mod value;
 

@@ -113,6 +113,14 @@ pub mod plugin;
 pub mod providers;
 pub mod random;
 pub mod recovery;
+
+/// The `brocanth create` module that writes this crate into a new project.
+///
+/// Behind the `scaffold` feature, which is off: the generator is the CLI's
+/// business and not an application's.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub mod session;
 pub mod storage;
 pub mod tokens;
