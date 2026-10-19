@@ -3005,7 +3005,7 @@ mod tests {
                     .args(["--edition", "2021", "--check"])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .expect("rustfmt runs");
                 child
@@ -3014,18 +3014,68 @@ mod tests {
                     .expect("a pipe")
                     .write_all(source.as_bytes())
                     .expect("rustfmt reads");
-                // Reading a file from stdin, rustfmt reports by printing a
-                // diff and still exits 0, so the empty stdout is the signal.
                 let done = child.wait_with_output().expect("rustfmt finishes");
-                if !done.stdout.is_empty() {
+
+                // Two different failures, and for a long time this test saw
+                // only one of them. Reading stdin, rustfmt reports bad
+                // formatting by printing a diff and exiting 0 — so empty
+                // stdout was taken as the all-clear. But a file rustfmt
+                // cannot *parse* also prints nothing to stdout; it writes to
+                // stderr and exits 1. With stderr thrown away and the status
+                // ignored, a generated file with a stray brace in it read as
+                // perfectly formatted, which is the one thing this test
+                // exists to catch.
+                if !done.status.success() {
+                    unformatted.push(format!(
+                        "{name}: {path} does not parse: {}",
+                        String::from_utf8_lossy(&done.stderr).trim()
+                    ));
+                } else if !done.stdout.is_empty() {
                     unformatted.push(format!("{name}: {path}"));
                 }
             }
         }
         assert!(
             unformatted.is_empty(),
-            "rustfmt would change these:\n  {}",
+            "rustfmt rejects these:\n  {}",
             unformatted.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_formatting_check_notices_a_file_that_does_not_parse() {
+        // The test above is only worth having if it fails on the input it
+        // used to pass. This is that input.
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if Command::new("rustfmt").arg("--version").output().is_err() {
+            eprintln!("skipped: rustfmt is not on PATH");
+            return;
+        }
+        let mut child = Command::new("rustfmt")
+            .args(["--edition", "2021", "--check"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("rustfmt runs");
+        child
+            .stdin
+            .take()
+            .expect("a pipe")
+            .write_all(b"fn main() { let x = 1; }}\n")
+            .expect("rustfmt reads");
+        let done = child.wait_with_output().expect("rustfmt finishes");
+
+        assert!(
+            done.stdout.is_empty(),
+            "this is why stdout alone was not enough to tell"
+        );
+        assert!(
+            !done.status.success(),
+            "and this is what tells: rustfmt exits non-zero on input it \
+             cannot parse"
         );
     }
 

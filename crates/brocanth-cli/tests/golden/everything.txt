@@ -1296,7 +1296,7 @@ impl Plugin for Cache {
         }
     }
 }
-===== src/plugins/jobs.rs =====
+===== src/plugins/jobs/mod.rs =====
 //! Background jobs, as this application registers them.
 //!
 //! A job is a struct that serialises, plus one `perform`. Enqueuing takes the

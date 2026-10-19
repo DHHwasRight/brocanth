@@ -51,7 +51,7 @@ impl Module for Jobs {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/jobs.rs", plugin_rs(project));
+        s.file("src/plugins/jobs/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod jobs;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "jobs", "Jobs"));
