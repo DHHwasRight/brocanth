@@ -36,6 +36,17 @@ thiserror = "2"
 # output against a recorded snapshot. It is how `a build with no policy
 # registered must not compile` becomes an assertion rather than a sentence in a
 # README. `brocanth-command` set the precedent in this workspace.
+# `src/scaffold.rs` is the module `brocanth create` lists under the key
+# `resource`, and lists as blocked. It lives beside the crate it speaks for,
+# and not in the CLI, because the reason it is blocked is a fact about this
+# crate's shape: five routes that arrive as a `RouteSource`, over an entity
+# and a policy a new project does not have. A copy of that reasoning in the
+# CLI rots the first time either changes.
+#
+# Optional, and off by default. The one program that wants it is the CLI,
+# which asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 trybuild = "1"
 
@@ -58,6 +69,11 @@ tokio = { version = "1", features = ["rt", "macros"] }
 default = ["plugin"]
 # The route bundle: `RouteSource`, the status codes and the JSON envelope.
 plugin = ["dep:brocanth", "dep:http"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above. It writes no code and reads nothing from this crate,
+# so it needs neither `plugin` nor the core.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

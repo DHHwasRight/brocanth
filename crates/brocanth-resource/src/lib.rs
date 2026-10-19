@@ -107,6 +107,13 @@ pub mod status;
 #[cfg(feature = "plugin")]
 pub mod routes;
 
+/// Why this crate is listed on the `brocanth create` menu and not available.
+///
+/// Behind an off-by-default feature. The one program that reads it is the
+/// CLI.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 pub use data::{DataError, FetchQuery, ListQuery, ResourceData};
 pub use error::Failure;
 pub use page::{Listing, PageRequest, Totals};

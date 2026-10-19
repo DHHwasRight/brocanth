@@ -16,6 +16,22 @@ brocanth-schema-derive = { path = "derive", version = "=0.1.0", optional = true 
 regex = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `validation`. It lives beside the crate it writes into a project, and not in
+# the CLI, because everything it writes is a statement about this crate: that
+# the context item is `Validation` and the only thing that can mint a
+# `Valid<T>`, that `ReportStyle` has exactly two spellings, that
+# `ValidationConfig` carries no parser and so cannot be read out of a TOML
+# file by itself. A copy of that in the CLI rots the first time a name here
+# changes, and it rots in silence, because nothing compiles the generator
+# against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application that validates wants the vocabulary and
+# nothing else. The one program that wants the generator is the CLI, which
+# asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [features]
 default = ["derive", "pattern", "plugin"]
 # `#[derive(Validate)]`.
@@ -29,6 +45,12 @@ plugin = ["dep:brocanth"]
 # `Serialize`/`Deserialize` on `SchemaNode`, `Issue` and `Issues`. The JSON
 # rendering in `Issues::to_json` does not need it.
 serde = ["dep:serde"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business. It writes text and reads nothing from this crate, so it needs
+# none of the features above.
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "deny"
