@@ -362,7 +362,7 @@ what was read.
 | `brocanth-cache` | — | yes | — | `cache` |
 | `brocanth-realtime` | — | yes | events (as a sink) | `realtime` |
 | `brocanth-auth` | 8,875 | 146 | 2 | **no** |
-| `brocanth-openapi` | 5,873 | 72 | 1 | **no** |
+| `brocanth-openapi` | 5,873 | 72 | **0** | **no** |
 | `brocanth-schema` | 4,832 | 61 | **0** | **no** |
 | `brocanth-storage` | 2,944 | 70 | 2 | **no** |
 | `brocanth-policy` | 3,290 | 64 | 2 | **no** |
@@ -517,6 +517,33 @@ application to put the broker in it. The receiving side needs no change.
 **Depends on:** nothing. It also decides whether `brocanth-events` ever
 deserves a scaffold module: today a module could only generate a sink with no
 publisher, which is why it has none.
+
+### G4b. Eight slots are declared and never read, and the context does not reach a handler
+
+Two findings from writing five modules at once, both measured.
+
+**`create.rs` consumes seven of fifteen `Slot` variants.** `CargoExtra`,
+`AppItems`, `AppBeforeRouter`, `PagesItems`, `GitIgnore`, `MiseTasks`,
+`NodeDependencies` and `AgentsSections` are never consulted. A module writing
+into one is recorded by `Scaffold` and discarded by the generator, silently —
+which already happened: one module wrote a `.gitignore` line believing it was
+the slot's first user, and it was, and the line goes nowhere.
+
+**A generated project's `Ctx` has no extractor.** A plugin declaring
+`ProvidesContext<T>` publishes to a per-request context that `src/pages/mod.rs`
+does not expose. `cx.extract()` works only inside `plugins::announce!` at
+startup. Three generated modules told the developer to call it from a handler;
+that line does not compile. Corrected in the generated prose, but the gap is
+the `Ctx` type, not the prose.
+
+**`mount_routes` never appears in generated code either.** `RouteSource` is
+the seam `plugin_routes.rs` opens by naming an OpenAPI plugin and an admin
+plugin as its cases. `app_rs` does not emit a mount and `dispatch` consults
+only the page table, so a route bundle reaches tests and no application the
+CLI can write. This is what blocks `brocanth-resource` from the menu.
+
+**Cost:** read the eight slots, or delete them. Give `Ctx` the plugin context
+and an extractor. Add a slot for mounting route bundles after `build()`.
 
 ### G5. `resource` and `schema` are wired to nothing
 

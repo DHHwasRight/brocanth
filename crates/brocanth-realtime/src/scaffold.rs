@@ -175,6 +175,7 @@ fn plugin_rs(project: &Project) -> String {
 //! broker reads nothing:
 //!
 //! ```ignore
+//! // Not from a handler yet: `Ctx` has no extractor. See below.
 //! let realtime: &Broadcast = cx.extract();
 //! let row = Row::new().with("author_id", author);
 //! realtime

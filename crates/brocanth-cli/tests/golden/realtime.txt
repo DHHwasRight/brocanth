@@ -702,6 +702,7 @@ pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Resp
 //! broker reads nothing:
 //!
 //! ```ignore
+//! // Not from a handler yet: `Ctx` has no extractor. See below.
 //! let realtime: &Broadcast = cx.extract();
 //! let row = Row::new().with("author_id", author);
 //! realtime

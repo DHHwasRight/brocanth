@@ -96,17 +96,25 @@ fn plugin_rs(project: &Project) -> String {
 //! no other route. Delete the registration in `src/app.rs` and delete this
 //! file, and the application runs no jobs and links nothing to run them with.
 //!
-//! # Enqueuing
+//! # Enqueuing, and what does not work yet
 //!
-//! A handler reaches the queue through the context:
+//! This plugin publishes the `Queue` on the per-request context, and a
+//! handler in this project **cannot reach it today**. The `Ctx` in
+//! `src/pages/mod.rs` carries the verb, the path, the parameters and the
+//! partial depth, and has no extractor on it. `cx.extract()` works in
+//! `plugins::announce!`, at startup, where the context builder is in
+//! scope -- which is the one place this project calls it.
+//!
+//! So enqueue from `src/app.rs`, from a command under `src/commands/`, or
+//! from anything else holding the `Queue`:
 //!
 //! ```ignore
-//! let queue: &Queue = cx.extract();
 //! queue.enqueue(Welcome {{ user_id: 7 }}).await?;
 //! ```
 //!
-//! and a handler in an application that never registered this plugin does
-//! not compile, which is the point of putting it on the context.
+//! The plugin half is right and the handler half is missing: `Ctx` needs
+//! to carry the plugin context and expose an extractor. Until it does,
+//! a line claiming otherwise would be a line that does not compile.
 //!
 //! # Where job types go
 //!
