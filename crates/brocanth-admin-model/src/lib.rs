@@ -193,6 +193,11 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
 /// default for a screen with a delete button on it: appearing there should
 /// be a decision somebody made rather than a consequence of compiling.
 ///
+/// The list may be empty. A new project has no entities yet, and an
+/// application whose backoffice is only contributed panels -- a queue, a
+/// cache, a set of flags -- never needs one. That admin shows "nothing to
+/// administer" and its tabs, which is accurate rather than broken.
+///
 /// # Why the match is written six times
 ///
 /// Once per method, by the macro. A helper macro holding it once cannot be
@@ -207,7 +212,7 @@ macro_rules! admin_source {
     (
         $(#[$meta:meta])*
         $vis:vis struct $name:ident;
-        $($module:literal => $entity:path),+ $(,)?
+        $($module:literal => $entity:path),* $(,)?
     ) => {
         $(#[$meta])*
         $vis struct $name {
@@ -224,7 +229,7 @@ macro_rules! admin_source {
                 use $crate::brocanth_model::sea_orm::ConnectionTrait as _;
                 let backend = db.get_database_backend();
                 let entries = ::std::vec![
-                    $($crate::entry_of::<$entity>($module, backend),)+
+                    $($crate::entry_of::<$entity>($module, backend),)*
                 ];
                 Self { db, entries }
             }
@@ -249,7 +254,7 @@ macro_rules! admin_source {
                 search: $crate::brocanth_admin::data::Search<'_>,
             ) -> ::std::result::Result<usize, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
-                    $($module => $crate::count_of::<$entity>(&self.db, search).await,)+
+                    $($module => $crate::count_of::<$entity>(&self.db, search).await,)*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -262,7 +267,7 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::DataError,
             > {
                 match request.model.module_path.as_str() {
-                    $($module => $crate::rows_of::<$entity>(&self.db, &request).await,)+
+                    $($module => $crate::rows_of::<$entity>(&self.db, &request).await,)*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -278,7 +283,7 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::row_of::<$entity>(&self.db, key, &model.table).await
-                    })+
+                    })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -294,7 +299,7 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::insert_of::<$entity>(&self.db, model, values).await
-                    })+
+                    })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -308,7 +313,7 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::update_of::<$entity>(&self.db, model, key, values).await
-                    })+
+                    })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -319,7 +324,7 @@ macro_rules! admin_source {
                 key: &$crate::brocanth_admin::model::PrimaryKey,
             ) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
-                    $($module => $crate::delete_of::<$entity>(&self.db, model, key).await,)+
+                    $($module => $crate::delete_of::<$entity>(&self.db, model, key).await,)*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }

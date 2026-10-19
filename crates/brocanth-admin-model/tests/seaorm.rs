@@ -330,3 +330,23 @@ async fn a_module_path_the_macro_was_not_given_is_named() {
     let named = matches!(&out, Err(DataError::UnknownModel(m)) if m == "blog::comment");
     assert!(named, "{out:?}");
 }
+
+admin_source! {
+    /// No entities at all, which a new project has and a panels-only
+    /// backoffice always has.
+    pub struct Nothing;
+}
+
+#[tokio::test]
+async fn a_source_with_no_entities_is_a_source() {
+    let harness = Harness::sqlite().await.expect("connect");
+    let models = Nothing::new(harness.conn().clone());
+    assert!(models.registry().is_empty());
+
+    // And every operation names the model it was not given, rather than
+    // panicking on a match with no arms.
+    let mut model = user_model();
+    model.module_path = "anything".into();
+    let out = models.count(&model, no_search()).await;
+    assert!(matches!(out, Err(DataError::UnknownModel(_))), "{out:?}");
+}
