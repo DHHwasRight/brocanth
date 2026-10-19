@@ -226,6 +226,7 @@ fn allocations_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 #[test]
 fn a_request_through_an_application_with_no_hooks_allocates_nothing() {
     use brocanth::plugin_app::AppBuilder;
+    use brocanth::plugin_body::Body;
     use brocanth::plugin_hooks::{HandlerError, Request, RequestState, Response};
 
     let app = AppBuilder::new().build().unwrap();
@@ -233,7 +234,7 @@ fn a_request_through_an_application_with_no_hooks_allocates_nothing() {
     let mut state = RequestState::new();
 
     let handler = |_: &mut Request, _: &mut RequestState| -> Result<Response, HandlerError> {
-        Ok(Response::new(Vec::new()))
+        Ok(Response::new(Body::empty()))
     };
 
     // Warm anything the first call might set up, so the measurement is of the

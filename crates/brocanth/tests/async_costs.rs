@@ -10,6 +10,7 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_body::Body;
 use brocanth::plugin_context::Base;
 use brocanth::plugin_hooks::{HandlerError, Request, RequestState, Response};
 use brocanth::plugin_routes::{async_handler, AnyHandler, BoxFuture, Handler, RouteCx};
@@ -50,12 +51,12 @@ fn allocations_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 }
 
 fn sync_handler() -> Handler<Base> {
-    Box::new(|_: &mut RouteCx<'_, Base>| Ok(Response::new(Vec::new())))
+    Box::new(|_: &mut RouteCx<'_, Base>| Ok(Response::new(Body::empty())))
 }
 
 fn async_handler_of() -> brocanth::plugin_routes::AsyncHandler<Base> {
     async_handler(|_: &mut RouteCx<'_, Base>| {
-        Box::pin(async move { Ok(Response::new(Vec::new())) }) as BoxFuture<'_, _>
+        Box::pin(async move { Ok(Response::new(Body::empty())) }) as BoxFuture<'_, _>
     })
 }
 

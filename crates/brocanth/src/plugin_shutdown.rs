@@ -31,6 +31,7 @@
 use std::time::{Duration, Instant};
 
 use crate::plugin_api::{PluginError, Services};
+use crate::plugin_body::StreamGate;
 
 /// Why the application is stopping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +92,7 @@ pub struct ShutdownCx<'a> {
     started: Instant,
     instance: &'a str,
     services: &'a mut Services,
+    streams: &'a StreamGate,
 }
 
 impl<'a> ShutdownCx<'a> {
@@ -101,6 +103,7 @@ impl<'a> ShutdownCx<'a> {
         started: Instant,
         instance: &'a str,
         services: &'a mut Services,
+        streams: &'a StreamGate,
     ) -> Self {
         Self {
             reason,
@@ -109,6 +112,7 @@ impl<'a> ShutdownCx<'a> {
             started,
             instance,
             services,
+            streams,
         }
     }
 
@@ -146,6 +150,27 @@ impl<'a> ShutdownCx<'a> {
         matches!(self.remaining(), Some(left) if left.is_zero())
     }
 
+    /// How many response bodies are still being produced.
+    ///
+    /// Already non-zero in phase [`ShutdownPhase::Begin`] and falling through
+    /// [`ShutdownPhase::Drain`] as each one ends. A plugin that owns what a
+    /// stream reads from -- a broker, a connection pool, a file handle --
+    /// reads this before it closes: the gate has already told every stream to
+    /// end, so a number that will not fall is a stream that ignored
+    /// [`BodyStream::finish`](crate::plugin_body::BodyStream::finish).
+    ///
+    /// It is a number and not a wait. Only whatever polls a body can make it
+    /// fall, and the core polls nothing; the transport awaits
+    /// [`StreamGate::drained`].
+    pub fn open_streams(&self) -> usize {
+        self.streams.open_streams()
+    }
+
+    /// The application's gate, for a plugin that wants to wait on it itself.
+    pub fn streams(&self) -> &StreamGate {
+        self.streams
+    }
+
     pub fn services(&self) -> &Services {
         self.services
     }
@@ -162,6 +187,7 @@ impl std::fmt::Debug for ShutdownCx<'_> {
             .field("phase", &self.phase)
             .field("instance", &self.instance)
             .field("remaining", &self.remaining())
+            .field("open_streams", &self.open_streams())
             .finish()
     }
 }
@@ -196,6 +222,7 @@ pub struct ShutdownReport {
     failures: Vec<ShutdownFailure>,
     elapsed: Duration,
     grace: Option<Duration>,
+    streams_left: usize,
 }
 
 impl ShutdownReport {
@@ -206,6 +233,7 @@ impl ShutdownReport {
             failures: Vec::new(),
             elapsed: Duration::ZERO,
             grace,
+            streams_left: 0,
         }
     }
 
@@ -221,8 +249,9 @@ impl ShutdownReport {
         });
     }
 
-    pub(crate) fn finish(&mut self, elapsed: Duration) {
+    pub(crate) fn finish(&mut self, elapsed: Duration, streams_left: usize) {
         self.elapsed = elapsed;
+        self.streams_left = streams_left;
     }
 
     pub fn reason(&self) -> ShutdownReason {
@@ -239,9 +268,21 @@ impl ShutdownReport {
         &self.failures
     }
 
-    /// Nothing failed.
+    /// Response bodies that were still being produced when the last plugin
+    /// had stopped.
+    ///
+    /// Every one of them was told to end at the start of the shutdown, so a
+    /// number above zero means either that the transport had not finished
+    /// draining when this ran, or that a stream ignored
+    /// [`BodyStream::finish`](crate::plugin_body::BodyStream::finish). Those
+    /// clients see a truncated response.
+    pub fn streams_left(&self) -> usize {
+        self.streams_left
+    }
+
+    /// Nothing failed, and no response was cut off.
     pub fn is_clean(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && self.streams_left == 0
     }
 
     /// How long the whole shutdown took.
@@ -264,6 +305,13 @@ impl std::fmt::Display for ShutdownReport {
             self.elapsed,
             self.order.len()
         )?;
+        if self.streams_left > 0 {
+            write!(
+                f,
+                "\n  {} response stream(s) were still open and were cut off",
+                self.streams_left
+            )?;
+        }
         for failure in &self.failures {
             write!(f, "\n  {failure}")?;
         }

@@ -270,7 +270,7 @@ the pattern.
 | Middleware layer | **Yes**, separate stack | An auth layer reads a session store. But see §3.1 — nothing in the request path uses the stack today. |
 | `RequestHook::before_dispatch` | **Yes, optionally** | A session loader needs I/O before the handler. §5 shows this costs nothing when nobody registers one. |
 | `RequestHook::after_dispatch` | **No** | It cannot fail, cannot change the response, and runs after the response is final. Awaiting there holds the connection open to do work the client is not waiting for. A plugin that wants that wants a job queue. |
-| `ResponseHook::on_response` | **No** | It rewrites a `Vec<u8>` that is already in memory. Compression, ETag and partial-navigation headers are CPU, not I/O. There is nothing to wait for. |
+| `ResponseHook::on_headers` / `on_body` | **No** | They rewrite headers, and a `Vec<u8>` that is already in memory. Compression, ETag and partial-navigation headers are CPU, not I/O. There is nothing to wait for. A streaming body is not an exception: the hooks run before the first byte, and the waiting is the transport's. |
 | `ErrorHook::on_error` | **No** | It recognises an error by type and builds a response. Same argument. An error hook that wants to *report* to a remote service should hand the report to a queue, not hold the 500 open. |
 | `ModelHook` | **No** | The ORM owns its own write path and is already async if it wants to be. The core forwards a value it never looks inside. Making the forwarding async puts a future in the ORM's hot loop for no gain. |
 | `Plugin::start` / `shutdown` | **No** (out of scope) | Separate question. Worth asking later; not asked here. |
@@ -768,22 +768,41 @@ work, and it is ordinary work, not research.
 
 ## 9. Streaming responses
 
-Not built, as instructed, and the instruction is right.
+**Built since this section was written.** What it predicted was right, so the
+prediction is kept above the correction.
 
-Async does make streaming look closer, and that appearance is misleading. The
-blocker is not the type of a handler's return value. It is
+The blocker was never the type of a handler's return value. It was
 `ResponseHook::on_response(&self, request, response: &mut Response, state)`,
-which is specified to see a **complete body**: compression compresses a whole
+which was specified to see a **complete body**: compression compresses a whole
 `Vec<u8>`, an ETag is a hash of a whole `Vec<u8>`, and both are documented as
-running inside-out so that compression wraps the ETag.
+running inside-out so that compression wraps the ETag. A streaming body made
+`&mut Response` meaningless for both.
 
-A streaming body makes `&mut Response` meaningless for both. A response hook
-would have to become a *transform over a stream* — a different signature, a
-different ordering story, and a different failure story, since a hook can no
-longer answer "this failed, send a 500" after the first byte has gone out.
+*Correction: that is what the change did.* `Response` is now
+`http::Response<brocanth::plugin_body::Body>`, where a `Body` is either every
+byte or a `BodyStream` the transport polls, and `ResponseHook` is two methods
+rather than one:
 
-That is a change to the hook contract. Async is a prerequisite for it, not a
-step toward it. Deciding it needs its own document.
+* `on_headers(&self, request, head: &mut ResponseHead, body: BodyShape<'_>, state)`
+  runs for **every** response, before the first byte, a stream included.
+* `on_body(&self, request, head: &mut ResponseHead, body: &mut Vec<u8>, state)`
+  runs only for a body that is complete.
+
+So a hook is never handed an unfinished body. Compression sets its header in
+`on_headers` and either rewrites bytes in `on_body` or wraps the stream with
+`Streaming::wrap`; the partial-navigation headers are head-only and reach a
+stream unchanged; `ETag` over a stream is unavailable and is stated to be,
+rather than computed over nothing.
+
+The failure story is the one this section predicted and it has not improved:
+once the first byte is out there is no clean 500. A stream that fails mid-body
+stops writing and the client sees a truncated response, which is why PLAN.md
+§3 buffers by default and why streaming is opt-in per response.
+
+Async was indeed a prerequisite rather than a step: the core still holds no
+future and polls no body. `StreamGate` is the shutdown half — `close()` is
+ADR 2's `begin_shutdown` and calls `BodyStream::finish`, and
+`StreamGate::drained()` is what the transport awaits.
 
 ---
 

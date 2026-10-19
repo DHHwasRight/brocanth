@@ -17,10 +17,12 @@ use std::time::{Duration, Instant};
 
 use brocanth::plugin_api::{Plugin, PluginError};
 use brocanth::plugin_app::{App, AppBuilder};
+use brocanth::plugin_body::Body as CoreBody;
 use brocanth::plugin_context::{Base, NoContext};
 use brocanth::plugin_hooks::{
-    Flow, HookFamilies, HookRegistrar, HookSource, OnRequest, OnResponse, Request as CoreRequest,
-    RequestHook, RequestState, Response as CoreResponse, ResponseHook,
+    BodyShape, Flow, HookFamilies, HookRegistrar, HookSource, OnRequest, OnResponse,
+    Request as CoreRequest, RequestHook, RequestState, Response as CoreResponse, ResponseHead,
+    ResponseHook,
 };
 use brocanth::plugin_order::Order;
 use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
@@ -66,14 +68,15 @@ impl HookSource for Stamp {
 struct Mark;
 
 impl ResponseHook for Mark {
-    fn on_response(
+    fn on_headers(
         &self,
         _request: &CoreRequest,
-        response: &mut CoreResponse,
+        head: &mut ResponseHead,
+        _body: BodyShape<'_>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
-        let status = response.status().as_u16();
-        response.headers_mut().insert(
+        let status = head.status.as_u16();
+        head.headers.insert(
             "x-pipeline",
             http::HeaderValue::from_str(&status.to_string()).expect("a status is ASCII digits"),
         );
@@ -81,7 +84,7 @@ impl ResponseHook for Mark {
     }
 }
 
-fn ok(body: impl Into<Vec<u8>>) -> CoreResponse {
+fn ok(body: impl Into<CoreBody>) -> CoreResponse {
     http::Response::builder()
         .status(200)
         .header("content-type", "text/plain; charset=utf-8")
@@ -342,7 +345,7 @@ async fn a_content_length_the_core_wrote_does_not_reach_the_wire() {
                 Ok(http::Response::builder()
                     .status(200)
                     .header("content-length", "9999")
-                    .body(b"short".to_vec())
+                    .body(CoreBody::from("short"))
                     .expect("a response this test wrote"))
             }),
         )

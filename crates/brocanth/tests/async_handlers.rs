@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_body::Body;
 use brocanth::plugin_context::{Base, Context as Cx};
 use brocanth::plugin_hooks::{Begin, HandlerError, NoHooks, Request, RequestState, Response};
 use brocanth::plugin_routes::{async_handler, AnyHandler, BoxFuture, Handler, RouteCx};
@@ -29,7 +30,7 @@ use brocanth::routing::{Dispatch, Params, Router, Verb};
 fn sync_route() -> Handler<Base> {
     Box::new(|cx: &mut RouteCx<'_, Base>| {
         let who = cx.params().get("who").unwrap_or("nobody").to_string();
-        Ok(Response::new(format!("sync {who}").into_bytes()))
+        Ok(Response::new(Body::from(format!("sync {who}"))))
     })
 }
 
@@ -40,7 +41,7 @@ fn async_route() -> brocanth::plugin_routes::AsyncHandler<Base> {
             // A real suspension point, so the test is not a sync call in a
             // future's clothing.
             yield_once().await;
-            Ok(Response::new(format!("async {who}").into_bytes()))
+            Ok(Response::new(Body::from(format!("async {who}"))))
         }) as BoxFuture<'_, _>
     })
 }
@@ -75,7 +76,7 @@ fn serve(path: &str) -> Response {
                         let mut cx = RouteCx::new(request_ref, &params, &context, &mut state);
                         handler.call(&mut cx).await
                     }
-                    _ => Ok(Response::new(b"404".to_vec())),
+                    _ => Ok(Response::new(Body::from("404"))),
                 }
             }
             Begin::Answered(outcome) => outcome,
@@ -86,8 +87,11 @@ fn serve(path: &str) -> Response {
 
 #[test]
 fn a_sync_route_and_an_async_route_live_in_one_table_and_both_answer() {
-    assert_eq!(serve("/sync/ada").body(), b"sync ada");
-    assert_eq!(serve("/async/ada").body(), b"async ada");
+    assert_eq!(serve("/sync/ada").body().buffered(), Some(&b"sync ada"[..]));
+    assert_eq!(
+        serve("/async/ada").body().buffered(),
+        Some(&b"async ada"[..])
+    );
 }
 
 #[test]
@@ -140,7 +144,7 @@ fn request_state_written_before_an_await_is_there_after_it() {
         Box::pin(async move {
             yield_once().await;
             let seen = cx.state().get::<Started>().map(|s| s.0).unwrap_or(0);
-            Ok(Response::new(format!("{seen}").into_bytes()))
+            Ok(Response::new(Body::from(format!("{seen}"))))
         }) as BoxFuture<'_, _>
     });
 
@@ -151,7 +155,7 @@ fn request_state_written_before_an_await_is_there_after_it() {
     let mut state = RequestState::new();
     let mut cx = RouteCx::new(&request, &params, &context, &mut state);
     let response = block_on(handler(&mut cx)).expect("ok");
-    assert_eq!(response.body(), b"7");
+    assert_eq!(response.body().buffered(), Some(&b"7"[..]));
 }
 
 #[test]
@@ -210,7 +214,7 @@ mod plugin {
             bundle.get(
                 "fast",
                 "/fast",
-                Box::new(|_: &mut RouteCx<'_, Base>| Ok(Response::new(b"fast".to_vec()))),
+                Box::new(|_: &mut RouteCx<'_, Base>| Ok(Response::new(Body::from("fast")))),
             );
             // No `async_handler` here, on purpose: the argument's expected
             // type is already `AsyncHandler<Base>`, so a plain boxed closure
@@ -221,7 +225,7 @@ mod plugin {
                 Box::new(|_: &mut RouteCx<'_, Base>| {
                     Box::pin(async move {
                         yield_once().await;
-                        Ok(Response::new(b"slow".to_vec()))
+                        Ok(Response::new(Body::from("slow")))
                     }) as BoxFuture<'_, _>
                 }),
             );

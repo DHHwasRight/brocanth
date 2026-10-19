@@ -92,74 +92,65 @@
 //!
 //! # The limit: this crate does not ship the transport
 //!
-//! **It produces encoded frames and stops.** The reason is a property of the
-//! core, not a shortage of time:
+//! **It produces encoded frames and stops.** That used to be a statement
+//! about the core, and it is now a statement about this crate's dependency
+//! list.
 //!
-//! > The core's `Response = http::Response<Vec<u8>>` is buffered, and
-//! > `ResponseHook::on_response(&mut Response)` is specified to see a complete
-//! > body. A streaming body would silently skip every response hook — which is
-//! > exactly §8's "compression, partial-navigation headers and ETag" list. So
-//! > SSE is not one type change away; it is a change to the hook contract.
+//! The core's half is done. `brocanth::plugin_hooks::Response` is
+//! `http::Response<brocanth::plugin_body::Body>`, and a `Body` is either
+//! every byte or a `BodyStream` the transport polls. `ResponseHook` is two
+//! methods rather than one: `on_headers` runs for every response, a stream
+//! included, and `on_body` takes `&mut Vec<u8>` and runs only for a body that
+//! is complete. So nothing is silently skipped -- the partial-navigation
+//! headers reach a stream unchanged, compression wraps the stream rather than
+//! announcing an encoding it will not apply, and `ETag` is unavailable over a
+//! stream and says so rather than hashing something wrong. ADR 2's shutdown
+//! reaches an open body too: `StreamGate::close` is `begin_shutdown` and
+//! calls `BodyStream::finish`, which is where an SSE endpoint sends its
+//! `event: close`.
 //!
-//! `brocanth::plugin_hooks` declares `pub type Response =
-//! http::Response<Vec<u8>>` and `ResponseHook::on_response(&self, &Request,
-//! &mut Response, &mut RequestState)`. A hook holds `&mut Vec<u8>`: it may
-//! read the whole body, rewrite it, compress it, hash it into an `ETag`. None
-//! of that is meaningful over a body that has not finished, and most of it is
-//! not meaningful over a body that never will.
+//! What is left is an arrow this crate refuses to draw. **No `brocanth`.**
+//! Nothing here touches a request, a response or a route, and a transport is
+//! a handler. A handler belongs to whichever crate owns the routes, and
+//! putting one here would make every application that merely broadcasts link
+//! the router.
 //!
-//! **What the core would have to change to close the seam**, exactly:
+//! **What a transport does with this crate**, in about thirty lines none of
+//! which are here: implement `brocanth::plugin_body::BodyStream` over a
+//! [`Mailbox`], returning `Poll::Ready(Some(Ok(frame.bytes().to_vec())))` for
+//! each frame and `Poll::Pending` with the waker [`Mailbox::recv`] already
+//! knows how to store; answer the route with
+//! `brocanth_server::Response::events(that_stream)`; open the [`Client`] with
+//! [`Broker::connect`], write [`Client::id`] in the first frame, and accept a
+//! subscription request on a second endpoint, authorising *there*, as
+//! PocketBase does, because that is where the subject is known. Implement
+//! `BodyStream::finish` by draining the mailbox once and ending, or a deploy
+//! waits for the longest-lived subscriber.
 //!
-//! 1. A response body that can be a stream as well as a `Vec<u8>` — an enum,
-//!    or a `Body` type the core owns. `Layer<C, O>` is already generic over
-//!    the output, so the router does not care; `Response` is the concrete type
-//!    that does.
-//! 2. `ResponseHook` split in two, because one trait cannot keep both
-//!    meanings. A **header** hook that sees the status and headers before the
-//!    first byte, and runs for every response including a stream; and a
-//!    **body** hook that sees `&mut Vec<u8>` and runs only for a buffered one.
-//!    Compression and partial-navigation headers are the first kind; `ETag` is
-//!    the second and is simply not available for a stream, which is correct
-//!    and should be stated rather than silently skipped.
-//! 3. ADR 2's two-phase shutdown extended to open streams: `begin_shutdown`
-//!    has to be able to tell a connection to finish, with `shutdown` waiting
-//!    for it, or a deploy hangs on the longest-lived subscriber.
+//! A websocket is still a second piece of work, and not this one: it needs an
+//! HTTP upgrade below `Response` and a frame codec, neither of which is a
+//! body.
 //!
-//! Until those exist, a transport built on top of this crate would be a plugin
-//! that bypasses the hook chain — and §8 is explicit that *"anything a plugin
-//! cannot do through [the extension points] is a gap in the core, to be fixed
-//! by widening the seam rather than by special-casing the plugin."* So the gap
-//! is written down here instead of worked around.
+//! Note also §4: SSE was on the "cut from v1, explicitly" list, and §4 itself
+//! records that three cut things shipped anyway *"and the list is wrong
+//! rather than the work"*. This is the fourth.
 //!
-//! Note also §4: SSE is on the "cut from v1, explicitly" list, and §4 itself
-//! records that three cut things shipped anyway *"and the list is wrong rather
-//! than the work"*. The broker is the half of realtime that pays for itself
-//! immediately — it is also what cache invalidation and an audit log want —
-//! and it is the half that does not need the core to change. The transport is
-//! the half that does.
+//! # The transport that needs no stream at all, still not built here
 //!
-//! # One transport that needs no core change at all, not built here
-//!
-//! Long polling. A handler calls [`Broker::connect`] once, keeps the
-//! [`Client`] in the session, and on each request calls
+//! Long polling, which was the answer while the core buffered and is still a
+//! reasonable answer for an application that wants no open connections. A
+//! handler calls [`Broker::connect`] once, keeps the [`Client`] in the
+//! session, and on each request calls
 //! [`Mailbox::recv_timeout`] for a few seconds and then [`Mailbox::drain`],
 //! returning every frame it got as **one complete `Vec<u8>`**. The body is
 //! finished when the handler returns, so `Response` does not change, every
 //! response hook runs exactly as specified, compression and `ETag` still mean
 //! what they mean, and no shutdown phase has to learn about open streams.
 //!
-//! It costs a request per poll interval and a little latency, and it is a real
-//! option for an application that wants realtime before the core grows a
-//! streaming body. It is reported rather than built: this crate's job is the
+//! It costs a request per poll interval and a little latency. It is reported
+//! rather than built, for the same reason SSE is: this crate's job is the
 //! broker, and a polling endpoint is a handler in whichever crate owns the
 //! routes.
-//!
-//! **What a transport does with this crate**, when the core is ready: open the
-//! stream, [`Broker::connect`], write `Client::id` in the first frame, accept
-//! a subscription request on a second endpoint (authorising *there*, as
-//! PocketBase does, because that is where the subject is known), then loop on
-//! [`Mailbox::recv`] writing [`Frame::bytes`] verbatim. That loop is about
-//! thirty lines and none of them are in this crate.
 //!
 //! # No runtime
 //!

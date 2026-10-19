@@ -42,6 +42,7 @@ use crate::plugin_api::{
     AnyInstance, Instance, Lifecycle, MiddlewareCatalog, MiddlewareOffer, Plugin, PluginError,
     Services, Stage,
 };
+use crate::plugin_body::StreamGate;
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
 use crate::plugin_hooks::{
     Begin, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline,
@@ -546,6 +547,7 @@ impl<E, H> AppBuilder<E, H> {
             pipeline,
             model: Arc::new(model),
             routes: RoutePlan::new(),
+            streams: StreamGate::new(),
             _providers: PhantomData,
             _families: PhantomData,
         })
@@ -688,6 +690,7 @@ pub struct App<E = Base, H = NoHooks> {
     pipeline: Pipeline,
     model: Arc<ModelHooks>,
     routes: RoutePlan<E>,
+    streams: StreamGate,
     _providers: PhantomData<fn() -> E>,
     _families: PhantomData<fn() -> H>,
 }
@@ -705,6 +708,7 @@ impl<E, H> std::fmt::Debug for App<E, H> {
             .field("mounts", &self.router.mounts.len())
             .field("hooks", &self.pipeline)
             .field("routes", &self.routes)
+            .field("streams", &self.streams)
             .finish()
     }
 }
@@ -777,6 +781,31 @@ impl<E, H> App<E, H> {
     /// The sorted hooks this application installed.
     pub fn pipeline(&self) -> &Pipeline {
         &self.pipeline
+    }
+
+    /// Every response body this application still has open, and the one bit
+    /// that tells them all to end.
+    ///
+    /// Cloneable, so the transport can hold it: `brocanth-server` takes a
+    /// clone and closes it the moment its listener stops, which is ADR 2's
+    /// `Begin` arriving at the wire. [`App::shutdown`] closes the same gate,
+    /// so whichever route a stop takes, an open stream is told once.
+    ///
+    /// The core never polls a body -- it has no runtime -- so it never waits
+    /// here either. [`StreamGate::drained`] is the wait, and the transport
+    /// awaits it under a budget it chooses.
+    pub fn streams(&self) -> &StreamGate {
+        &self.streams
+    }
+
+    /// Registers a streaming body with this application's gate.
+    ///
+    /// Every response the application produces goes through here, so a
+    /// handler never has to know the gate exists.
+    fn adopt(&self, response: &mut Response) {
+        if let Some(stream) = response.body_mut().streaming_mut() {
+            stream.watch(&self.streams);
+        }
     }
 
     /// The model hooks, for a caller that wants to look rather than emit.
@@ -930,7 +959,9 @@ impl<E, H: HookFamilies> App<E, H> {
     where
         F: FnOnce(&mut Request, &mut RequestState) -> Result<Response, HandlerError>,
     {
-        self.pipeline.run::<H, F>(request, state, dispatch)
+        let mut response = self.pipeline.run::<H, F>(request, state, dispatch);
+        self.adopt(&mut response);
+        response
     }
 
     /// The request hooks, for a caller that will `.await` the handler itself.
@@ -961,6 +992,11 @@ impl<E, H: HookFamilies> App<E, H> {
 
     /// The error hooks, response hooks and `after_dispatch`, over whatever the
     /// handler produced. See [`App::begin`].
+    ///
+    /// A streaming body is registered with [`App::streams`] here, after every
+    /// response hook has run: this is the last point the core touches a
+    /// response, and a body registered earlier would be counted open while a
+    /// hook could still replace it.
     #[inline]
     pub fn finish(
         &self,
@@ -968,7 +1004,9 @@ impl<E, H: HookFamilies> App<E, H> {
         state: &mut RequestState,
         outcome: Result<Response, HandlerError>,
     ) -> Response {
-        self.pipeline.finish::<H>(request, state, outcome)
+        let mut response = self.pipeline.finish::<H>(request, state, outcome);
+        self.adopt(&mut response);
+        response
     }
 
     /// A handle an ORM keeps so its write path can emit model events.
@@ -1016,12 +1054,26 @@ impl<E, H: HookFamilies> App<E, H> {
         let started = Instant::now();
         let mut report = ShutdownReport::new(reason, grace);
 
+        // Phase `Begin` for a response body, before any plugin is asked:
+        // every open stream is told to end at its next chunk, and a parked
+        // one is woken so that there is a next chunk. A plugin's own
+        // `begin_shutdown` may then close the thing the stream reads from
+        // without cutting a client off mid-frame.
+        self.streams.close();
+
         for phase in [ShutdownPhase::Begin, ShutdownPhase::Drain] {
             for reg in self.instances.iter_mut().rev() {
                 let name = reg.inner.name().to_string();
                 let outcome = {
-                    let mut sd =
-                        ShutdownCx::new(reason, phase, grace, started, &name, &mut self.services);
+                    let mut sd = ShutdownCx::new(
+                        reason,
+                        phase,
+                        grace,
+                        started,
+                        &name,
+                        &mut self.services,
+                        &self.streams,
+                    );
                     match phase {
                         ShutdownPhase::Begin => reg.inner.begin_shutdown(&mut sd),
                         ShutdownPhase::Drain => reg.inner.shutdown(&mut sd),
@@ -1034,7 +1086,10 @@ impl<E, H: HookFamilies> App<E, H> {
             }
         }
 
-        report.finish(started.elapsed());
+        // What is left is what the transport did not drain. The core cannot
+        // wait for it -- only the thing polling a body can -- so it counts it
+        // instead of claiming a clean stop it did not get.
+        report.finish(started.elapsed(), self.streams.open_streams());
         report
     }
 }

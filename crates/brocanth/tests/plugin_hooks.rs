@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_app::{AppBuilder, BuildError};
+use brocanth::plugin_body::Body;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
-    Both, ErrorHook, Flow, HandlerError, HookRegistrar, HookSource, NoHooks, OnError, OnModel,
-    OnRequest, OnResponse, Request, RequestHook, RequestState, Response, ResponseHook,
+    BodyShape, Both, ErrorHook, Flow, HandlerError, HookRegistrar, HookSource, NoHooks, OnError,
+    OnModel, OnRequest, OnResponse, Request, RequestHook, RequestState, Response, ResponseHead,
+    ResponseHook,
 };
 use brocanth::plugin_model::{ModelEvent, ModelHook};
 use brocanth::plugin_order::Order;
@@ -117,7 +119,7 @@ impl RequestHook for TraceHook {
             return Err(PluginError::new(format!("{} refused", self.tag)));
         }
         if self.stop {
-            let mut short = Response::new(b"short".to_vec());
+            let mut short = Response::new(Body::from("short"));
             *short.status_mut() = http::StatusCode::ACCEPTED;
             return Ok(Flow::respond(short));
         }
@@ -134,17 +136,31 @@ impl RequestHook for TraceHook {
 }
 
 impl ResponseHook for TraceHook {
-    fn on_response(
+    fn on_headers(
         &self,
         _request: &Request,
-        response: &mut Response,
+        _head: &mut ResponseHead,
+        body: BodyShape<'_>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
+        // Still spelled `:response`, so the order assertions in this file
+        // keep saying what they said before the split.
+        let _ = body;
         self.rec.push(format!("{}:response", self.tag));
         if self.fail_response {
             return Err(PluginError::new(format!("{} broke the response", self.tag)));
         }
-        response.body_mut().extend_from_slice(self.tag.as_bytes());
+        Ok(())
+    }
+
+    fn on_body(
+        &self,
+        _request: &Request,
+        _head: &mut ResponseHead,
+        body: &mut Vec<u8>,
+        _state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        body.extend_from_slice(self.tag.as_bytes());
         Ok(())
     }
 }
@@ -215,7 +231,7 @@ impl ErrorHook for AuthErrors {
         self.rec.push(format!("{}:asked", self.name));
         // The core has never heard of `Denied`. This hook has.
         error.downcast_ref::<Denied>()?;
-        let mut response = Response::new(self.name.as_bytes().to_vec());
+        let mut response = Response::new(Body::from(self.name));
         *response.status_mut() = self.status;
         Some(response)
     }
@@ -272,7 +288,7 @@ impl<E> RouteSource<E> for Admin {
 }
 
 fn screen<E>(body: &'static str) -> Handler<E> {
-    Box::new(move |_cx: &mut RouteCx<'_, E>| Ok(Response::new(body.as_bytes().to_vec())))
+    Box::new(move |_cx: &mut RouteCx<'_, E>| Ok(Response::new(Body::from(body))))
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +395,7 @@ fn request() -> Request {
 }
 
 fn ok_handler(_rq: &mut Request, _st: &mut RequestState) -> Result<Response, HandlerError> {
-    Ok(Response::new(b"body:".to_vec()))
+    Ok(Response::new(Body::from("body:")))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +420,7 @@ fn every_hook_fires_at_the_stated_moment() {
         vec!["t:before", "handler", "t:response", "t:after(200)"]
     );
     // The response hook really did rewrite the body.
-    assert_eq!(response.body(), b"body:t");
+    assert_eq!(response.body().buffered(), Some(&b"body:t"[..]));
 }
 
 #[test]
@@ -424,7 +440,7 @@ fn a_short_circuit_skips_the_handler_and_nothing_else() {
 
     assert_eq!(rec.take(), vec!["t:before", "t:response", "t:after(202)"]);
     assert_eq!(response.status(), http::StatusCode::ACCEPTED);
-    assert_eq!(response.body(), b"shortt");
+    assert_eq!(response.body().buffered(), Some(&b"shortt"[..]));
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +609,7 @@ fn an_error_hook_renders_an_error_the_core_has_never_heard_of() {
     });
 
     assert_eq!(response.status(), http::StatusCode::FOUND);
-    assert_eq!(response.body(), b"auth");
+    assert_eq!(response.body().buffered(), Some(&b"auth"[..]));
     assert_eq!(rec.take(), vec!["auth:asked"]);
 }
 
@@ -770,7 +786,7 @@ fn a_contributed_handler_runs_and_sees_the_context() {
         .call_sync(&mut cx)
         .expect("a sync route")
         .unwrap();
-    assert_eq!(response.body(), b"dashboard");
+    assert_eq!(response.body().buffered(), Some(&b"dashboard"[..]));
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +908,6 @@ fn an_application_with_no_hooks_at_all_still_runs() {
     let app: brocanth::plugin_app::App<brocanth::plugin_context::Base, NoHooks> =
         AppBuilder::new().build().unwrap();
     let response = app.run(&mut request(), &mut RequestState::new(), ok_handler);
-    assert_eq!(response.body(), b"body:");
+    assert_eq!(response.body().buffered(), Some(&b"body:"[..]));
     assert!(app.pipeline().is_empty());
 }

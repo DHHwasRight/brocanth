@@ -71,12 +71,16 @@ pub mod bridge;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
+use brocanth::plugin_body::{BodyStream, StreamError, StreamGate, Streaming};
 use brocanth::routing::Verb;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
+use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -143,10 +147,63 @@ impl Request {
     }
 }
 
+/// A body on its way out: every byte, or a promise of them.
+///
+/// The streaming half is [`brocanth::plugin_body::Streaming`] rather than a
+/// type of this crate's own, because the core already owns the contract --
+/// what a chunk is, and what a shutdown means to a body that has not finished
+/// -- and two spellings of it would drift. hyper is still nowhere in this
+/// crate's public API.
+pub enum Body {
+    /// Every byte. Framed with a `content-length`.
+    Bytes(Bytes),
+    /// Bytes that do not exist yet. Framed `chunked`, because the length is
+    /// unknown by definition.
+    Stream(Streaming),
+}
+
+impl Body {
+    /// How many bytes, when that is knowable. [`None`] for a stream.
+    pub fn len(&self) -> Option<usize> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes.len()),
+            Self::Stream(_) => None,
+        }
+    }
+
+    /// Whether this body is known to carry no bytes. `false` for a stream.
+    pub fn is_empty(&self) -> bool {
+        self.len() == Some(0)
+    }
+
+    /// The bytes, when there are bytes. [`None`] for a stream.
+    pub fn bytes(&self) -> Option<&Bytes> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Stream(_) => None,
+        }
+    }
+}
+
+impl<T: Into<Bytes>> From<T> for Body {
+    fn from(bytes: T) -> Self {
+        Self::Bytes(bytes.into())
+    }
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(bytes) => write!(f, "Bytes({} bytes)", bytes.len()),
+            Self::Stream(_) => f.write_str("Stream(..)"),
+        }
+    }
+}
+
 /// What to send back.
 pub struct Response {
     pub status: u16,
-    pub body: Bytes,
+    pub body: Body,
     headers: Vec<(String, String)>,
 }
 
@@ -155,9 +212,34 @@ impl Response {
     pub fn new(status: u16, content_type: &str, body: impl Into<Bytes>) -> Self {
         Self {
             status,
-            body: body.into(),
+            body: Body::Bytes(body.into()),
             headers: vec![("content-type".to_string(), content_type.to_string())],
         }
+    }
+
+    /// A response whose body is written as it is produced.
+    ///
+    /// The first bytes reach the client before the last are made, which is
+    /// what SSE, a streamed shell and a large download all need. There is no
+    /// `content-length` and no `ETag`: neither is knowable here.
+    ///
+    /// A stream that may live a long time should implement
+    /// [`BodyStream::finish`], or a deploy waits for it. See
+    /// [`Server::drain_grace`].
+    pub fn stream(status: u16, content_type: &str, stream: impl BodyStream) -> Self {
+        Self {
+            status,
+            body: Body::Stream(Streaming::new(stream)),
+            headers: vec![("content-type".to_string(), content_type.to_string())],
+        }
+    }
+
+    /// `text/event-stream`, with the two headers every SSE client needs:
+    /// nothing may cache it and nothing may buffer it.
+    pub fn events(stream: impl BodyStream) -> Self {
+        Self::stream(200, "text/event-stream", stream)
+            .with_header("cache-control", "no-cache")
+            .with_header("x-accel-buffering", "no")
     }
 
     /// `text/plain; charset=utf-8`.
@@ -205,6 +287,8 @@ impl Stopper {
 pub struct Server {
     listener: TcpListener,
     stop: Arc<Notify>,
+    streams: StreamGate,
+    drain: Option<Duration>,
 }
 
 impl Server {
@@ -223,6 +307,8 @@ impl Server {
         Ok(Self {
             listener,
             stop: Arc::new(Notify::new()),
+            streams: StreamGate::new(),
+            drain: None,
         })
     }
 
@@ -235,6 +321,45 @@ impl Server {
     /// A handle that stops this server.
     pub fn stopper(&self) -> Stopper {
         Stopper(Arc::clone(&self.stop))
+    }
+
+    /// Every response body this server still has open.
+    ///
+    /// [`Server::run`] closes it the moment the listener stops, which is what
+    /// tells an SSE stream to send its last frame and end. A caller that
+    /// wants to close it earlier -- or to read how many are open -- takes a
+    /// clone of this.
+    pub fn streams(&self) -> &StreamGate {
+        &self.streams
+    }
+
+    /// Shares the gate with whoever else owns one.
+    ///
+    /// [`bridge::Bridge::serve`](crate::bridge::Bridge::serve) hands over the
+    /// application's own
+    /// [`App::streams`](brocanth::plugin_app::App::streams), so that a stop
+    /// arriving at the listener and a stop arriving at
+    /// [`App::shutdown`](brocanth::plugin_app::App::shutdown) close one gate
+    /// rather than two halves of one.
+    #[must_use]
+    pub fn with_streams(mut self, streams: StreamGate) -> Self {
+        self.streams = streams;
+        self
+    }
+
+    /// How long to wait, after the gate is closed, for the connections still
+    /// in flight.
+    ///
+    /// [`None`] -- the default, and what this server did before it could
+    /// stream -- waits for as long as they take. That is right for a request
+    /// that is merely slow and wrong for a body that never ends: a stream
+    /// that does not implement [`BodyStream::finish`] holds the deploy open
+    /// for ever. With a budget, whatever is still open when it expires is
+    /// dropped, and those clients see a truncated response.
+    #[must_use]
+    pub fn drain_grace(mut self, grace: Duration) -> Self {
+        self.drain = Some(grace);
+        self
     }
 
     /// Accepts until [`Stopper::stop`], serving each connection as a task.
@@ -275,17 +400,42 @@ impl Server {
             let handle = Arc::clone(&handle);
             let builder = builder.clone();
             let watcher = graceful.watcher();
+            let streams = self.streams.clone();
             tokio::spawn(async move {
                 let service = service_fn(move |req: hyper::Request<Incoming>| {
                     let handle = Arc::clone(&handle);
-                    async move { Ok::<_, Infallible>(exchange(req, peer, handle.as_ref()).await) }
+                    let streams = streams.clone();
+                    async move {
+                        Ok::<_, Infallible>(exchange(req, peer, handle.as_ref(), &streams).await)
+                    }
                 });
                 let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
                 let _ = watcher.watch(conn).await;
             });
         }
 
-        graceful.shutdown().await;
+        // ADR 2 arriving at the wire. The listener is closed; hyper's drain
+        // tells each connection to finish, and this tells each open response
+        // body to. Without it a subscriber on an SSE endpoint keeps its
+        // connection in flight, hyper's drain waits for the connection, and
+        // the deploy waits for the subscriber.
+        self.streams.close();
+
+        match self.drain {
+            None => graceful.shutdown().await,
+            Some(grace) => {
+                if tokio::time::timeout(grace, graceful.shutdown())
+                    .await
+                    .is_err()
+                {
+                    // Dropping `graceful` drops the watchers, which drops the
+                    // connections, which drops the bodies. A client mid-frame
+                    // sees a truncated response; the alternative is a deploy
+                    // that never finishes.
+                    return Ok(());
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -302,12 +452,81 @@ fn transient(e: &std::io::Error) -> bool {
     )
 }
 
+/// A body on the way to hyper: one chunk, or a stream of them.
+///
+/// It exists so that `Full<Bytes>` is not this crate's only answer. hyper
+/// asks a body for one `poll_frame`, which is exactly the shape
+/// [`BodyStream`] has, so the streaming arm is a forward and nothing else.
+pub struct OutBody(Out);
+
+enum Out {
+    /// One chunk, or none. `None` after it has been taken.
+    Once(Option<Bytes>),
+    Stream(Streaming),
+}
+
+impl OutBody {
+    fn once(bytes: Bytes) -> Self {
+        Self(Out::Once(Some(bytes)))
+    }
+
+    fn empty() -> Self {
+        Self(Out::Once(None))
+    }
+
+    fn stream(stream: Streaming) -> Self {
+        Self(Out::Stream(stream))
+    }
+}
+
+impl hyper::body::Body for OutBody {
+    type Data = Bytes;
+    type Error = StreamError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        match &mut self.get_mut().0 {
+            Out::Once(slot) => Poll::Ready(slot.take().map(|bytes| Ok(Frame::data(bytes)))),
+            Out::Stream(stream) => match stream.poll_chunk(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(Ok(chunk))) => {
+                    Poll::Ready(Some(Ok(Frame::data(Bytes::from(chunk)))))
+                }
+                // The status and the headers are already on the wire, so
+                // there is no clean 500 to be had: hyper stops writing and
+                // the client sees a response that ends early. PLAN.md §3
+                // buffers by default for exactly this reason.
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        matches!(&self.0, Out::Once(None))
+    }
+
+    /// Exact for a buffered body, so hyper writes a `content-length`.
+    /// Unknown for a stream, so hyper writes `transfer-encoding: chunked` and
+    /// the first chunk can leave before the last exists.
+    fn size_hint(&self) -> SizeHint {
+        match &self.0 {
+            Out::Once(Some(bytes)) => SizeHint::with_exact(bytes.len() as u64),
+            Out::Once(None) => SizeHint::with_exact(0),
+            Out::Stream(_) => SizeHint::default(),
+        }
+    }
+}
+
 /// One request, from hyper's types into ours and back.
 async fn exchange<F, Fut>(
     req: hyper::Request<Incoming>,
     peer: SocketAddr,
     handle: &F,
-) -> hyper::Response<Full<Bytes>>
+    streams: &StreamGate,
+) -> hyper::Response<OutBody>
 where
     F: Fn(Request) -> Fut,
     Fut: Future<Output = Response>,
@@ -316,44 +535,64 @@ where
         Ok(request) => request,
         // A verb the router has no name for cannot be dispatched, and 404
         // would be a claim about the path, which may be perfectly good.
-        Err(Rejected::UnknownVerb) => return render(Response::text(501, "Not Implemented"), false),
+        Err(Rejected::UnknownVerb) => {
+            return render(Response::text(501, "Not Implemented"), false, streams)
+        }
         // The handler is never called. Handing it the first two megabytes, or
         // an empty body, would let it act on a request nobody sent -- and an
         // empty body is indistinguishable from a legitimate empty POST.
-        Err(Rejected::TooLarge) => return render(Response::text(413, "Payload Too Large"), false),
+        Err(Rejected::TooLarge) => {
+            return render(Response::text(413, "Payload Too Large"), false, streams)
+        }
     };
 
     // HEAD is GET without the body, and a handler should not have to know
     // that. A page answers HEAD correctly by answering GET at all.
     let head_only = request.verb == Verb::Head;
-    render(handle(request).await, head_only)
+    render(handle(request).await, head_only, streams)
 }
 
 /// Ours into hyper's.
-fn render(response: Response, head_only: bool) -> hyper::Response<Full<Bytes>> {
+///
+/// `streams` is where an unfinished body is registered, so that a shutdown
+/// can reach it. A body that arrives already registered -- every body that
+/// came through the bridge, because
+/// [`App::finish`](brocanth::plugin_app::App::finish) registers it -- is left
+/// alone rather than counted twice.
+fn render(response: Response, head_only: bool, streams: &StreamGate) -> hyper::Response<OutBody> {
     let length = response.body.len();
-    let body = if head_only {
-        Bytes::new()
-    } else {
-        response.body
-    };
 
     let mut out = hyper::Response::builder().status(response.status);
     for (name, value) in &response.headers {
         out = out.header(name, value);
     }
-    if head_only {
-        // Still the length the body would have had: a HEAD advertising zero
-        // is worse than one advertising nothing.
-        out = out.header("content-length", length.to_string());
-    }
 
-    out.body(Full::new(body)).unwrap_or_else(|_| {
+    let body = match (head_only, response.body) {
+        // A HEAD still advertises the length the body would have had: one
+        // advertising zero is worse than one advertising nothing. A stream
+        // has no length to advertise, so it says nothing and the stream is
+        // dropped unpolled -- which is what HEAD means.
+        (true, _) => {
+            if let Some(length) = length {
+                out = out.header("content-length", length.to_string());
+            }
+            OutBody::empty()
+        }
+        (false, Body::Bytes(bytes)) => OutBody::once(bytes),
+        (false, Body::Stream(mut stream)) => {
+            if !stream.is_watched() {
+                stream.watch(streams);
+            }
+            OutBody::stream(stream)
+        }
+    };
+
+    out.body(body).unwrap_or_else(|_| {
         // Only reachable from a header a handler built out of bytes hyper
         // refuses. Losing the headers beats losing the response.
         hyper::Response::builder()
             .status(500)
-            .body(Full::new(Bytes::from_static(b"Internal Server Error")))
+            .body(OutBody::once(Bytes::from_static(b"Internal Server Error")))
             .expect("a response with no custom headers always builds")
     })
 }
@@ -412,6 +651,7 @@ mod tests {
         let text = Response::text(200, "hi");
         assert_eq!(text.status, 200);
         assert_eq!(text.headers[0].1, "text/plain; charset=utf-8");
+        assert_eq!(text.body.len(), Some(2));
         assert_eq!(Response::json(201, "{}").headers[0].1, "application/json");
         assert_eq!(
             Response::html(200, "<p>").headers[0].1,
@@ -436,7 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_head_response_keeps_the_length_and_drops_the_body() {
-        let out = render(Response::text(200, "0123456789"), true);
+        let out = render(Response::text(200, "0123456789"), true, &StreamGate::new());
         assert_eq!(
             out.headers()
                 .get("content-length")
@@ -450,7 +690,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_get_response_keeps_its_body() {
-        let out = render(Response::text(200, "0123456789"), false);
+        let out = render(Response::text(200, "0123456789"), false, &StreamGate::new());
         let body = out.into_body().collect().await.expect("collect").to_bytes();
         assert_eq!(&body[..], b"0123456789");
     }
