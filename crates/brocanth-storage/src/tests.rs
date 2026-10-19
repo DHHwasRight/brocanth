@@ -673,6 +673,316 @@ mod disk {
         assert!(keys.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(store.get_blocking(&keys[0]).unwrap(), b"the same bytes");
     }
+
+    // -- what the module documentation claims, where nothing checked it yet --
+
+    /// The paths this backend builds, for a test that needs to put something
+    /// in one of them before the backend does. Spelled out rather than
+    /// reached through the private helpers, so a change to the layout fails
+    /// here rather than passing against itself.
+    fn object_path(root: &Path, key: &ObjectKey) -> PathBuf {
+        let hex = key.to_hex();
+        root.join("objects")
+            .join(&hex[0..2])
+            .join(&hex[2..4])
+            .join(&hex)
+    }
+
+    fn meta_path(root: &Path, key: &ObjectKey) -> PathBuf {
+        let mut path = object_path(root, key).into_os_string();
+        path.push(".meta");
+        PathBuf::from(path)
+    }
+
+    #[test]
+    fn opening_a_store_where_one_is_already_there_finds_what_was_put_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let about = ObjectInfo::new()
+            .with_filename("holiday.png")
+            .with_declared_type("image/png");
+
+        let first = LocalDisk::open(dir.path()).unwrap();
+        let key = first
+            .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
+            .unwrap();
+        drop(first);
+
+        // `open` creates if needed; the needed half is the only one anything
+        // tested. Opening onto an existing store must not clear it, re-create
+        // it, or change the address anything already stored is at.
+        let second = LocalDisk::open(dir.path()).unwrap();
+        assert_eq!(second.get_blocking(&key).unwrap(), b"\x89PNG\r\n\x1a\nbody");
+        let meta = second.meta_blocking(&key).unwrap();
+        assert_eq!(meta.content_type.as_str(), "image/png");
+        assert_eq!(meta.filename.unwrap().as_str(), "holiday.png");
+        assert_eq!(second.address_of(b"\x89PNG\r\n\x1a\nbody"), key);
+    }
+
+    #[test]
+    fn opening_a_store_on_a_path_that_is_a_file_fails_without_naming_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("not-a-directory");
+        std::fs::write(&occupied, b"somebody else's file").unwrap();
+
+        // `.err()` rather than `expect_err`, because `LocalDisk` has no
+        // `Debug` to print -- it holds a `HashKey`.
+        let error = LocalDisk::open(&occupied)
+            .err()
+            .expect("a file is not a store");
+        assert!(matches!(error, StorageError::Backend(_)));
+        // `error` claims the context "names the operation, never the path",
+        // because a path here carries an object address.
+        let text = error.to_string();
+        assert!(text.contains("create the storage root"), "{text}");
+        assert!(
+            !text.contains(occupied.to_str().unwrap()),
+            "the error printed the path: {text}"
+        );
+        // And it did not quietly become the store.
+        assert!(occupied.is_file());
+    }
+
+    /// The gap between "every write is atomic" and "an object is whole".
+    ///
+    /// `put_at` writes two files: the object, then the sidecar. Each one is
+    /// atomic on its own, which is what the module documentation claims and
+    /// what it delivers. The *pair* is not, and the consequence is not
+    /// transient: the early return on `path.exists()` is keyed on the object,
+    /// so the identical upload that would have written the missing sidecar
+    /// returns `Ok` and writes nothing. The media type is degraded to
+    /// `application/octet-stream` and the filename is lost for good.
+    ///
+    /// Degrading towards `octet_stream` is the safe direction -- the serving
+    /// half forces an attachment -- so this is a durability bug and not a
+    /// disclosure one. It is still unrecoverable through the public surface:
+    /// `delete` then `put` is the only repair, and that is a different
+    /// operation from the retry anybody would actually run.
+    #[test]
+    fn a_half_written_object_keeps_its_bytes_loses_its_metadata_and_a_retry_does_not_heal_it() {
+        let (_dir, store) = store();
+        let about = ObjectInfo::new()
+            .with_filename("holiday.png")
+            .with_declared_type("image/png");
+        let key = store
+            .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
+            .unwrap();
+
+        // What a crash between the two `write_atomic` calls leaves behind.
+        std::fs::remove_file(meta_path(store.root(), &key)).unwrap();
+
+        // The bytes are intact, which is the half content addressing can
+        // check for itself.
+        assert_eq!(store.get_blocking(&key).unwrap(), b"\x89PNG\r\n\x1a\nbody");
+        assert!(store.exists_blocking(&key).unwrap());
+
+        // The identical upload, which is what a retry is.
+        assert_eq!(
+            store
+                .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
+                .unwrap(),
+            key
+        );
+
+        // It did not write the sidecar, and this is the finding.
+        assert!(!meta_path(store.root(), &key).exists());
+        let meta = store.meta_blocking(&key).unwrap();
+        assert_eq!(meta.size, 12);
+        assert_eq!(meta.content_type.as_str(), "application/octet-stream");
+        assert!(!meta.content_type.is_safe_to_inline());
+        assert!(meta.filename.is_none());
+
+        // Only the long way round repairs it.
+        store.delete_blocking(&key).unwrap();
+        store
+            .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
+            .unwrap();
+        assert_eq!(
+            store.meta_blocking(&key).unwrap().content_type.as_str(),
+            "image/png"
+        );
+    }
+
+    /// The temporary directory is cleaned on the failure path and emptied by
+    /// the rename on the success path. Neither is a sweep, and a process that
+    /// dies between the two leaves a file nothing will ever reclaim.
+    ///
+    /// `nothing_is_left_in_the_temporary_directory` proves the success path.
+    /// This proves the other half of the claim -- that the leftover is never
+    /// *served* -- and records that it is also never removed.
+    #[test]
+    fn a_crashed_write_leaves_a_temporary_file_that_is_unreachable_and_unreclaimed() {
+        let (_dir, store) = store();
+        let orphan = store.root().join("tmp").join("0123456789abcdef");
+        std::fs::write(&orphan, b"half of an upload").unwrap();
+
+        // Nothing any address reaches is that file: the only names below
+        // `objects/` and `variants/` are hex and canonical sizes.
+        let key = store
+            .put_blocking(b"a real object", &ObjectInfo::new())
+            .unwrap();
+        assert_eq!(store.get_blocking(&key).unwrap(), b"a real object");
+        let mut served = Vec::new();
+        walk(&store.root().join("objects"), &mut served);
+        walk(&store.root().join("variants"), &mut served);
+        assert!(!served.iter().any(|p| p == &orphan));
+
+        // And nothing reclaims it, now or after any number of later writes.
+        for i in 0..5 {
+            store
+                .put_blocking(format!("later {i}").as_bytes(), &ObjectInfo::new())
+                .unwrap();
+        }
+        assert!(
+            orphan.exists(),
+            "a sweep appeared; if this crate grew one, delete this assertion"
+        );
+    }
+
+    #[test]
+    fn storing_an_image_derives_no_variant_until_one_is_asked_for() {
+        let (_dir, store) = store();
+        let key = store
+            .put_blocking(b"\x89PNG\r\n\x1a\nbody", &ObjectInfo::new())
+            .unwrap();
+        assert_eq!(
+            store.meta_blocking(&key).unwrap().content_type.as_str(),
+            "image/png"
+        );
+
+        // A recognised image and no thumbnail: `put` does not guess what
+        // sizes anybody will ask for, and with the `variants` feature off it
+        // could not make one.
+        let mut derived = Vec::new();
+        walk(&store.root().join("variants"), &mut derived);
+        assert!(derived.is_empty(), "{derived:?}");
+        for spec in ["300x200t", "64x64f", "100x100b"] {
+            let spec = VariantSpec::parse(spec).unwrap();
+            assert_eq!(store.get_variant_blocking(&key, spec).unwrap(), None);
+        }
+        // Still nothing: asking is not deriving either.
+        let mut derived = Vec::new();
+        walk(&store.root().join("variants"), &mut derived);
+        assert!(derived.is_empty(), "{derived:?}");
+
+        // Only putting one puts one, and only the one that was put.
+        let asked = VariantSpec::parse("300x200t").unwrap();
+        store.put_variant_blocking(&key, asked, b"thumb").unwrap();
+        let mut derived = Vec::new();
+        walk(&store.root().join("variants"), &mut derived);
+        assert_eq!(derived.len(), 1);
+        assert_eq!(
+            store.get_variant_blocking(&key, asked).unwrap(),
+            Some(b"thumb".to_vec())
+        );
+        assert_eq!(
+            store
+                .get_variant_blocking(&key, VariantSpec::parse("64x64f").unwrap())
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn every_path_an_address_builds_is_lexically_under_the_root() {
+        let (_dir, store) = store();
+        let root = store.root().to_path_buf();
+        // Addresses from both routes a caller can reach: content and random.
+        let mut keys = vec![ObjectKey::of(b"hashed"), ObjectKey::of(&[0xff; 64])];
+        for _ in 0..16 {
+            keys.push(ObjectKey::random().unwrap());
+        }
+        for key in &keys {
+            store
+                .put_at_blocking(key, b"content", &ObjectInfo::new())
+                .unwrap();
+            let spec = VariantSpec::parse("10x10").unwrap();
+            store.put_variant_blocking(key, spec, b"derived").unwrap();
+            for built in [object_path(&root, key), meta_path(&root, key)] {
+                assert!(built.starts_with(&root), "{built:?}");
+                assert!(!built.to_string_lossy().contains(".."), "{built:?}");
+            }
+        }
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        for path in files {
+            assert!(path.starts_with(&root), "{path:?} escaped the root");
+        }
+    }
+
+    /// The traversal defence is on the *name* and not on the *resolution*,
+    /// and this is where the difference shows.
+    ///
+    /// The claim in `crate` and in this module is exact and it holds: an
+    /// [`ObjectKey`] renders as sixty-four hex characters, so no filename,
+    /// URL segment or header ever becomes a path component, and every path
+    /// this backend builds is lexically under the root --
+    /// `every_path_an_address_builds_is_lexically_under_the_root` is that.
+    ///
+    /// What neither claim covers is a path component that is already a
+    /// symlink when the backend arrives. `std::fs::read`, `Path::exists` and
+    /// `create_dir_all` all follow one. So anybody who can create an entry
+    /// inside `<root>/objects` can make `get` read a file outside the root,
+    /// and make `put_at` write one there. The root is `0700`, so that is a
+    /// process running as this uid, a restored backup, or an `rsync` that
+    /// carried a link -- not a request. It is a limit of the defence rather
+    /// than a hole in it, and it is written down here because the
+    /// documentation reads as though resolution were covered too.
+    ///
+    /// If this test starts failing because the backend grew an
+    /// `O_NOFOLLOW` or a `symlink_metadata` check, the limit is closed:
+    /// delete the test.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_in_the_store_is_followed_out_of_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"not this store's bytes").unwrap();
+
+        // Reading out: a link where an object would be.
+        let (_dir, store) = store();
+        let key = ObjectKey::of(b"never stored");
+        let planted = object_path(store.root(), &key);
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&secret, &planted).unwrap();
+
+        assert!(store.exists_blocking(&key).unwrap());
+        assert_eq!(
+            store.get_blocking(&key).unwrap(),
+            b"not this store's bytes",
+            "a planted link is followed"
+        );
+        // And the early return on `exists` means the real bytes are never
+        // written over it, so the link survives the upload that should have
+        // replaced it.
+        store
+            .put_at_blocking(&key, b"never stored", &ObjectInfo::new())
+            .unwrap();
+        assert_eq!(store.get_blocking(&key).unwrap(), b"not this store's bytes");
+        assert_eq!(
+            std::fs::read(&secret).unwrap(),
+            b"not this store's bytes",
+            "the file outside was at least not overwritten"
+        );
+
+        // Writing out: a link where a bucket directory would be. A second
+        // store, because the first one's objects directory now holds a link.
+        let second = tempfile::tempdir().unwrap();
+        let store = LocalDisk::open(second.path()).unwrap();
+        let key = ObjectKey::of(b"escaping");
+        let hex = key.to_hex();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            store.root().join("objects").join(&hex[0..2]),
+        )
+        .unwrap();
+        store
+            .put_at_blocking(&key, b"escaping", &ObjectInfo::new())
+            .unwrap();
+        assert!(
+            outside.path().join(&hex[2..4]).join(&hex).exists(),
+            "the object landed outside the root"
+        );
+    }
 }
 
 mod tokens {

@@ -67,6 +67,21 @@ tokio = { version = "1", default-features = false, features = [
     "rt",
 ], optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `storage`. It lives beside the crate it writes into a project, and not in
+# the CLI, because what it must stay true to is this crate's own surface:
+# `LocalDisk::open`, `with_hash_key`, and the two keys one secret derives.
+# A copy of that knowledge in the CLI rots the first time a name here
+# changes, and it rots in silence, because nothing compiles the generator
+# against this crate.
+#
+# Optional, and off by default, because two different people read this
+# dependency line. An application that stores files wants the store and
+# nothing else. The one program that wants the generator is the CLI, which
+# asks for `features = ["scaffold"]`. So the code that writes a store into a
+# new project is never linked into an application that merely has one.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 # A real directory for the disk tests, removed when the test ends. Nothing
 # else: the tests drive the async trait through a twenty-line executor in
@@ -84,6 +99,11 @@ tempfile = "3"
 # the feature off; only the pixels need `image`.
 default = []
 variants = ["dep:image"]
+
+# The scaffold module, for `brocanth create`. Off by default: see the
+# dependency line above for why the generator is not an application's
+# business.
+scaffold = ["dep:brocanth-scaffold"]
 
 # Objects in Postgres rather than on a disk, in `bytea` columns. See
 # [`crate::postgres`] for the schema and for why it is `bytea` and not a large

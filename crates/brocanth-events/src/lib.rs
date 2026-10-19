@@ -843,4 +843,166 @@ mod tests {
         carried::<ChangeKind<'static>>();
         carried::<ChangedFields<'static>>();
     }
+
+    // -- the contract under the parts nothing exercised ---------------------
+
+    /// A sink that overrides nothing, to read the defaults off the trait.
+    struct Plain(Arc<AtomicUsize>);
+
+    impl ChangeSink for Plain {
+        fn publish(&self, _change: &RowChange<'_>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A sink that panics, which `ChangeSink` tells an implementor not to be.
+    struct Panics;
+
+    impl ChangeSink for Panics {
+        fn publish(&self, _change: &RowChange<'_>) {
+            panic!("this sink does what the trait says not to");
+        }
+    }
+
+    #[test]
+    fn a_sink_that_overrides_nothing_is_always_asked() {
+        // The documented default: `wants` is `true`, so a sink that does not
+        // think about the question still gets every change. Answering `false`
+        // wrongly drops events silently, which is why this is the default and
+        // not the other one.
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = Plain(Arc::clone(&count));
+        assert!(sink.wants("posts"));
+        assert!(sink.wants("anything at all"));
+        assert!(sink.wants(""));
+
+        // And through the fan-out, which asks each sink in turn.
+        let fan = FanOut::new().with(Plain(Arc::clone(&count)));
+        assert!(fan.wants("posts"));
+        fan.publish(&update());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_borrowed_sink_is_itself_a_sink() {
+        // `&T`, `Box<T>` and `Arc<T>` all forward. The boxed and shared forms
+        // are covered above; this is the one a caller reaches for when it
+        // holds a sink it does not own.
+        let count = Arc::new(AtomicUsize::new(0));
+        let owned = Recorder::new(Arc::clone(&count));
+        let borrowed: &dyn ChangeSink = &owned;
+        assert!(borrowed.wants("posts"));
+        borrowed.publish(&update());
+
+        fn takes_a_sink(sink: impl ChangeSink) {
+            sink.publish(&update());
+        }
+        takes_a_sink(&owned);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// What a panicking sink costs, measured rather than asserted in prose.
+    ///
+    /// `ChangeSink::publish` says "must not panic" and `FanOut` says a sink
+    /// that panics "takes the writer with it". Both are true, and the second
+    /// sentence understates it: the fan-out publishes in registration order
+    /// with no guard, so a panic in the second of three sinks also means the
+    /// third never hears about the change. The unwind reaches the writer,
+    /// and the fan-out is left half delivered.
+    ///
+    /// This is a deliberate design -- a guard would need `catch_unwind`,
+    /// which needs `UnwindSafe` bounds on a trait that is meant to be
+    /// implementable by anybody -- so the test pins the behaviour rather than
+    /// asking for a different one. What it is here to stop is the behaviour
+    /// changing quietly, in either direction.
+    #[test]
+    fn a_sink_that_panics_takes_the_writer_and_the_sinks_after_it() {
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+
+        let fan = FanOut::new()
+            .with(Recorder::new(Arc::clone(&before)))
+            .with(Panics)
+            .with(Recorder::new(Arc::clone(&after)));
+        assert_eq!(fan.len(), 3);
+
+        // `wants` does not touch `publish`, so asking is still safe.
+        assert!(fan.wants("posts"));
+
+        let hushed = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fan.publish(&update());
+        }));
+        std::panic::set_hook(hushed);
+
+        assert!(outcome.is_err(), "the panic reached the writer");
+        assert_eq!(
+            before.load(Ordering::SeqCst),
+            1,
+            "the sink before it saw it"
+        );
+        assert_eq!(
+            after.load(Ordering::SeqCst),
+            0,
+            "and the sink after it never did"
+        );
+
+        // The fan-out is not poisoned: a second write delivers to the same
+        // two of three. The hole is per publish, not permanent.
+        let hushed = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fan.publish(&update());
+        }));
+        std::panic::set_hook(hushed);
+        assert_eq!(before.load(Ordering::SeqCst), 2);
+        assert_eq!(after.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn nothing_listens_and_the_publisher_is_told_so_before_it_builds_anything() {
+        // "What happens with no sink", at the level the publisher sees. The
+        // model layer holds a sink unconditionally, so "no sink" is one of
+        // these two values and never an `Option`.
+        for sink in [
+            Box::new(NoopSink) as Box<dyn ChangeSink>,
+            Box::new(FanOut::new()),
+        ] {
+            assert!(!sink.wants("posts"));
+            // Publishing anyway is still defined, because a publisher that
+            // ignores `wants` must not be a crash.
+            sink.publish(&update());
+            sink.publish(&RowChange::created("posts", 1_i64));
+            sink.publish(&RowChange::deleted("posts", 1_i64));
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_field_list_off_a_channel_owns_its_names() {
+        // `ChangedFields` is the one `Deserialize` written by hand, and the
+        // claim it carries is that a change arriving from a channel is always
+        // the owned representation -- nothing can deserialise into
+        // `&'static str`. Checked through serde's own value deserialiser, so
+        // this crate still links no format.
+        use serde::de::value::{Error as ValueError, SeqDeserializer};
+        use serde::Deserialize;
+
+        let wire = SeqDeserializer::<_, ValueError>::new(["title", "body"].into_iter());
+        let fields = ChangedFields::deserialize(wire).expect("a sequence of names");
+        assert!(
+            matches!(fields, ChangedFields::Owned(_)),
+            "a change off a channel borrowed something"
+        );
+        // And it is the same value a publisher would have borrowed, which is
+        // what lets one sink serve both sides of the wire.
+        assert_eq!(fields, ChangedFields::Borrowed(&["title", "body"]));
+        assert!(fields.contains("body"));
+
+        let empty = SeqDeserializer::<_, ValueError>::new(std::iter::empty::<&str>());
+        let fields = ChangedFields::deserialize(empty).expect("an empty sequence");
+        assert!(fields.is_empty());
+        assert_eq!(fields, ChangedFields::NONE);
+    }
 }
