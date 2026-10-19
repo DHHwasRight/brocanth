@@ -32,10 +32,25 @@ use brocanth_jobs::{Enqueued, Queue, Worker};
 use common::{log, token, wait_for, AlwaysFails, Echo, Nightly};
 
 /// The queue under test, or `None` when no database was named.
+///
+/// `migrate` runs once for the whole process, not once per test. Running it
+/// per test is what the suite used to do, and it deadlocks once there are
+/// enough tests: `CREATE INDEX IF NOT EXISTS` takes a `ShareLock` on the
+/// table, a concurrent `reclaim_orphans` holds `RowExclusiveLock` on it and
+/// wants the dead-letter table, and the two cross. The schema is the same
+/// for every test here, so creating it once is also what an application
+/// does.
 async fn postgres_queue() -> Option<Queue> {
+    use tokio::sync::OnceCell;
+    static MIGRATED: OnceCell<()> = OnceCell::const_new();
+
     let url = common::postgres_url()?;
     let queue = Queue::connect(&url).await.expect("connecting to Postgres");
-    queue.migrate().await.expect("creating the tables");
+    MIGRATED
+        .get_or_init(|| async {
+            queue.migrate().await.expect("creating the tables");
+        })
+        .await;
     // One database serves every test in this file, and they run in parallel,
     // so nothing here truncates anything. Each test works inside its own queue
     // name and its own token instead, which is what two applications sharing a
@@ -356,4 +371,162 @@ async fn migrate_is_safe_from_several_connections_at_once() {
         ],
         "all three tables, created once"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Being told, rather than asking
+// ---------------------------------------------------------------------------
+
+/// The claim about `LISTEN`/`NOTIFY`, stated so it cannot pass by accident.
+///
+/// Both polls are set to a minute. A worker that polls cannot start this job
+/// inside the assertion window, so the only way the test passes is if the
+/// enqueue woke it. That is the point: a shorter poll here would make the
+/// test pass on either mechanism and prove nothing.
+#[tokio::test]
+async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
+    let queue = queue_or_skip!();
+    let token = token("notify-wakes");
+    let name = format!("q-{token}");
+
+    let worker = Worker::builder(&queue)
+        .queues([name.clone()])
+        .concurrency(1)
+        // A minute each. Neither is allowed to be what makes this work.
+        .poll_interval(Duration::from_secs(60))
+        .safety_poll(Duration::from_secs(60))
+        .register::<Echo>()
+        .start()
+        .expect("the worker started");
+
+    // Let it reach the idle branch and the listener attach before the row
+    // lands, which is the case the notification exists for. A job enqueued
+    // before the listener attaches is covered by the ring on connect.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let started = std::time::Instant::now();
+    queue
+        .enqueue(Echo {
+            token: token.clone(),
+            n: 1,
+        })
+        .queue(&name)
+        .await
+        .expect("enqueued");
+
+    wait_for("the job to run", Duration::from_secs(5), || async {
+        !log(&token).is_empty()
+    })
+    .await;
+
+    let waited = started.elapsed();
+    assert_eq!(log(&token), ["ran 1"]);
+    assert!(
+        waited < Duration::from_secs(5),
+        "woken by the enqueue, not by a poll: waited {waited:?}"
+    );
+
+    worker
+        .shutdown(Duration::from_secs(5))
+        .await
+        .expect("the worker stopped");
+}
+
+/// A scheduled job starts when it is due, not at the next tick after it.
+///
+/// The safety poll is a minute, so if the worker slept its whole cap this
+/// would take a minute. It does not, because an idle worker asks when the
+/// soonest job is due and sleeps until then.
+#[tokio::test]
+async fn a_worker_sleeps_until_the_next_job_is_due() {
+    let queue = queue_or_skip!();
+    let token = token("sleep-until-due");
+    let name = format!("q-{token}");
+
+    // Before the enqueue, not after it: `in_` counts from the moment the
+    // builder is made, and a contended database can take most of a second
+    // to accept the row. Measuring from after it would make this test fail
+    // when the machine is busy, which is a test measuring the wrong thing
+    // rather than a worker waking early.
+    let started = std::time::Instant::now();
+    queue
+        .enqueue(Echo {
+            token: token.clone(),
+            n: 1,
+        })
+        .queue(&name)
+        .in_(Duration::from_millis(1200))
+        .await
+        .expect("enqueued for later");
+
+    let worker = Worker::builder(&queue)
+        .queues([name.clone()])
+        .concurrency(1)
+        .poll_interval(Duration::from_secs(60))
+        .safety_poll(Duration::from_secs(60))
+        .register::<Echo>()
+        .start()
+        .expect("the worker started");
+
+    wait_for("the scheduled job to run", Duration::from_secs(10), || async {
+        !log(&token).is_empty()
+    })
+    .await;
+
+    let waited = started.elapsed();
+    assert_eq!(log(&token), ["ran 1"]);
+    assert!(
+        waited >= Duration::from_millis(1000),
+        "not before it was due: {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(10),
+        "and not a tick later: {waited:?}"
+    );
+
+    worker
+        .shutdown(Duration::from_secs(5))
+        .await
+        .expect("the worker stopped");
+}
+
+/// With the listener off, the poll is the mechanism again.
+///
+/// The fallback has to work, because it is what a SQLite deployment runs and
+/// what a Postgres deployment runs when its connection limit cannot spare a
+/// session per worker.
+#[tokio::test]
+async fn a_worker_told_not_to_listen_still_finds_the_work() {
+    let queue = queue_or_skip!();
+    let token = token("no-listen");
+    let name = format!("q-{token}");
+
+    let worker = Worker::builder(&queue)
+        .queues([name.clone()])
+        .concurrency(1)
+        .listen(false)
+        .poll_interval(Duration::from_millis(100))
+        .register::<Echo>()
+        .start()
+        .expect("the worker started");
+
+    queue
+        .enqueue(Echo {
+            token: token.clone(),
+            n: 7,
+        })
+        .queue(&name)
+        .await
+        .expect("enqueued");
+
+    wait_for("the polled job to run", Duration::from_secs(10), || async {
+        !log(&token).is_empty()
+    })
+    .await;
+    assert_eq!(log(&token), ["ran 7"]);
+
+    worker
+        .shutdown(Duration::from_secs(5))
+        .await
+        .expect("the worker stopped");
 }

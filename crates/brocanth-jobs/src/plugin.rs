@@ -200,6 +200,8 @@ impl Plugin for JobsPlugin {
                 .queues(config.queues.clone())
                 .concurrency(config.concurrency)
                 .poll_interval(config.poll_interval)
+                .safety_poll(config.safety_poll)
+                .listen(config.listen)
                 .heartbeat_interval(config.heartbeat_interval)
                 .stale_after(config.stale_after)
                 .maintenance_interval(config.maintenance_interval);

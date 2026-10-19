@@ -138,6 +138,22 @@ pub enum JobEvent<'a> {
         /// Jobs abandoned at the deadline and returned to the queue.
         returned: u64,
     },
+    /// A worker's listener attached to the store and is now woken by new
+    /// work instead of asking for it.
+    ///
+    /// Emitted again after every reconnect, because a reconnect means
+    /// whatever was announced in between was said to nobody.
+    ListenerConnected,
+    /// A worker's listener dropped, or could not attach.
+    ///
+    /// Not an error the worker acts on. It falls back to its safety poll and
+    /// keeps claiming, so this costs idle latency and never a job. It is an
+    /// event rather than silence because a listener that dies quietly looks
+    /// exactly like a queue that went slow.
+    ListenerFailed {
+        /// What the driver said.
+        error: String,
+    },
     /// Something in the queue's own machinery failed — a poll, a heartbeat, a
     /// reclaim sweep.
     ///
@@ -201,6 +217,8 @@ impl fmt::Display for JobEvent<'_> {
                 f,
                 "dead-lettered {name} {id} after {attempts} attempts: {failure}"
             ),
+            JobEvent::ListenerConnected => write!(f, "listener connected"),
+            JobEvent::ListenerFailed { error } => write!(f, "listener failed: {error}"),
             JobEvent::Reclaimed {
                 requeued,
                 dead_lettered,

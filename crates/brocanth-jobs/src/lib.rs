@@ -96,6 +96,11 @@
 //!   instead, which is different in mechanism and identical in guarantee.
 //! * [`worker`] — **the runtime question**: which runtime runs the workers, is
 //!   it the one serving requests, and what that costs.
+//! * [`listen`] — **being told there is work instead of asking twice a
+//!   second.** `pg_notify` rides inside the insert, so it is delivered when
+//!   the insert commits and never before the row is visible. It can only
+//!   ever shorten a sleep, so losing every notification costs latency and
+//!   no job. SQLite has no equivalent and polls.
 //! * [`clock`] — why time is a `BIGINT` and a parameter.
 //! * [`backoff`] — exponential, capped, jittered, and why the jitter matters.
 //! * [`cron`] — five fields, UTC only, and why there is no time zone.
@@ -159,6 +164,7 @@ pub mod clock;
 pub mod cron;
 pub mod events;
 pub mod job;
+pub mod listen;
 pub mod plugin;
 pub mod queue;
 pub mod registry;

@@ -150,11 +150,32 @@ pub(crate) const SCHEMA_SQLITE: &[&str] = &[
 // Enqueue
 // ---------------------------------------------------------------------------
 
+/// The channel every worker listens on. One channel and not one per queue:
+/// a worker claims from a set of queues, `LISTEN` takes a literal name, and
+/// a worker on eight queues would otherwise hold eight subscriptions to say
+/// the same thing. The queue name rides as the payload, so a listener that
+/// cares can filter without a second channel.
+pub(crate) const CHANNEL: &str = "brocanth_jobs";
+
+/// The notify is in the statement and not a second round trip.
+///
+/// `pg_notify` inside the insert is delivered when the insert commits, so a
+/// job is never announced before it is visible, and an enqueue that rolls
+/// back announces nothing. A separate `NOTIFY` after the insert would be two
+/// chances to get that wrong.
+///
+/// It fires whatever `run_at` says, including for a job scheduled an hour
+/// out. That is deliberate: a worker sleeps until the soonest job is due
+/// (see [`NEXT_RUN_AT_PG`]), so a job that lands sooner than that deadline
+/// has to wake it up to shorten the sleep.
 #[cfg(feature = "postgres")]
 pub(crate) const INSERT_PG: &str = r#"
-INSERT INTO brocanth_jobs (queue, job_name, payload, priority, max_attempts, run_at, created_at, state, attempts)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
-RETURNING id"#;
+WITH new_job AS (
+    INSERT INTO brocanth_jobs (queue, job_name, payload, priority, max_attempts, run_at, created_at, state, attempts)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
+    RETURNING id, queue
+)
+SELECT id, pg_notify('brocanth_jobs', queue) FROM new_job"#;
 
 #[cfg(feature = "sqlite")]
 pub(crate) const INSERT_SQLITE: &str = r#"
@@ -162,12 +183,18 @@ INSERT INTO brocanth_jobs (queue, job_name, payload, priority, max_attempts, run
 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0)
 RETURNING id"#;
 
+/// The same, and the conflict case keeps working: `DO NOTHING` leaves the
+/// CTE empty, so the outer select returns no row and nothing is announced.
+/// A duplicate enqueue wakes nobody, which is what a duplicate should cost.
 #[cfg(feature = "postgres")]
 pub(crate) const INSERT_UNIQUE_PG: &str = r#"
-INSERT INTO brocanth_jobs (queue, job_name, payload, priority, max_attempts, run_at, created_at, unique_key, state, attempts)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0)
-ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING
-RETURNING id"#;
+WITH new_job AS (
+    INSERT INTO brocanth_jobs (queue, job_name, payload, priority, max_attempts, run_at, created_at, unique_key, state, attempts)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0)
+    ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING
+    RETURNING id, queue
+)
+SELECT id, pg_notify('brocanth_jobs', queue) FROM new_job"#;
 
 #[cfg(feature = "sqlite")]
 pub(crate) const INSERT_UNIQUE_SQLITE: &str = r#"
@@ -183,6 +210,34 @@ pub(crate) const FIND_BY_KEY_PG: &str =
 #[cfg(feature = "sqlite")]
 pub(crate) const FIND_BY_KEY_SQLITE: &str =
     "SELECT id FROM brocanth_jobs WHERE unique_key = ? LIMIT 1";
+
+// ---------------------------------------------------------------------------
+// When to wake up
+// ---------------------------------------------------------------------------
+
+/// The soonest a pending job on these queues becomes runnable.
+///
+/// This is what turns the poll into a backstop. A worker that finds nothing
+/// asks when there will be something and sleeps until then, so a job
+/// scheduled for 09:00 is claimed at 09:00 rather than at the next tick
+/// after it. Without this the safety poll would also be the latency floor
+/// for every retry and every scheduled job.
+///
+/// It reads the claim index -- same columns, same partial predicate -- so it
+/// costs an index scan that stops at the first row.
+///
+/// `$1` queues.
+#[cfg(feature = "postgres")]
+pub(crate) const NEXT_RUN_AT_PG: &str =
+    "SELECT min(run_at) FROM brocanth_jobs WHERE state = 'pending' AND queue = ANY($1)";
+
+/// The same, with the queue list expanded into placeholders by the caller:
+/// SQLite has no array type to bind.
+#[cfg(feature = "sqlite")]
+pub(crate) fn next_run_at_sqlite(queues: usize) -> String {
+    let marks = vec!["?"; queues.max(1)].join(", ");
+    format!("SELECT min(run_at) FROM brocanth_jobs WHERE state = 'pending' AND queue IN ({marks})")
+}
 
 // ---------------------------------------------------------------------------
 // Claim
@@ -372,19 +427,32 @@ pub(crate) fn orphan_delete(dialect: Dialect) -> &'static str {
     }
 }
 
+/// Put every orphan back, and say so on the way out.
+///
+/// `RETURNING queue` rather than `rows_affected`, because the caller needs
+/// both the count and, on Postgres, a notification per row. Putting
+/// `pg_notify` in the `RETURNING` list is what keeps this one statement: it
+/// runs once per row the update already locked, so it adds no lock and
+/// cannot deadlock against a concurrent claim. A separate `SELECT ... FROM
+/// brocanth_jobs` in the same transaction can, and did.
+///
+/// The caller reads column 0 in both dialects, so the extra column on
+/// Postgres costs the SQLite path nothing.
 pub(crate) fn orphan_requeue(dialect: Dialect) -> &'static str {
     match dialect {
         #[cfg(feature = "postgres")]
         Dialect::Postgres => {
             "UPDATE brocanth_jobs SET state = 'pending', run_at = $1, last_error = $2, \
              locked_by = NULL, locked_at = NULL, heartbeat_at = NULL \
-             WHERE state = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < $3"
+             WHERE state = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < $3 \
+             RETURNING queue, pg_notify('brocanth_jobs', queue)"
         }
         #[cfg(feature = "sqlite")]
         Dialect::Sqlite => {
             "UPDATE brocanth_jobs SET state = 'pending', run_at = ?, last_error = ?, \
              locked_by = NULL, locked_at = NULL, heartbeat_at = NULL \
-             WHERE state = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?"
+             WHERE state = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ? \
+             RETURNING queue"
         }
     }
 }

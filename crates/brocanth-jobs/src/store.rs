@@ -684,17 +684,64 @@ impl Store {
                     .execute(&mut *tx)
                     .await?;
             }
-            let requeued = sqlx::query(sql::orphan_requeue(dialect))
+            // `fetch_all` and not `execute`: the statement returns one row
+            // per job put back, and on Postgres each of those rows is also
+            // the notification that wakes a worker with a free slot. The
+            // announcement therefore lands exactly when the put-back
+            // commits. SQLite has no `NOTIFY`; its workers poll.
+            let requeued = sqlx::query_scalar::<_, String>(sql::orphan_requeue(dialect))
                 .bind(now)
                 .bind(&failure.message)
                 .bind(stale_before)
-                .execute(&mut *tx)
+                .fetch_all(&mut *tx)
                 .await?
-                .rows_affected();
+                .len() as u64;
             (requeued, dead)
         });
         Ok(out)
     }
+
+    /// When the soonest pending job on these queues becomes runnable.
+    ///
+    /// `None` means there is nothing pending at all, so a worker may sleep
+    /// its whole interval. A value in the past means there is work now and
+    /// the claim that just came back empty lost a race with another worker.
+    pub(crate) async fn next_run_at(&self, queues: &[String]) -> Result<Option<i64>> {
+        if queues.is_empty() {
+            return Ok(None);
+        }
+        match &self.backend {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => Ok(sqlx::query_scalar::<_, Option<i64>>(sql::NEXT_RUN_AT_PG)
+                .bind(queues)
+                .fetch_one(pool)
+                .await?),
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(pool) => {
+                let statement = sql::next_run_at_sqlite(queues.len());
+                let mut q = sqlx::query_scalar::<_, Option<i64>>(sqlx::AssertSqlSafe(statement));
+                for queue in queues {
+                    q = q.bind(queue);
+                }
+                Ok(q.fetch_one(pool).await?)
+            }
+        }
+    }
+
+    /// A pool a listener can hold a session on, where the store has one.
+    ///
+    /// `None` is the honest answer for SQLite rather than a `can_notify`
+    /// flag the caller then has to act on: there is nothing to listen with,
+    /// so there is no pool to hand over.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn listen_pool(&self) -> Option<sqlx::PgPool> {
+        match &self.backend {
+            Backend::Postgres(pool) => Some(pool.clone()),
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(_) => None,
+        }
+    }
+
 
     /// Marks every job this worker holds as still alive.
     pub(crate) async fn heartbeat(&self, worker: &str, now: i64) -> Result<u64> {

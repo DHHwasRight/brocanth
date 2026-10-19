@@ -84,8 +84,28 @@ pub struct WorkerConfig {
     pub queues: Vec<String>,
     /// How many jobs may run at once on this worker.
     pub concurrency: usize,
-    /// How long to wait after finding nothing before looking again.
+    /// How long to wait after finding nothing before looking again, on a
+    /// store that cannot announce new work.
+    ///
+    /// SQLite, in other words. On Postgres a worker is woken by the enqueue
+    /// itself and this is not used; see [`safety_poll`](Self::safety_poll)
+    /// and the [`listen`](crate::listen) module.
     pub poll_interval: Duration,
+    /// The longest a listening worker sleeps before looking anyway.
+    ///
+    /// A backstop and not the mechanism. A worker on Postgres sleeps until
+    /// the soonest pending job is due, and a notification only shortens
+    /// that; this caps the sleep so a notification nobody heard -- sent
+    /// while the listener was reconnecting -- costs seconds rather than
+    /// waiting for the next enqueue.
+    pub safety_poll: Duration,
+    /// Whether to listen for new work instead of asking for it.
+    ///
+    /// On by default, and ignored on a store with nothing to listen to.
+    /// Turning it off is for a deployment whose connection limit cannot
+    /// spare one connection per worker process: that is what a listener
+    /// costs, because `LISTEN` holds a session.
+    pub listen: bool,
     /// How often to refresh `heartbeat_at` on the jobs this worker holds.
     pub heartbeat_interval: Duration,
     /// How quiet a worker must go before another worker takes its jobs back.
@@ -115,6 +135,8 @@ impl Default for WorkerConfig {
             queues: vec!["default".to_string()],
             concurrency: 5,
             poll_interval: Duration::from_millis(500),
+            safety_poll: Duration::from_secs(5),
+            listen: true,
             heartbeat_interval: Duration::from_secs(5),
             stale_after: Duration::from_secs(60),
             maintenance_interval: Duration::from_secs(15),
@@ -149,9 +171,22 @@ impl WorkerBuilder {
         self
     }
 
-    /// How long to wait after an empty poll.
+    /// How long to wait after an empty poll, where polling is the mechanism.
     pub fn poll_interval(mut self, interval: Duration) -> Self {
         self.config.poll_interval = interval;
+        self
+    }
+
+    /// The longest a listening worker sleeps before looking anyway.
+    pub fn safety_poll(mut self, interval: Duration) -> Self {
+        self.config.safety_poll = interval;
+        self
+    }
+
+    /// Whether to be woken by new work rather than ask for it. On by
+    /// default; see [`WorkerConfig::listen`].
+    pub fn listen(mut self, listen: bool) -> Self {
+        self.config.listen = listen;
         self
     }
 
@@ -340,6 +375,22 @@ impl Worker {
             shutdown.clone(),
         ));
 
+        // And a third, where the store can announce its own work. It is an
+        // optimisation with no say in correctness: the bell only ever cuts a
+        // sleep short, so a listener that never connects costs idle latency
+        // and nothing else.
+        let bell = crate::listen::Bell::default();
+        let listener = crate::listen::spawn(
+            &store,
+            &bell,
+            queue.event_sink(),
+            config.safety_poll,
+            config.listen,
+        );
+        // The store decides this, not the config: `listen = true` on SQLite
+        // is a wish, and the sleep has to follow what actually happened.
+        let listening = listener.is_some();
+
         let mut running: JoinSet<()> = JoinSet::new();
         let mut finished = 0usize;
         let grace = loop {
@@ -403,10 +454,13 @@ impl Worker {
             }
 
             if claimed_count == 0 {
-                // Nothing to do: sleep, or wake early on a shutdown or on a
-                // slot freeing up.
+                // Nothing to do. How long to wait is the whole question, and
+                // the answer is the soonest of: the next job's `run_at`, the
+                // cap, a notification, a free slot, a shutdown.
+                let nap = idle_nap(&store, &clock, &config, listening).await;
                 tokio::select! {
-                    _ = tokio::time::sleep(config.poll_interval) => {}
+                    _ = tokio::time::sleep(nap) => {}
+                    _ = bell.rung(), if listening => {}
                     _ = shutdown.changed() => {}
                     Some(done) = running.join_next(), if !running.is_empty() => {
                         if done.is_ok() {
@@ -466,6 +520,9 @@ impl Worker {
 
         heartbeat.abort();
         maintenance.abort();
+        if let Some(listener) = listener {
+            listener.abort();
+        }
 
         events.handle(JobEvent::WorkerStopped {
             worker: &id,
@@ -663,6 +720,46 @@ impl RunOne {
 // ---------------------------------------------------------------------------
 // The two background loops
 // ---------------------------------------------------------------------------
+
+/// How long a worker with nothing to do should sleep.
+///
+/// Three inputs, and the smallest wins:
+///
+/// 1. **The next job's `run_at`.** A job scheduled for 09:00 should start at
+///    09:00, not at whichever tick follows it. This is why the cap can be
+///    seconds without making every retry wait seconds.
+/// 2. **The cap** -- [`safety_poll`](WorkerConfig::safety_poll) while
+///    listening, [`poll_interval`](WorkerConfig::poll_interval) otherwise.
+/// 3. **Zero**, when the next job is already due. That means the claim that
+///    just came back empty lost a race to another worker, and there may be
+///    more where that came from, so the loop goes straight round again.
+///
+/// A failed lookup falls back to the cap. The question "when is the next job
+/// due" is an optimisation, and a database that cannot answer it is already
+/// being reported by the claim that runs next.
+async fn idle_nap(
+    store: &Store,
+    clock: &Arc<dyn Clock>,
+    config: &WorkerConfig,
+    listening: bool,
+) -> Duration {
+    let cap = if listening {
+        config.safety_poll
+    } else {
+        config.poll_interval
+    };
+    match store.next_run_at(&config.queues).await {
+        Ok(Some(due)) => {
+            let now = to_millis(clock.now());
+            let wait = due.saturating_sub(now).max(0) as u64;
+            cap.min(Duration::from_millis(wait))
+        }
+        // Nothing pending at all. Nothing to wake up for except a
+        // notification, which is exactly what the cap is a backstop for.
+        Ok(None) => cap,
+        Err(_) => cap,
+    }
+}
 
 async fn heartbeat_loop(
     store: Arc<Store>,
