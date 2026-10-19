@@ -113,6 +113,12 @@ pub mod postgres;
 #[cfg(feature = "variants")]
 pub mod variants;
 
+/// Behind the `scaffold` feature, which is off: the generator is the CLI's
+/// business and not an application's. See the dependency comment in
+/// `Cargo.toml`.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 #[cfg(test)]
 mod rt;
 
