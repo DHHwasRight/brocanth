@@ -30,7 +30,8 @@
 //! before_dispatch   request hooks, declared order           may short-circuit
 //!     dispatch      the application's handler
 //!     on_error      error hooks, declared order             first answer wins
-//! on_response       response hooks, reverse declared order  may rewrite
+//! on_headers        response hooks, reverse declared order  every response
+//! on_body           response hooks, reverse declared order  buffered only
 //! after_dispatch    request hooks, reverse declared order   read-only
 //! ```
 //!
@@ -39,6 +40,11 @@
 //! hook ordered before it computes the tag over the body the client will
 //! actually be able to verify, and compression, declared last, wraps the
 //! result.
+//!
+//! One hook's `on_headers` and `on_body` run together, in that order, before
+//! the next hook is asked anything. `on_body` does not run at all when the
+//! body is a [`Body::Streaming`]: see [`ResponseHook`] for what each of
+//! compression, the partial-navigation headers and `ETag` does about that.
 //!
 //! `after_dispatch` runs whatever happened — a short-circuit, a handler error,
 //! a response hook failure — because a logger that only logs the happy path is
@@ -83,6 +89,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::plugin_api::{Plugin, PluginError};
+use crate::plugin_body::{Body, Streaming};
 use crate::plugin_model::{ModelEvent, ModelHook, ModelHooks};
 use crate::plugin_order::{HookId, Order, Ordered};
 use crate::plugin_routes::BoxFuture;
@@ -92,7 +99,20 @@ use crate::plugin_routes::BoxFuture;
 pub type Request = http::Request<Vec<u8>>;
 
 /// The response a hook sees.
-pub type Response = http::Response<Vec<u8>>;
+///
+/// The body is a [`Body`] rather than a `Vec<u8>`, because an SSE endpoint, a
+/// streamed shell and a large download all have to answer before the last
+/// byte exists. [`Body::Buffered`] is still what a rendered page is, and
+/// still what PLAN.md §3's clean 500 depends on.
+pub type Response = http::Response<Body>;
+
+/// A response without its body: the status, the version, the headers and the
+/// extensions.
+///
+/// What [`ResponseHook::on_headers`] rewrites. It is `http`'s own type, so a
+/// hook writes `head.headers.insert(..)` and `head.status` with no wrapper in
+/// the way.
+pub type ResponseHead = http::response::Parts;
 
 // ---------------------------------------------------------------------------
 // The type-level record of installed families
@@ -476,20 +496,176 @@ impl RequestStep {
     }
 }
 
-/// Rewriting a response: headers, body, or both.
+/// What the body is, to a hook that runs before the first byte.
+///
+/// A [`ResponseHook::on_headers`] gets one of these, so a hook cannot rewrite
+/// a header on a claim about bytes it has not seen. Matching on it is how
+/// every response hook states what it does about a stream, instead of being
+/// silently skipped for one.
+pub enum BodyShape<'a> {
+    /// Every byte is in memory. [`ResponseHook::on_body`] runs next, over
+    /// exactly these bytes.
+    Buffered {
+        /// How many bytes there are.
+        len: usize,
+    },
+    /// The body has not been produced. [`ResponseHook::on_body`] will **not**
+    /// run: there is nothing to hash and nothing to rewrite in place.
+    ///
+    /// A hook that must act on the bytes anyway wraps the stream with
+    /// [`Streaming::wrap`], which is what compression does here. A hook that
+    /// cannot — `ETag` is the example, because a tag over a body nobody has
+    /// read yet would be a tag over nothing — does nothing and says so.
+    Streaming(&'a mut Streaming),
+}
+
+impl BodyShape<'_> {
+    /// Whether the body has still to be produced.
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, Self::Streaming(_))
+    }
+
+    /// How many bytes the body is, when that is knowable. [`None`] for a
+    /// stream, which is also the answer to "what `content-length` do I set".
+    pub fn len(&self) -> Option<usize> {
+        match self {
+            Self::Buffered { len } => Some(*len),
+            Self::Streaming(_) => None,
+        }
+    }
+
+    /// Whether the body is known to carry no bytes. `false` for a stream.
+    pub fn is_empty(&self) -> bool {
+        self.len() == Some(0)
+    }
+}
+
+impl std::fmt::Debug for BodyShape<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Buffered { len } => f.debug_struct("Buffered").field("len", len).finish(),
+            Self::Streaming(_) => f.write_str("Streaming"),
+        }
+    }
+}
+
+/// Rewriting a response, in two halves, because a response has two moments.
 ///
 /// Runs in **reverse** declared order, so the hook declared last is the
 /// outermost and sees the response first. Compression, partial-navigation
 /// headers and ETag all live here.
+///
+/// # Why there are two methods and not one
+///
+/// `on_response(&mut Response)` was one method, and it could only be honest
+/// about a body that was already complete. A streaming body has two different
+/// moments and the old signature collapsed them:
+///
+/// | | runs for a buffered body | runs for a stream |
+/// |---|---|---|
+/// | [`on_headers`](ResponseHook::on_headers) | yes | **yes**, before the first byte |
+/// | [`on_body`](ResponseHook::on_body) | yes | **no**, there is no body yet |
+///
+/// `on_headers` is required rather than defaulted on purpose. The failure
+/// being designed out is a stream that quietly skips compression, the
+/// `DP-Partial` headers and `ETag`; a hook author who has to write
+/// `on_headers` has to look at [`BodyShape`] and decide what a stream gets.
+///
+/// # What each of the three hooks §8 names does here
+///
+/// * **Partial-navigation headers** (`DP-Partial`) are headers. They go in
+///   `on_headers` and they work for a stream unchanged.
+/// * **Compression** sets a header *and* rewrites bytes. For a buffered body
+///   it does both, in `on_headers` and `on_body`. For a stream it sets the
+///   header and calls [`Streaming::wrap`] in `on_headers`, putting a
+///   compressing stream around the one the handler built — announcing an
+///   encoding without wrapping would be the silent skip.
+/// * **`ETag`** is a hash of the whole body, so for a stream it is simply
+///   **unavailable**. There is nothing to hash, and a weak tag over the
+///   headers would be a tag that two different bodies share. The hook
+///   computes nothing and sets nothing; `on_headers` is where it says so, in
+///   one `BodyShape::Streaming => {}` arm somebody can read.
+///
+/// ```
+/// use brocanth::plugin_api::PluginError;
+/// use brocanth::plugin_hooks::{
+///     BodyShape, Request, RequestState, ResponseHead, ResponseHook,
+/// };
+///
+/// /// A tag over the body, which a stream does not have.
+/// struct ETag;
+///
+/// impl ResponseHook for ETag {
+///     fn on_headers(
+///         &self,
+///         _request: &Request,
+///         _head: &mut ResponseHead,
+///         body: BodyShape<'_>,
+///         _state: &mut RequestState,
+///     ) -> Result<(), PluginError> {
+///         match body {
+///             // Nothing to do yet; the bytes arrive in `on_body`.
+///             BodyShape::Buffered { .. } => Ok(()),
+///             // Unavailable, and said rather than skipped: there is no
+///             // body to hash and there never will be one in hand.
+///             BodyShape::Streaming(_) => Ok(()),
+///         }
+///     }
+///
+///     fn on_body(
+///         &self,
+///         _request: &Request,
+///         head: &mut ResponseHead,
+///         body: &mut Vec<u8>,
+///         _state: &mut RequestState,
+///     ) -> Result<(), PluginError> {
+///         let tag = format!("\"{}\"", body.len());
+///         let value = http::HeaderValue::from_str(&tag).expect("digits and quotes");
+///         head.headers.insert(http::header::ETAG, value);
+///         Ok(())
+///     }
+/// }
+/// ```
 pub trait ResponseHook: Send + Sync + 'static {
+    /// The status and the headers, before the first byte, for **every**
+    /// response — a stream included.
+    ///
     /// Returning `Err` replaces the response with a 500 and skips the
     /// remaining response hooks. `after_dispatch` still runs.
-    fn on_response(
+    fn on_headers(
         &self,
         request: &Request,
-        response: &mut Response,
+        head: &mut ResponseHead,
+        body: BodyShape<'_>,
         state: &mut RequestState,
     ) -> Result<(), PluginError>;
+
+    /// The whole body, for a **buffered** response only.
+    ///
+    /// Runs straight after this hook's own
+    /// [`on_headers`](ResponseHook::on_headers), so one hook still sees the
+    /// head and the body together and the reverse declared order is the order
+    /// it always was. It does not run at all for a stream, which is the point
+    /// of the split: a hook can never be handed a body that is not finished.
+    ///
+    /// `head` is here too, because the things that rewrite a body then have
+    /// something to say about it: `ETag` sets a tag, compression sets
+    /// `content-encoding`. Framing headers are not a hook's business —
+    /// `content-length` and `transfer-encoding` are set by the transport
+    /// after every hook has run.
+    ///
+    /// Defaulted to doing nothing, so a hook that only touches headers writes
+    /// nothing here.
+    fn on_body(
+        &self,
+        request: &Request,
+        head: &mut ResponseHead,
+        body: &mut Vec<u8>,
+        state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        let _ = (request, head, body, state);
+        Ok(())
+    }
 }
 
 /// Turning an error into a response.
@@ -716,6 +892,7 @@ impl Pipeline {
     /// # use brocanth::plugin_api::{Plugin, PluginError};
     /// # use brocanth::plugin_app::AppBuilder;
     /// # use brocanth::plugin_context::NoContext;
+    /// # use brocanth::plugin_body::Body;
     /// # use brocanth::plugin_hooks::{
     /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
     /// #     RequestState, Response,
@@ -751,7 +928,7 @@ impl Pipeline {
     /// let mut state = RequestState::new();
     ///
     /// // The chain holds a step this call cannot run, so it does not build.
-    /// app.run(&mut request, &mut state, |_, _| Ok(Response::new(Vec::new())));
+    /// app.run(&mut request, &mut state, |_, _| Ok(Response::new(Body::empty())));
     /// ```
     ///
     /// The same application with the same hook, through the entry point that
@@ -762,6 +939,7 @@ impl Pipeline {
     /// # use brocanth::plugin_api::{Plugin, PluginError};
     /// # use brocanth::plugin_app::AppBuilder;
     /// # use brocanth::plugin_context::NoContext;
+    /// # use brocanth::plugin_body::Body;
     /// # use brocanth::plugin_hooks::{
     /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
     /// #     RequestState, Response,
@@ -892,6 +1070,17 @@ impl Pipeline {
     }
 
     /// Runs the response hooks in reverse declared order.
+    ///
+    /// Each hook sees [`ResponseHook::on_headers`] and then, for a buffered
+    /// body only, [`ResponseHook::on_body`]. Per hook rather than in two
+    /// passes, so that one hook still sees the head and the body together and
+    /// the declared order means what it always meant.
+    ///
+    /// The early return is the whole of this function for an application that
+    /// installed no response hook: `tests/hooks_cost_nothing.rs` reads the
+    /// generated code and fails if anything below it survives. That is why
+    /// the body is a second function — taking the response apart costs two
+    /// moves, and they must not be in the empty path.
     #[inline]
     pub fn on_response<H: HookFamilies>(
         &self,
@@ -902,10 +1091,43 @@ impl Pipeline {
         if !H::RESPONSE {
             return Ok(());
         }
-        for hook in self.response.iter().rev() {
-            hook.on_response(request, response, state)?;
-        }
-        Ok(())
+        self.walk_response_hooks(request, response, state)
+    }
+
+    fn walk_response_hooks(
+        &self,
+        request: &Request,
+        response: &mut Response,
+        state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        // Taken apart once rather than once per hook: `on_headers` needs the
+        // head and the body at the same time, and `http::Response` will not
+        // lend both.
+        let taken = std::mem::replace(response, Response::new(Body::empty()));
+        let (mut head, mut body) = taken.into_parts();
+
+        let outcome = (|| {
+            for hook in self.response.iter().rev() {
+                match &mut body {
+                    Body::Buffered(bytes) => {
+                        let shape = BodyShape::Buffered { len: bytes.len() };
+                        hook.on_headers(request, &mut head, shape, state)?;
+                        hook.on_body(request, &mut head, bytes, state)?;
+                    }
+                    Body::Streaming(stream) => {
+                        let shape = BodyShape::Streaming(stream);
+                        hook.on_headers(request, &mut head, shape, state)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        // Put back whatever we have, failure included: `finish` replaces a
+        // failed response with a bare 500, and a caller that calls this
+        // directly should not be left holding an empty one.
+        *response = Response::from_parts(head, body);
+        outcome
     }
 
     /// Asks each error hook, in declared order, until one answers.
@@ -1210,7 +1432,7 @@ pub mod probe {
 
 /// What the core says about an error nobody claimed.
 fn bare_500() -> Response {
-    let mut response = Response::new(Vec::new());
+    let mut response = Response::new(Body::empty());
     *response.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
     response
 }
@@ -1276,9 +1498,9 @@ mod tests {
         let mut request = Request::new(Vec::new());
         let mut state = RequestState::new();
         let response = pipeline.run::<NoHooks, _>(&mut request, &mut state, |_, _| {
-            Ok(Response::new(b"ok".to_vec()))
+            Ok(Response::new(Body::from("ok")))
         });
-        assert_eq!(response.body(), b"ok");
+        assert_eq!(response.body().buffered(), Some(&b"ok"[..]));
         assert!(state.is_empty());
     }
 

@@ -9,20 +9,21 @@
 //! a generator living in another repository would learn about it from a bug
 //! report.
 //!
-//! # What it does not write, and will not until the core changes
+//! # What it does not write
 //!
-//! A transport. The crate documentation gives the argument in full; the short
-//! form is that `brocanth::plugin_hooks::Response` is `http::Response<Vec<u8>>`
-//! and `ResponseHook::on_response` is specified to see a complete body, so a
-//! streaming response would silently skip compression, the partial-navigation
-//! headers and `ETag`. SSE is therefore a change to the hook contract, not a
-//! type change, and a websocket is that plus an upgrade out of the
-//! request/response shape entirely. PLAN.md §8: widen the seam, do not
-//! special-case the plugin.
+//! A transport. The core can carry one now -- `Response` is
+//! `http::Response<brocanth::plugin_body::Body>`, a response hook sees the
+//! headers of a stream and is never handed an unfinished body, and a shutdown
+//! reaches an open stream -- so SSE is no longer blocked. What still holds is
+//! the arrow: this crate does not depend on `brocanth` and must not, because
+//! nothing here touches a request, a response or a route. A transport is a
+//! handler, and a handler belongs to whichever crate owns the routes.
 //!
-//! So this module scaffolds the half that pays for itself today -- the index,
-//! the mailboxes and the frames -- and the generated file says in its own
-//! header what reads them.
+//! A websocket is a second piece of work in any case: it needs an HTTP
+//! upgrade below `Response` and a frame codec, neither of which is a body.
+//!
+//! So this module scaffolds the index, the mailboxes and the frames, and the
+//! generated file says in its own header what reads them.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.

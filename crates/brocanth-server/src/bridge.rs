@@ -216,6 +216,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use brocanth::plugin_app::{App, BuildError};
+use brocanth::plugin_body::Body as CoreBody;
 use brocanth::plugin_hooks::{
     Begin, HandlerError, HookFamilies, Request as CoreRequest, RequestState,
     Response as CoreResponse,
@@ -226,7 +227,7 @@ use brocanth::routing::{Allow, Dispatch, Router, Verb};
 use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
 
-use crate::{Request, Response, ServeError, Server};
+use crate::{Body, Request, Response, ServeError, Server};
 
 /// Who connected, as the core sees it.
 ///
@@ -346,10 +347,14 @@ fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
 /// The core's response into this crate's.
 ///
 /// Two headers are dropped on the way: `content-length` and
-/// `transfer-encoding`. Framing is this crate's job -- the body is a `Bytes`
-/// of known length by the time hyper sees it, and `HEAD` needs the length the
-/// body *would* have had. A stale `content-length` from a response hook that
-/// rewrote a body would otherwise cut the response in half.
+/// `transfer-encoding`. Framing is this crate's job -- a buffered body is a
+/// `Bytes` of known length by the time hyper sees it, a streaming one is
+/// `chunked` because its length is unknowable, and `HEAD` needs the length
+/// the body *would* have had. A stale `content-length` from a response hook
+/// that rewrote a body would otherwise cut the response in half.
+///
+/// The body crosses by move, stream included: the core produced it and never
+/// polls it, and this crate polls it and never produces one.
 ///
 /// A header value that is not UTF-8 is dropped, because this crate's response
 /// headers are `String`. The alternative is `from_utf8_lossy`, which would
@@ -371,14 +376,17 @@ fn from_core(response: CoreResponse) -> Response {
 
     Response {
         status: parts.status.as_u16(),
-        body: Bytes::from(body),
+        body: match body {
+            CoreBody::Buffered(bytes) => Body::Bytes(Bytes::from(bytes)),
+            CoreBody::Streaming(stream) => Body::Stream(stream),
+        },
         headers,
     }
 }
 
 /// A core response with a status, a plain-text body and nothing else.
 fn plain(status: u16, body: &'static str) -> CoreResponse {
-    let mut out = CoreResponse::new(body.as_bytes().to_vec());
+    let mut out = CoreResponse::new(CoreBody::from(body));
     *out.status_mut() = http::StatusCode::from_u16(status).expect("a status this crate wrote");
     out.headers_mut().insert(
         CONTENT_TYPE,
@@ -750,7 +758,19 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     /// served, and the plugins that did start are stopped first.
     /// [`BridgeError::Serve`] if the listener fails.
     /// [`BridgeError::Shutdown`] if serving finished cleanly and a plugin then
-    /// failed to stop.
+    /// failed to stop, or a response stream was still open at the end.
+    ///
+    /// # Streams, and the budget this does not set
+    ///
+    /// `server` serves under the application's own gate, so a stop closes
+    /// one gate and every open response body is told to end. How long to wait
+    /// for them is [`Server::drain_grace`], and it is the caller's: this
+    /// function does not impose one, so a stream that never implements
+    /// [`BodyStream::finish`](brocanth::plugin_body::BodyStream::finish)
+    /// holds the stop open. [`ShutdownReport::streams_left`] is how many were
+    /// cut off, and it is why such a shutdown is not clean.
+    ///
+    /// [`ShutdownReport::streams_left`]: brocanth::plugin_shutdown::ShutdownReport::streams_left
     pub async fn serve(mut self, server: Server) -> Result<(), BridgeError> {
         if let Err(e) = self.app.start() {
             // Some instances started before the one that failed; they are
@@ -758,6 +778,12 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             self.app.shutdown(ShutdownReason::Failed, None);
             return Err(BridgeError::Start(e));
         }
+
+        // One gate, not two. The application opened it when a handler
+        // returned a streaming body; the listener closes it when it stops
+        // accepting, which is ADR 2's `Begin` reaching the wire before
+        // `App::shutdown` reaches the plugins.
+        let server = server.with_streams(self.app.streams().clone());
 
         let mut bridge = Arc::new(self);
         let handle = Arc::clone(&bridge);
@@ -943,7 +969,7 @@ mod tests {
                 "text/plain; charset=utf-8".to_string()
             )]
         );
-        assert_eq!(out.body, Bytes::from_static(b"ok"));
+        assert_eq!(out.body.bytes(), Some(&Bytes::from_static(b"ok")));
     }
 
     // -----------------------------------------------------------------

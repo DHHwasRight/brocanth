@@ -31,6 +31,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use brocanth::plugin_api::{Plugin, PluginError};
 use brocanth::plugin_app::{AppBuilder, BuildError};
+use brocanth::plugin_body::Body;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
     AsyncRequestHook, Begin, Both, Flow, HandlerError, HookRegistrar, HookSource, OnAsyncRequest,
@@ -130,7 +131,7 @@ impl AsyncRequestHook for SessionHook {
                 return Err(PluginError::new("no session"));
             }
             if self.stop {
-                let mut short = Response::new(b"short".to_vec());
+                let mut short = Response::new(Body::from("short"));
                 *short.status_mut() = http::StatusCode::ACCEPTED;
                 return Ok(Flow::respond(short));
             }
@@ -299,7 +300,7 @@ fn serve<E, H: brocanth::plugin_hooks::HookFamilies>(
         let outcome = match app.begin_async(&mut request, &mut state).await {
             Begin::Dispatch => {
                 rec.push("handler");
-                Ok(Response::new(b"body".to_vec()))
+                Ok(Response::new(Body::from("body")))
             }
             Begin::Answered(outcome) => outcome,
         };
@@ -465,10 +466,11 @@ impl Plugin for Mute {
 struct Stamper;
 
 impl brocanth::plugin_hooks::ResponseHook for Stamper {
-    fn on_response(
+    fn on_headers(
         &self,
         _request: &Request,
-        _response: &mut Response,
+        _head: &mut brocanth::plugin_hooks::ResponseHead,
+        _body: brocanth::plugin_hooks::BodyShape<'_>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
         Ok(())
@@ -553,7 +555,7 @@ fn an_async_hook_that_answers_stops_the_whole_chain_and_not_after_dispatch() {
         vec!["session:before", "stamp:after(202)", "session:after(202)"]
     );
     assert_eq!(response.status(), http::StatusCode::ACCEPTED);
-    assert_eq!(response.body(), b"short");
+    assert_eq!(response.body().buffered(), Some(&b"short"[..]));
 }
 
 #[test]
@@ -599,7 +601,7 @@ fn an_application_with_only_sync_hooks_may_still_use_the_async_entry_point() {
         .unwrap();
     app2.run(&mut request(), &mut RequestState::new(), |_, _| {
         rec2.push("handler");
-        Ok(Response::new(b"body".to_vec()))
+        Ok(Response::new(Body::from("body")))
     });
     assert_eq!(
         rec2.take(),

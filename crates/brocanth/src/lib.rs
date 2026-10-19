@@ -90,11 +90,19 @@
 //! are a **compile** error, because they would have to walk past a step they
 //! cannot run.
 //!
-//! ## 4. Response — rewriting headers and body
+//! ## 4. Response — rewriting headers, and rewriting a body that exists
 //!
-//! [`ResponseHook::on_response`], in **reverse** declared order, so the hook
-//! declared last is the outermost: compression wraps the ETag that an inner
-//! hook computed. Partial-navigation headers live here too.
+//! In **reverse** declared order, so the hook declared last is the outermost:
+//! compression wraps the ETag that an inner hook computed. Partial-navigation
+//! headers live here too.
+//!
+//! The seam is two methods rather than one, because a body is not always
+//! finished when the headers are. [`ResponseHook::on_headers`] sees the
+//! status and the headers before the first byte and runs for **every**
+//! response; [`ResponseHook::on_body`] sees `&mut Vec<u8>` and runs only for
+//! a body that is complete. A streaming body has no `ETag` — there is nothing
+//! to hash — and [`BodyShape`] is how a hook is made to say that rather than
+//! be skipped without anyone noticing. See [`plugin_body`].
 //!
 //! ## 5. Model — the seam an ORM registers into
 //!
@@ -202,13 +210,16 @@
 //! [`OnAsyncRequest`]: plugin_hooks::OnAsyncRequest
 //! [`RequestHook::before_dispatch`]: plugin_hooks::RequestHook::before_dispatch
 //! [`RequestHook::after_dispatch`]: plugin_hooks::RequestHook::after_dispatch
-//! [`ResponseHook::on_response`]: plugin_hooks::ResponseHook::on_response
+//! [`ResponseHook::on_headers`]: plugin_hooks::ResponseHook::on_headers
+//! [`ResponseHook::on_body`]: plugin_hooks::ResponseHook::on_body
+//! [`BodyShape`]: plugin_hooks::BodyShape
 //! [`RouteSource`]: plugin_routes::RouteSource
 //! [`Services`]: plugin_api::Services
 //! [`ShutdownCx::remaining`]: plugin_shutdown::ShutdownCx::remaining
 
 pub mod plugin_api;
 pub mod plugin_app;
+pub mod plugin_body;
 pub mod plugin_context;
 pub mod plugin_hooks;
 pub mod plugin_model;
