@@ -63,7 +63,10 @@ fn a_generated_key_is_hidden_and_a_foreign_key_is_a_picker() {
 fn seaorm_type_spellings_fold_onto_kinds() {
     assert_eq!(ColumnKind::from_type_name("string"), ColumnKind::Text);
     assert_eq!(ColumnKind::from_type_name("text"), ColumnKind::LongText);
-    assert_eq!(ColumnKind::from_type_name("big_integer"), ColumnKind::Integer);
+    assert_eq!(
+        ColumnKind::from_type_name("big_integer"),
+        ColumnKind::Integer
+    );
     assert_eq!(ColumnKind::from_type_name("DateTime"), ColumnKind::DateTime);
     assert_eq!(
         ColumnKind::from_type_name("timestamp_with_time_zone"),
@@ -126,10 +129,18 @@ fn a_cleared_field_stays_cleared() {
     let mut form = Form::build(&model, &admin, Some(&row), &[]);
     assert_eq!(form.field("bio").unwrap().value, "Something");
 
-    form.accept(&Submission::new().with("name", "Ada").with("age", "36").with("bio", ""));
+    form.accept(
+        &Submission::new()
+            .with("name", "Ada")
+            .with("age", "36")
+            .with("bio", ""),
+    );
 
     assert_eq!(form.field("bio").unwrap().value, "");
-    assert!(!form.field("active").unwrap().checked, "an absent checkbox is off");
+    assert!(
+        !form.field("active").unwrap().checked,
+        "an absent checkbox is off"
+    );
 }
 
 #[test]
@@ -146,8 +157,15 @@ fn errors_from_the_data_source_land_beside_their_fields() {
     form.reject(&errors);
 
     assert!(!form.is_valid());
-    assert_eq!(form.field("name").unwrap().errors, ["has already been taken"]);
-    assert_eq!(form.field("name").unwrap().value, "Ada", "still what was typed");
+    assert_eq!(
+        form.field("name").unwrap().errors,
+        ["has already been taken"]
+    );
+    assert_eq!(
+        form.field("name").unwrap().value,
+        "Ada",
+        "still what was typed"
+    );
     assert_eq!(form.errors, ["the record could not be saved"]);
 }
 
@@ -173,7 +191,10 @@ fn a_foreign_key_field_offers_labels_rather_than_numbers() {
     let admin = ModelAdmin::new("post");
     let choices = vec![(
         "author_id".to_string(),
-        vec![Choice::new("1", "Ada Lovelace"), Choice::new("2", "Grace Hopper")],
+        vec![
+            Choice::new("1", "Ada Lovelace"),
+            Choice::new("2", "Grace Hopper"),
+        ],
     )];
 
     let form = Form::build(&model, &admin, None, &choices);
@@ -201,12 +222,9 @@ fn a_rejected_create_re_renders_the_form_with_what_was_typed() {
         .with("role", "author")
         .with("active", "on");
 
-    let response = brocanth_admin::rt::block_on(admin.create(
-        Principal::anonymous(),
-        "user",
-        &submission,
-    ))
-    .unwrap();
+    let response =
+        brocanth_admin::rt::block_on(admin.create(Principal::anonymous(), "user", &submission))
+            .unwrap();
 
     assert_eq!(response.status(), 422, "rejected, not redirected");
     let html = response.html().unwrap();
@@ -216,5 +234,8 @@ fn a_rejected_create_re_renders_the_form_with_what_was_typed() {
         html.contains("A biography that must not be lost."),
         "the textarea survived"
     );
-    assert!(html.contains("ada@example.com"), "even the bad value survived");
+    assert!(
+        html.contains("ada@example.com"),
+        "even the bad value survived"
+    );
 }

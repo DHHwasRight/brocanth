@@ -456,7 +456,10 @@ impl PrimaryKey {
         T: Into<String>,
     {
         PrimaryKey {
-            parts: parts.into_iter().map(|(a, b)| (a.into(), b.into())).collect(),
+            parts: parts
+                .into_iter()
+                .map(|(a, b)| (a.into(), b.into()))
+                .collect(),
         }
     }
 

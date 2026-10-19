@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use brocanth_admin::policy::{policy_fn, Action, AllowAllUnsafeForDevelopment, DenyAll, Policy, Request};
+use brocanth_admin::policy::{
+    policy_fn, Action, AllowAllUnsafeForDevelopment, DenyAll, Policy, Request,
+};
 use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Principal, Submission};
 
@@ -28,6 +30,8 @@ fn the_default_policy_denies() {
         Action::Create,
         Action::Update,
         Action::Delete,
+        Action::ViewPanel,
+        Action::ActOnPanel,
     ] {
         assert!(
             !policy.allows(&Principal::new(&staff), Request::new(action, "user")),
@@ -74,7 +78,10 @@ fn a_refusal_does_not_leak_the_model_list() {
         .unwrap()
         .to_string();
 
-    assert!(!html.contains("Posts"), "the sidebar is built for the asker");
+    assert!(
+        !html.contains("Posts"),
+        "the sidebar is built for the asker"
+    );
     assert!(!html.contains("Users"));
 }
 
@@ -99,11 +106,29 @@ fn a_policy_decides_per_action_and_per_model() {
     let who = Principal::new(&staff);
 
     assert_eq!(block_on(admin.index(who)).unwrap().status(), 200);
-    assert_eq!(block_on(admin.delete(who, "post", "1")).unwrap().status(), 403);
-    assert_eq!(block_on(admin.edit_form(who, "post", "1")).unwrap().status(), 200);
-    assert_eq!(block_on(admin.edit_form(who, "user", "1")).unwrap().status(), 403);
+    assert_eq!(
+        block_on(admin.delete(who, "post", "1")).unwrap().status(),
+        403
+    );
+    assert_eq!(
+        block_on(admin.edit_form(who, "post", "1"))
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        block_on(admin.edit_form(who, "user", "1"))
+            .unwrap()
+            .status(),
+        403
+    );
     // And an anonymous caller is still refused, because the policy says so.
-    assert_eq!(block_on(admin.index(Principal::anonymous())).unwrap().status(), 403);
+    assert_eq!(
+        block_on(admin.index(Principal::anonymous()))
+            .unwrap()
+            .status(),
+        403
+    );
 }
 
 #[test]
@@ -123,7 +148,10 @@ fn a_denied_action_hides_its_own_links() {
         .to_string();
 
     assert!(html.contains("Edit"));
-    assert!(!html.contains(">Delete<"), "no link to a screen that would refuse");
+    assert!(
+        !html.contains(">Delete<"),
+        "no link to a screen that would refuse"
+    );
 }
 
 #[test]
@@ -134,5 +162,10 @@ fn the_development_policy_has_to_be_named_in_full() {
             .discovering(Discovery::new().under("blog::models"))
             .with_policy(AllowAllUnsafeForDevelopment),
     );
-    assert_eq!(block_on(admin.index(Principal::anonymous())).unwrap().status(), 200);
+    assert_eq!(
+        block_on(admin.index(Principal::anonymous()))
+            .unwrap()
+            .status(),
+        200
+    );
 }

@@ -410,10 +410,9 @@ impl Form {
                         .parse::<f64>()
                         .map(Value::Float)
                         .unwrap_or_else(|_| Value::Text(trimmed.to_string())),
-                    ColumnKind::Boolean => Value::Bool(matches!(
-                        trimmed,
-                        "true" | "1" | "on" | "yes" | "t"
-                    )),
+                    ColumnKind::Boolean => {
+                        Value::Bool(matches!(trimmed, "true" | "1" | "on" | "yes" | "t"))
+                    }
                     _ => Value::Text(trimmed.to_string()),
                 },
             };

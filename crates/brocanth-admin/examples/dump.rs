@@ -20,7 +20,11 @@ fn main() {
             .model("post", |m| {
                 m.list_columns(["id", "title", "author_id", "published", "views"])
                     .searchable(["title", "body"])
-                    .display(|row| row.get("title").map(ToString::to_string).unwrap_or_default())
+                    .display(|row| {
+                        row.get("title")
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    })
             })
             .model("user", |m| {
                 m.display(|row| row.get("name").map(ToString::to_string).unwrap_or_default())
@@ -32,14 +36,9 @@ fn main() {
         0 => "/admin".to_string(),
         _ => format!("/admin/{}", args.join("/")),
     };
-    let response = block_on(admin.dispatch(
-        Principal::anonymous(),
-        "GET",
-        &path,
-        "",
-        &Submission::new(),
-    ))
-    .expect("the admin rendered");
+    let response =
+        block_on(admin.dispatch(Principal::anonymous(), "GET", &path, "", &Submission::new()))
+            .expect("the admin rendered");
 
     println!("{}", response.html().unwrap_or_default());
 }

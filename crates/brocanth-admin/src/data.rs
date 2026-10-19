@@ -152,8 +152,7 @@ pub trait AdminData: Send + Sync + 'static {
     fn registry(&self) -> Vec<RegistryEntry>;
 
     /// How many rows match the search.
-    async fn count(&self, model: &ModelDescriptor, search: Search<'_>)
-        -> Result<usize, DataError>;
+    async fn count(&self, model: &ModelDescriptor, search: Search<'_>) -> Result<usize, DataError>;
 
     /// One page of rows.
     async fn list(&self, request: ListRequest<'_>) -> Result<Vec<Row>, DataError>;

@@ -21,6 +21,13 @@
 //! 403 to its own index. Shipping open and asking people to remember to lock
 //! it is a security incident waiting for someone's first deploy.
 //!
+//! **A tab can come from another crate.** Four screens about a table is not
+//! a whole backoffice: a queue has a dashboard and a kill button, a feature
+//! flag has a switch, and neither is a row. [`Panel`](panel::Panel) is a tab
+//! that renders its own body and is given this chrome for free. It lives in
+//! the crate that owns the data, because this one has four dependencies and
+//! intends to keep them.
+//!
 //! # Modularity
 //!
 //! Four dependencies: `brocanth`, `rsx`, `async-trait`, `thiserror`. No SQL
@@ -130,6 +137,7 @@ pub mod fixture;
 pub mod form;
 pub mod model;
 pub mod paging;
+pub mod panel;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod policy;

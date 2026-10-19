@@ -25,7 +25,11 @@ fn the_last_page_has_no_next_and_is_short() {
     assert_eq!(page.next(), None);
     assert_eq!(page.previous(), Some(9));
     assert_eq!(page.offset(), 90);
-    assert_eq!(page.range(), Some((91, 95)), "the last page holds five rows");
+    assert_eq!(
+        page.range(),
+        Some((91, 95)),
+        "the last page holds five rows"
+    );
 }
 
 #[test]

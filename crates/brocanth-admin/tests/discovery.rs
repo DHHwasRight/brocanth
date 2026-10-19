@@ -1,7 +1,7 @@
 //! Discovery: the registry is not the model list until the filter has run.
 
 use brocanth_admin::discovery::{discover, is_migration_table, Discovery, RegistryEntry};
-use brocanth_admin::{AdminConfig, Admin, ColumnDescriptor, ColumnKind, Fixture};
+use brocanth_admin::{Admin, AdminConfig, ColumnDescriptor, ColumnKind, Fixture};
 use std::sync::Arc;
 
 fn registry() -> Vec<RegistryEntry> {
@@ -34,7 +34,11 @@ fn the_prefix_keeps_another_crates_entities_out() {
     let found = discover(registry(), &Discovery::new().under("blog::models"));
     let keys: Vec<&str> = found.iter().map(|m| m.key.as_str()).collect();
 
-    assert_eq!(keys, ["post", "user"], "sorted, and only this application's");
+    assert_eq!(
+        keys,
+        ["post", "user"],
+        "sorted, and only this application's"
+    );
 }
 
 #[test]

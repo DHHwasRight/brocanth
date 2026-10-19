@@ -184,6 +184,20 @@ impl ListQuery {
 /// Byte-level throughout. Slicing the `&str` instead would panic on `%` in
 /// front of a multi-byte character, because the two bytes after the `%` can
 /// fall inside one.
+/// One parameter out of a query string, decoded.
+///
+/// `ListQuery::parse` knows the five keys the model screens use. A panel
+/// has its own, and the decoder it needs is already here.
+pub(crate) fn param(query: &str, name: &str) -> Option<String> {
+    for pair in query.trim_start_matches('?').split('&') {
+        let (key, raw) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == name {
+            return Some(percent_decode(raw));
+        }
+    }
+    None
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -194,18 +208,16 @@ fn percent_decode(s: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                    (Some(high), Some(low)) => {
-                        out.push(high * 16 + low);
-                        i += 3;
-                    }
-                    _ => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                (Some(high), Some(low)) => {
+                    out.push(high * 16 + low);
+                    i += 3;
                 }
-            }
+                _ => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             byte => {
                 out.push(byte);
                 i += 1;

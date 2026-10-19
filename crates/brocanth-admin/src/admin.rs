@@ -17,6 +17,7 @@ use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
 use crate::model::{ColumnDescriptor, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::paging::Page;
+use crate::panel::{Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::view::{
@@ -101,6 +102,7 @@ pub struct Admin {
     policy: Box<dyn crate::policy::Policy>,
     views: Views,
     entries: Vec<Entry>,
+    panels: Vec<std::sync::Arc<dyn Panel>>,
 }
 
 impl std::fmt::Debug for Admin {
@@ -109,6 +111,7 @@ impl std::fmt::Debug for Admin {
             .field("title", &self.title)
             .field("base_path", &self.base_path)
             .field("models", &self.model_keys())
+            .field("panels", &self.panel_keys())
             .finish()
     }
 }
@@ -122,7 +125,7 @@ impl Admin {
     pub fn new(data: SharedData, mut config: AdminConfig) -> Admin {
         let descriptors = discover(data.registry(), &config.discovery);
         let mut configured = config.take_models();
-        let entries = descriptors
+        let entries: Vec<Entry> = descriptors
             .into_iter()
             .map(|descriptor| {
                 let admin = configured
@@ -132,6 +135,17 @@ impl Admin {
             })
             .filter(|entry| entry.admin.is_visible())
             .collect();
+        let panels = config.panels;
+        // Named now rather than discovered by a request that went to the
+        // wrong screen. Two modules claiming one path is an error that
+        // names both, and a panel shadowing a model is the same mistake.
+        if let Some((panel, model)) = collision(&panels, &entries) {
+            panic!(
+                "the admin has a panel and a model both called `{panel}`: the panel would \
+                 shadow the model at the same URL. Rename the panel, or hide the model with \
+                 `Discovery::without`. (model discovered as `{model}`)"
+            );
+        }
         Admin {
             data,
             title: config.title,
@@ -139,7 +153,13 @@ impl Admin {
             policy: config.policy,
             views: config.views,
             entries,
+            panels,
         }
+    }
+
+    /// The keys of every panel the admin shows.
+    pub fn panel_keys(&self) -> Vec<&str> {
+        self.panels.iter().map(|p| p.key()).collect()
     }
 
     /// The keys of every model the admin shows.
@@ -170,18 +190,10 @@ impl Admin {
         let models = self
             .entries
             .iter()
-            .filter(|e| {
-                self.allows(
-                    principal,
-                    Request::new(Action::ViewList, &e.descriptor.key),
-                )
-            })
+            .filter(|e| self.allows(principal, Request::new(Action::ViewList, &e.descriptor.key)))
             .map(|e| {
                 let can_create = e.admin.allows_create()
-                    && self.allows(
-                        principal,
-                        Request::new(Action::Create, &e.descriptor.key),
-                    );
+                    && self.allows(principal, Request::new(Action::Create, &e.descriptor.key));
                 IndexEntry {
                     label: e.admin.plural(&e.descriptor),
                     href: self.list_url(&e.descriptor.key),
@@ -256,22 +268,13 @@ impl Admin {
             .window(PAGER_WINDOW)
             .into_iter()
             .map(|number| PageLink {
-                href: format!(
-                    "{}?{}",
-                    self.list_url(model),
-                    query.to_query_string(number)
-                ),
+                href: format!("{}?{}", self.list_url(model), query.to_query_string(number)),
                 current: number == page.number(),
                 number,
             })
             .collect();
-        let link_for = |number: usize| {
-            format!(
-                "{}?{}",
-                self.list_url(model),
-                query.to_query_string(number)
-            )
-        };
+        let link_for =
+            |number: usize| format!("{}?{}", self.list_url(model), query.to_query_string(number));
         let context = ListCtx {
             chrome: self.chrome(principal, model),
             model: self.heading(entry),
@@ -425,7 +428,8 @@ impl Admin {
         };
         let choices = self.choices(&entry.admin, &entry.descriptor).await?;
         let form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
-        self.render_form(principal, entry, form, Some(&record)).await
+        self.render_form(principal, entry, form, Some(&record))
+            .await
     }
 
     /// Takes an edit.
@@ -551,25 +555,77 @@ impl Admin {
         query: &str,
         submission: &Submission,
     ) -> Result<Response, AdminError> {
-        let Some(route) = Route::parse(&self.base_path, method, path) else {
+        let keys = self.panel_keys();
+        let Some(route) = Route::parse(&self.base_path, method, path, &keys) else {
             return self.missing(principal);
         };
         match route {
             Route::Index => self.index(principal).await,
+            Route::Panel { key, rest, post } => {
+                self.panel(principal, key, rest, query, post, submission)
+                    .await
+            }
             Route::List(model) => self.list(principal, model, ListQuery::parse(query)).await,
             Route::New(model) => self.create_form(principal, model).await,
             Route::Create(model) => self.create(principal, model, submission).await,
             Route::Detail(model, key) => self.detail(principal, model, key).await,
             Route::Edit(model, key) => self.edit_form(principal, model, key).await,
             Route::Update(model, key) => self.update(principal, model, key, submission).await,
-            Route::ConfirmDelete(model, key) => {
-                self.delete_confirm(principal, model, key).await
-            }
+            Route::ConfirmDelete(model, key) => self.delete_confirm(principal, model, key).await,
             Route::Delete(model, key) => self.delete(principal, model, key).await,
         }
     }
 
+    /// One panel's screen.
+    ///
+    /// Reading asks the policy for [`Action::ViewPanel`]; a POST asks for
+    /// [`Action::ActOnPanel`] as well, and is refused before the panel is
+    /// called rather than after it has done the thing.
+    async fn panel(
+        &self,
+        principal: Principal<'_>,
+        key: &str,
+        rest: &str,
+        query: &str,
+        post: bool,
+        submission: &Submission,
+    ) -> Result<Response, AdminError> {
+        let Some(panel) = self.panels.iter().find(|p| p.key() == key) else {
+            return self.missing(principal);
+        };
+        if !self.allows(principal, Request::new(Action::ViewPanel, key)) {
+            return self.refuse(principal, Action::ViewPanel);
+        }
+        if post && !self.allows(principal, Request::new(Action::ActOnPanel, key)) {
+            return self.refuse(principal, Action::ActOnPanel);
+        }
+        let mount = self.panel_url(key);
+        let request = PanelRequest {
+            path: rest,
+            query,
+            post,
+            submission,
+            mount: &mount,
+        };
+        match panel.render(request).await? {
+            // The panel's own 404, rendered as the admin's, so a panel does
+            // not have to carry a copy of this page.
+            None => self.missing(principal),
+            Some(PanelPage::Redirect { location }) => Ok(Response::Redirect {
+                status: 303,
+                location,
+            }),
+            Some(PanelPage::Body { heading, html }) => {
+                self.page(200, principal, key, heading, html)
+            }
+        }
+    }
+
     // --------------------------------------------------------------- helpers
+
+    fn panel_url(&self, key: &str) -> String {
+        format!("{}/{key}", self.base_path)
+    }
 
     fn entry(&self, key: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.descriptor.key == key)
@@ -596,10 +652,7 @@ impl Admin {
                 .entries
                 .iter()
                 .filter(|e| {
-                    self.allows(
-                        principal,
-                        Request::new(Action::ViewList, &e.descriptor.key),
-                    )
+                    self.allows(principal, Request::new(Action::ViewList, &e.descriptor.key))
                 })
                 .map(|e| NavItem {
                     label: e.admin.plural(&e.descriptor),
@@ -607,6 +660,22 @@ impl Admin {
                     current: e.descriptor.key == current,
                     key: e.descriptor.key.clone(),
                 })
+                // The panels, after the models and in the order they were
+                // added. Filtered by the same policy call the screen makes,
+                // so a tab nobody may open is not a tab anybody is shown.
+                .chain(
+                    self.panels
+                        .iter()
+                        .filter(|p| {
+                            self.allows(principal, Request::new(Action::ViewPanel, p.key()))
+                        })
+                        .map(|p| NavItem {
+                            label: p.label(),
+                            href: self.panel_url(p.key()),
+                            current: p.key() == current,
+                            key: p.key().to_string(),
+                        }),
+                )
                 .collect(),
         }
     }
@@ -630,11 +699,7 @@ impl Admin {
         })
     }
 
-    fn refuse(
-        &self,
-        principal: Principal<'_>,
-        action: Action,
-    ) -> Result<Response, AdminError> {
+    fn refuse(&self, principal: Principal<'_>, action: Action) -> Result<Response, AdminError> {
         self.error_page(
             principal,
             403,
@@ -993,6 +1058,19 @@ pub enum Route<'a> {
     ConfirmDelete(&'a str, &'a str),
     /// `POST {base}/{model}/{key}/delete`.
     Delete(&'a str, &'a str),
+    /// Anything under a panel's key: `{base}/{key}` and below.
+    ///
+    /// One variant for the whole subtree, because the admin does not know
+    /// what paths a panel serves and should not have to. The panel is given
+    /// what is left and answers `None` for a path it does not serve.
+    Panel {
+        /// The panel's key.
+        key: &'a str,
+        /// What followed it, with no leading or trailing slash.
+        rest: &'a str,
+        /// Whether this is a POST.
+        post: bool,
+    },
 }
 
 impl<'a> Route<'a> {
@@ -1001,7 +1079,10 @@ impl<'a> Route<'a> {
     /// `new` is a reserved key segment, as `add` is in Django: a record whose
     /// primary key is the literal text `new` cannot be reached. Say so rather
     /// than discover it.
-    pub fn parse(base: &str, method: &str, path: &'a str) -> Option<Route<'a>> {
+    /// `panels` is the set of keys that are tabs rather than models. It is
+    /// a parameter and not a lookup because this function is pure and the
+    /// test suite calls it directly; `Admin::dispatch` passes its own.
+    pub fn parse(base: &str, method: &str, path: &'a str, panels: &[&str]) -> Option<Route<'a>> {
         // A path outside the mount is not this admin's, which matters when the
         // application routes by a pattern wider than the mount point.
         let rest = match base.is_empty() {
@@ -1021,6 +1102,19 @@ impl<'a> Route<'a> {
             true => Vec::new(),
             false => rest.split('/').collect(),
         };
+        // A panel owns everything under its key, so it is matched before
+        // the model shapes and on any depth. `Admin::new` has already
+        // refused a key that is both.
+        if let Some(first) = parts.first() {
+            if panels.contains(first) {
+                let rest = rest[first.len()..].trim_matches('/');
+                return Some(Route::Panel {
+                    key: first,
+                    rest,
+                    post,
+                });
+            }
+        }
         match (parts.as_slice(), post) {
             ([], false) => Some(Route::Index),
             ([model], false) => Some(Route::List(model)),
@@ -1034,6 +1128,16 @@ impl<'a> Route<'a> {
             _ => None,
         }
     }
+}
+
+/// A panel key that is also a model key, if there is one.
+fn collision(panels: &[std::sync::Arc<dyn Panel>], entries: &[Entry]) -> Option<(String, String)> {
+    panels.iter().find_map(|p| {
+        entries
+            .iter()
+            .find(|e| e.descriptor.key == p.key())
+            .map(|e| (p.key().to_string(), e.descriptor.table.clone()))
+    })
 }
 
 /// Shortens a cell so one long column cannot push the table off the screen.

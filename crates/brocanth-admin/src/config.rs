@@ -424,6 +424,13 @@ pub struct AdminConfig {
     pub policy: Box<dyn Policy>,
     /// The screens. Replace any of them with your own rsx component.
     pub views: Views,
+    /// Tabs other crates contributed, in the order they were added.
+    ///
+    /// Not autowired. A crate that can draw a panel does not get to decide
+    /// that this application shows one, so adding it is a line in the
+    /// application -- the same rule `JobsPlugin` follows about starting a
+    /// worker.
+    pub panels: Vec<std::sync::Arc<dyn crate::panel::Panel>>,
     models: BTreeMap<String, ModelAdmin>,
 }
 
@@ -434,6 +441,10 @@ impl std::fmt::Debug for AdminConfig {
             .field("base_path", &self.base_path)
             .field("discovery", &self.discovery)
             .field("models", &self.models.keys().collect::<Vec<_>>())
+            .field(
+                "panels",
+                &self.panels.iter().map(|p| p.key()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -453,8 +464,23 @@ impl AdminConfig {
             discovery: Discovery::new(),
             policy: Box::new(DenyAll),
             views: Views::default(),
+            panels: Vec::new(),
             models: BTreeMap::new(),
         }
+    }
+
+    /// Adds a tab another crate contributed.
+    ///
+    /// ```ignore
+    /// AdminConfig::new().panel(brocanth_jobs::admin::JobsPanel::new(queue))
+    /// ```
+    ///
+    /// Panels appear after the models, in the order they were added. A
+    /// panel whose key collides with a model's is refused by
+    /// [`Admin::new`](crate::Admin), naming both.
+    pub fn panel(mut self, panel: impl crate::panel::Panel + 'static) -> Self {
+        self.panels.push(std::sync::Arc::new(panel));
+        self
     }
 
     /// Sets the title.

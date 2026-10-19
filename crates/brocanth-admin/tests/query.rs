@@ -41,18 +41,27 @@ fn a_nonsense_query_string_still_yields_a_list() {
 
     assert_eq!(query.page, 1, "not an error, and not page zero");
     assert_eq!(query.per_page, None);
-    assert!(query.sort.is_none(), "a direction without a column is no sort");
+    assert!(
+        query.sort.is_none(),
+        "a direction without a column is no sort"
+    );
 }
 
 #[test]
 fn a_path_outside_the_mount_is_not_this_admins() {
-    assert_eq!(Route::parse("/admin", "GET", "/other/post"), None);
-    assert_eq!(Route::parse("/admin", "GET", "/administrator"), None);
-    assert_eq!(Route::parse("/admin", "GET", "/admin"), Some(Route::Index));
+    assert_eq!(Route::parse("/admin", "GET", "/other/post", &[]), None);
+    assert_eq!(Route::parse("/admin", "GET", "/administrator", &[]), None);
     assert_eq!(
-        Route::parse("/admin", "GET", "/admin/post"),
+        Route::parse("/admin", "GET", "/admin", &[]),
+        Some(Route::Index)
+    );
+    assert_eq!(
+        Route::parse("/admin", "GET", "/admin/post", &[]),
         Some(Route::List("post"))
     );
     // Mounted at the root, everything is in scope.
-    assert_eq!(Route::parse("", "GET", "/post"), Some(Route::List("post")));
+    assert_eq!(
+        Route::parse("", "GET", "/post", &[]),
+        Some(Route::List("post"))
+    );
 }

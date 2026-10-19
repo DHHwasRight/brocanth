@@ -67,6 +67,14 @@ pub enum Action {
     Update,
     /// Remove a record, and see the confirmation that does it.
     Delete,
+    /// Read a panel another crate contributed. The subject is its key.
+    ViewPanel,
+    /// Press a button on one. The subject is its key.
+    ///
+    /// Separate from [`Action::ViewPanel`], because "may look at the queue"
+    /// and "may empty the dead set" are different answers in every
+    /// organisation that has ever been asked the question.
+    ActOnPanel,
 }
 
 impl Action {
@@ -79,6 +87,8 @@ impl Action {
             Action::Create => "create",
             Action::Update => "change",
             Action::Delete => "delete",
+            Action::ViewPanel => "view this",
+            Action::ActOnPanel => "change this",
         }
     }
 }

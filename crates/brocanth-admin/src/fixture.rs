@@ -95,9 +95,10 @@ impl Fixture {
             .with(ColumnDescriptor::new("published_at", ColumnKind::Date).nullable());
 
         // What SeaORM's own migrator registers. The admin must never show it.
-        let migrations = RegistryEntry::new("sea_orm_migration::seaql_migrations", "seaql_migrations")
-            .with(ColumnDescriptor::new("version", ColumnKind::Text).primary_key())
-            .with(ColumnDescriptor::new("applied_at", ColumnKind::Integer));
+        let migrations =
+            RegistryEntry::new("sea_orm_migration::seaql_migrations", "seaql_migrations")
+                .with(ColumnDescriptor::new("version", ColumnKind::Text).primary_key())
+                .with(ColumnDescriptor::new("applied_at", ColumnKind::Integer));
 
         Fixture::new()
             .model(user)
@@ -231,12 +232,12 @@ fn sorted(rows: &mut [Row], sort: Option<&Sort>) {
 }
 
 fn matches_key(model: &ModelDescriptor, row: &Row, key: &PrimaryKey) -> bool {
-    model.key_columns().iter().all(|column| {
-        match (row.get(&column.name), key.get(&column.name)) {
+    model.key_columns().iter().all(
+        |column| match (row.get(&column.name), key.get(&column.name)) {
             (Some(value), Some(wanted)) => value.as_input() == wanted,
             _ => false,
-        }
-    })
+        },
+    )
 }
 
 #[async_trait]
@@ -245,11 +246,7 @@ impl AdminData for Fixture {
         self.entries.clone()
     }
 
-    async fn count(
-        &self,
-        model: &ModelDescriptor,
-        search: Search<'_>,
-    ) -> Result<usize, DataError> {
+    async fn count(&self, model: &ModelDescriptor, search: Search<'_>) -> Result<usize, DataError> {
         Ok(self.matching(model, search).len())
     }
 
@@ -272,7 +269,11 @@ impl AdminData for Fixture {
         Ok(tables
             .iter()
             .find(|(t, _)| *t == model.table)
-            .and_then(|(_, rows)| rows.iter().find(|row| matches_key(model, row, key)).cloned()))
+            .and_then(|(_, rows)| {
+                rows.iter()
+                    .find(|row| matches_key(model, row, key))
+                    .cloned()
+            }))
     }
 
     async fn insert(
