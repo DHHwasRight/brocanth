@@ -44,6 +44,11 @@ impl Module for Tailwind {
         )
         .part_of("rsx")
         .because("the CSS build reads class names out of `.rsx` files")
+        .needs(
+            "commands",
+            "the CSS build is `brocanth css`, a subcommand, and a project \
+             with no command line has nowhere to put it",
+        )
     }
 
     fn contribute(&self, _project: &Project, _scaffold: &mut Scaffold) {

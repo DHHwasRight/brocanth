@@ -303,6 +303,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
     let local = local_checkout(args)?;
     unavailable(&picked(args))?;
     orphans(&picked(args))?;
+    unmet(&picked(args))?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -428,6 +429,39 @@ fn orphans(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
     }
 }
 
+/// Picks that cannot be written without a module nobody asked for.
+///
+/// The flat command line's half of [`Manifest::needs`]. The chooser's half
+/// is a tick that brings what it requires, which a screen can do and a flag
+/// must not: a flag that quietly adds a module is a flag nobody can read.
+fn unmet(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
+    let bad: Vec<Diagnostic> = picks
+        .iter()
+        .flat_map(|pick| {
+            let missing: Vec<(&'static str, &'static str)> = about(pick)
+                .needs
+                .into_iter()
+                .filter(|(need, _)| !picks.contains(need))
+                .collect();
+            missing.into_iter().map(move |(need, why)| {
+                let mut with: Vec<&str> = picks.iter().copied().chain([need]).collect();
+                with.sort_unstable();
+                Diagnostic::error(
+                    *pick,
+                    format!("`{pick}` cannot be written without `{need}`"),
+                )
+                .note(why)
+                .help(format!("--with {}", with.join(",")))
+            })
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
+}
+
 /// The full-screen route. Returns the same [`Answers`] the flags produce.
 fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
     let preset = picked(args);
@@ -450,6 +484,14 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                     .parent
                     .and_then(|parent| all().iter().position(|p| *p == parent)),
                 blocked: about(pick).blocked.map(str::to_string),
+                // A tick brings what it requires, and an untick takes the
+                // ticks that required it. The screen can do that honestly
+                // because every row it changed is still on the screen.
+                needs: about(pick)
+                    .needs
+                    .iter()
+                    .filter_map(|(need, _)| all().iter().position(|p| p == need))
+                    .collect(),
             })
             .collect(),
         // The chooser offers a repository and the flag route does not, and the
@@ -737,7 +779,6 @@ fn scaffold(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
             "assets/css/site.css".to_string(),
             SITE_CSS_PLACEHOLDER.to_string(),
         ));
-        files.push(("scripts/build-css.sh".to_string(), BUILD_CSS_SH.to_string()));
         files.push(("package.json".to_string(), package_json(a)));
     }
     if a.has("rsx-htmx") {
@@ -767,11 +808,14 @@ fn scaffold(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
         // cargo is the build tool; hooking one into the other conflates them.
         // The ways in are `brocanth <command>` from anywhere inside the
         // project, and the built binary itself.
-        files.push((
-            "src/commands/mod.rs".to_string(),
-            COMMANDS_MOD_RS.to_string(),
-        ));
+        files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(a)));
         files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
+        if a.has("rsx-tailwind") {
+            // The CSS build. A command and not `scripts/build-css.sh`,
+            // because this project has a command line and a second way to
+            // run things is a second thing to keep in step.
+            files.push(("src/commands/css.rs".to_string(), CSS_RS.to_string()));
+        }
     }
     // The modules' own files, after the ones every project has. A clash
     // with a path above is caught here rather than by whichever happened to
@@ -838,12 +882,26 @@ fn agents_md(a: &Answers) -> String {
     }
 
     let commands = if a.has("commands") {
-        "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
-         `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
-         registration happens at link time and there is no list to add it to.\n\n\
-         ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n```\n"
+        let mut out = String::from(
+            "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
+             `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
+             registration happens at link time and there is no list to add it to.\n\n\
+             ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n",
+        );
+        if a.has("rsx-tailwind") {
+            // The CSS build is one of them, and the reason it is a command
+            // rather than a script belongs where an agent will look first.
+            out.push_str(
+                "brocanth css         # the CSS build; -W rebuilds on each change\n```\n\n\
+                 The stylesheet is embedded, so a new one is a new binary. `css` rewrites\n\
+                 `src/assets.rs` to say so, which is what makes cargo notice.\n",
+            );
+        } else {
+            out.push_str("```\n");
+        }
+        out
     } else {
-        ""
+        String::new()
     };
 
     format!(
@@ -1048,7 +1106,10 @@ header and never changes for it.
 // scaffolded project was run through rustfmt. PLAN.md §4.8 -- "if scaffolding
 // produces code you would not write by hand, the framework below it is wrong"
 // -- and nobody writes an unindented struct body.
-const COMMANDS_MOD_RS: &str = r#"//! Every command in this project.
+/// `src/commands/mod.rs`: the `mod` lines, and nothing else.
+fn commands_mod_rs(a: &Answers) -> String {
+    let mut out = String::from(
+        r#"//! Every command in this project.
 //!
 //! The `mod` lines are the whole of it. A command registers itself through a
 //! link-time slice, so adding one is a file and a `mod`, and there is no list
@@ -1057,8 +1118,17 @@ const COMMANDS_MOD_RS: &str = r#"//! Every command in this project.
 //! `serve` arrived with the scaffold and is ordinary code here: rename it,
 //! give it flags, or delete it. The framework does not own this command line.
 
-pub mod serve;
-"#;
+"#,
+    );
+    // Alphabetical, which is also what rustfmt wants. A scaffold that hands
+    // a developer a diff on their first `cargo fmt` is a scaffold that got
+    // it wrong.
+    if a.has("rsx-tailwind") {
+        out.push_str("pub mod css;\n");
+    }
+    out.push_str("pub mod serve;\n");
+    out
+}
 
 /// Where a brocanth crate comes from: a local checkout when one was named, the
 /// repository otherwise.
@@ -1456,13 +1526,22 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// the runtime is built here rather than wrapped around `main`: a command\n\
          /// that never serves should not start a reactor to run.\n\
          pub fn serve(addr: &str) -> Result<(), String> {\n\
-        \x20   let app = Arc::new(build()?);\n\
-        \x20   eprintln!(\"{APP}: plugins: [{}]\", app.plugins.join(\", \"));\n\
-         \n\
         \x20   let runtime = tokio::runtime::Builder::new_multi_thread()\n\
         \x20       .enable_all()\n\
         \x20       .build()\n\
         \x20       .map_err(|e| e.to_string())?;\n\
+         \n\
+        \x20   // The runtime first, and the application inside it. A plugin\n\
+        \x20   // that opens a connection pool does it in `before_start`,\n\
+        \x20   // where the hook is synchronous and connecting is not, so it\n\
+        \x20   // reaches for the current runtime handle and blocks on a\n\
+        \x20   // scoped thread. Building the application first would leave\n\
+        \x20   // it with no handle to reach for.\n\
+        \x20   let app = {\n\
+        \x20       let _guard = runtime.enter();\n\
+        \x20       Arc::new(build()?)\n\
+        \x20   };\n\
+        \x20   eprintln!(\"{APP}: plugins: [{}]\", app.plugins.join(\", \"));\n\
          \n\
         \x20   runtime.block_on(async move {\n\
         \x20       let server = brocanth_server::Server::bind(addr)\n\
@@ -1642,13 +1721,17 @@ fn mise_toml(a: &Answers) -> String {
     let mut out = String::from(MISE_TOML);
     if a.has("rsx-tailwind") {
         out.push_str(
+            // The same build `brocanth css` runs, spelled for a tool that
+            // does not know this project has a command line. `cargo run`
+            // and not `brocanth`, so a checkout works before anything is
+            // installed globally.
             "\n[tasks.css]\n\
              description = \"build assets/css/site.css from _tailwind.css\"\n\
-             run = \"bash scripts/build-css.sh\"\n\
+             run = \"cargo run -- css\"\n\
              \n\
              [tasks.\"css:watch\"]\n\
              description = \"the same, again on each change\"\n\
-             run = \"bash scripts/build-css.sh --watch\"\n",
+             run = \"cargo run -- css --watch\"\n",
         );
     }
     out
@@ -1659,7 +1742,12 @@ const MISE_TOML: &str = r#"[tools]
 # they are not compatible across patch releases.
 rust = "1.98"
 
-[tasks.run]
+# Named for what it does, and not `run`: `run` is one of mise's own
+# subcommands, so a task called that is only reachable as `mise run run`.
+# The alias keeps a bare `mise run` working, because mise runs the task
+# called `default` when it is given no name.
+[tasks.serve]
+alias = ["default"]
 run = "cargo run"
 
 [tasks.test]
@@ -2625,8 +2713,8 @@ const TAILWIND_CSS: &str = r#"/* The input of the CSS build. Never published.
  * and that `assets!` must not publish on its own. The build reads this file
  * and writes assets/css/site.css, which is the one that ships:
  *
- *     mise run css          # once, minified
- *     mise run css:watch    # again on each change
+ *     brocanth css          # once, minified
+ *     brocanth css -W       # again on each change
  */
 
 @import "tailwindcss";
@@ -2653,51 +2741,111 @@ const TAILWIND_CSS: &str = r#"/* The input of the CSS build. Never published.
 /// about an asset rather than about node. depoth's build script writes
 /// placeholders for the same reason.
 const SITE_CSS_PLACEHOLDER: &str = "/* Written by `brocanth create` so the \
-                                    first build works.\n   `mise run css` \
+                                    first build works.\n   `brocanth css` \
                                     replaces it with the real one. */\n";
 
-const BUILD_CSS_SH: &str = r##"#!/usr/bin/env bash
-#
-# Build assets/css/site.css from assets/css/_tailwind.css.
-#
-#   scripts/build-css.sh            once, minified
-#   scripts/build-css.sh --watch    again on each change
-#
-# Runs the Tailwind CLI out of node_modules and does not fall back to `npx`,
-# because npx downloads a package when the local one is absent and that hides
-# the real fault: nobody ran `npm install`.
+/// `src/commands/css.rs`: the CSS build, as a subcommand of this project.
+///
+/// A shell script was the obvious thing and the wrong one. The project
+/// already has a command line whose subcommands register themselves at link
+/// time, so the build belongs there: it gets `--help` for free, it is found
+/// by `brocanth --help` beside `serve`, and it is Rust that a reader can
+/// change without leaving the language the rest of the project is in.
+const CSS_RS: &str = r##"//! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
+//!
+//!     brocanth css          once, minified
+//!     brocanth css -W       again on each change
+//!
+//! Ordinary project code, like `serve`: rename it, give it more flags, or
+//! delete it. It is here rather than in a shell script because this project
+//! already has a command line, and a second way to run things is a second
+//! thing to keep in step.
+//!
+//! The Tailwind CLI comes out of `node_modules` and there is no fallback to
+//! `npx`. A fallback downloads some other version and hides the one fact
+//! worth knowing, which is that nobody ran `npm install`.
 
-set -euo pipefail
+use std::path::Path;
+use std::process::Command as Child;
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
-INPUT="assets/css/_tailwind.css"
-OUTPUT="assets/css/site.css"
-CLI="node_modules/.bin/tailwindcss"
+/// Build the stylesheet from the Tailwind input.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Css {
+    /// Rebuild on each change instead of once.
+    #[arg(short = 'W', long)]
+    pub watch: bool,
+}
 
-if [ ! -x "$CLI" ]; then
-  echo "error: the Tailwind CLI is absent at $ROOT/$CLI" >&2
-  echo "       run 'npm install' in $ROOT first." >&2
-  exit 1
-fi
+const INPUT: &str = "assets/css/_tailwind.css";
+const OUTPUT: &str = "assets/css/site.css";
+const CLI: &str = "node_modules/.bin/tailwindcss";
 
-if [ "${1:-}" = "--watch" ]; then
-  exec "$CLI" --input "$INPUT" --output "$OUTPUT" --watch
-fi
+impl Command for Css {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        // The project root and not the working directory: `brocanth css`
+        // runs from wherever you happen to be, and every path below is
+        // written relative to the project.
+        let root = ctx.root();
+        let cli = root.join(CLI);
+        if !cli.is_file() {
+            anyhow::bail!(
+                "the Tailwind CLI is absent at {}\n       run `npm install` in {} first",
+                cli.display(),
+                root.display()
+            );
+        }
 
-"$CLI" --input "$INPUT" --output "$OUTPUT" --minify
+        let mut child = Child::new(&cli);
+        child
+            .current_dir(root)
+            .args(["--input", INPUT, "--output", OUTPUT]);
+        if self.watch {
+            child.arg("--watch");
+        } else {
+            child.arg("--minify");
+        }
 
-if [ ! -s "$OUTPUT" ]; then
-  echo "error: the build wrote no CSS to $ROOT/$OUTPUT" >&2
-  exit 1
-fi
+        let status = child.status()?;
+        if !status.success() {
+            // No message beyond this: the CLI has already written its own
+            // on the stderr this process inherited.
+            anyhow::bail!("the Tailwind CLI failed");
+        }
 
-# The stylesheet is embedded at compile time, so a new one is a new binary.
-# Touching the module that embeds it is what makes cargo notice.
-touch src/assets.rs
+        // `--watch` only ever returns when it was interrupted, and the
+        // output it leaves behind is whatever the last change produced.
+        // Checking it, or touching the module below, would both be about a
+        // build that is over.
+        if self.watch {
+            return Ok(());
+        }
 
-echo "built $OUTPUT ($(wc -c < "$OUTPUT" | tr -d ' ') bytes)"
+        let written = root.join(OUTPUT);
+        let bytes = std::fs::metadata(&written)?.len();
+        if bytes == 0 {
+            anyhow::bail!("the build wrote no CSS to {}", written.display());
+        }
+
+        touch(&root.join("src/assets.rs"))?;
+        println!("built {OUTPUT} ({bytes} bytes)");
+        Ok(())
+    }
+}
+
+/// Make cargo notice a stylesheet it has already compiled in.
+///
+/// The CSS is embedded at compile time, so a new one is a new binary, and
+/// nothing rebuilds until the module that embeds it looks newer than the
+/// artefact. Rewriting its own bytes is the portable way to say so: there is
+/// no `utimes` in `std`, and a dependency for one call is not worth it.
+fn touch(path: &Path) -> anyhow::Result<()> {
+    let same = std::fs::read(path)?;
+    std::fs::write(path, same)?;
+    Ok(())
+}
 "##;
 
 fn package_json(a: &Answers) -> String {
@@ -2706,11 +2854,7 @@ fn package_json(a: &Answers) -> String {
   "name": {name:?},
   "version": "0.0.0",
   "private": true,
-  "description": "The CSS build. Nothing in the Rust binary needs node; this does.",
-  "scripts": {{
-    "css": "bash scripts/build-css.sh",
-    "css:watch": "bash scripts/build-css.sh --watch"
-  }},
+  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
   "devDependencies": {{
     "@tailwindcss/cli": "^4.1.14"
   }}
@@ -2800,9 +2944,15 @@ mod tests {
             // branch of both is here.
             ("realtime", vec!["realtime"]),
             ("rsx", vec!["rsx"]),
-            ("rsx-tailwind", vec!["rsx", "rsx-tailwind"]),
+            // `commands` and not because this shape is about a command
+            // line: the CSS build is a subcommand, so tailwind cannot be
+            // written without one. `rsx-tailwind` declares it.
+            ("rsx-tailwind", vec!["rsx", "rsx-tailwind", "commands"]),
             ("rsx-htmx", vec!["rsx", "rsx-htmx"]),
-            ("rsx-tailwind-htmx", vec!["rsx", "rsx-tailwind", "rsx-htmx"]),
+            (
+                "rsx-tailwind-htmx",
+                vec!["rsx", "rsx-tailwind", "rsx-htmx", "commands"],
+            ),
         ]
     }
 
@@ -3424,6 +3574,23 @@ mod tests {
     }
 
     #[test]
+    fn a_pick_that_cannot_stand_alone_names_what_it_needs() {
+        // `rsx-tailwind` writes `src/commands/css.rs`, so a project with no
+        // command line has nowhere to put it. The flat command line has to
+        // say that rather than write a project that does not compile.
+        let bad = unmet(&["rsx", "rsx-tailwind"]).expect_err("tailwind needs a command line");
+        let text = format!("{bad:?}");
+        assert!(text.contains("rsx-tailwind"), "{text}");
+        assert!(text.contains("commands"), "{text}");
+
+        unmet(&["rsx", "rsx-tailwind", "commands"]).expect("together they are fine");
+        unmet(&DEFAULT).expect("the default shape stands on its own");
+        for (name, picks) in shapes() {
+            unmet(&picks).unwrap_or_else(|_| panic!("the `{name}` shape is not a project"));
+        }
+    }
+
+    #[test]
     fn every_generated_toml_line_starts_in_the_first_column() {
         // A stray indent in an assembled string is valid TOML and still
         // wrong: the reader cannot tell a continuation from a mistake.
@@ -3462,7 +3629,10 @@ mod tests {
             if about(key).blocked.is_none() {
                 continue;
             }
-            assert!(!core.contains(key), "{key} is in the manifest's absent list");
+            assert!(
+                !core.contains(key),
+                "{key} is in the manifest's absent list"
+            );
             assert!(!brief.contains(key), "{key} is in the brief's absent list");
         }
     }

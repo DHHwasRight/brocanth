@@ -150,6 +150,28 @@ mod tests {
     }
 
     #[test]
+    fn a_requirement_names_a_module_that_exists_and_says_what_breaks() {
+        for module in ALL {
+            let m = module.manifest();
+            for (need, why) in &m.needs {
+                assert!(
+                    find(need).is_some(),
+                    "`{}` needs `{need}`, which no module declares",
+                    m.key
+                );
+                assert_ne!(*need, m.key, "`{}` needs itself", m.key);
+                // It is printed to whoever named this choice alone, so it
+                // has to say what breaks rather than restate the arrow.
+                assert!(
+                    !why.is_empty(),
+                    "`{}` needs `{need}` and does not say why",
+                    m.key
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_module_nobody_can_choose_says_why_on_its_own_row() {
         for module in ALL {
             let m = module.manifest();

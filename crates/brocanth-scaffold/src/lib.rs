@@ -100,6 +100,27 @@ pub struct Manifest {
     /// otherwise depend on the order of the array in the CLI, which is a
     /// thing nobody should have to know.
     pub after: Vec<&'static str>,
+    /// Modules this one cannot be written without.
+    ///
+    /// The third relation, and not either of the other two. [`after`] is
+    /// order between two modules that were both chosen. [`parent`] is one
+    /// choice drawn inside another on a screen. This one is a requirement:
+    /// `rsx-tailwind` writes a subcommand, and a project with no command
+    /// line has nowhere to put it.
+    ///
+    /// The flags refuse a pick whose needs are missing, and name the fix.
+    /// The chooser ticks what a tick requires, and unticks what an untick
+    /// leaves without. So neither route can produce a project that does not
+    /// compile.
+    ///
+    /// Each entry carries its own reason, because it is a different
+    /// question from [`because`] -- that one says why a choice sits inside
+    /// another on a screen, this one says what breaks without it.
+    ///
+    /// [`after`]: Manifest::after
+    /// [`parent`]: Manifest::parent
+    /// [`because`]: Manifest::because
+    pub needs: Vec<(&'static str, &'static str)>,
     /// What this choice puts in the generated project's dependency tree.
     pub crates: Vec<Dep>,
     /// Why this choice is part of its parent, in one sentence, for the
@@ -134,6 +155,7 @@ impl Manifest {
             parent: None,
             on_with_parent: false,
             after: Vec::new(),
+            needs: Vec::new(),
             crates: Vec::new(),
             because: "",
             blocked: None,
@@ -164,6 +186,21 @@ impl Manifest {
 
     /// Contribute after another module, wherever both write.
     pub fn after(mut self, key: &'static str) -> Self {
+        self.after.push(key);
+        self
+    }
+
+    /// Refuse to be written without another module, and contribute after it.
+    ///
+    /// `why` is printed to whoever named this choice alone, so it says what
+    /// breaks: not "it depends on commands" but what this module writes
+    /// that a project without one has nowhere to put.
+    ///
+    /// Requiring implies ordering: a module that cannot exist without
+    /// another writes into whatever that one put there, so declaring both
+    /// separately would only let them disagree.
+    pub fn needs(mut self, key: &'static str, why: &'static str) -> Self {
+        self.needs.push((key, why));
         self.after.push(key);
         self
     }

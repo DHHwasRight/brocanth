@@ -3,6 +3,7 @@
 name = "my-blog"
 version = "0.1.0"
 edition = "2021"
+default-run = "my-blog"
 
 # Exactly what was chosen when this application was scaffolded.
 #
@@ -20,6 +21,7 @@ edition = "2021"
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
+brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -36,7 +38,12 @@ channel = "1.98"
 # they are not compatible across patch releases.
 rust = "1.98"
 
-[tasks.run]
+# Named for what it does, and not `run`: `run` is one of mise's own
+# subcommands, so a task called that is only reachable as `mise run run`.
+# The alias keeps a bare `mise run` working, because mise runs the task
+# called `default` when it is given no name.
+[tasks.serve]
+alias = ["default"]
 run = "cargo run"
 
 [tasks.test]
@@ -44,32 +51,29 @@ run = "cargo test"
 
 [tasks.css]
 description = "build assets/css/site.css from _tailwind.css"
-run = "bash scripts/build-css.sh"
+run = "cargo run -- css"
 
 [tasks."css:watch"]
 description = "the same, again on each change"
-run = "bash scripts/build-css.sh --watch"
+run = "cargo run -- css --watch"
 ===== src/main.rs =====
 //! My Blog -- a brocanth application.
 //!
-//! No command line was asked for, so this binary does one thing. Everything it
-//! contains is in `src/app.rs`; `brocanth create --with commands` turns this
-//! into a command line with `serve` as one of its commands.
+//! This binary is the project's command line. `serve` is the one command the
+//! scaffold wrote; the rest are yours. A struct with `#[cmd]` under
+//! `src/commands/` is a subcommand, registered at link time, with no list to
+//! add it to.
+//!
+//! The wiring lives in `src/app.rs`, so `serve` and anything else that needs
+//! the router read the same thing.
 
 mod app;
 mod assets;
+mod commands;
 mod pages;
 
-use std::process::ExitCode;
-
-fn main() -> ExitCode {
-    match app::serve("127.0.0.1:3000") {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("error: {message}");
-            ExitCode::FAILURE
-        }
-    }
+fn main() -> brocanth_command::anyhow::Result<()> {
+    brocanth_command::main(brocanth_command::Context::boot()?)
 }
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
@@ -189,13 +193,22 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
-    let app = Arc::new(build()?);
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+
+    // The runtime first, and the application inside it. A plugin
+    // that opens a connection pool does it in `before_start`,
+    // where the hook is synchronous and connecting is not, so it
+    // reaches for the current runtime handle and blocks on a
+    // scoped thread. Building the application first would leave
+    // it with no handle to reach for.
+    let app = {
+        let _guard = runtime.enter();
+        Arc::new(build()?)
+    };
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
 
     runtime.block_on(async move {
         let server = brocanth_server::Server::bind(addr)
@@ -839,8 +852,8 @@ brocanth_assets::assets!("assets", "public");
  * and that `assets!` must not publish on its own. The build reads this file
  * and writes assets/css/site.css, which is the one that ships:
  *
- *     mise run css          # once, minified
- *     mise run css:watch    # again on each change
+ *     brocanth css          # once, minified
+ *     brocanth css -W       # again on each change
  */
 
 @import "tailwindcss";
@@ -860,63 +873,149 @@ brocanth_assets::assets!("assets", "public");
 @source "../../src/**/*.rs";
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
-   `mise run css` replaces it with the real one. */
-===== scripts/build-css.sh =====
-#!/usr/bin/env bash
-#
-# Build assets/css/site.css from assets/css/_tailwind.css.
-#
-#   scripts/build-css.sh            once, minified
-#   scripts/build-css.sh --watch    again on each change
-#
-# Runs the Tailwind CLI out of node_modules and does not fall back to `npx`,
-# because npx downloads a package when the local one is absent and that hides
-# the real fault: nobody ran `npm install`.
-
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
-
-INPUT="assets/css/_tailwind.css"
-OUTPUT="assets/css/site.css"
-CLI="node_modules/.bin/tailwindcss"
-
-if [ ! -x "$CLI" ]; then
-  echo "error: the Tailwind CLI is absent at $ROOT/$CLI" >&2
-  echo "       run 'npm install' in $ROOT first." >&2
-  exit 1
-fi
-
-if [ "${1:-}" = "--watch" ]; then
-  exec "$CLI" --input "$INPUT" --output "$OUTPUT" --watch
-fi
-
-"$CLI" --input "$INPUT" --output "$OUTPUT" --minify
-
-if [ ! -s "$OUTPUT" ]; then
-  echo "error: the build wrote no CSS to $ROOT/$OUTPUT" >&2
-  exit 1
-fi
-
-# The stylesheet is embedded at compile time, so a new one is a new binary.
-# Touching the module that embeds it is what makes cargo notice.
-touch src/assets.rs
-
-echo "built $OUTPUT ($(wc -c < "$OUTPUT" | tr -d ' ') bytes)"
+   `brocanth css` replaces it with the real one. */
 ===== package.json =====
 {
   "name": "my-blog",
   "version": "0.0.0",
   "private": true,
-  "description": "The CSS build. Nothing in the Rust binary needs node; this does.",
-  "scripts": {
-    "css": "bash scripts/build-css.sh",
-    "css:watch": "bash scripts/build-css.sh --watch"
-  },
+  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.14"
   }
+}
+===== brocanth.toml =====
+[project]
+name = "my-blog"
+===== src/commands/mod.rs =====
+//! Every command in this project.
+//!
+//! The `mod` lines are the whole of it. A command registers itself through a
+//! link-time slice, so adding one is a file and a `mod`, and there is no list
+//! to keep in step.
+//!
+//! `serve` arrived with the scaffold and is ordinary code here: rename it,
+//! give it flags, or delete it. The framework does not own this command line.
+
+pub mod css;
+pub mod serve;
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+===== src/commands/css.rs =====
+//! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
+//!
+//!     brocanth css          once, minified
+//!     brocanth css -W       again on each change
+//!
+//! Ordinary project code, like `serve`: rename it, give it more flags, or
+//! delete it. It is here rather than in a shell script because this project
+//! already has a command line, and a second way to run things is a second
+//! thing to keep in step.
+//!
+//! The Tailwind CLI comes out of `node_modules` and there is no fallback to
+//! `npx`. A fallback downloads some other version and hides the one fact
+//! worth knowing, which is that nobody ran `npm install`.
+
+use std::path::Path;
+use std::process::Command as Child;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Build the stylesheet from the Tailwind input.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Css {
+    /// Rebuild on each change instead of once.
+    #[arg(short = 'W', long)]
+    pub watch: bool,
+}
+
+const INPUT: &str = "assets/css/_tailwind.css";
+const OUTPUT: &str = "assets/css/site.css";
+const CLI: &str = "node_modules/.bin/tailwindcss";
+
+impl Command for Css {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        // The project root and not the working directory: `brocanth css`
+        // runs from wherever you happen to be, and every path below is
+        // written relative to the project.
+        let root = ctx.root();
+        let cli = root.join(CLI);
+        if !cli.is_file() {
+            anyhow::bail!(
+                "the Tailwind CLI is absent at {}\n       run `npm install` in {} first",
+                cli.display(),
+                root.display()
+            );
+        }
+
+        let mut child = Child::new(&cli);
+        child
+            .current_dir(root)
+            .args(["--input", INPUT, "--output", OUTPUT]);
+        if self.watch {
+            child.arg("--watch");
+        } else {
+            child.arg("--minify");
+        }
+
+        let status = child.status()?;
+        if !status.success() {
+            // No message beyond this: the CLI has already written its own
+            // on the stderr this process inherited.
+            anyhow::bail!("the Tailwind CLI failed");
+        }
+
+        // `--watch` only ever returns when it was interrupted, and the
+        // output it leaves behind is whatever the last change produced.
+        // Checking it, or touching the module below, would both be about a
+        // build that is over.
+        if self.watch {
+            return Ok(());
+        }
+
+        let written = root.join(OUTPUT);
+        let bytes = std::fs::metadata(&written)?.len();
+        if bytes == 0 {
+            anyhow::bail!("the build wrote no CSS to {}", written.display());
+        }
+
+        touch(&root.join("src/assets.rs"))?;
+        println!("built {OUTPUT} ({bytes} bytes)");
+        Ok(())
+    }
+}
+
+/// Make cargo notice a stylesheet it has already compiled in.
+///
+/// The CSS is embedded at compile time, so a new one is a new binary, and
+/// nothing rebuilds until the module that embeds it looks newer than the
+/// artefact. Rewriting its own bytes is the portable way to say so: there is
+/// no `utimes` in `std`, and a dependency for one call is not worth it.
+fn touch(path: &Path) -> anyhow::Result<()> {
+    let same = std::fs::read(path)?;
+    std::fs::write(path, same)?;
+    Ok(())
 }
 ===== AGENTS.md =====
 # Working in My Blog
@@ -944,8 +1043,9 @@ request.
 - `core`  the router, the context, the plugin seams
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
+- `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `realtime`, `commands`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `realtime`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1056,6 +1156,21 @@ A basename starting with `_` is an input and is never published, which is what
 
 Both directories are embedded in the binary. **Adding a file where there was
 none does not rebuild anything**; run `touch src/assets.rs` after creating one.
+
+## Tasks
+
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
+`src/commands/`, plus a `mod` line. It becomes a subcommand automatically —
+registration happens at link time and there is no list to add it to.
+
+```
+brocanth --help      # lists this project's commands too
+brocanth serve
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
 
 ## House style
 

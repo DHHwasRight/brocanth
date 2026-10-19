@@ -573,10 +573,20 @@ reaches a handler and never costs a route.
 ```
 assets/css/_tailwind.css   the input; never published
 assets/css/site.css        the output, and what the layout links to
-scripts/build-css.sh       runs the CLI out of node_modules
+src/commands/css.rs        the build, as a subcommand of this project
 package.json               one dev dependency, @tailwindcss/cli
-mise.toml                  mise run css, and mise run css:watch
+mise.toml                  mise css, and mise css:watch
 ```
+
+The build is a command and not a shell script:
+
+```
+brocanth css          once, minified
+brocanth css -W       again on each change
+```
+
+`rsx-tailwind` therefore needs `commands`, and `brocanth create` says so
+rather than writing a project with nowhere to put the command.
 
 The globs are written out rather than left to Tailwind to find:
 
@@ -589,11 +599,11 @@ The globs are written out rather than left to Tailwind to find:
 string is not one it would look for either. An explicit glob states the
 contract.
 
-The build script ends with `touch src/assets.rs`, because a new stylesheet is
-a new binary: the CSS is embedded, so nothing changes until the crate
-rebuilds. The script runs the CLI from `node_modules` and does **not** fall
-back to `npx`. A fallback that downloads some other version hides the one
-thing worth knowing, which is that nobody ran `npm install`.
+The command rewrites `src/assets.rs` when it is done, because a new
+stylesheet is a new binary: the CSS is embedded, so nothing changes until the
+crate rebuilds. It runs the CLI from `node_modules` and does **not** fall back
+to `npx`. A fallback that downloads some other version hides the one thing
+worth knowing, which is that nobody ran `npm install`.
 
 ### `rsx-htmx`
 

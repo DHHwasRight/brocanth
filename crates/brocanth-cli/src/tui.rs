@@ -77,6 +77,12 @@ pub struct Choice {
     /// change is a row that looks broken, and the reason it will not change
     /// is off screen.
     pub under: Option<usize>,
+    /// Choices this one cannot be taken without, by index.
+    ///
+    /// Ticking this row ticks them, and unticking one of them unticks this
+    /// row. The screen may do that where a flag may not, because every row
+    /// it changed is visible and can be changed back.
+    pub needs: Vec<usize>,
     /// Why this choice cannot be ticked, for a choice that cannot.
     ///
     /// Drawn and not hidden, which is the opposite of what [`Choice::under`]
@@ -221,7 +227,27 @@ impl Model {
 
     fn toggle(&mut self) {
         match self.here() {
-            Row::Choice(i) => self.draft.choices[i].on = !self.draft.choices[i].on,
+            Row::Choice(i) => {
+                let on = !self.draft.choices[i].on;
+                self.draft.choices[i].on = on;
+                if on {
+                    // What this row needs comes on with it. One level deep,
+                    // like `shown`: nothing here requires something that
+                    // requires something else.
+                    for at in self.draft.choices[i].needs.clone() {
+                        self.draft.choices[at].on = true;
+                    }
+                } else {
+                    // And a row that needed this one goes off with it,
+                    // rather than staying ticked against something that is
+                    // not there any more.
+                    for at in 0..self.draft.choices.len() {
+                        if self.draft.choices[at].needs.contains(&i) {
+                            self.draft.choices[at].on = false;
+                        }
+                    }
+                }
+            }
             Row::Git => self.draft.git = !self.draft.git,
             _ => {}
         }
@@ -693,6 +719,7 @@ mod tests {
                         on: true,
                         under: None,
                         blocked: None,
+                        needs: Vec::new(),
                     },
                     Choice {
                         label: "model".into(),
@@ -700,6 +727,7 @@ mod tests {
                         on: false,
                         under: None,
                         blocked: None,
+                        needs: Vec::new(),
                     },
                 ],
                 git: false,
@@ -810,6 +838,11 @@ mod tests {
                         .parent
                         .and_then(|parent| keys.iter().position(|k| *k == parent)),
                     blocked: m.blocked.map(str::to_string),
+                    needs: m
+                        .needs
+                        .iter()
+                        .filter_map(|(need, _)| keys.iter().position(|k| k == need))
+                        .collect(),
                 }
             })
             .collect();

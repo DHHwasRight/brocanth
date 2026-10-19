@@ -34,7 +34,12 @@ channel = "1.98"
 # they are not compatible across patch releases.
 rust = "1.98"
 
-[tasks.run]
+# Named for what it does, and not `run`: `run` is one of mise's own
+# subcommands, so a task called that is only reachable as `mise run run`.
+# The alias keeps a bare `mise run` working, because mise runs the task
+# called `default` when it is given no name.
+[tasks.serve]
+alias = ["default"]
 run = "cargo run"
 
 [tasks.test]
@@ -163,13 +168,22 @@ fn sent(answered: Response) -> brocanth_server::Response {
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
-    let app = Arc::new(build()?);
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+
+    // The runtime first, and the application inside it. A plugin
+    // that opens a connection pool does it in `before_start`,
+    // where the hook is synchronous and connecting is not, so it
+    // reaches for the current runtime handle and blocks on a
+    // scoped thread. Building the application first would leave
+    // it with no handle to reach for.
+    let app = {
+        let _guard = runtime.enter();
+        Arc::new(build()?)
+    };
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
 
     runtime.block_on(async move {
         let server = brocanth_server::Server::bind(addr)
