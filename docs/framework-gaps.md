@@ -351,23 +351,32 @@ what was read.
 
 ### 2.1 The crates, and whether anything uses them
 
-| Crate | Source lines | Test files | Crates that depend on it | On the `create` menu |
+| Crate | Source lines | Tests | Crates that depend on it | On the `create` menu |
 |---|---:|---:|---:|---|
 | `brocanth` (core) | — | many | every plugin | n/a |
 | `brocanth-pages` | — | yes | generated projects | always |
-| `brocanth-model` | — | 4 | admin-model | `model` |
-| `brocanth-admin` | 5,842 | 9 | admin-model | **no** |
-| `brocanth-admin-model` | ~450 | 1 | — | **no** |
-| `brocanth-jobs` | ~7,000 | 5 | — | `jobs` |
+| `brocanth-model` | — | yes | admin-model | `model` |
+| `brocanth-admin` | 5,274 | 73 | admin-model | **no** |
+| `brocanth-admin-model` | 657 | 8 | — | **no** |
+| `brocanth-jobs` | ~7,000 | ~70 | — | `jobs` |
 | `brocanth-cache` | — | yes | — | `cache` |
-| `brocanth-realtime` | — | yes | — | `realtime` |
-| `brocanth-auth` | 8,875 | 12 | 2 | **no** |
-| `brocanth-openapi` | 5,873 | 1 | 1 | **no** |
-| `brocanth-schema` | 4,832 | 3 | **0** | **no** |
-| `brocanth-storage` | 4,384 | **0** | 2 | **no** |
-| `brocanth-policy` | 3,290 | 8 | 2 | **no** |
-| `brocanth-resource` | 2,167 | 7 | **0** | **no** |
-| `brocanth-events` | 846 | **0** | 2 | **no** |
+| `brocanth-realtime` | — | yes | events (as a sink) | `realtime` |
+| `brocanth-auth` | 8,875 | 146 | 2 | **no** |
+| `brocanth-openapi` | 5,873 | 72 | 1 | **no** |
+| `brocanth-schema` | 4,832 | 61 | **0** | **no** |
+| `brocanth-storage` | 2,944 | 70 | 2 | **no** |
+| `brocanth-policy` | 3,290 | 64 | 2 | **no** |
+| `brocanth-resource` | 2,167 | 61 | **0** | **no** |
+| `brocanth-events` | 846 | 14 | 2 | **no** |
+
+> **Corrected.** The first version of this table counted *files under
+> `tests/`* and reported two crates as having no tests at all. That measured
+> the wrong thing: a `#[cfg(test)] mod tests` inside `src/` is invisible to
+> it. `brocanth-storage` has a 1,440-line `src/tests.rs` wired at
+> `lib.rs:120`, and `brocanth-events` ends in a test module. The source-line
+> counts were wrong in the same direction — they included the test file while
+> the row claimed there was none. Both columns are now counted across `src/`
+> and `tests/`, with test lines excluded from the source count.
 
 Three findings in that table.
 
@@ -380,9 +389,10 @@ repository after the CLI.
 says it answers `docs/pocketbase-surface.md` §2, which makes it the PocketBase
 records API — written, and unreachable from any application.
 
-**Two crates with no tests at all.** `storage` writes files to disk and has
-no test file. `events` is the seam the model layer and realtime are both
-supposed to meet at, and has none either.
+**Everything is tested.** No capability crate here is short of tests. That is
+worth saying because the first version of this document claimed two of them
+had none, and the claim came from counting the wrong thing rather than from
+reading anything.
 
 **Nine of fifteen capability crates are not on the menu.** `brocanth create`
 offers logging, config, sessions, model, cache, jobs, realtime, commands and
@@ -420,7 +430,7 @@ means it is not yet a feature.
 | App registry, `startapp` (D17) | **yes, and further** | the module system plus `brocanth add` |
 | `manage.py` custom commands (D18) | **yes** | `brocanth-command`, `#[cmd]` registers at link time |
 | Cache framework (D19) | **partial** | key/value only; no per-view or fragment caching |
-| Signals (D20) | **partial** | `brocanth-events` exists, has no tests, and nothing subscribes |
+| Signals (D20) | **partial** | `brocanth-events` is tested and `brocanth-realtime` subscribes; `brocanth-model` publishes nothing |
 | Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
 | Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
 | Deployment checks that refuse to start (D23) | **partial** | a plugin's `configure` can refuse; no `check --deploy` |
@@ -489,12 +499,24 @@ feature, plus one line in the CLI's registry. `brocanth-cache`,
 the list. It is also the one place where parallel work collides: every module
 touches `create.rs`, `modules/mod.rs` and all ten golden files.
 
-### G4. `storage` and `events` have no tests
+### G4. The model layer publishes to nobody
 
-4,384 lines that write files to disk, and 846 lines that are the seam the
-model layer and realtime are both supposed to meet at. Neither has a test
-file. `events` additionally has no subscriber, so Django's signals (D20) are
-present as a type and absent as a behaviour.
+**This section replaces a wrong one.** It claimed `storage` and `events` had
+no tests. Both have plenty — 70 and 14 — and `brocanth-realtime` already
+implements `ChangeSink` for `Broker`, so Django's signals (D20) are present
+as a behaviour and not only as a type.
+
+The real gap is narrower and more useful. **`brocanth-model` holds no sink.**
+The publisher that PLAN.md §10 names — "the model layer publishes, realtime
+subscribes" — is the end that is not wired. The subscriber half works and is
+tested; a row written through the ORM reaches nothing.
+
+**Cost:** a sink on the model layer's write path, and a way for an
+application to put the broker in it. The receiving side needs no change.
+
+**Depends on:** nothing. It also decides whether `brocanth-events` ever
+deserves a scaffold module: today a module could only generate a sink with no
+publisher, which is why it has none.
 
 ### G5. `resource` and `schema` are wired to nothing
 
