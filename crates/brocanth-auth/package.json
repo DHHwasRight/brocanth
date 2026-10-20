@@ -1,0 +1,13 @@
+{
+  "name": "brocanth-auth-panel-style",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The CSS build for the panel's templates. Nothing an application needs: src/admin.css is committed.",
+  "scripts": {
+    "css": "tailwindcss --input style/panel.css --output src/admin.css --minify",
+    "css:watch": "tailwindcss --input style/panel.css --output src/admin.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14"
+  }
+}

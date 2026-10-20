@@ -29,11 +29,17 @@
 //! * **No colour.** A dump goes into a ticket, a log line and a pipe at least
 //!   as often as it goes to a terminal, and an escape sequence in any of those
 //!   is noise.
+//! * **No secrets.** A dump goes into a ticket, a log line and a pipe. Every
+//!   value passes [`Redaction`] first, and the `was ...` lines pass it too,
+//!   because a password that was overridden is still a password. See
+//!   [`crate::redact`] for the rule. [`Dump::showing_secrets`] turns it off,
+//!   and it is a line somebody has to write.
 
 use std::fmt;
 
 use crate::config::Config;
 use crate::plugin::SectionClaim;
+use crate::redact::Redaction;
 use crate::value::{Provenance, Value};
 use crate::CORE_SECTIONS;
 
@@ -45,6 +51,7 @@ pub struct Dump<'a> {
     pub(crate) config: &'a Config,
     pub(crate) claims: &'a [SectionClaim],
     pub(crate) history: bool,
+    pub(crate) redaction: Redaction,
 }
 
 /// What number a file has in the source table, so an origin can cite it.
@@ -64,6 +71,25 @@ impl Dump<'_> {
     #[must_use]
     pub fn without_history(mut self) -> Self {
         self.history = false;
+        self
+    }
+
+    /// Prints secrets.
+    ///
+    /// Off, and spelled out rather than reached by leaving an argument off: a
+    /// dump that prints a database password is a decision, and the line that
+    /// took it should be findable with `grep`.
+    #[must_use]
+    pub fn showing_secrets(mut self) -> Self {
+        self.redaction = Redaction::none();
+        self
+    }
+
+    /// A different rule, for an application whose own vocabulary the standard
+    /// one does not know.
+    #[must_use]
+    pub fn redacting(mut self, redaction: Redaction) -> Self {
+        self.redaction = redaction;
         self
     }
 }
@@ -86,6 +112,7 @@ impl fmt::Display for Dump<'_> {
 
         let mut total = 0usize;
         let mut defaulted = 0usize;
+        let mut hidden = 0usize;
 
         for (name, section) in sections {
             writeln!(f, "  [{name}]{}", self.claim_note(name))?;
@@ -101,14 +128,18 @@ impl fmt::Display for Dump<'_> {
                     defaulted += 1;
                 }
                 let marker = if is_default { ' ' } else { '*' };
-                let shown = value.display();
+                let shown = self.redaction.show(&path, value);
+                if shown.is_redacted() {
+                    hidden += 1;
+                }
                 writeln!(
                     f,
-                    "  {marker} {path:<KEY_COLUMN$} = {shown:<VALUE_COLUMN$}  {}",
+                    "  {marker} {path:<KEY_COLUMN$} = {:<VALUE_COLUMN$}  {}",
+                    shown.text,
                     self.origin(value.provenance())
                 )?;
                 if self.history {
-                    self.history_lines(f, value)?;
+                    self.history_lines(f, &path, value)?;
                 }
             }
             writeln!(f)?;
@@ -117,8 +148,19 @@ impl fmt::Display for Dump<'_> {
         let overridden = total - defaulted;
         writeln!(
             f,
-            "  {total} keys · {defaulted} at their default · {overridden} overridden (marked *)"
-        )
+            "  {total} keys · {defaulted} at their default · {overridden} overridden (marked *){}",
+            match hidden {
+                0 => String::new(),
+                n => format!(" · {n} hidden"),
+            }
+        )?;
+        if hidden > 0 {
+            writeln!(
+                f,
+                "  a hidden value is a key named like a secret, or a URL with a password in it"
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -174,9 +216,12 @@ impl Dump<'_> {
     /// One line per layer this value beat, in the same columns as the key
     /// above it, so the value column reads `8080`, `was 3000`, `was 3000`
     /// straight down and the origin column says who set each one.
-    fn history_lines(&self, f: &mut fmt::Formatter<'_>, value: &Value) -> fmt::Result {
+    fn history_lines(&self, f: &mut fmt::Formatter<'_>, path: &str, value: &Value) -> fmt::Result {
         for earlier in value.shadowed() {
-            let was = format!("was {}", earlier.display());
+            // The same rule on the way down. A password that was overridden
+            // is still a password, and the layer it came from is exactly the
+            // file somebody is about to go and read.
+            let was = format!("was {}", self.redaction.show(path, earlier).text);
             writeln!(
                 f,
                 "    {:<KEY_COLUMN$}   {was:<VALUE_COLUMN$}  {}",
