@@ -70,6 +70,27 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_cache::scaffold::Cache,
     // The queue, from the crate that is the queue.
     &brocanth_jobs::scaffold::Jobs,
+    // Accounts, from the crate that is the accounts. The local path only:
+    // there is one `AuthStore` in the workspace and it is a `HashMap`, and
+    // a provider cannot be a second choice until a crate can appear in two
+    // modules' dependency lists.
+    &brocanth_auth::scaffold::Auth,
+    // The rule algebra. `after("model")` and not `needs`: a condition
+    // inverts into a broadcast key as well as a `WHERE`, so requiring an
+    // ORM would refuse a project that broadcasts and stores nothing.
+    &brocanth_policy::scaffold::Policy,
+    // Uploads on a local disk. The first module to write a `.gitignore`
+    // line, which is also why that slot is now read.
+    &brocanth_storage::scaffold::FileStorage,
+    // The document, served at `/openapi.json` as a page, because a route
+    // here is a file.
+    &brocanth_openapi::scaffold::OpenApi,
+    // The schema vocabulary. Keyed `validation`, because what a project
+    // gets is a `Valid<T>` rather than a schema library.
+    &brocanth_schema::scaffold::Validation,
+    // Listed and not available: five typed CRUD routes that arrive as a
+    // `RouteSource`, and a generated `app.rs` mounts no bundle.
+    &brocanth_resource::scaffold::Records,
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,

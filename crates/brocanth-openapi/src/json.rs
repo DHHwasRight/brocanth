@@ -152,9 +152,8 @@ impl PartialEq for Json {
             (Json::Array(a), Json::Array(b)) => a == b,
             (Json::Object(a), Json::Object(b)) => {
                 a.len() == b.len()
-                    && a.iter().all(|(key, value)| {
-                        b.iter().any(|(k, v)| k == key && v == value)
-                    })
+                    && a.iter()
+                        .all(|(key, value)| b.iter().any(|(k, v)| k == key && v == value))
             }
             _ => false,
         }
@@ -690,8 +689,7 @@ impl Parser<'_> {
             return Err(self.error("short unicode escape"));
         }
         let slice = &self.text[self.at..self.at + 4];
-        let value =
-            u32::from_str_radix(slice, 16).map_err(|_| self.error("bad unicode escape"))?;
+        let value = u32::from_str_radix(slice, 16).map_err(|_| self.error("bad unicode escape"))?;
         self.at += 4;
         Ok(value)
     }
@@ -784,7 +782,10 @@ mod tests {
         assert_eq!(yaml_string("/users/{id}"), "\"/users/{id}\"");
         assert_eq!(yaml_string("200"), "\"200\"");
         assert_eq!(yaml_string("true"), "\"true\"");
-        assert_eq!(yaml_string("#/components/schemas/Post"), "\"#/components/schemas/Post\"");
+        assert_eq!(
+            yaml_string("#/components/schemas/Post"),
+            "\"#/components/schemas/Post\""
+        );
     }
 
     #[test]

@@ -119,7 +119,9 @@ fn router() -> Router<&'static str> {
     routes.route("/", Verb::Get, "home").unwrap();
     routes.route("/posts", Verb::Get, "posts#index").unwrap();
     routes.route("/posts", Verb::Post, "posts#create").unwrap();
-    routes.route("/posts/{id}", Verb::Get, "posts#show").unwrap();
+    routes
+        .route("/posts/{id}", Verb::Get, "posts#show")
+        .unwrap();
     routes
         .route("/posts/{id}", Verb::Patch, "posts#update")
         .unwrap();
@@ -132,7 +134,9 @@ fn router() -> Router<&'static str> {
     routes
         .route("/posts/{id}/comments", Verb::Post, "comments#create")
         .unwrap();
-    routes.route("/docs/{*rest}", Verb::Get, "docs#show").unwrap();
+    routes
+        .route("/docs/{*rest}", Verb::Get, "docs#show")
+        .unwrap();
     routes.route("/openapi.json", Verb::Get, "openapi").unwrap();
     routes.route("/openapi.yaml", Verb::Get, "openapi").unwrap();
     routes.build().unwrap()

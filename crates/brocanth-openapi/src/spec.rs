@@ -698,10 +698,9 @@ impl SpecBuilder {
             .map(|entry| openapi_path(entry.template.pattern()))
             .collect();
         for (path, verb) in self.annotations.keys() {
-            let exists = self
-                .routes
-                .iter()
-                .any(|entry| entry.verb == *verb && openapi_path(entry.template.pattern()) == *path);
+            let exists = self.routes.iter().any(|entry| {
+                entry.verb == *verb && openapi_path(entry.template.pattern()) == *path
+            });
             if !exists {
                 return Err(SpecError::UnknownRoute {
                     verb: *verb,
@@ -838,9 +837,9 @@ impl SpecBuilder {
                 None => (
                     Schema::string(),
                     match spec.kind() {
-                        ParamKind::CatchAll => Some(
-                            "Matches the rest of the path and may contain `/`.".to_owned(),
-                        ),
+                        ParamKind::CatchAll => {
+                            Some("Matches the rest of the path and may contain `/`.".to_owned())
+                        }
                         ParamKind::Dynamic => None,
                     },
                 ),
@@ -1042,7 +1041,11 @@ mod tests {
             ("/", Verb::Get, "get_root"),
             ("/posts", Verb::Get, "get_posts"),
             ("/posts/{id}", Verb::Delete, "delete_posts_by_id"),
-            ("/posts/{id}/comments", Verb::Post, "post_posts_by_id_comments"),
+            (
+                "/posts/{id}/comments",
+                Verb::Post,
+                "post_posts_by_id_comments",
+            ),
             ("/docs/{*rest}", Verb::Get, "get_docs_by_rest"),
         ];
         for (pattern, verb, expected) in cases {

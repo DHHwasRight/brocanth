@@ -651,7 +651,10 @@ impl Schema {
 
     fn type_json(&self, name: &str) -> Json {
         if self.nullable {
-            Json::Array(vec![Json::Str(name.to_owned()), Json::Str("null".to_owned())])
+            Json::Array(vec![
+                Json::Str(name.to_owned()),
+                Json::Str("null".to_owned()),
+            ])
         } else {
             Json::Str(name.to_owned())
         }
@@ -790,7 +793,10 @@ mod tests {
         let json = Schema::reference("Post").description("the post").to_json();
         assert!(json.get("$ref").is_none());
         assert_eq!(json.get("allOf").unwrap().as_array().unwrap().len(), 1);
-        assert_eq!(json.get("description").and_then(Json::as_str), Some("the post"));
+        assert_eq!(
+            json.get("description").and_then(Json::as_str),
+            Some("the post")
+        );
     }
 
     #[test]

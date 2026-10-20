@@ -73,6 +73,10 @@ impl Module for OpenApi {
         // `src/pages`, and the last dot is the extension, so this file is
         // `/openapi.json` and renaming it moves the document.
         s.file("src/pages/openapi.json.rs", PAGE_RS);
+        // And the same document as YAML. Two files because two routes,
+        // and because a `yaml()` nothing called was a function the
+        // compiler warned about on a generated project's first build.
+        s.file("src/pages/openapi.yaml.rs", YAML_PAGE_RS);
         s.at(Slot::PluginsMod).line("pub mod openapi;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "openapi", "OpenApi"));
@@ -103,6 +107,34 @@ fn section(project: &Project) -> String {
 }
 
 /// `src/pages/openapi.json.rs`: the one route that serves the document.
+const YAML_PAGE_RS: &str = r#"//! `/openapi.yaml` -- the same document, in the other spelling.
+//!
+//! Two files and not one handler branching on `Accept`. A route here is a
+//! file, so two routes are two files, and a reader who wants only one of
+//! them deletes the other.
+//!
+//! YAML because a person reads this one. The JSON is what a generator
+//! consumes; this is what somebody opens to find out whether the endpoint
+//! they were promised exists.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/openapi.yaml`.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::openapi::yaml().ok_or_else(|| {
+        Error::internal("the openapi plugin is not registered, so there is no document to serve")
+    })?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            ("content-type".to_string(), "application/yaml".to_string()),
+            ("cache-control".to_string(), "no-cache".to_string()),
+        ],
+    ))
+}
+"#;
+
 const PAGE_RS: &str = r#"//! `/openapi.json` -- because the file is called `openapi.json.rs`.
 //!
 //! The route is the file name, as it is for every page: the last dot is the
@@ -207,8 +239,8 @@ pub fn json() -> Option<&'static str> {{
 
 /// The document as YAML, or `None` when this plugin was never registered.
 ///
-/// Nothing serves it. A `src/pages/openapi.yaml.rs` beside the JSON one,
-/// reading this instead, is the whole of what that takes.
+/// Served by `src/pages/openapi.yaml.rs`, which is the file beside the
+/// JSON one and reads this instead.
 pub fn yaml() -> Option<&'static str> {{
     RENDERED.get().map(|(_, yaml)| yaml.as_str())
 }}

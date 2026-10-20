@@ -914,9 +914,7 @@ impl Components {
             return Err(ComponentError::BadName { name });
         }
         match self.security_schemes.get(&name) {
-            Some(existing) if *existing != scheme => {
-                Err(ComponentError::SecurityConflict { name })
-            }
+            Some(existing) if *existing != scheme => Err(ComponentError::SecurityConflict { name }),
             Some(_) => Ok(()),
             None => {
                 self.security_schemes.insert(name, scheme);
@@ -1036,7 +1034,10 @@ impl Document {
     /// How many operations the document describes.
     #[must_use]
     pub fn operation_count(&self) -> usize {
-        self.paths.iter().map(|(_, item)| item.operations.len()).sum()
+        self.paths
+            .iter()
+            .map(|(_, item)| item.operations.len())
+            .sum()
     }
 
     /// The document as a value, ready to write.
@@ -1045,7 +1046,10 @@ impl Document {
         let mut obj = Json::object();
         obj.set("openapi", &self.openapi);
         obj.set("info", self.info.to_json());
-        obj.list("servers", self.servers.iter().map(Server::to_json).collect());
+        obj.list(
+            "servers",
+            self.servers.iter().map(Server::to_json).collect(),
+        );
         let mut paths = Json::object();
         for (path, item) in &self.paths {
             paths.set(path, item.to_json());
@@ -1185,7 +1189,10 @@ impl Document {
         }
 
         for name in self.components.schema_names() {
-            let schema = self.components.get_schema(name).expect("name came from the map");
+            let schema = self
+                .components
+                .get_schema(name)
+                .expect("name came from the map");
             schema.problems(&format!("components.schemas.{name}"), &mut problems);
             let mut found = Vec::new();
             schema.collect_references(&mut found);
@@ -1267,10 +1274,9 @@ impl Document {
                     ));
                 }
             }
-            parameter.schema.problems(
-                &format!("{at}.parameters.{}", parameter.name),
-                problems,
-            );
+            parameter
+                .schema
+                .problems(&format!("{at}.parameters.{}", parameter.name), problems);
             let mut found = Vec::new();
             parameter.schema.collect_references(&mut found);
             for reference in found {
@@ -1508,9 +1514,7 @@ mod tests {
         let mut components = Components::new();
         components.schema("Post", Schema::object()).unwrap();
         components.schema("Post", Schema::object()).unwrap();
-        let error = components
-            .schema("Post", Schema::string())
-            .unwrap_err();
+        let error = components.schema("Post", Schema::string()).unwrap_err();
         assert_eq!(
             error,
             ComponentError::SchemaConflict {

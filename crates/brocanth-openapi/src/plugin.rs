@@ -50,8 +50,8 @@
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
-use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth::plugin_context::NoContext;
+use brocanth::routing::{BuildError, RouterBuilder, Verb};
 
 use crate::document::Document;
 use crate::drift::{render, Format};

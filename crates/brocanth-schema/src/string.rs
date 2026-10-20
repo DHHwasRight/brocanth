@@ -158,8 +158,11 @@ impl Schema for StringSchema {
         if let Some(min) = self.node.min_length {
             if len < min {
                 issues.report(at, IssueCode::TooShort, |i| {
-                    i.expected(format!("at least {}", count(min, "character", "characters")))
-                        .received(count(len, "character", "characters"))
+                    i.expected(format!(
+                        "at least {}",
+                        count(min, "character", "characters")
+                    ))
+                    .received(count(len, "character", "characters"))
                 });
             }
         }
@@ -174,8 +177,11 @@ impl Schema for StringSchema {
         if let Some(exact) = self.node.exact_length {
             if len != exact {
                 issues.report(at, IssueCode::WrongLength, |i| {
-                    i.expected(format!("exactly {}", count(exact, "character", "characters")))
-                        .received(count(len, "character", "characters"))
+                    i.expected(format!(
+                        "exactly {}",
+                        count(exact, "character", "characters")
+                    ))
+                    .received(count(len, "character", "characters"))
                 });
             }
         }
@@ -280,11 +286,12 @@ fn is_email(value: &str) -> bool {
     if labels.len() < 2 {
         return false;
     }
-    labels.last().is_some_and(|tld| {
-        tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
-    }) && labels
-        .iter()
-        .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+    labels
+        .last()
+        .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 fn is_url(value: &str) -> bool {
@@ -318,8 +325,8 @@ fn is_uuid(value: &str) -> bool {
     let mut parts = value.split('-');
     for expected in groups {
         match parts.next() {
-            Some(part)
-                if part.len() == expected && part.chars().all(|c| c.is_ascii_hexdigit()) => {}
+            Some(part) if part.len() == expected && part.chars().all(|c| c.is_ascii_hexdigit()) => {
+            }
             _ => return false,
         }
     }
@@ -343,7 +350,9 @@ mod tests {
         for good in ["a@b.co", "first.last+tag@sub.example.com"] {
             assert!(schema.validate(good).is_ok(), "rejected {good}");
         }
-        for bad in ["", "a@b", "a@@b.co", "a b@c.co", "@b.co", "a@.co", "a@b..co"] {
+        for bad in [
+            "", "a@b", "a@@b.co", "a b@c.co", "@b.co", "a@.co", "a@b..co",
+        ] {
             assert!(schema.validate(bad).is_err(), "accepted {bad}");
         }
     }
@@ -362,7 +371,9 @@ mod tests {
     #[test]
     fn uuids_are_hyphenated_hex() {
         let schema = string().uuid();
-        assert!(schema.validate("3f2504e0-4f89-11d3-9a0c-0305e82c3301").is_ok());
+        assert!(schema
+            .validate("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+            .is_ok());
         assert!(schema.validate("3f2504e04f8911d39a0c0305e82c3301").is_err());
         assert!(schema
             .validate("3f2504e0-4f89-11d3-9a0c-0305e82c3301-x")

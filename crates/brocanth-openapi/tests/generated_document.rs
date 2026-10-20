@@ -18,7 +18,9 @@ fn blog_router() -> Router<&'static str> {
     routes.route("/", Verb::Get, "home").unwrap();
     routes.route("/posts", Verb::Get, "posts_index").unwrap();
     routes.route("/posts", Verb::Post, "posts_create").unwrap();
-    routes.route("/posts/{id}", Verb::Get, "posts_show").unwrap();
+    routes
+        .route("/posts/{id}", Verb::Get, "posts_show")
+        .unwrap();
     routes
         .route("/posts/{id}", Verb::Patch, "posts_update")
         .unwrap();
@@ -70,7 +72,11 @@ fn blog_document() -> Document {
         .describe("/posts", Verb::Get, |op| {
             op.summary("List posts")
                 .query_param("page", Schema::integer().minimum(1.0))
-                .json_response(200, "A page of posts", Schema::array(Schema::reference("Post")))
+                .json_response(
+                    200,
+                    "A page of posts",
+                    Schema::array(Schema::reference("Post")),
+                )
         })
         .describe("/posts", Verb::Post, |op| {
             op.summary("Create a post")
@@ -179,10 +185,7 @@ fn every_route_appears_exactly_once() {
             if verb == Verb::Head && allow.contains(Verb::Get) {
                 continue;
             }
-            expected.push((
-                brocanth_openapi::openapi_path(template.pattern()),
-                verb,
-            ));
+            expected.push((brocanth_openapi::openapi_path(template.pattern()), verb));
         }
     }
 
@@ -225,7 +228,11 @@ fn an_undescribed_route_still_produces_a_valid_operation() {
 #[test]
 fn an_implicit_head_is_left_out_unless_it_is_asked_for() {
     let document = blog_document();
-    assert!(document.path("/posts").unwrap().operation(Verb::Head).is_none());
+    assert!(document
+        .path("/posts")
+        .unwrap()
+        .operation(Verb::Head)
+        .is_none());
 
     let with_head = SpecBuilder::new("Blog", "1.0.0")
         .head_policy(HeadPolicy::Include)
@@ -575,10 +582,7 @@ fn drift_ignores_formatting_and_key_order() {
 
 #[test]
 fn drift_against_a_file_on_disk() {
-    let dir = std::env::temp_dir().join(format!(
-        "brocanth-openapi-drift-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("brocanth-openapi-drift-{}", std::process::id()));
     let path = dir.join("openapi.json");
     let document = blog_document();
 

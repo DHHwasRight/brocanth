@@ -166,6 +166,14 @@ use brocanth_schema::{{ReportStyle, Validate, ValidationConfig, ValidationPlugin
 /// the derive reads the field list from the struct, so there is no string to
 /// misspell.
 #[derive(Debug, Validate)]
+/// The shape a sign-up body has to have.
+///
+/// Allowed to be unconstructed: a handler is what builds one, and a
+/// handler cannot reach the per-request context yet — `Ctx` in
+/// `src/pages/mod.rs` has no extractor, so `Valid<SignUp>` has nowhere to
+/// be asked for. Delete this attribute with the first route that takes a
+/// body.
+#[allow(dead_code)]
 pub struct SignUp {{
     /// Three to thirty-two characters.
     #[validate(string(min_length = 3, max_length = 32))]

@@ -16,8 +16,9 @@ use std::path::Path;
 
 #[test]
 fn every_dependency_is_optional() {
-    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("this crate has a manifest");
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("this crate has a manifest");
 
     let dependencies = section(&manifest, "[dependencies]");
     assert!(
@@ -36,8 +37,9 @@ fn every_dependency_is_optional() {
 
 #[test]
 fn there_are_no_dev_dependencies_either() {
-    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("this crate has a manifest");
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("this crate has a manifest");
     assert!(
         !manifest.contains("[dev-dependencies]"),
         "a dev-dependency does not reach a consumer's binary, but it does appear in \

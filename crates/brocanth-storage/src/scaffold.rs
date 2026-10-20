@@ -64,6 +64,19 @@ impl Module for FileStorage {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/storage/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod storage;");
+        // What makes the store a thing the project reads rather than a
+        // field nothing touches. A generated application that warns on its
+        // first build is a bad first minute, and §4.8 says a scaffold that
+        // produces code you would not write by hand is a scaffold whose
+        // framework is wrong.
+        s.at(Slot::AppContext).block(
+            "    let files: &plugins::storage::FileStore = cx.extract();\n\
+            \x20   eprintln!(\n\
+            \x20       \"storage: ready, download links last {}s\",\n\
+            \x20       files.tokens.ttl()\n\
+            \x20   );"
+                .to_string(),
+        );
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "storage", "Files"));
         // The one module so far that writes files into the working tree, so
@@ -215,6 +228,15 @@ impl Default for Settings {{
 pub struct FileStore {{
     /// The store, behind the trait rather than as a `LocalDisk`, so swapping
     /// the backend is a change in this file and nowhere else.
+    ///
+    /// Allowed to be unread, and only until one thing changes. Every
+    /// `Storage` method is `async` and the startup line below is not, so
+    /// nothing the generator writes can touch this field — a handler is
+    /// what uses it, and a handler cannot reach the per-request context
+    /// yet, because `Ctx` in `src/pages/mod.rs` has no extractor. Delete
+    /// this attribute the moment you write the first upload route; it is
+    /// a note about today, not about the field.
+    #[allow(dead_code)]
     pub store: Arc<dyn Storage>,
     /// Mints and verifies the short-lived tokens a download route checks.
     pub tokens: FileTokens,

@@ -632,9 +632,10 @@ mod tests {
 
     #[test]
     fn a_union_is_any_of_rather_than_one_of() {
-        let node = SchemaNode::Union(vec![SchemaNode::Boolean, SchemaNode::Integer(
-            IntegerNode::default(),
-        )]);
+        let node = SchemaNode::Union(vec![
+            SchemaNode::Boolean,
+            SchemaNode::Integer(IntegerNode::default()),
+        ]);
         let json = schema_for(&node).to_json();
         assert!(json.get("oneOf").is_none());
         assert_eq!(json.get("anyOf").unwrap().as_array().unwrap().len(), 2);
@@ -646,7 +647,10 @@ mod tests {
             inner: Box::new(SchemaNode::Integer(IntegerNode::default())),
             value: LiteralValue::Integer(25),
         };
-        assert_eq!(schema_for(&node).to_json().get("default"), Some(&Json::Int(25)));
+        assert_eq!(
+            schema_for(&node).to_json().get("default"),
+            Some(&Json::Int(25))
+        );
     }
 
     #[test]

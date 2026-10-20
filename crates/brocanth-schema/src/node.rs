@@ -134,10 +134,7 @@ impl SchemaNode {
     /// value may be null. That distinction is the whole reason both exist.
     #[must_use]
     pub fn is_optional(&self) -> bool {
-        matches!(
-            self,
-            SchemaNode::Optional(_) | SchemaNode::Default { .. }
-        )
+        matches!(self, SchemaNode::Optional(_) | SchemaNode::Default { .. })
     }
 
     /// Strip [`SchemaNode::Optional`], [`SchemaNode::Nullable`],

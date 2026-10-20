@@ -257,11 +257,7 @@ pub enum DriftError {
 ///
 /// [`DriftError::Drifted`] when the two disagree, and
 /// [`DriftError::Unparseable`] when the committed JSON does not parse.
-pub fn check(
-    document: &Document,
-    committed: &str,
-    format: Format,
-) -> Result<(), DriftError> {
+pub fn check(document: &Document, committed: &str, format: Format) -> Result<(), DriftError> {
     check_located(document, committed, format, None)
 }
 

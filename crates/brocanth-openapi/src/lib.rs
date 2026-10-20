@@ -140,9 +140,7 @@ pub use crate::drift::{
 };
 pub use crate::json::{Json, JsonError};
 pub use crate::plugin::{document_of, OpenApiConfig, OpenApiPlugin, SharedDocument};
-pub use crate::schema::{
-    Additional, NamedSchema, Schema, SchemaKind, SchemaSource, SchemaType,
-};
+pub use crate::schema::{Additional, NamedSchema, Schema, SchemaKind, SchemaSource, SchemaType};
 pub use crate::spec::{
     check_path_parameters, openapi_path, operation_id_for, DescribeOperation, HeadPolicy,
     OperationIdStyle, OperationSpec, SpecBuilder, SpecError,

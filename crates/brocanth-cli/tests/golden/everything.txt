@@ -17,6 +17,11 @@ brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
@@ -28,6 +33,8 @@ serde = { version = "1", features = ["derive"] }  # the config plugin reads type
 ===== .gitignore =====
 /target
 /node_modules
+/var/uploads
+
 ===== rust-toolchain.toml =====
 [toolchain]
 channel = "1.98"
@@ -971,12 +978,17 @@ pub fn Link(to: &str, children: Element) -> Element {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
+pub mod auth;
 pub mod cache;
 pub mod jobs;
 pub mod logging;
 pub mod model;
+pub mod openapi;
+pub mod policy;
 pub mod realtime;
 pub mod sessions;
+pub mod storage;
+pub mod validation;
 
 use brocanth::routing::Next;
 
@@ -1020,6 +1032,21 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
         let builder = builder
+            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::policy::Policies>("policy")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::storage::Files>("storage")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::openapi::OpenApi>("openapi")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::validation::Validation>("validation")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::realtime::Realtime>("realtime")
             .map_err(|e| e.to_string())?;
         builder
@@ -1043,6 +1070,21 @@ macro_rules! announce {
         eprintln!("session cookie: {}", session.cookie);
         let db: &crate::plugins::model::Db = cx.extract();
         eprintln!("database: {}", db.url);
+        let auth: &crate::plugins::auth::Services = cx.extract();
+        eprintln!(
+            "auth: session cookie {}, {} provider(s)",
+            auth.sessions().config().cookie_name,
+            auth.providers().len()
+        );
+        let rules: &crate::plugins::policy::Rules = cx.extract();
+        eprintln!("policy: compiling for {:?}", rules.dialect);
+        let files: &plugins::storage::FileStore = cx.extract();
+        eprintln!(
+            "storage: ready, download links last {}s",
+            files.tokens.ttl()
+        );
+        let checks: &brocanth_schema::Validation = cx.extract();
+        eprintln!("validation: reports as {:?}", checks.report_style());
         let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
         eprintln!(
             "realtime: up to {} clients",
@@ -1066,7 +1108,7 @@ pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Resp
     }
 }
 
-// brocanth-digest: b58f1c05b40a7c62
+// brocanth-digest: 367606dfafee35b3
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1108,6 +1150,63 @@ migrate = true
 worker = true
 queues = ["default"]
 concurrency = 5
+
+[auth]
+# The *name* of the variable that holds the session signing key, not the
+# key. 32 bytes, base64url. `brocanth` will not invent one: a key minted at
+# startup logs every session out on each restart and differs between the
+# instances of a fleet, so a missing key stops the application instead.
+#
+#   export MY_BLOG_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
+signing_key_env = "MY_BLOG_SESSION_KEY"
+# Development, over plain HTTP on localhost. In production this is
+# "__Host-session" with secure = true, and the two move together: a
+# __Host- cookie that is not Secure is a cookie no browser stores.
+cookie_name = "session"
+secure = false
+# Eight hours unattended, thirty days total. They answer different
+# questions: idle bounds a browser nobody is sitting at, absolute bounds a
+# stolen cookie that is being kept warm.
+idle_timeout = 28800
+absolute_timeout = 2592000
+
+[policy]
+# This follows `[model] url`, which the scaffold pointed at SQLite. Move the
+# two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and
+# only one of them parses, so a condition compiled for the wrong dialect is
+# valid SQL that the engine rejects at the worst possible moment.
+dialect = "sqlite"
+
+[storage]
+# Below the working directory, so an upload is not source and `.gitignore`
+# already says so. Move it off the deployment's disk and every instance stops
+# seeing the same files: an object store is a separate crate behind the same
+# trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.
+root = "var/uploads"
+# Development only, and the one line to change first. It signs file tokens and
+# it keys the address an object is stored at. While it is this string, anybody
+# who has read this repository can mint a token for any object, and anybody
+# holding a copy of a file can compute whether somebody uploaded it.
+secret = "development only: replace before anything is uploaded in anger"
+# Seconds a file token lives. It cannot be revoked, so this number is the
+# window in which a URL pasted into a chat still works. Two minutes is long
+# enough for a page full of images and short enough to be dead before anyone
+# clicks it.
+token_ttl = 120
+
+[openapi]
+# The name of the API, which is not the name of this binary: the
+# document is read by somebody who never sees the source.
+title = "My Blog"
+# The version of the contract, not of the crate. It moves when an
+# operation changes and stays still when the code does.
+version = "0.1.0"
+
+[validation]
+# json for an API client, form for re-rendering a form with the
+# messages grouped by field. A third spelling stops the
+# application at startup rather than reporting the wrong way.
+report = "json"
 
 [realtime]
 # Refused at the limit, not traded for an existing connection: evicting a
@@ -1255,6 +1354,363 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     let same = std::fs::read(path)?;
     std::fs::write(path, same)?;
     Ok(())
+}
+===== src/pages/openapi.json.rs =====
+//! `/openapi.json` -- because the file is called `openapi.json.rs`.
+//!
+//! The route is the file name, as it is for every page: the last dot is the
+//! extension and what is left is the path, so this file answers
+//! `/openapi.json` and renaming it moves the document.
+//!
+//! The body was rendered once, at startup, by `src/plugins/openapi/mod.rs`.
+//! This page hands it out and does nothing else.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/openapi.json`.
+///
+/// `no-cache` rather than a long max-age: the document changes when this
+/// application is redeployed, and a client holding a stale one is the exact
+/// failure a derived document exists to prevent.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::openapi::json().ok_or_else(|| {
+        Error::internal("the openapi plugin is not registered, so there is no document to serve")
+    })?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("cache-control".to_string(), "no-cache".to_string()),
+        ],
+    ))
+}
+===== src/pages/openapi.yaml.rs =====
+//! `/openapi.yaml` -- the same document, in the other spelling.
+//!
+//! Two files and not one handler branching on `Accept`. A route here is a
+//! file, so two routes are two files, and a reader who wants only one of
+//! them deletes the other.
+//!
+//! YAML because a person reads this one. The JSON is what a generator
+//! consumes; this is what somebody opens to find out whether the endpoint
+//! they were promised exists.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/openapi.yaml`.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::openapi::yaml().ok_or_else(|| {
+        Error::internal("the openapi plugin is not registered, so there is no document to serve")
+    })?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            ("content-type".to_string(), "application/yaml".to_string()),
+            ("cache-control".to_string(), "no-cache".to_string()),
+        ],
+    ))
+}
+===== src/plugins/auth/mod.rs =====
+//! Accounts and sessions, as this application registers them.
+//!
+//! One interface, no providers yet, and a local account path that does not
+//! leak who has one: `register`, `login`, `request_password_reset` and
+//! `verify_email` answer the same shape and take the same time whether or not
+//! the address exists, because the expensive hash runs on both paths.
+//!
+//! `brocanth-auth` is in `Cargo.toml` because this file is here, and through
+//! no other route. Delete the registration in `src/app.rs` and delete this
+//! file, and the application has no accounts and links nothing to hash a
+//! password with.
+//!
+//! # Signing somebody in
+//!
+//! Everything is behind one context item, and a handler in an application
+//! that never registered this plugin does not compile:
+//!
+//! ```ignore
+//! use brocanth_auth::mfa::{Admission, Enrolled, FactorPolicy, FactorSet};
+//!
+//! let auth: &Services = cx.extract();
+//!
+//! // 1. The credential. `login` answers the same shape and takes the same
+//! //    time whether or not the address has an account.
+//! let who = auth.accounts().login(email, password).await?;
+//!
+//! // 2. What this account could prove. Nothing: `Mfa` needs a store trait
+//! //    this application does not implement, so the enrolment is empty and
+//! //    the constructor is named so that a reviewer stops on it. The day
+//! //    there is an `MfaStore`, `Mfa::second_factors` answers this properly
+//! //    and this line goes.
+//! let enrolled =
+//!     Enrolled::without_asking_the_store(who.account().id.clone(), FactorSet::empty());
+//!
+//! // 3. The policy, which consumes the proof. `Admitted` has no public
+//! //    constructor, so this step cannot be skipped -- a sign-in that
+//! //    forgot the second factor is a program that does not compile rather
+//! //    than one that ships.
+//! let Admission::Admit(admitted) =
+//!     FactorPolicy::default().admit(&enrolled, who.into_proof())
+//! else {
+//!     return Err(Error::new(401, "sign in"));
+//! };
+//!
+//! // 4. The session, which takes the admission by value.
+//! let started = auth.sessions().begin_with_factors(admitted, None).await?;
+//! // `started.cookie` is the `Set-Cookie` header to send back.
+//! ```
+//!
+//! **A page cannot do that yet.** A handler here is
+//! `Box<dyn Fn(&mut Ctx) -> Result<Response, Error>>`, which is synchronous,
+//! and every method above is `async fn`. What runs today is a test, a
+//! `manage` subcommand, and anything else of yours that already has a
+//! runtime. The sign-in form arrives with the core's request hooks, which are
+//! also what the two middleware offers below are waiting for.
+//!
+//! # Three decisions this file makes, each in one line
+//!
+//! They are type aliases so that changing one changes one line and nothing
+//! else in the project changes type.
+//!
+//! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
+//!    sessions last exactly as long as the process, so a restart is a logout
+//!    for everybody and a deploy loses every account. That is the one thing
+//!    in this file to replace before anybody else uses this application: write
+//!    an `AuthStore` over your database -- fourteen methods, of which the two
+//!    that carry a requirement are a unique email and a `consume_token` that
+//!    deletes and returns under one lock -- and change the line below.
+//!
+//!    When you do, the build moves: a pool is opened asynchronously and
+//!    `Plugin::new` is not, so `configure` becomes `before_start` and reaches
+//!    for the current runtime handle. `brocanth-cache` does it in about ten
+//!    lines and they are worth copying rather than inventing.
+//! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
+//!    binary ever performs a provider request, and a client that answers "no
+//!    stubbed route" is a louder failure than one that opens a socket. It is
+//!    also the line that keeps reqwest, rustls and their trees out of the lock
+//!    file. Adding a provider changes it; see below.
+//! 3. **`Passwords::recommended()`, not a setting.** The hash is argon2id and
+//!    there is no choice to make. The one question a deployment gets to answer
+//!    is cost, and it is a named constructor rather than three numbers in a
+//!    file, because three numbers in a file is how an application ends up
+//!    hashing at a cost nobody chose.
+//!
+//! # Adding a provider
+//!
+//! Three steps, and the flow code never learns the provider's name.
+//!
+//! 1. In `Cargo.toml`, `brocanth-auth = { ..., features = ["reqwest-client"] }`.
+//! 2. Here, `pub type Http = brocanth_auth::http_client::ReqwestClient;`.
+//! 3. Here, in `configure`, push one `ConfiguredProvider`:
+//!
+//! ```ignore
+//! use brocanth_auth::oauth::ClientConfig;
+//! use brocanth_auth::plugin::ConfiguredProvider;
+//! use brocanth_auth::providers::catalog::GOOGLE;
+//!
+//! providers: vec![ConfiguredProvider {
+//!     provider: GOOGLE,
+//!     client: ClientConfig::new(
+//!         std::env::var("GOOGLE_CLIENT_ID")?,
+//!         std::env::var("GOOGLE_CLIENT_SECRET")?,
+//!         "https://example.test/auth/google/callback",
+//!     ),
+//! }]
+//! ```
+//!
+//! A provider is data -- endpoints, scopes, and a mapping from its profile
+//! JSON to a common identity -- so the second one is another entry in that
+//! `vec!` and no new code anywhere. `brocanth_auth::providers::catalog` has
+//! the ones that are already written down.
+//!
+//! Two things change with the first provider. `same_site` below must become
+//! `Lax`, because the callback is a cross-site top-level navigation and
+//! `Strict` drops the cookie on the way back. And a matching email still does
+//! not link an account to a provider: `Linking` returns a refusal the
+//! application answers with a page that asks, because "this provider says
+//! alice@example.com" is not Alice consenting, and several real products have
+//! shipped that account takeover.
+//!
+//! # What is not here
+//!
+//! Second factors, one-time codes and login alerts. Each needs a store trait
+//! of its own -- `MfaStore`, `OtpStore`, `SignInLocationStore` -- and
+//! `brocanth-auth` deliberately keeps all three off `Auth`, so that an
+//! application wanting a password form does not have to implement a TOTP
+//! table. An application that wants them builds them here, from the same
+//! `Arc<Store>`, and puts them on the context itself: one line each, in this
+//! file, where the decision is visible.
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth_auth::http_client::StubHttp;
+use brocanth_auth::plugin::AuthConfig;
+use brocanth_auth::session::{SameSite, SessionConfig, SigningKey};
+use brocanth_auth::{MemoryStore, Passwords, SystemClock};
+
+/// Where identities, sessions and single-use tokens live.
+///
+/// In memory, for now. See the file header: this is the line to change first.
+pub type Store = MemoryStore;
+
+/// How this application reaches a provider.
+///
+/// It does not. There are no providers, so nothing calls this.
+pub type Http = StubHttp;
+
+/// Where the time comes from.
+pub type Clock = SystemClock;
+
+/// Everything a handler needs, behind one `Arc`: registration, login, the
+/// token service, sessions and identity linking.
+///
+/// An alias rather than a wrapper, because `brocanth_auth::Auth` is already a
+/// `ContextItem`. Cloning is cheap and the clone shares the provider key
+/// cache, which is why there is one of these and not one per request.
+pub type Services = brocanth_auth::Auth<Store, Http, Clock>;
+
+/// What this plugin is built from.
+///
+/// Five values a file can carry. The store, the client, the clock and the
+/// hasher are built below, because none of them is a thing a TOML file can
+/// say.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[auth]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The *name* of the environment variable holding the session signing
+    /// key, not the key. 32 bytes, base64url.
+    pub signing_key_env: String,
+    /// The session cookie's name. `__Host-` in production: it is the only
+    /// prefix a browser enforces, and what it enforces is `Secure`, a path of
+    /// `/` and no `Domain` -- so a subdomain takeover cannot set a session
+    /// cookie for the parent.
+    pub cookie_name: String,
+    /// Whether the cookie is `Secure`. False only on plain-HTTP localhost,
+    /// and then the name above must lose its `__Host-` prefix as well.
+    pub secure: bool,
+    /// Seconds of inactivity before the session is dead.
+    pub idle_timeout: i64,
+    /// Seconds from creation before it is dead however much it was used.
+    pub absolute_timeout: i64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            signing_key_env: "MY_BLOG_SESSION_KEY".to_string(),
+            cookie_name: "__Host-session".to_string(),
+            secure: true,
+            idle_timeout: 8 * 60 * 60,
+            absolute_timeout: 30 * 24 * 60 * 60,
+        }
+    }
+}
+
+pub struct Auth {
+    settings: Settings,
+    /// Built at `configure`, so this is an `Option` for exactly the length of
+    /// the build.
+    services: Option<Services>,
+}
+
+impl Plugin for Auth {
+    type Config = Settings;
+    type Provides = ProvidesContext<Services>;
+    const NAME: &'static str = "auth";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            services: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.settings.cookie_name.is_empty() {
+            return Err(PluginError::new("[auth] cookie_name must not be empty"));
+        }
+        // A `__Host-` cookie is `Secure` by definition, so a configuration
+        // where the two disagree produces a cookie no browser stores and a
+        // login that silently never takes. Caught here, at startup, where it
+        // can still be answered.
+        if self.settings.cookie_name.starts_with("__Host-") && !self.settings.secure {
+            return Err(PluginError::new(
+                "[auth] a __Host- cookie is Secure by definition; set secure = true, \
+                 or drop the prefix for plain-HTTP development",
+            ));
+        }
+
+        let name = self.settings.signing_key_env.clone();
+        let raw = std::env::var(&name).map_err(|_| {
+            PluginError::new(format!(
+                "[auth] ${name} is not set. It is 32 random bytes, base64url:\n  \
+                 export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
+                 There is no default: a key invented at startup would log every session \
+                 out on each restart and differ between the instances of a fleet."
+            ))
+        })?;
+        // Rejected rather than stretched. Padding a four-character secret to
+        // 32 bytes is how a deployment ends up with a forgeable cookie and no
+        // warning anywhere.
+        let signing_key = SigningKey::parse(&raw)
+            .map_err(|e| PluginError::new(format!("[auth] ${name}: {e}")))?;
+
+        let passwords = Passwords::recommended()
+            .map_err(|e| PluginError::new(format!("[auth] argon2id: {e}")))?;
+
+        let session = SessionConfig {
+            cookie_name: self.settings.cookie_name.clone(),
+            secure: self.settings.secure,
+            idle_timeout: self.settings.idle_timeout,
+            absolute_timeout: self.settings.absolute_timeout,
+            // Strict, and not the crate's own `Lax` default. `Lax` is there
+            // for the cross-site top-level navigation an OAuth callback is,
+            // and this application has no provider. Add one and this line
+            // has to become `Lax` or the cookie is dropped on the way back.
+            same_site: SameSite::Strict,
+            // Path `/`, and thirty minutes for an impersonated session. Both
+            // are the crate's defaults and both are arguments rather than
+            // numbers; `SessionConfig` carries them.
+            ..SessionConfig::default()
+        };
+
+        // Nothing here opens anything, so there is no `before_start`:
+        // `MemoryStore` is a `HashMap` and `Auth::build` is synchronous. A
+        // store over a database is a pool, a pool is opened asynchronously,
+        // and `Plugin::new` is not async -- so that swap moves this block
+        // into `before_start`, where it takes the current runtime handle and
+        // blocks on a scoped thread. `brocanth-cache` does exactly that.
+        self.services = Some(
+            brocanth_auth::Auth::build(AuthConfig {
+                store: Arc::new(Store::new()),
+                http: Arc::new(Http::new()),
+                clock: Arc::new(SystemClock),
+                signing_key,
+                session,
+                passwords: Arc::new(passwords),
+                // Add one here. The file header has the three lines.
+                providers: Vec::new(),
+            })
+            .map_err(|e| PluginError::new(format!("[auth] {e}")))?,
+        );
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server is handed the application, so
+        // the services are here by the time any request builds a context.
+        if let Some(services) = &self.services {
+            cx.insert(services.clone());
+        }
+    }
 }
 ===== src/plugins/cache/mod.rs =====
 //! The cache, as this application registers it.
@@ -1750,6 +2206,444 @@ impl Plugin for Model {
         });
     }
 }
+===== src/plugins/openapi/mod.rs =====
+//! The OpenAPI document, as this application derives it.
+//!
+//! The route table already knows every path, every verb and every path
+//! parameter, and it knows them while this crate compiles, because the
+//! filesystem is the route table. So the document is derived from
+//! `crate::pages::router()` rather than written, and the two cannot drift:
+//! add a file under `src/pages` and the document grows an operation.
+//!
+//! `brocanth-openapi` is in `Cargo.toml` because this file is here, and
+//! through no other route. Delete the registration in `src/app.rs`, this file
+//! and `src/pages/openapi.json.rs`, and the application describes nothing and
+//! links nothing to describe it with.
+//!
+//! # What is derived, and what is not
+//!
+//! Every route, with its path parameters, an `operationId` and a 200. What a
+//! page accepts and returns is not derivable from a `Fn(&mut Ctx)`, so bodies
+//! are added by hand with `SpecBuilder::describe`, beside the
+//! `routes_from_router` line below:
+//!
+//! ```ignore
+//! .describe("/users/{id}", Verb::Get, |op| {
+//!     op.summary("One user")
+//!         .json_response(200, "The user", Schema::reference("User"))
+//! })
+//! ```
+//!
+//! `/openapi.json` is hidden from the document it serves. The endpoint is a
+//! row of the table it describes, and an endpoint that describes itself is
+//! noise in every client somebody generates from this.
+//!
+//! # Why this is not `OpenApiPlugin`
+//!
+//! The crate also ships `OpenApiPlugin`, and this is not that. That one is
+//! handed a document that is already built, which is right for an application
+//! that writes its document in `main`. This one takes a title and a version,
+//! because a new project has a title and a version. It still holds an
+//! `OpenApiPlugin` and calls its hooks, so the two things only that type can
+//! do still happen: an invalid document stops the build, and the document
+//! reaches `Services` for anything else that wants to read it.
+
+use std::sync::OnceLock;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::routing::Verb;
+use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, SpecBuilder};
+
+/// Where the document is served.
+///
+/// A constant and not a setting. The path is the name of the file in
+/// `src/pages` that answers it, so moving the document is renaming that file
+/// and this line, and a setting that disagreed with the file name would serve
+/// a 404 and hide it in the document.
+pub const ROUTE: &str = "/openapi.json";
+
+/// The rendered document, both ways round.
+///
+/// Rendered once at `configure`, so a request costs a borrow rather than a
+/// walk of the whole structure. A `OnceLock` because the page that serves it
+/// is a plain function with no handle on this plugin.
+static RENDERED: OnceLock<(String, String)> = OnceLock::new();
+
+/// The document as JSON, or `None` when this plugin was never registered.
+pub fn json() -> Option<&'static str> {
+    RENDERED.get().map(|(json, _)| json.as_str())
+}
+
+/// The document as YAML, or `None` when this plugin was never registered.
+///
+/// Served by `src/pages/openapi.yaml.rs`, which is the file beside the
+/// JSON one and reads this instead.
+pub fn yaml() -> Option<&'static str> {
+    RENDERED.get().map(|(_, yaml)| yaml.as_str())
+}
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[openapi]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The name of the API, which is not the name of this binary.
+    pub title: String,
+    /// The version of the contract, not of the crate.
+    pub version: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            title: "My Blog".to_string(),
+            version: "0.1.0".to_string(),
+        }
+    }
+}
+
+pub struct OpenApi {
+    settings: Settings,
+    /// Built at `configure` and not in `new`, because deriving a document can
+    /// fail and `Plugin::new` cannot.
+    served: Option<OpenApiPlugin>,
+}
+
+impl Plugin for OpenApi {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "openapi";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            served: None,
+        }
+    }
+
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The same function `src/app.rs` builds the live table with, so the
+        // document describes what this binary actually dispatches.
+        let router = crate::pages::router().map_err(|e| {
+            PluginError::new(format!("[openapi] the route table does not build: {e}"))
+        })?;
+        let document = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
+            .routes_from_router(&router)
+            .hide(ROUTE, Verb::Get)
+            .build()
+            .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
+
+        // The crate's own plugin, held rather than registered. Its
+        // `configure` is what makes an invalid document a build failure
+        // instead of a 500 found during an incident, and it renders both
+        // bodies once.
+        let mut served = OpenApiPlugin::new(OpenApiConfig::new(document).json_route(ROUTE));
+        served.configure(lc)?;
+        let _ = RENDERED.set((
+            served.body(Format::Json).to_string(),
+            served.body(Format::Yaml).to_string(),
+        ));
+        self.served = Some(served);
+        Ok(())
+    }
+
+    fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Publishes the document through `Services`, so a command or another
+        // plugin can read it with `brocanth_openapi::document_of`.
+        match &mut self.served {
+            Some(served) => served.register(lc),
+            None => Ok(()),
+        }
+    }
+}
+===== src/plugins/policy/mod.rs =====
+//! Authorisation, as this application writes it.
+//!
+//! A rule is a predicate and a check is a witness. `PostPolicy` below is the
+//! first; `Verified` is the second; the two are not alternatives.
+//!
+//! `brocanth-policy` is in `Cargo.toml` because this file is here, and through
+//! no other route. Delete the registration in `src/app.rs` and delete this
+//! file, and the application has no rule algebra and links nothing to have one
+//! with.
+//!
+//! # The bug this file cannot have
+//!
+//! PocketBase validates a rule against an empty request object, so a
+//! misspelled field in a negated rule becomes `'' IS NOT 'banned'`, which is
+//! true, which grants access -- silently, for ever. Two things here make that
+//! impossible, and both are visible below:
+//!
+//! 1. **A field name is not a string.** `Pred::eq` takes a `PostColumn`, so
+//!    `PostColumn::Autor` is a compile error. There is no
+//!    `Pred::eq("author_id", ..)` to fall back to and no string-to-filter
+//!    parser anywhere in this framework.
+//! 2. **An absent value is a word somebody wrote.** An `Option` does not turn
+//!    into a `Bound`. The author writes `Bound::or_deny`, `or_allow` or
+//!    `or_null`, and the word is in the diff for a reviewer to disagree with.
+//!
+//! # Where the rules go
+//!
+//! `Post` is here so that this file compiles into something that runs. Move
+//! it, and whatever follows it, into `src/policies/` once there is more than
+//! one -- what must stay here is the plugin, because that is what reads the
+//! dialect and puts it on the context.
+//!
+//! The column enum is written by hand on purpose: the `policy!` macro is
+//! deliberately late, after a real application has used the algebra, so that
+//! the syntax is informed rather than imitated.
+//!
+//! # Listing, and then writing
+//!
+//! A list is a `WHERE` fragment, so the paginator keeps its totals:
+//!
+//! ```ignore
+//! let rules: &Rules = cx.extract();
+//! let condition = PostPolicy.list(&visitor).condition::<Post>(rules.dialect)?;
+//! // "SELECT .. FROM posts WHERE " + condition.sql(), bound to condition.binds()
+//! ```
+//!
+//! A write is the same predicate carried into the statement, which is what
+//! closes the window between the check and the change:
+//!
+//! ```ignore
+//! let admission = PostPolicy.update(&visitor).admission::<Post>(rules.dialect, id)?;
+//! let rows = /* run admission.query(), count the rows */;
+//! let verified = admission.resolve(rows)?;          // zero rows is a denial
+//! let write = verified.update(rules.dialect, [(PostColumn::Status, "published".into())])?;
+//! // run write.query(); then:
+//! write.applied(affected)?;                          // zero affected is RaceLost
+//! ```
+//!
+//! `Verified` is taken by value everywhere it is used, and a debug build fails
+//! the test that checked one and then forgot to spend it.
+//!
+//! # This project also has the broker
+//!
+//! `Pred::audience` is the join, and it is why `brocanth-realtime`
+//! depends on this crate. A predicate you can inspect inverts into an
+//! audience -- `author_id = 7` becomes the key `(author_id, 7)` -- so the
+//! broker files a subscriber under that key and one write is a map lookup
+//! rather than one query per subscriber. A rule that is a string can only
+//! be executed, which is why PocketBase runs the query.
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth_policy::{Bound, Column, Dialect, Entity, EntityPred, FieldMask, Ident, Policy, Pred};
+
+// ---------------------------------------------------------------------------
+// An entity
+// ---------------------------------------------------------------------------
+
+/// The columns of `posts`, as an enum, because a rule is written in them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PostColumn {
+    /// Primary key.
+    Id,
+    /// Who wrote it.
+    AuthorId,
+    /// `draft` or `published`.
+    Status,
+}
+
+impl Column for PostColumn {
+    /// Required rather than derived: a changed-field name that is not one of
+    /// these is rejected instead of quietly permitted.
+    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status];
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::AuthorId => "author_id",
+            Self::Status => "status",
+        }
+    }
+}
+
+/// The table the rules below are about.
+pub struct Post;
+
+impl Entity for Post {
+    type Column = PostColumn;
+    /// Checked at compile time, because a table name is program text and the
+    /// only honest moment to reject one is while the program is being built.
+    const TABLE: Ident = Ident::must("posts");
+    const PRIMARY_KEY: Self::Column = PostColumn::Id;
+}
+
+// ---------------------------------------------------------------------------
+// A subject, and the rules about it
+// ---------------------------------------------------------------------------
+
+/// Whoever is asking. `brocanth-policy` never looks inside it.
+///
+/// An anonymous visitor is this application's own `None`, turned into a
+/// decision at the point a rule reads it.
+#[derive(Clone, Debug, Default)]
+pub struct Visitor {
+    /// The signed-in account, when there is one.
+    pub account_id: Option<i64>,
+    /// Whether this one may see everything.
+    pub admin: bool,
+}
+
+impl Visitor {
+    /// Nobody. What a request with no session carries.
+    pub fn anonymous() -> Self {
+        Self::default()
+    }
+}
+
+/// The rules for `posts`.
+///
+/// Only `list` is required, because list authorisation is the one that cannot
+/// be done per object: a paginator that filters after reading lies about its
+/// totals. Everything else defaults to deny, which is what makes shipping this
+/// file as it stands safe rather than lucky.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PostPolicy;
+
+impl Policy for PostPolicy {
+    type Entity = Post;
+    type Subject = Visitor;
+
+    fn list(&self, who: &Visitor) -> EntityPred<Post> {
+        if who.admin {
+            // `Pred::is_always` reports this, so a test can assert which
+            // subjects see everything.
+            return Pred::Always;
+        }
+        Pred::any([
+            Pred::eq(PostColumn::Status, "published"),
+            // `or_deny` is the word that says what an anonymous visitor's
+            // missing id means: they own nothing.
+            Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id)),
+        ])
+    }
+
+    fn create(&self, who: &Visitor) -> EntityPred<Post> {
+        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id))
+    }
+
+    fn update(&self, who: &Visitor) -> EntityPred<Post> {
+        if who.admin {
+            return Pred::Always;
+        }
+        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id))
+    }
+
+    fn writable(&self, who: &Visitor) -> FieldMask<PostColumn> {
+        if who.admin {
+            FieldMask::except([PostColumn::Id])
+        } else {
+            // The author edits the body, never the status. The mask is the
+            // other half of the rule: `update` says which rows, this says
+            // which columns.
+            FieldMask::only([PostColumn::AuthorId])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The plugin
+// ---------------------------------------------------------------------------
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[policy]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// `postgres` or `sqlite`. A string here and an enum below: a config file
+    /// is text, and the translation is checked at startup where a typo can
+    /// still be answered.
+    pub dialect: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            dialect: "sqlite".to_string(),
+        }
+    }
+}
+
+/// What this plugin puts on the context.
+///
+/// The dialect, and only the dialect. Every compile entry point still takes
+/// one as an argument -- the call site says which it meant -- and this is
+/// where the call site gets it, so one database is named once.
+///
+/// The policies are not here. `PostPolicy` is a unit struct and a value, not
+/// a service: a handler writes `PostPolicy.list(&who)` and has nothing to
+/// look up. What a handler cannot work out on its own is which dialect this
+/// deployment is, so that is what the context carries.
+pub struct Rules {
+    /// Which dialect this application's conditions are compiled for.
+    pub dialect: Dialect,
+}
+
+impl ContextItem for Rules {}
+
+pub struct Policies {
+    settings: Settings,
+    /// Read at `configure` and not in `new`, because turning a string into a
+    /// dialect can fail and `Plugin::new` cannot.
+    dialect: Option<Dialect>,
+}
+
+impl Plugin for Policies {
+    type Config = Settings;
+    type Provides = ProvidesContext<Rules>;
+    const NAME: &'static str = "policy";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            dialect: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let dialect = match self.settings.dialect.as_str() {
+            "postgres" => Dialect::Postgres,
+            "sqlite" => Dialect::Sqlite,
+            other => {
+                return Err(PluginError::new(format!(
+                    "[policy] dialect is {other:?}; write postgres or sqlite"
+                )))
+            }
+        };
+
+        // Compile one rule at startup. It costs a string and it answers the
+        // only question this file can get wrong without anybody noticing: a
+        // column whose name is not a bare identifier fails the query rather
+        // than escaping into it, and finding that out here is better than
+        // finding it out on the first list request.
+        let condition = PostPolicy
+            .list(&Visitor::anonymous())
+            .condition::<Post>(dialect)
+            .map_err(|e| PluginError::new(format!("[policy] posts: {e}")))?;
+        eprintln!("[policy] posts, anonymous: {}", condition.sql());
+
+        self.dialect = Some(dialect);
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server is handed the application, so
+        // the dialect is here by the time any request builds a context.
+        if let Some(dialect) = self.dialect {
+            cx.insert(Rules { dialect });
+        }
+    }
+}
 ===== src/plugins/realtime/mod.rs =====
 //! The realtime broker, as this application registers it.
 //!
@@ -2023,6 +2917,359 @@ impl Plugin for Sessions {
 pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
     next.run(ctx)
 }
+===== src/plugins/storage/mod.rs =====
+//! File storage, as this application registers it.
+//!
+//! An object is named by what is in it. Thirty-two bytes rendered as
+//! sixty-four hex characters is the whole address, so `..`, a slash and a
+//! drive letter are not values the type can hold and no filename a client
+//! sent ever becomes a path component. The original name is kept as metadata,
+//! defanged for the `Content-Disposition` header it ends up in, and never
+//! touches the filesystem.
+//!
+//! `brocanth-storage` is in `Cargo.toml` because this file is here, and
+//! through no other route. Delete the registration in `src/app.rs` and delete
+//! this file, and the application stores no files and links nothing to store
+//! them with.
+//!
+//! # Uploading
+//!
+//! There is no upload route here, on purpose: `brocanth-storage` parses no
+//! multipart body and knows nothing about HTTP, and whether *this*
+//! application lets *this* request store a file is a policy question a
+//! generator cannot answer. A handler that has already asked it writes:
+//!
+//! ```ignore
+//! let files: &FileStore = cx.extract();
+//! let about = ObjectInfo::new()
+//!     .with_filename(sent_name)
+//!     .with_declared_type(sent_type);
+//! let key = files.store.put(&bytes, &about).await?;
+//! ```
+//!
+//! and keeps `key.to_hex()` on the record. The media type is taken from the
+//! bytes rather than from `sent_type`, because a client that labels a file
+//! `text/html` is choosing what this origin serves back to the next visitor.
+//!
+//! # Serving
+//!
+//! Also the application's, and for a sharper reason: a file token says "the
+//! bearer may read this object" and carries no identity at all. Mint one only
+//! for a request that has already passed the policy, because after that the
+//! token is the only thing between the object and whoever the URL reaches.
+//!
+//! ```ignore
+//! let token = files.tokens.issue(&key);           // after the policy said yes
+//! let key = files.tokens.verify(presented)?;      // on the download route
+//! let meta = files.store.meta(&key).await?;
+//! ```
+//!
+//! `ObjectMeta::content_type` answers `is_safe_to_inline`, which is the bit
+//! the download route needs to force an attachment for everything that is not
+//! a recognised image.
+//!
+//! # Thumbnails
+//!
+//! `get_variant` and `put_variant` are here already, with the `variants`
+//! feature off: moving derived bytes needs no codec, so this build can serve
+//! a variant another process computed and cannot compute one itself. Turning
+//! the feature on in `Cargo.toml` adds `derive_variant`, and adds png, jpeg,
+//! gif and webp decoders pointed at stranger-supplied bytes. An application
+//! that stores documents should leave it off.
+//!
+//! # One secret, two keys
+//!
+//! `secret` below is used twice and the two uses cannot be confused for each
+//! other: `HashKey` and `FileTokenKey` derive from it under different domain
+//! separators, so an address key cannot sign a token and a token key cannot
+//! address an object. Rotating the secret invalidates every outstanding token
+//! at once, which is the break-glass, and it also changes the address new
+//! uploads are stored at -- objects already on disk keep the address they
+//! were written under, so rotate it with a plan rather than on a Friday.
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth_storage::{FileTokenKey, FileTokens, HashKey, LocalDisk, Storage};
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[storage]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Where the objects live, relative to the working directory or absolute.
+    /// Created if it is not there.
+    pub root: String,
+    /// The deployment secret. It signs file tokens and keys object addresses;
+    /// see the module header for what each of those means.
+    pub secret: String,
+    /// How many seconds a file token lives. A token cannot be revoked, so
+    /// this is the leak window.
+    pub token_ttl: i64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            root: "var/uploads".to_string(),
+            secret: "development only: replace before anything is uploaded in anger".to_string(),
+            token_ttl: 120,
+        }
+    }
+}
+
+/// What this plugin puts on the context.
+///
+/// A wrapper and not the two values loose, because `ContextItem` is
+/// brocanth's trait and both of these are `brocanth-storage`'s types. That
+/// crate deliberately does not depend on the core -- it has no routes, parses
+/// no multipart body and knows nothing about HTTP -- so the impl that joins
+/// the two belongs in the one crate that can see both, which is this one.
+pub struct FileStore {
+    /// The store, behind the trait rather than as a `LocalDisk`, so swapping
+    /// the backend is a change in this file and nowhere else.
+    ///
+    /// Allowed to be unread, and only until one thing changes. Every
+    /// `Storage` method is `async` and the startup line below is not, so
+    /// nothing the generator writes can touch this field — a handler is
+    /// what uses it, and a handler cannot reach the per-request context
+    /// yet, because `Ctx` in `src/pages/mod.rs` has no extractor. Delete
+    /// this attribute the moment you write the first upload route; it is
+    /// a note about today, not about the field.
+    #[allow(dead_code)]
+    pub store: Arc<dyn Storage>,
+    /// Mints and verifies the short-lived tokens a download route checks.
+    pub tokens: FileTokens,
+}
+
+impl ContextItem for FileStore {}
+
+pub struct Files {
+    settings: Settings,
+    /// Built at `configure`, because opening a store can fail and
+    /// `Plugin::new` cannot.
+    store: Option<Arc<dyn Storage>>,
+    tokens: Option<FileTokens>,
+}
+
+impl Plugin for Files {
+    type Config = Settings;
+    type Provides = ProvidesContext<FileStore>;
+    const NAME: &'static str = "storage";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            store: None,
+            tokens: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.settings.root.is_empty() {
+            return Err(PluginError::new(
+                "[storage] root is required; there is no default directory",
+            ));
+        }
+        if self.settings.secret.is_empty() {
+            // An empty secret is not a weaker store, it is two different
+            // stores: addresses stop being keyed, and a token key of no bytes
+            // signs tokens anybody can forge.
+            return Err(PluginError::new(
+                "[storage] secret is required; it signs file tokens and keys object addresses",
+            ));
+        }
+        if self.settings.token_ttl <= 0 {
+            return Err(PluginError::new(
+                "[storage] token_ttl must be at least one second, or no token is ever valid",
+            ));
+        }
+        // Synchronous: `std::fs`, a `create_dir_all` and a `canonicalize`.
+        // Unlike a pool there is nothing to open, so there is no
+        // `before_start`.
+        let disk = LocalDisk::open(&self.settings.root)
+            .map_err(|e| {
+                PluginError::new(format!("[storage] opening {:?}: {e}", self.settings.root))
+            })?
+            .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
+        self.store = Some(Arc::new(disk));
+        self.tokens = Some(
+            FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
+                .with_ttl(self.settings.token_ttl),
+        );
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server is handed the application, so
+        // both are here by the time any request builds a context.
+        if let (Some(store), Some(tokens)) = (&self.store, &self.tokens) {
+            cx.insert(FileStore {
+                store: store.clone(),
+                tokens: tokens.clone(),
+            });
+        }
+    }
+}
+===== src/plugins/validation/mod.rs =====
+//! Request validation, as this application registers it.
+//!
+//! The shape of a schema is checked when this crate compiles; the data is
+//! checked when a request arrives, because a request body is bytes that did
+//! not exist at compile time. What the derive buys is that the check and the
+//! description come from one declaration, so a form, an OpenAPI document and
+//! the check on the way in cannot drift apart.
+//!
+//! `brocanth-schema` is in `Cargo.toml` because this file is here, and
+//! through no other route. Delete the registration in `src/app.rs` and delete
+//! this file, and the application validates nothing and links nothing to
+//! validate with.
+//!
+//! # The proof, and why a handler asks for it
+//!
+//! `Valid<T>` has a private field and exactly one constructor:
+//! `Validation::check`, a method on the context item this plugin provides.
+//! A handler that takes a `Valid<SignUp>` therefore has proof the body was
+//! checked, and a handler in an application that never registered this plugin
+//! does not compile. Forgetting to wire validation is a build that does not
+//! finish rather than a bug that reaches production.
+//!
+//! ```ignore
+//! let checks: &brocanth_schema::Validation = cx.extract();
+//! match checks.check(SignUp { username, email }) {
+//!     Ok(body) => create(body),
+//!     Err(issues) => Response {
+//!         status: 422,
+//!         body: checks.render(&issues),
+//!         ..Default::default()
+//!     },
+//! }
+//! ```
+//!
+//! # Where schemas go
+//!
+//! `SignUp` is here so that this file compiles into something that runs. Move
+//! it, and whatever follows it, into `src/schemas/` once there is more than
+//! one. Nothing registers a schema: a type with `#[derive(Validate)]` is
+//! reachable from wherever it is written.
+//!
+//! # The middleware this does not mount
+//!
+//! `ValidationPlugin` offers a middleware called `validation.report`, and
+//! this plugin does not pass the offer on. The offer is a name; the crate
+//! ships no function behind it, because turning an unhandled report into a
+//! 422 means knowing what this application's `Response` is. Mounting a name
+//! with no layer behind it stops the application at startup, so the offer is
+//! withheld until there is something to mount. Write the layer in this file,
+//! add `"validation.report" => Some(validation::layer),` to
+//! `src/plugins/mod.rs`, and forward `configure_router` to `self.inner`.
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth_schema::{ReportStyle, Validate, ValidationConfig, ValidationPlugin};
+
+// ---------------------------------------------------------------------------
+// A schema
+// ---------------------------------------------------------------------------
+
+/// What somebody may send to sign up.
+///
+/// A constraint that cannot mean anything for a field's type does not
+/// compile, and neither does a rule naming a field this struct does not have:
+/// the derive reads the field list from the struct, so there is no string to
+/// misspell.
+#[derive(Debug, Validate)]
+/// The shape a sign-up body has to have.
+///
+/// Allowed to be unconstructed: a handler is what builds one, and a
+/// handler cannot reach the per-request context yet — `Ctx` in
+/// `src/pages/mod.rs` has no extractor, so `Valid<SignUp>` has nowhere to
+/// be asked for. Delete this attribute with the first route that takes a
+/// body.
+#[allow(dead_code)]
+pub struct SignUp {
+    /// Three to thirty-two characters.
+    #[validate(string(min_length = 3, max_length = 32))]
+    pub username: String,
+    /// Checked against the shape of an address, not against a mail server.
+    #[validate(string(email))]
+    pub email: String,
+}
+
+// ---------------------------------------------------------------------------
+// The plugin
+// ---------------------------------------------------------------------------
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[validation]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// `json` or `form`. A string here and an enum below: the config file is
+    /// text, and the translation is checked at startup where a typo can still
+    /// be answered.
+    pub report: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            report: "json".to_string(),
+        }
+    }
+}
+
+pub struct Validation {
+    report: String,
+    /// Built at `configure` and not in `new`, because reading the report
+    /// style out of a string can fail and `Plugin::new` cannot.
+    inner: Option<ValidationPlugin>,
+}
+
+impl Plugin for Validation {
+    type Config = Settings;
+    type Provides = ProvidesContext<brocanth_schema::Validation>;
+    const NAME: &'static str = "validation";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            report: config.report,
+            inner: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let report = match self.report.as_str() {
+            "json" => ReportStyle::Json,
+            "form" => ReportStyle::Form,
+            other => {
+                return Err(PluginError::new(format!(
+                    "[validation] report is {other:?}; write json or form"
+                )))
+            }
+        };
+        // The crate's own plugin, held rather than registered: it is the only
+        // thing that can build the context item, because `Validation`'s field
+        // is private and this file is not that crate.
+        self.inner = Some(ValidationPlugin::new(ValidationConfig { report }));
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server is handed the application, so
+        // the inner plugin is here by the time any request builds a context.
+        if let Some(inner) = &self.inner {
+            inner.provide(cx);
+        }
+    }
+}
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -2055,6 +3302,11 @@ request.
 - `model`  SeaORM, validations, migrations; without it no SQL driver at all
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
+- `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
+- `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
+- `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
+- `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
+- `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
@@ -2224,7 +3476,7 @@ The stylesheet is embedded, so a new one is a new binary. `css` rewrites
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b0602853c441ba8f -->
+<!-- brocanth-digest: 07b92e0a67f235cb -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -2236,7 +3488,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
+enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "openapi", "validation", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
 
 [modules.logging]
 files = ["src/plugins/logging/"]
@@ -2268,6 +3520,31 @@ files = ["src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs"]
 
+[modules.auth]
+files = ["src/plugins/auth/"]
+config = ["auth"]
+crates = ["brocanth-auth"]
+
+[modules.policy]
+files = ["src/plugins/policy/"]
+config = ["policy"]
+crates = ["brocanth-policy"]
+
+[modules.storage]
+files = ["src/plugins/storage/"]
+config = ["storage"]
+crates = ["brocanth-storage"]
+
+[modules.openapi]
+files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
+config = ["openapi"]
+crates = ["brocanth-openapi"]
+
+[modules.validation]
+files = ["src/plugins/validation/"]
+config = ["validation"]
+crates = ["brocanth-schema"]
+
 [modules.realtime]
 files = ["src/plugins/realtime/"]
 config = ["realtime"]
@@ -2293,4 +3570,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: a1ac8244a0f309f6
+# brocanth-digest: 510f44d62d16da45

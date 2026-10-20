@@ -308,7 +308,11 @@ fn split_offset(rest: &str) -> Result<(&str, Option<i16>), DateError> {
     // An offset is the last `+` or `-` in a string whose time part has none.
     if let Some(position) = rest.rfind(['+', '-']) {
         let (time_part, sign_and_offset) = rest.split_at(position);
-        let sign = if sign_and_offset.starts_with('-') { -1 } else { 1 };
+        let sign = if sign_and_offset.starts_with('-') {
+            -1
+        } else {
+            1
+        };
         let body = &sign_and_offset[1..];
         let (hours, minutes) = match body.len() {
             5 if body.as_bytes()[2] == b':' => (digits(&body[0..2])?, digits(&body[3..5])?),
@@ -411,12 +415,7 @@ macro_rules! temporal_schema {
                 self.parse_at(input, at, issues);
             }
 
-            fn parse_at(
-                &self,
-                input: &str,
-                at: &mut Path,
-                issues: &mut Issues,
-            ) -> Option<$value> {
+            fn parse_at(&self, input: &str, at: &mut Path, issues: &mut Issues) -> Option<$value> {
                 let parsed: $value = match input.parse() {
                     Ok(value) => value,
                     Err(_) => {
@@ -453,16 +452,28 @@ macro_rules! temporal_schema {
 }
 
 temporal_schema!(
-    DateSchema, date, Date, Date,
-    shape = "YYYY-MM-DD", noun = "a date"
+    DateSchema,
+    date,
+    Date,
+    Date,
+    shape = "YYYY-MM-DD",
+    noun = "a date"
 );
 temporal_schema!(
-    TimeSchema, time, Time, Time,
-    shape = "HH:MM[:SS]", noun = "a time"
+    TimeSchema,
+    time,
+    Time,
+    Time,
+    shape = "HH:MM[:SS]",
+    noun = "a time"
 );
 temporal_schema!(
-    DateTimeSchema, datetime, DateTime, DateTime,
-    shape = "YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]", noun = "a date and time"
+    DateTimeSchema,
+    datetime,
+    DateTime,
+    DateTime,
+    shape = "YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]",
+    noun = "a date and time"
 );
 
 #[cfg(test)]
@@ -486,7 +497,10 @@ mod tests {
     #[test]
     fn times_accept_the_three_lengths() {
         assert_eq!("09:30".parse::<Time>().unwrap(), Time::from_hms(9, 30, 0));
-        assert_eq!("09:30:15".parse::<Time>().unwrap(), Time::from_hms(9, 30, 15));
+        assert_eq!(
+            "09:30:15".parse::<Time>().unwrap(),
+            Time::from_hms(9, 30, 15)
+        );
         assert_eq!(
             "09:30:15.250".parse::<Time>().unwrap().nanosecond,
             250_000_000

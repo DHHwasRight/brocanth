@@ -1,9 +1,7 @@
 //! `#[derive(Validate)]`: the whole grammar, the paths it produces, and the
 //! description it writes.
 
-use brocanth_schema::{
-    IssueCode, Issues, Path, SchemaNode, StringFormat, UnknownKeys, Validate,
-};
+use brocanth_schema::{IssueCode, Issues, Path, SchemaNode, StringFormat, UnknownKeys, Validate};
 
 // ---------------------------------------------------------------------------
 // The worked example
@@ -152,10 +150,7 @@ fn every_bad_field_is_reported_at_its_own_path() {
     // Three constraints on one field, all three reported.
     assert_eq!(
         issues.messages_at("username"),
-        vec![
-            "must be at least 3 characters",
-            "must match ^[a-z0-9_]+$",
-        ]
+        vec!["must be at least 3 characters", "must match ^[a-z0-9_]+$",]
     );
     assert!(issues.has_code("tags", &IssueCode::TooLong));
     assert!(issues.has_code("tags[2]", &IssueCode::NotUnique));
@@ -208,8 +203,8 @@ fn the_derive_describes_every_field_it_did_not_skip() {
             .map(|f| f.name.as_ref())
             .collect::<Vec<_>>(),
         vec![
-            "username", "email", "age", "website", "terms", "born_on", "tags", "notes",
-            "address", "ref",
+            "username", "email", "age", "website", "terms", "born_on", "tags", "notes", "address",
+            "ref",
         ],
         "`skip` leaves a field out and `rename` changes its key"
     );

@@ -133,7 +133,10 @@ fn the_unknown_key_policy_is_all_three() {
 
     assert!(base().validate(&value).is_err());
     assert!(base().unknown_keys_ignored().validate(&value).is_ok());
-    assert!(base().unknown_keys_passed_through().validate(&value).is_ok());
+    assert!(base()
+        .unknown_keys_passed_through()
+        .validate(&value)
+        .is_ok());
     assert!(base()
         .unknown_keys(UnknownKeys::Reject)
         .validate(&value)
@@ -218,10 +221,11 @@ fn transform_chains() {
 
 #[test]
 fn refine_survives_a_transform_in_front_of_it() {
-    let schema = int()
-        .min(0)
-        .transform(|n: i64| n.to_string())
-        .refine("even", "must be even", |n: &i64| n % 2 == 0);
+    let schema =
+        int()
+            .min(0)
+            .transform(|n: i64| n.to_string())
+            .refine("even", "must be even", |n: &i64| n % 2 == 0);
 
     assert_eq!(schema.parse(&4).unwrap(), "4");
     assert!(schema.parse(&3).is_err());
@@ -241,10 +245,7 @@ fn all_issues_are_reported_not_the_first() {
     let value = Value::object([
         ("name", Value::text("")),
         ("age", Value::Int(7)),
-        (
-            "tags",
-            Value::array([Value::text(""), Value::text("")]),
-        ),
+        ("tags", Value::array([Value::text(""), Value::text("")])),
     ]);
 
     let issues = schema.validate(&value).unwrap_err();
@@ -410,8 +411,14 @@ fn the_description_carries_what_a_consumer_needs() {
     assert_eq!(array.items.kind(), "string");
 
     // `unwrapped` reaches the widget a form builder has to draw.
-    assert_eq!(object.field("opt").unwrap().schema.unwrapped().kind(), "string");
-    assert_eq!(object.field("ref").unwrap().schema.unwrapped().kind(), "string");
+    assert_eq!(
+        object.field("opt").unwrap().schema.unwrapped().kind(),
+        "string"
+    );
+    assert_eq!(
+        object.field("ref").unwrap().schema.unwrapped().kind(),
+        "string"
+    );
 }
 
 #[test]

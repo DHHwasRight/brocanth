@@ -396,9 +396,7 @@ impl Issues {
     /// `true` when `path` failed with this code.
     #[must_use]
     pub fn has_code(&self, path: &str, code: &IssueCode) -> bool {
-        self.items
-            .iter()
-            .any(|i| i.path == path && &i.code == code)
+        self.items.iter().any(|i| i.path == path && &i.code == code)
     }
 
     /// Every path that failed, first-seen order, no repeats.

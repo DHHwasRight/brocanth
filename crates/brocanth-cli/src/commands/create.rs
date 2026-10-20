@@ -749,17 +749,24 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     let built = contributions(a)?;
     let mut files = vec![
         ("Cargo.toml".to_string(), cargo_toml(a, &built)),
-        (
-            ".gitignore".to_string(),
+        (".gitignore".to_string(), {
+            let mut out = String::from("/target\n");
             if a.has("rsx-tailwind") {
-                // `assets/css/site.css` is **not** ignored. It is embedded
-                // at compile time, so a checkout without it does not build,
-                // and "run npm first" is a worse answer than 3 kB in git.
-                "/target\n/node_modules\n".to_string()
-            } else {
-                "/target\n".to_string()
-            },
-        ),
+                // `assets/css/site.css` is **not** ignored. It is
+                // embedded at compile time, so a checkout without it
+                // does not build, and "run npm first" is a worse
+                // answer than 3 kB in git.
+                out.push_str("/node_modules\n");
+            }
+            // And whatever a module keeps under the working tree. The
+            // slot was declared and never read until a module wrote a
+            // line into it and the line went nowhere.
+            for line in built.slot(Slot::GitIgnore) {
+                out.push_str(line);
+                out.push('\n');
+            }
+            out
+        }),
         // Without a pin, a generated application picks whatever rustc is on
         // PATH, and brocanth's proc-macro artifacts are not compatible across
         // patch releases: the failure is E0514, which names a crate the user
@@ -1336,12 +1343,57 @@ fn core(name: &'static str) -> Dep {
 }
 
 /// The manifest, and the comment that makes it a statement rather than a list.
+/// Every crate the chosen modules ask for, merged by name.
+///
+/// Two modules may want one crate with different features. Until this
+/// existed each `Dep` became its own line, so the pair wrote the crate
+/// into `[dependencies]` twice and cargo refused to read the manifest.
+/// Nothing hit it, because the two places it would have — an
+/// `auth-oauth` child turning on a provider, a `storage-variants` child
+/// turning on the image decoders — were each abandoned on discovering it.
+/// Both are now possible.
+///
+/// Features union. `default-features = false` survives only if *every*
+/// requester asked for it, which is what cargo does anyway: one dependant
+/// wanting the defaults turns them on for all.
+fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
+    let mut out: Vec<Dep> = Vec::new();
+    for pick in picks {
+        for dep in about(pick).crates {
+            match out.iter_mut().find(|held| held.name == dep.name) {
+                None => out.push(dep),
+                Some(held) => {
+                    // Two sources for one crate is not a merge, it is two
+                    // different crates sharing a name, and guessing which
+                    // one the project meant is worse than stopping.
+                    if held.source != dep.source {
+                        return Err(vec![Diagnostic::error(
+                            *pick,
+                            format!("two modules want `{}` from different places", dep.name),
+                        )
+                        .note("a dependency line can name one source")]);
+                    }
+                    for feature in dep.features {
+                        if !held.features.contains(&feature) {
+                            held.features.push(feature);
+                        }
+                    }
+                    held.defaults = held.defaults || dep.defaults;
+                    held.note = held.note.or(dep.note);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn cargo_toml(a: &Answers, built: &Built) -> String {
     let mut deps = vec![source_of(a, &core("brocanth"))];
-    for pick in &a.picks {
-        for dep in about(pick).crates {
-            deps.push(source_of(a, &dep));
-        }
+    // `expect` and not `?`: `ask` already refused a pick whose module is
+    // not in this build, and two sources for one name is a mistake in this
+    // repository's own registry rather than anything a user typed.
+    for dep in merged(&a.picks).expect("the registry does not disagree with itself") {
+        deps.push(source_of(a, &dep));
     }
     // The macros that read `src/pages`: the route table always, and the
     // layouts when there are any. Compile-time only -- a proc macro puts no

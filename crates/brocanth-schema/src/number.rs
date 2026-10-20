@@ -102,14 +102,16 @@ impl Schema for IntSchema {
         if let Some(min) = self.node.min {
             if value < min {
                 issues.report(at, IssueCode::TooSmall, |i| {
-                    i.expected(format!("at least {min}")).received(value.to_string())
+                    i.expected(format!("at least {min}"))
+                        .received(value.to_string())
                 });
             }
         }
         if let Some(max) = self.node.max {
             if value > max {
                 issues.report(at, IssueCode::TooLarge, |i| {
-                    i.expected(format!("at most {max}")).received(value.to_string())
+                    i.expected(format!("at most {max}"))
+                        .received(value.to_string())
                 });
             }
         }
