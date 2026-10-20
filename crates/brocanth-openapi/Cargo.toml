@@ -31,6 +31,36 @@ thiserror = "2"
 # asks for `features = ["scaffold"]`.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `src/admin.rs` is the document's tab in the backoffice: every operation
+# with its path, verb and summary, and one screen per operation for its
+# parameters, body and responses. PocketBase's API preview, generated from
+# the route table instead of from a collection editor.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and intends to keep them. An API tab written there would
+# put the document builder in the binary of every application with a
+# backoffice. The admin owns the seam and this crate owns the screens.
+#
+# Optional and off, so a program that only serves `/openapi.json` links
+# neither the admin nor a template engine.
+brocanth-admin = { workspace = true, optional = true }
+
+# The screens, compiled in by the macro. Only reachable through `admin`: a
+# document does not render HTML. Same spelling the admin uses, so one copy
+# is linked.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
+# The panel's trait is async and object-safe, which `async fn` in a trait
+# still is not. Same spelling the admin uses, so one copy is linked.
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+# The HTTP test client. `tests/panel.rs` uses `Html` alone: it drives the
+# real `Admin` directly, because this crate mounts no routes of the
+# admin's. Asserting on a substring of the page is the habit it exists to
+# end (`docs/framework-gaps.md` §G6).
+brocanth-test.workspace = true
+
 [features]
 default = []
 
@@ -38,3 +68,6 @@ default = []
 # dependency line above for why the generator is not an application's
 # business.
 scaffold = ["dep:brocanth-scaffold"]
+
+# The backoffice tab. Off, like every other way out of this crate.
+admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]

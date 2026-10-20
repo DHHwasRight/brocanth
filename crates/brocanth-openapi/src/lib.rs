@@ -115,6 +115,13 @@
 #![warn(missing_docs)]
 
 pub mod adapter;
+
+/// The document's tab in `brocanth-admin`.
+///
+/// Behind an off-by-default feature, so an application that publishes a
+/// document and has no backoffice links neither the admin nor a renderer.
+#[cfg(feature = "admin")]
+pub mod admin;
 pub mod document;
 pub mod drift;
 pub mod json;
@@ -128,6 +135,17 @@ pub mod spec;
 /// document never links the code that writes one into a new project.
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+
+/// The panel's screens, compiled in by rsx at macro expansion: nothing is
+/// read from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own
+/// `use` line names this path. Private, like the admin's own template
+/// module, which is also what keeps `missing_docs` off generated items.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
 
 pub use crate::adapter::{schema_for, SchemaNode};
 pub use crate::document::{
