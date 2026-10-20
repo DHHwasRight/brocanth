@@ -71,7 +71,7 @@ One binary, `./pocketbase serve`, superuser dashboard at `/_/`.
 | P2, P3 records and filters | `admin` + `model` | the list screen | **done**, except the filter expression |
 | P5 superusers | `auth` + `policy` | **Accounts** | with J8 |
 | P6 request logs | `logging` | **Requests** | **blocked** — see below |
-| P7 settings | `config` | **Settings** | **blocked** — see below |
+| P7 settings | `config` | **Settings** | buildable; it needed redaction, not a merged document |
 | P8 backups | — | — | missing, and nothing owns it |
 | P9 files | `storage` | **Files** | **blocked** — see below |
 | P10 realtime clients | `realtime` | **Realtime** | **buildable today** |
@@ -80,7 +80,9 @@ One binary, `./pocketbase serve`, superuser dashboard at `/_/`.
 | — | `jobs` | **Background jobs** | **done** |
 | — | `cache` | **Cache** | partly buildable |
 
-## 4. The five tabs that cannot be built, and why
+## 4. The tabs that cannot be built, and why
+
+Four, not five: `config` turned out not to be one of them.
 
 Each of these is a missing *read*, not a missing screen. The panel is an
 afternoon; the read is the work.
@@ -101,11 +103,19 @@ an index the crate deliberately does not keep.
 Nothing retains anything, so there is no table to show. PocketBase's logs
 tab is backed by a table; this would need one.
 
-**Settings (`config`).** The loader reads the layered TOML into typed
-sections and hands each to its plugin. It keeps no merged document, so
-there is nothing to render. A read-only settings tab — the most useful
-half, since the values came from files on disk — needs the loader to keep
-what it merged.
+**Settings (`config`).** ~~The loader keeps no merged document.~~ Wrong,
+and wrong the same way the test counts in `framework-gaps.md` were: I
+grepped `lib.rs`, saw no `pub fn`, and called the surface empty. `lib.rs`
+re-exports; the API is in `config.rs` and `value.rs`. `Loader::load`
+returns a `Config` whose `root: Value` **is** the deep-merged tree, every
+node carrying a `Provenance` — file, line and column, or `$VAR`, or a
+plugin default — plus `Value::shadowed()`, the chain of layers it beat.
+`Dump` already renders it.
+
+What was actually missing is **redaction**, which is a sharper gap than
+the one it replaces: without it the tab prints the password out of a
+database URL, and so does `Config::dump()` into a terminal, a ticket or a
+log.
 
 **Changes (`events`).** `ChangeSink` is implemented by `brocanth-realtime`
 and the seam works. But `brocanth-model` holds no sink, so no row written
