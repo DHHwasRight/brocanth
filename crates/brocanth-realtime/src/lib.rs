@@ -178,6 +178,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "admin")]
+pub mod admin;
 pub mod broker;
 pub mod frame;
 pub mod gate;
@@ -189,6 +191,17 @@ pub mod row;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 pub mod topic;
+
+/// The panel's screen, compiled in by rsx at macro expansion: nothing is
+/// read from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own
+/// `use` line names this path. Private, like the admin's own template
+/// module, which is also what keeps `missing_docs` off generated items.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
 
 pub use broker::{
     Broker, BrokerBuilder, Client, ClientId, Config, ConnectError, Delivery, Fallback, Stats,

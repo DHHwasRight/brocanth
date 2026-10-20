@@ -62,8 +62,36 @@ sqlx = { version = "0.9", default-features = false, features = [
 # project is never linked into an application that merely has one.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `src/admin.rs` is the cache's tab in the backoffice: a Clear button per
+# declared namespace and one Purge expired button, and no numbers, because
+# `Cache` has no `stats()` and a panel holds an `Arc<dyn Cache>`.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and no SQL driver, and intends to keep it that way. A cache
+# panel written there would put this crate in the binary of every
+# application with a backoffice. The admin owns the seam and this crate
+# owns the screen.
+#
+# Optional and off, so a process that only reads the cache links neither
+# the admin nor a template engine.
+brocanth-admin = { workspace = true, optional = true }
+
+# The screen, compiled in by the macro. Only reachable through `admin`: a
+# cache does not render HTML. Same spelling the admin uses, so one copy is
+# linked.
+#
+# No `async-trait` line here: this crate already depends on it, because
+# `Cache` is held behind a `dyn` for the same reason `Panel` is.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+# The HTTP test client. `tests/panel.rs` uses `Html` alone: it drives the
+# real `Admin` directly, because this crate mounts no routes of the
+# admin's. Asserting on a substring of the page is the habit it exists to
+# end (`docs/framework-gaps.md` §G6).
+brocanth-test.workspace = true
 
 [features]
 # `postgres` is the default and the only backend here. SQLite is the "smaller
@@ -86,6 +114,9 @@ postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
 # dependency line above for why the generator is not an application's
 # business.
 scaffold = ["dep:brocanth-scaffold"]
+
+# The backoffice tab. Off, like every other way out of this crate.
+admin = ["dep:brocanth-admin", "dep:rsx"]
 
 [lints.rust]
 missing_docs = "warn"

@@ -50,6 +50,54 @@ serde_json = { version = "1", optional = true }
 # project is never linked into an application that merely has one.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `src/admin.rs` is the broker's tab in the backoffice: the indexed/scanned
+# split, the four counts under it, and `Broker::audit` as a table.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and intends to keep them. A realtime panel written there
+# would put the broker in the binary of every application with a
+# backoffice. The admin owns the seam and this crate owns the screen.
+#
+# Optional and off, so a process that only broadcasts links neither the
+# admin nor a template engine.
+#
+# `default-features = false` keeps the promise at the top of this file.
+# `brocanth-admin`'s own `plugin` feature is what pulls in `brocanth`, and
+# this crate refuses that arrow. `Admin::dispatch` takes a method, a path
+# and form pairs, and needs none of it -- so turning this tab on adds the
+# admin and the renderer, and still no core, no request and no route.
+# `cargo tree -p brocanth-realtime --features admin` is the check.
+#
+# Spelled out rather than `workspace = true`, and that is not an oversight:
+# cargo ignores `default-features = false` on a workspace dependency whose
+# table in the root manifest does not mention `default-features`, with a
+# warning, so inheriting it here would silently pull `brocanth` back in.
+# Setting it in the root table instead would turn the admin's plugin off
+# for every other crate. One crate wants something different from the
+# default, so one crate says so.
+brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", optional = true, default-features = false }
+
+# The screen, compiled in by the macro. Only reachable through `admin`: a
+# broker does not render HTML. Same spelling the admin uses, so one copy is
+# linked.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
+# The panel's trait is async and object-safe, which `async fn` in a trait
+# still is not. Same spelling the admin uses, so one copy is linked.
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+# The HTTP test client, for `tests/panel.rs` only.
+#
+# It brings `brocanth` into the *test* build, which the dependency list
+# above refuses for a library build, and the trade is deliberate: the
+# alternative is a panel test that searches the page for a substring, which
+# is the habit `brocanth-test` exists to end (`docs/framework-gaps.md` §G6).
+# A dev-dependency is linked into no application and changes nothing an
+# application resolves. `tests/panel.rs` uses `Html` alone -- it drives the
+# real `Admin` directly, because this crate mounts no routes.
+brocanth-test.workspace = true
+
 [features]
 default = []
 # Multi-process realtime over Postgres `LISTEN/NOTIFY` (§10). Off by default
@@ -61,6 +109,9 @@ listen-notify = ["dep:serde", "dep:serde_json"]
 # dependency line above for why the generator is not an application's
 # business.
 scaffold = ["dep:brocanth-scaffold"]
+
+# The backoffice tab. Off, like every other way out of this crate.
+admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
 
 [lints.rust]
 missing_docs = "warn"

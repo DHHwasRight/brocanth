@@ -157,6 +157,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// The cache's tab in `brocanth-admin`.
+///
+/// Behind an off-by-default feature, so a process that only reads the
+/// cache links neither the admin nor a renderer.
+#[cfg(feature = "admin")]
+pub mod admin;
 pub mod cache;
 pub mod clock;
 pub mod error;
@@ -174,6 +180,17 @@ pub mod postgres;
 /// business and not an application's.
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+
+/// The panel's screen, compiled in by rsx at macro expansion: nothing is
+/// read from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own
+/// `use` line names this path. Private, like the admin's own template
+/// module, which is also what keeps `missing_docs` off generated items.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
 
 pub use cache::{expires_at, Cache, DEFAULT_MAX_VALUE_BYTES};
 pub use clock::{from_millis, to_millis, Clock, ManualClock, SystemClock};

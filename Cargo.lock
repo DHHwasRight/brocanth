@@ -634,8 +634,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-admin",
  "brocanth-scaffold",
+ "brocanth-test",
  "chrono",
+ "rsx",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
@@ -757,9 +760,13 @@ dependencies = [
 name = "brocanth-openapi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "brocanth",
+ "brocanth-admin",
  "brocanth-scaffold",
+ "brocanth-test",
  "http",
+ "rsx",
  "thiserror 2.0.21",
 ]
 
@@ -788,9 +795,13 @@ dependencies = [
 name = "brocanth-realtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "brocanth-admin",
  "brocanth-events",
  "brocanth-policy",
  "brocanth-scaffold",
+ "brocanth-test",
+ "rsx",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

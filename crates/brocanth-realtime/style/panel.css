@@ -1,0 +1,47 @@
+/* The realtime panel's stylesheet, built into `src/admin.css`.
+ *
+ * Its own build and not the admin's, because a `Panel` is contributed by
+ * another crate and the admin's Tailwind run cannot see class names that
+ * are not in its own templates. A panel that needed the admin to have
+ * pre-baked its classes would be a panel only this repository could write.
+ *
+ * No preflight: the admin's sheet already reset the document, and a second
+ * reset would fight the first. This emits the theme variables it uses and
+ * the utilities its template names, and nothing else.
+ *
+ * To rebuild it, see style/README.md.
+ */
+
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
+
+@source "../src/admin_templates/**/*.rsx";
+@source "../src/admin.rs";
+
+/* The same tokens the admin defines, because the panel sits inside its
+ * chrome and must not look like a different product. Duplicated rather
+ * than imported: a crate that reached into another crate's stylesheet
+ * would break the first time the dependency was optional, which this one
+ * is. If the admin's palette moves, move these.
+ *
+ * No colour of this panel's own. The screen has one judgement to make --
+ * whether anything is on the slow path -- and it makes it in a sentence.
+ * An amber the admin does not have would be this crate deciding what the
+ * product's warning colour is, from inside a tab.
+ */
+@theme {
+    --color-ink: #0a2540;
+    --color-ink-soft: #425466;
+    --color-ink-faint: #8792a2;
+    --color-accent: #635bff;
+    --color-accent-dark: #4b45c6;
+    --color-line: #e6ebf1;
+    --color-stage: #f6f9fc;
+    --color-danger: #c62828;
+
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius-card: 8px;
+    --radius-control: 6px;
+    --shadow-card: 0 2px 5px -1px rgba(50, 50, 93, 0.25),
+        0 1px 3px -1px rgba(0, 0, 0, 0.3);
+}
