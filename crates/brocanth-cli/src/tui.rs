@@ -231,10 +231,21 @@ impl Model {
                 let on = !self.draft.choices[i].on;
                 self.draft.choices[i].on = on;
                 if on {
-                    // What this row needs comes on with it. One level deep,
-                    // like `shown`: nothing here requires something that
-                    // requires something else.
-                    for at in self.draft.choices[i].needs.clone() {
+                    // What this row needs comes on with it — and so does
+                    // what its children need. A child that starts on
+                    // arrives the moment its parent is ticked, and it has
+                    // requirements of its own: `rsx` brings
+                    // `rsx-tailwind`, which cannot be written without
+                    // `commands`. Satisfying only the ticked row's needs
+                    // produced a selection the flags refuse, which is the
+                    // two front doors disagreeing.
+                    let mut wants: Vec<usize> = self.draft.choices[i].needs.clone();
+                    for at in 0..self.draft.choices.len() {
+                        if self.draft.choices[at].under == Some(i) && self.draft.choices[at].on {
+                            wants.extend(self.draft.choices[at].needs.iter().copied());
+                        }
+                    }
+                    for at in wants {
                         self.draft.choices[at].on = true;
                     }
                 } else {
@@ -927,5 +938,73 @@ mod tests {
         m.backspace();
         assert_eq!(m.draft.choices[0].on, before);
         assert!(m.draft.name.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod needs_tests {
+    use super::*;
+
+    /// Ticking a parent brings a child that starts on. Does it bring what
+    /// that child needs?
+    #[test]
+    fn a_child_that_arrives_with_its_parent_brings_its_own_requirements() {
+        let keys = crate::modules::keys();
+        let choices: Vec<Choice> = keys
+            .iter()
+            .map(|key| {
+                let m = crate::modules::find(key).expect("registered").manifest();
+                Choice {
+                    label: m.key.to_string(),
+                    blurb: m.gist.to_string(),
+                    on: m.on_with_parent,
+                    under: m
+                        .parent
+                        .and_then(|parent| keys.iter().position(|k| *k == parent)),
+                    blocked: m.blocked.map(str::to_string),
+                    needs: m
+                        .needs
+                        .iter()
+                        .filter_map(|(need, _)| keys.iter().position(|k| k == need))
+                        .collect(),
+                }
+            })
+            .collect();
+        let mut model = Model {
+            draft: Draft {
+                name: "x".into(),
+                title: "X".into(),
+                choices,
+                git: false,
+            },
+            row: 0,
+            title_is_mine: true,
+            complained: false,
+        };
+
+        // Land on `rsx` and tick it. `rsx-tailwind` starts on and needs
+        // `commands`.
+        let rsx = model
+            .rows()
+            .iter()
+            .position(|r| matches!(r, Row::Choice(i) if model.draft.choices[*i].label == "rsx"))
+            .expect("rsx is on the menu");
+        model.row = rsx;
+        model.toggle();
+
+        let taken: Vec<&str> = (0..model.draft.choices.len())
+            .filter(|i| model.draft.taken(*i))
+            .map(|i| model.draft.choices[i].label.as_str())
+            .collect();
+
+        assert!(
+            taken.contains(&"rsx-tailwind"),
+            "the child arrived: {taken:?}"
+        );
+        assert!(
+            taken.contains(&"commands"),
+            "and so did what it needs, or the chooser produces an answer the \
+             flags would refuse: {taken:?}"
+        );
     }
 }
