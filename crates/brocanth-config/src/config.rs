@@ -842,6 +842,7 @@ impl Config {
             config: self,
             claims: &[],
             history: true,
+            redaction: crate::redact::Redaction::standard(),
         }
     }
 
@@ -850,6 +851,7 @@ impl Config {
             config: self,
             claims,
             history: true,
+            redaction: crate::redact::Redaction::standard(),
         }
     }
 

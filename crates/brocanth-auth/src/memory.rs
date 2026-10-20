@@ -16,8 +16,8 @@ use crate::identity::{Account, AccountId, EmailAddress, ProviderLink};
 use crate::otp::OtpChallengeId;
 use crate::session::SessionId;
 use crate::storage::{
-    AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord, OtpStore, SessionRecord,
-    SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
+    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -299,6 +299,64 @@ impl AuthStore for MemoryStore {
             .tokens
             .retain(|(p, _), t| !(*p == purpose && &t.account == account));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AccountDirectory for MemoryStore {
+    async fn accounts(&self, limit: u32, offset: u32) -> Result<Vec<Account>, StoreError> {
+        // Sorted on every call, because nothing here is indexed and the trait
+        // promises one order. A real adapter writes `ORDER BY created_at DESC,
+        // id` and lets the database do it.
+        let mut all: Vec<Account> = self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .accounts
+            .values()
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(all
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
+    }
+
+    async fn count_accounts(&self) -> Result<u64, StoreError> {
+        Ok(self.state.lock().expect("memory store lock").accounts.len() as u64)
+    }
+
+    async fn sessions_for_account(
+        &self,
+        account: &AccountId,
+    ) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut found: Vec<SessionRecord> = self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .sessions
+            .values()
+            .filter(|s| &s.account == account)
+            .cloned()
+            .collect();
+        found.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(found)
+    }
+
+    fn is_durable(&self) -> bool {
+        // It is a `HashMap` behind a `Mutex`. Everything in it goes when the
+        // process does, and a screen listing these accounts has to say so.
+        false
     }
 }
 

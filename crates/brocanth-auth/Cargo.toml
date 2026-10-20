@@ -84,6 +84,24 @@ reqwest = { version = "0.13", default-features = false, features = [
 # project is never linked into an application that merely has it.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `src/admin.rs` is the **Accounts** tab in the backoffice: every account, its
+# address, whether that address is proven, whether it has a password, when it
+# was made, and the sessions open on it.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and no password hasher, and intends to keep it that way. An
+# accounts panel written there would put argon2 and a JWT library in the
+# binary of every application that has a backoffice. The admin owns the seam
+# and this crate owns the screens.
+#
+# Optional and off, so an application with accounts and no backoffice links
+# neither the admin nor rsx.
+brocanth-admin = { workspace = true, optional = true }
+
+# The templates, compiled in by the macro. Only reachable through `admin`: a
+# login does not render HTML.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
 [dev-dependencies]
 # The only thing the tests need that the library does not already provide: a
 # runtime to drive the async store and HTTP traits.
@@ -95,6 +113,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # rustc's own diagnostics, so they are pinned to the toolchain in `mise.toml`;
 # a toolchain bump regenerates them with `TRYBUILD=overwrite`.
 trybuild = "1.0.122"
+
+# This crate, as a dev-dependency on itself, with `admin` on, so the panel's
+# tests render the real screens through the real `Admin` rather than asserting
+# on a context struct. A screen that compiles and produces the wrong page is
+# the failure worth catching. The ordinary dependency tree is unaffected: a
+# published build links no admin and no rsx.
+brocanth-auth = { path = ".", features = ["admin"] }
+
+# The HTML assertions, and only those: `Html::assert_button` answers "is there
+# a button that says End every session", where `body.contains(..)` answers
+# "do those words appear anywhere, including in a comment". The test client
+# itself needs a built `App` and this test drives `Admin::dispatch`, so only
+# `Html` is used.
+brocanth-test.workspace = true
 
 [features]
 # Empty by default, and that is the §8 rule rather than an oversight. The plan
@@ -111,6 +143,11 @@ reqwest-client = ["dep:reqwest"]
 # dependency line above for why the generator is not an application's
 # business.
 scaffold = ["dep:brocanth-scaffold"]
+
+# The backoffice tab. Off, like every other way out of this crate. `admin` off
+# means the code is absent and not merely unreachable: `src/admin.rs` and the
+# templates beside it are `#[cfg]`-ed out of the crate entirely.
+admin = ["dep:brocanth-admin", "dep:rsx"]
 
 [lints.rust]
 missing_docs = "warn"

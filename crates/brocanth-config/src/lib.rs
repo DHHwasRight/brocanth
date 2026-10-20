@@ -136,6 +136,12 @@
 //! too, the first by PLAN.md §12 and the second because a secret that passes
 //! through this crate would end up in a dump.
 //!
+//! Declining to manage secrets does not stop a deployment writing one into a
+//! file, so [`Redaction`] is the other half of that decision: a key named like
+//! a secret, and the password inside a connection URL, do not reach a reader.
+//! Every [`Dump`] applies it, and so does the **Settings** tab. See
+//! [`crate::redact`] for the rule and the two alternatives it beat.
+//!
 //! # The two ways an application configures a plugin
 //!
 //! Without this crate, in the core alone — no parser is linked, and the value
@@ -197,8 +203,26 @@ mod dump;
 pub mod env;
 pub mod formats;
 mod plugin;
+pub mod redact;
 pub mod ser;
 mod value;
+
+/// The **Settings** tab in `brocanth-admin`.
+///
+/// Behind the `admin` feature, which is off. A service that reads a TOML file
+/// and serves no backoffice links neither the admin nor rsx.
+#[cfg(feature = "admin")]
+pub mod admin;
+
+/// The tab's screen, compiled in by rsx at macro expansion: nothing is read
+/// from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own `use`
+/// line names this path.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
 
 pub use config::{
     AppName, Config, ConfigError, Loader, Origin, Source, UnknownKey, CORE_SECTIONS, DEFAULT_ENV,
@@ -209,4 +233,5 @@ pub use plugin::{
     config_of, effective_of, AppBuilderConfigExt, ConfigPlugin, ConfiguredPlugin, Effective,
     SectionClaim, SharedConfig,
 };
+pub use redact::{Reason, Redaction, Shown};
 pub use value::{merge, merge_tables, Format, Provenance, Table, Value, ValueKind};

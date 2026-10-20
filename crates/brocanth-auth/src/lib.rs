@@ -96,6 +96,25 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+
+/// The **Accounts** tab in `brocanth-admin`.
+///
+/// Behind the `admin` feature, which is off. An application that has accounts
+/// and no backoffice links neither the admin nor rsx, and a crate that keeps
+/// its dependency list to four does not grow a password hasher.
+#[cfg(feature = "admin")]
+pub mod admin;
+
+/// The tab's screens, compiled in by rsx at macro expansion: nothing is read
+/// from disk at run time.
+///
+/// At the crate root and not inside [`admin`], because a template's own `use`
+/// line names this path. Private, like the admin's own template module.
+#[cfg(feature = "admin")]
+mod admin_templates {
+    rsx::load_dir!("src/admin_templates");
+}
+
 pub mod alerts;
 pub mod apple;
 pub mod clock;
@@ -150,8 +169,8 @@ pub use providers::{Provider, ProviderKind};
 pub use recovery::{RecoveryCode, RecoveryCodes};
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
 pub use storage::{
-    AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord, OtpStore, SessionRecord,
-    SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
+    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
 };
 pub use tokens::{IssuedToken, TokenPurpose, Tokens};
 pub use totp::{Totp, TotpSecret};

@@ -10,13 +10,15 @@
 //! An adapter over `brocanth-model` is a later, separate crate. It implements
 //! this trait and changes nothing above it.
 //!
-//! # Why there are four traits and not one
+//! # Why there are five traits and not one
 //!
 //! [`AuthStore`] is what every application needs. The rest are not:
 //!
 //! * [`MfaStore`] — TOTP secrets and recovery codes.
 //! * [`OtpStore`] — one-time code challenges.
 //! * [`SignInLocationStore`] — the networks an account has signed in from.
+//! * [`AccountDirectory`] — listing accounts and their sessions, for an
+//!   operator looking at a backoffice.
 //!
 //! §8 of the plan says a capability that was not asked for must be *absent*,
 //! not merely switched off, and a trait is where that rule lands for storage: a
@@ -29,6 +31,16 @@
 //! The split is by feature and not by table because that is the unit an
 //! application turns on. [`Otp`] needs [`OtpStore`] and nothing else;
 //! [`LoginAlerts`] needs [`SignInLocationStore`] and nothing else.
+//!
+//! [`AccountDirectory`] is the one that adds no table. It adds a *read* over
+//! rows [`AuthStore`] already owns, and it is separate for the same reason and
+//! a second one: a store backed by a directory service may be genuinely unable
+//! to enumerate. LDAP pages a subtree, Entra pages a Graph collection, and
+//! neither hands over "every account, in creation order". On [`AuthStore`] that
+//! store has two bad answers — `unimplemented!()`, or an empty list that an
+//! operator cannot tell from an empty database. As its own trait it has a good
+//! one: it does not implement it, the backoffice tab will not compile against
+//! it, and nobody is told a lie at run time.
 //!
 //! [`Mfa`]: crate::mfa::Mfa
 //! [`Otp`]: crate::otp::Otp
@@ -351,6 +363,57 @@ pub trait AuthStore: Send + Sync + 'static {
         account: &AccountId,
         purpose: TokenPurpose,
     ) -> Result<(), StoreError>;
+}
+
+/// Listing accounts and their sessions, for a backoffice.
+///
+/// Separate from [`AuthStore`] for the reasons in the module documentation: a
+/// store that cannot enumerate says so by not implementing this, rather than
+/// by failing at run time on a screen an operator is already looking at.
+///
+/// There is no default implementation of any method here, and that is on
+/// purpose. The only honest default for [`AccountDirectory::accounts`] would
+/// be an empty list, which an operator cannot tell apart from a database with
+/// nobody in it — the single worst answer this screen can give.
+///
+/// # What an implementation must guarantee
+///
+/// **A total order.** [`AccountDirectory::accounts`] must answer in the same
+/// order every time: newest first by [`Account::created_at`], ties broken by
+/// [`Account::id`]. Paging over an unordered set shows a row twice and skips
+/// another, and the person paging has no way to know.
+#[async_trait]
+pub trait AccountDirectory: AuthStore {
+    /// One page of accounts, newest first.
+    ///
+    /// `limit` is how many rows at most and `offset` is how many to skip. A
+    /// `limit` of zero answers an empty list; an `offset` past the end answers
+    /// an empty list and is not an error.
+    async fn accounts(&self, limit: u32, offset: u32) -> Result<Vec<Account>, StoreError>;
+
+    /// How many accounts there are, for the pager.
+    async fn count_accounts(&self) -> Result<u64, StoreError>;
+
+    /// Every live session of one account, newest first.
+    ///
+    /// [`AuthStore`] can delete them all and cannot list them, which is enough
+    /// for authentication and not enough for an operator deciding whether to.
+    /// The pair here is a read beside [`AuthStore::delete_sessions_for_account`].
+    async fn sessions_for_account(
+        &self,
+        account: &AccountId,
+    ) -> Result<Vec<SessionRecord>, StoreError>;
+
+    /// Whether these accounts survive the process that is serving them.
+    ///
+    /// `false` for [`MemoryStore`], which is a `HashMap`. It is here and not in
+    /// the backoffice because it is a fact about storage, and it has no default
+    /// because a store that answered it by forgetting to would answer it wrong:
+    /// a screen that looks like a user database and is not one has to say so,
+    /// and the only code that knows is the store.
+    ///
+    /// [`MemoryStore`]: crate::memory::MemoryStore
+    fn is_durable(&self) -> bool;
 }
 
 /// TOTP secrets and recovery codes, for an application that wants second

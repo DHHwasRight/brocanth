@@ -39,8 +39,44 @@ jsonc-parser = { version = "0.34", default-features = false, optional = true }
 # every node.
 saphyr = { version = "0.2", default-features = false, optional = true }
 
+# `src/admin.rs` is the **Settings** tab in the backoffice: every section,
+# every key, the value, and the file and line that decided it.
+#
+# It is here and not in `brocanth-admin` because that crate has four
+# dependencies and no parser. A settings panel written there would put serde
+# and three format crates in the binary of every application that has a
+# backoffice. The admin owns the seam and this crate owns the screen.
+#
+# Optional and off, so a service that reads a TOML file and serves no
+# backoffice links neither the admin nor rsx.
+brocanth-admin = { workspace = true, optional = true }
+
+# The template, compiled in by the macro. Only reachable through `admin`: a
+# configuration loader does not render HTML.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
+# `Panel::render` is an `async fn` in a trait that is held behind a `dyn`,
+# which `async fn` in a trait still is not. Same spelling the admin uses, so
+# one copy is linked.
+async-trait = { version = "0.1", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
+
+# This crate, as a dev-dependency on itself, with `admin` on, so the panel's
+# test renders the real screen through the real `Admin` rather than asserting
+# on a context struct. A screen that compiles and prints a password is the
+# failure worth catching, and `tests/panel.rs` is where that is caught.
+brocanth-config = { path = ".", features = ["admin"] }
+
+# The HTML assertions. `Html::assert_no_text("hunter2")` is the redaction
+# test, and it reads the rendered page rather than a context struct.
+brocanth-test.workspace = true
+
+# No tokio. `Panel::render` is async and `brocanth_admin::rt::block_on` drives
+# it: thirty lines of `std`, and the reason is the one this crate already
+# gives for every parser. A dependency that appears only to make a test
+# compile is still a dependency in the tree.
 
 [features]
 default = ["toml"]
@@ -50,6 +86,13 @@ toml = ["dep:toml", "dep:serde_spanned"]
 json = ["dep:jsonc-parser"]
 # YAML 1.2, through `saphyr` 0.2.
 yaml = ["dep:saphyr"]
+
+# The backoffice tab. Off, like every parser is until it is asked for. `admin`
+# off means the code is absent and not merely unreachable: `src/admin.rs` and
+# the template beside it are `#[cfg]`-ed out of the crate entirely. It needs
+# no format feature, because the panel reads a loaded `Config` and does not
+# parse anything.
+admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
 
 [lints.rust]
 missing_docs = "warn"
