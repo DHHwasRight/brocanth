@@ -68,6 +68,10 @@ impl Module for Policy {
             "policy",
             "typed predicates over an entity's columns; no ORM, no driver, no core",
         )
+        .asked_in(
+            "doors",
+            "Authorisation rules that compile into the WHERE clause",
+        )
         .krate(Dep::brocanth("brocanth-policy"))
         // Only for the order of the two sections and the two builder lines:
         // `[policy] dialect` has to say what `[model] url` says, so it reads

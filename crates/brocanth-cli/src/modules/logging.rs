@@ -16,6 +16,7 @@ impl Module for Logging {
             "logging",
             "a line per request; the core assumes no log layer",
         )
+        .asked_in("foundations", "A line per request")
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {

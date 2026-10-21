@@ -52,6 +52,10 @@ impl Module for Validation {
             "validation",
             "a zod-shaped vocabulary; a handler takes Valid<T> or does not compile",
         )
+        .asked_in(
+            "doors",
+            "A handler takes `Valid<T>`, or it does not compile",
+        )
         .krate(Dep::brocanth("brocanth-schema"))
         // Only for the order of the `[validation]` section and the builder
         // line: the report style comes from the file the config plugin

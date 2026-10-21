@@ -15,6 +15,7 @@ impl Module for Model {
             "model",
             "SeaORM, validations, migrations; without it no SQL driver at all",
         )
+        .asked_in("data", "An ORM with validations and migrations")
         .krate(Dep::brocanth("brocanth-model"))
         .absent(
             "brocanth-model",

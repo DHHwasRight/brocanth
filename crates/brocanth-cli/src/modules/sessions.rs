@@ -16,6 +16,7 @@ impl Module for Sessions {
             "sessions",
             "a cookie, and a `Session` the context hands a handler",
         )
+        .asked_in("doors", "A signed cookie, and a session on the context")
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {

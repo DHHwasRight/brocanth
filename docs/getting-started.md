@@ -37,6 +37,25 @@ Run with no name and a terminal on both stdin and stdout, `brocanth create`
 opens a chooser instead. With a name it runs straight through, because every
 other answer has a default.
 
+The chooser has two tabs over one answer, and `tab` switches them:
+
+**Wizard** asks one question per screen. The first is a shape — an HTML
+application, a JSON API, something that does work — which ticks an answer
+you then edit. The shape also decides how many questions follow: a JSON API
+makes no HTML, so it is never asked how, and its counter reads `1 of 5`
+rather than `1 of 6`. Each shape row says which questions it leads to, and
+on that first screen the counter follows the cursor, so two shapes can be
+compared without taking either.
+
+**Expert** is every row at once, nested, with the two text fields and the
+repository tick. It is also the review screen: a list of every module with
+its tick already says what was chosen and what was not.
+
+A tick in one is a tick in the other. When a tick brings something with it —
+`rsx-tailwind` cannot be written without `commands` — the chooser says so in
+a line under the list, because every row it changed is still on the screen.
+A flag may not do that, so `--with` refuses instead and names the fix.
+
 What it writes:
 
 ```

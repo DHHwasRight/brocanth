@@ -89,6 +89,7 @@ impl Module for Records {
             "resource",
             "five typed CRUD routes over one table, with the policy in the WHERE clause",
         )
+        .asked_in("doors", "")
         .blocked("a generated app dispatches src/pages; these routes arrive as a RouteSource")
     }
 

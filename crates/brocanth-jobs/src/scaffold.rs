@@ -40,6 +40,10 @@ impl Module for Jobs {
             "jobs",
             "a queue in Postgres with retries and a dead letter; a worker in this process",
         )
+        .asked_in(
+            "behaviour",
+            "Background jobs, with retries and a dead letter",
+        )
         .krate(Dep::brocanth("brocanth-jobs"))
         // Only for the order of the `[jobs]` section and the builder line:
         // the queue reads its URL from the file the config plugin loaded.

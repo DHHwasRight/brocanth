@@ -21,6 +21,7 @@ impl Module for Rsx {
             "rsx",
             "`.rsx` templates compiled into the binary; without it a page builds a String",
         )
+        .asked_in("pages", "Templates compiled into the binary")
         .krate(Dep::git("rsx", REPOSITORY, "main").note("templates, compiled"))
         .absent(
             "rsx",
@@ -41,6 +42,10 @@ impl Module for Tailwind {
         Manifest::new(
             "rsx-tailwind",
             "a CSS build over the class names in your templates; needs node",
+        )
+        .asked_in(
+            "pages",
+            "Tailwind, built from the class names in your templates",
         )
         .part_of("rsx")
         .because("the CSS build reads class names out of `.rsx` files")
@@ -65,6 +70,7 @@ impl Module for Htmx {
             "rsx-htmx",
             "a click swaps what changed; the server renders from the shared layout down",
         )
+        .asked_in("pages", "A click swaps what changed, not the whole page")
         .part_of("rsx")
         .because(
             "`<Link>` is an `.rsx` component, and the partial it asks for is a layout \

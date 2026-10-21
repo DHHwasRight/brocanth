@@ -477,6 +477,11 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
             .map(|pick| Choice {
                 label: pick.to_string(),
                 blurb: about(pick).gist.to_string(),
+                // The guided route's shorter voice, which falls back to the
+                // gist for a module that did not write one.
+                short: about(pick).phrasing().to_string(),
+                section: about(pick).section.to_string(),
+                starts_on: about(pick).on_with_parent,
                 // A child starts ticked once its parent is, which is the
                 // asymmetry with the flags: somebody in a terminal building
                 // an HTML application wants styling and wants a click not to
@@ -491,10 +496,17 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                 // A tick brings what it requires, and an untick takes the
                 // ticks that required it. The screen can do that honestly
                 // because every row it changed is still on the screen.
+                // Each one carries its own reason, because the chooser
+                // prints it the moment the row it names changes under you.
                 needs: about(pick)
                     .needs
                     .iter()
-                    .filter_map(|(need, _)| all().iter().position(|p| p == need))
+                    .filter_map(|(need, why)| {
+                        all()
+                            .iter()
+                            .position(|p| p == need)
+                            .map(|at| (at, (*why).to_string()))
+                    })
                     .collect(),
             })
             .collect(),

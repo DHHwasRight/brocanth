@@ -94,6 +94,7 @@ impl Module for Auth {
             "auth",
             "argon2id accounts and signed sessions; no provider, so no HTTP client",
         )
+        .asked_in("doors", "Accounts and passwords. No OAuth provider")
         .krate(Dep::brocanth("brocanth-auth"))
         // Only for the order of the `[auth]` section and the builder line:
         // the cookie name and the key's variable come out of the file the

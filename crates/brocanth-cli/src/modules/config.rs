@@ -16,6 +16,10 @@ impl Module for Config {
             "config",
             "config/<env>.toml, merged; without it nothing links a TOML parser",
         )
+        .asked_in(
+            "foundations",
+            "Settings in config/<env>.toml, layered per environment",
+        )
         .krate(Dep::brocanth("brocanth-config"))
         .absent(
             "brocanth-config",

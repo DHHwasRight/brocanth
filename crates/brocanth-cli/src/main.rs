@@ -11,6 +11,7 @@ mod modules;
 mod owned;
 mod tui;
 mod ui;
+mod wizard;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

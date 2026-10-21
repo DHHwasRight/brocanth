@@ -56,6 +56,7 @@ impl Module for OpenApi {
             "openapi",
             "an OpenAPI 3.1 document derived from src/pages, served at /openapi.json",
         )
+        .asked_in("doors", "An OpenAPI document, derived from your routes")
         .krate(Dep::brocanth("brocanth-openapi"))
         // Only for the order of the `[openapi]` section and the builder line:
         // the title and the version come from the file the config plugin

@@ -144,6 +144,31 @@ pub struct Manifest {
     /// means. The receipt is read from both ends, so a project says what it
     /// does not contain as plainly as what it does.
     pub absent: Option<(&'static str, &'static str)>,
+    /// Which of the chooser's questions asks about this module.
+    ///
+    /// The chooser has a guided route that asks one question per screen:
+    /// where data lives, how HTML is made, who gets in. A module says which
+    /// question it answers, because that is knowledge about the module and
+    /// not about the menu -- and because a module from another repository
+    /// must be able to join a question without editing the CLI.
+    ///
+    /// Empty means the module did not say. It is still asked about, in a
+    /// question at the end for everything that named no other.
+    pub section: &'static str,
+    /// The shorter phrasing the guided route uses, for a module whose
+    /// [`gist`] is written for the flat list.
+    ///
+    /// Two voices for one module, because the two screens ask different
+    /// questions. The flat list sets nineteen rows beside each other, so a
+    /// row has to say what it costs: "a cache on an unlogged Postgres
+    /// table, not Redis". One question on one screen has already said that
+    /// data is the subject, so the row can answer it: "a cache, in the
+    /// database you already have".
+    ///
+    /// Empty falls back to the gist, which is what most modules want.
+    ///
+    /// [`gist`]: Manifest::gist
+    pub short: &'static str,
 }
 
 impl Manifest {
@@ -160,6 +185,29 @@ impl Manifest {
             because: "",
             blocked: None,
             absent: None,
+            section: "",
+            short: "",
+        }
+    }
+
+    /// The guided route's question this module answers, and the phrasing it
+    /// uses there.
+    ///
+    /// Both at once, because a module that joins a question nearly always
+    /// wants the shorter voice that question allows. Pass an empty `short`
+    /// to keep the gist.
+    pub fn asked_in(mut self, section: &'static str, short: &'static str) -> Self {
+        self.section = section;
+        self.short = short;
+        self
+    }
+
+    /// What the guided route puts on this module's row.
+    pub fn phrasing(&self) -> &'static str {
+        if self.short.is_empty() {
+            self.gist
+        } else {
+            self.short
         }
     }
 

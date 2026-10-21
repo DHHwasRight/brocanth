@@ -43,6 +43,7 @@ impl Module for Realtime {
             "realtime",
             "one write is a map lookup, not a query per subscriber; no transport yet",
         )
+        .asked_in("behaviour", "A broadcast broker. No transport yet")
         .krate(Dep::brocanth("brocanth-realtime"))
         // Only for the order of the `[realtime]` section and the builder
         // line: the broker reads its limits from the file the config plugin
@@ -97,9 +98,10 @@ impl Module for Sse {
             "realtime-sse",
             "one long response per subscriber, frames written as they are made",
         )
+        .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it writes the frames the broker makes, and the broker is realtime")
-        .blocked("the core's Response is finished before a hook sees it")
+        .blocked("the core can stream now; this transport is simply not written yet")
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
@@ -127,6 +129,7 @@ impl Module for WebSocket {
             "realtime-websocket",
             "a duplex socket per subscriber, frames both ways",
         )
+        .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it carries the frames the broker makes, and the broker is realtime")
         .blocked("an upgrade out of the request/response shape, plus a frame codec")

@@ -50,6 +50,7 @@ impl Module for FileStorage {
             "storage",
             "uploads on a local disk, addressed by content hash; no object store and no S3",
         )
+        .asked_in("data", "Uploads on disk, addressed by content hash")
         .krate(Dep::brocanth("brocanth-storage"))
         // Only for the order of the `[storage]` section and the builder line:
         // the store reads its root and its secret from the file the config

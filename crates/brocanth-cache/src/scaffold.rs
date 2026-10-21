@@ -24,6 +24,7 @@ impl Module for Cache {
             "cache",
             "a cache on an unlogged Postgres table, not Redis; without it no cache at all",
         )
+        .asked_in("data", "A cache, in the database you already have")
         .krate(Dep::brocanth("brocanth-cache"))
         // Only for the order of the `[cache]` section and the builder line:
         // the cache reads its URL from the file the config plugin loaded, so
