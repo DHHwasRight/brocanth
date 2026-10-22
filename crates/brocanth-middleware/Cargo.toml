@@ -1,0 +1,21 @@
+[package]
+name = "brocanth-middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types and CORS."
+
+# Two dependencies, both already in the core's own tree. This crate is a
+# set of hooks and nothing else, so anything it linked would be a cost
+# every application that wants a canonical-host redirect also pays.
+[dependencies]
+brocanth.workspace = true
+http = "1"
+
+[features]
+default = []
+scaffold = ["dep:brocanth-scaffold"]
+
+[dependencies.brocanth-scaffold]
+workspace = true
+optional = true

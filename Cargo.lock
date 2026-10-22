@@ -659,6 +659,7 @@ dependencies = [
  "brocanth-cache",
  "brocanth-config",
  "brocanth-jobs",
+ "brocanth-middleware",
  "brocanth-openapi",
  "brocanth-policy",
  "brocanth-realtime",
@@ -737,6 +738,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "brocanth-middleware"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-scaffold",
+ "http",
 ]
 
 [[package]]

@@ -82,6 +82,10 @@ pub const ALL: &[&dyn Module] = &[
     // Uploads on a local disk. The first module to write a `.gitignore`
     // line, which is also why that slot is now read.
     &brocanth_storage::scaffold::FileStorage,
+    // The five edge hooks. The first crate in the workspace whose whole
+    // job is to implement `HookSource`: the pipeline was there, tested,
+    // and every implementation of it was a test fixture.
+    &brocanth_middleware::scaffold::Middleware,
     // The document, served at `/openapi.json` as a page, because a route
     // here is a file.
     &brocanth_openapi::scaffold::OpenApi,

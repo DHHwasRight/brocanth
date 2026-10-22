@@ -12,15 +12,16 @@ edition = "2021"
 # field on the context, no bytes in the binary.
 #
 # Not here, because nothing asked for it:
-#   brocanth-model     no ORM, no SQL driver, no sea-orm anywhere in the lock file
-#   brocanth-cache     no cache; every read does the work a hit would have skipped
-#   brocanth-auth      no accounts; nothing hashes a password and nothing signs a session cookie
-#   brocanth-policy    no rule algebra; authorisation is whatever each handler remembered to check
-#   brocanth-storage   no file storage; an upload has nowhere to go and no address to be read back from
-#   brocanth-openapi   no document; a client learns this API by reading the handlers
-#   brocanth-schema    no schema vocabulary; a body is checked by hand, or it is not checked
-#   brocanth-realtime  no broker; a write tells nobody, and a client finds out by asking again
-#   rsx                no template engine; a page builds the String it returns
+#   brocanth-model       no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache       no cache; every read does the work a hit would have skipped
+#   brocanth-auth        no accounts; nothing hashes a password and nothing signs a session cookie
+#   brocanth-policy      no rule algebra; authorisation is whatever each handler remembered to check
+#   brocanth-storage     no file storage; an upload has nowhere to go and no address to be read back from
+#   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
+#   brocanth-openapi     no document; a client learns this API by reading the handlers
+#   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
+#   brocanth-realtime    no broker; a write tells nobody, and a client finds out by asking again
+#   rsx                  no template engine; a page builds the String it returns
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -963,7 +964,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 
-**Absent:** `logging`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `openapi`, `validation`, `realtime`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `middleware`, `openapi`, `validation`, `realtime`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1008,7 +1009,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 7df713752d9a6711 -->
+<!-- brocanth-digest: 9429aa97989621fd -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

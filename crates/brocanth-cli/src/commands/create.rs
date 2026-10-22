@@ -887,7 +887,14 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
 
     // The brief goes last because it is the one file about all the others,
     // and the listing `create` prints reads in this order.
-    files.push(("AGENTS.md".to_string(), agents_md(a)));
+    files.push((
+        "AGENTS.md".to_string(),
+        // Whatever the modules have to say to a model reading the project,
+        // appended after the sections every project gets. The slot was
+        // declared and never read until a module needed to explain why it
+        // had registered nothing.
+        agents_md(a) + &built.slot(Slot::AgentsSections).collect::<String>(),
+    ));
     Ok(files)
 }
 

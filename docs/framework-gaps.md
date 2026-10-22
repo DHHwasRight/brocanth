@@ -449,6 +449,37 @@ means it is not yet a feature.
 
 Ranked by what unblocks the most, not by size.
 
+**Status, 2026-10-22.** Four of the nine have moved since this was written,
+and one row in the original is now wrong about our own code. The table is
+the current reading; the sections below are the original argument, kept
+because the argument is still why each one matters.
+
+| | Gap | State |
+|---|---|---|
+| G1 | the response body cannot stream | **done**: `Body::{Buffered,Streaming}`, `ResponseHook` split into `on_headers` and `on_body`, `StreamGate` in the shutdown |
+| G2 | dp-swap has no mutating verb | open, and now the single biggest blocker |
+| G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
+| G4 | the model layer publishes to nobody | open |
+| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore` and `AgentsSections` are read now. Six remain, and the `Ctx` and `mount_routes` halves are untouched |
+| G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
+| G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
+| G7 | no migration diffing | open |
+| G8 | the cache is key/value only | open; G1 no longer blocks the route-cache half |
+| G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
+| G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
+
+**G10 is new, and it is the one this audit missed.** Part 1 compared
+brocanth against five frameworks and did not ask what every one of them
+also ships: the dozen pieces of request plumbing that are nobody's feature
+and everybody's afternoon. Gorilla is the clearest inventory of that set,
+which is why it is written up separately.
+
+Reading the code for it turned up the finding under the finding: **the
+hook pipeline had no production implementation at all.** `RequestHook`,
+`AsyncRequestHook`, `ResponseHook` and `ErrorHook` are specified, ordered
+and tested, and every `impl HookSource` in the repository was a test
+fixture. A seam with no users is a seam nobody has been wrong about yet.
+
 ### G1. The response body cannot stream
 
 `plugin_hooks.rs` declares `pub type Response = http::Response<Vec<u8>>`, and

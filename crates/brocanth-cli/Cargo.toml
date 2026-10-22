@@ -29,6 +29,7 @@ brocanth-cache = { workspace = true, features = ["scaffold"] }
 # contract rather than a module that can be written today.
 brocanth-auth = { workspace = true, features = ["scaffold"] }
 brocanth-jobs = { workspace = true, features = ["scaffold"] }
+brocanth-middleware = { workspace = true, features = ["scaffold"] }
 brocanth-openapi = { workspace = true, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }
 # `default-features = false` keeps `regex`, the `Validate` proc macro and a

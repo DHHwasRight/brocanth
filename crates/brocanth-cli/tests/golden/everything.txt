@@ -20,6 +20,7 @@ brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1025,6 +1026,54 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
             .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware ------------------------------------------
+        //
+        // Five edge hooks, none of them on. Each encodes a fact about this
+        // deployment, so each is uncommented by somebody who knows it.
+
+        // Who the client is, behind a proxy. The list is the addresses of
+        // YOUR load balancers: `X-Forwarded-For` is a claim anybody who
+        // reaches the socket may make, so there is no "trust everything".
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::ProxyHeaders as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::ProxyHeadersConfig::trusting([
+        //             "10.0.0.1".parse().expect("an address"),
+        //         ]),
+        //     ),
+        // );
+
+        // A DELETE sent from an HTML form, through `_method` or
+        // `X-HTTP-Method-Override`. Only a POST is overridden, and only
+        // into PUT, PATCH or DELETE.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::MethodOverride as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::MethodOverrideConfig::default(),
+        //     ),
+        // );
+
+        // One host, so cookies and caches agree. 308 keeps the verb; 301
+        // is what crawlers prefer and may turn a POST into a GET.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::CanonicalHost as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::CanonicalHostConfig::to("https://example.com"),
+        //     ),
+        // );
+
+        // 415 before a handler parses nonsense.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::ContentTypes as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::ContentTypesConfig::json(),
+        //     ),
+        // );
+
+        // A browser on another origin. Name the origins: a wildcard with
+        // credentials is refused at startup, because a browser refuses it.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::Cors as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
+        //     ),
+        // );
         let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
@@ -1108,7 +1157,7 @@ pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Resp
     }
 }
 
-// brocanth-digest: 367606dfafee35b3
+// brocanth-digest: a62f15831ad3b7cb
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -3305,6 +3354,7 @@ request.
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
+- `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
@@ -3476,7 +3526,16 @@ The stylesheet is embedded, so a new one is a new binary. `css` rewrites
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 07b92e0a67f235cb -->
+## Edge middleware
+
+`src/app.rs` holds five commented registrations from
+`brocanth-middleware`. Each encodes a fact about the deployment --
+which proxy to trust, which host is canonical, which origins may call
+-- so each is uncommented by somebody who knows that fact. Do not
+enable them as a set, and do not invent an address or an origin to
+make one compile.
+
+<!-- brocanth-digest: 6ab14748c8d094d0 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -3488,7 +3547,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "openapi", "validation", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
+enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "middleware", "openapi", "validation", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
 
 [modules.logging]
 files = ["src/plugins/logging/"]
@@ -3535,6 +3594,11 @@ files = ["src/plugins/storage/"]
 config = ["storage"]
 crates = ["brocanth-storage"]
 
+[modules.middleware]
+files = []
+config = []
+crates = ["brocanth-middleware"]
+
 [modules.openapi]
 files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
@@ -3570,4 +3634,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 510f44d62d16da45
+# brocanth-digest: ac1acf4f2a6af012

@@ -11,6 +11,7 @@ members = [
     "crates/brocanth-config",
     "crates/brocanth-events",
     "crates/brocanth-jobs",
+    "crates/brocanth-middleware",
     "crates/brocanth-model",
     "crates/brocanth-openapi",
     "crates/brocanth-policy",
@@ -55,3 +56,4 @@ brocanth-assets = { path = "crates/brocanth-assets", version = "0.1.0" }
 brocanth-pages = { path = "crates/brocanth-pages", version = "0.1.0" }
 brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
 brocanth-test = { path = "crates/brocanth-test", version = "0.1.0" }
+brocanth-middleware = { path = "crates/brocanth-middleware", version = "0.1.0" }
