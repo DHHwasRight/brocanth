@@ -165,7 +165,10 @@ impl HttpClient for StubHttp {
             .find(|(m, prefix, _)| *m == request.method && request.url.starts_with(prefix.as_str()))
             .map(|(_, _, r)| r.clone())
             .ok_or_else(|| {
-                AuthError::Http(format!("no stubbed route for {} {}", request.method, request.url))
+                AuthError::Http(format!(
+                    "no stubbed route for {} {}",
+                    request.method, request.url
+                ))
             })
     }
 }

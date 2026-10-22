@@ -106,12 +106,11 @@ impl<H: HttpClient, C: Clock> Jwks<H, C> {
                 detail: format!("the JWKS endpoint answered {}", response.status),
             });
         }
-        let set: JwkSet = serde_json::from_slice(&response.body).map_err(|e| {
-            AuthError::ProviderResponse {
+        let set: JwkSet =
+            serde_json::from_slice(&response.body).map_err(|e| AuthError::ProviderResponse {
                 provider: url.to_string(),
                 detail: format!("the JWKS endpoint is not a JWK set: {e}"),
-            }
-        })?;
+            })?;
         self.cache
             .lock()
             .expect("jwks lock")

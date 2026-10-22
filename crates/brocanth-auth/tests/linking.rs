@@ -9,7 +9,12 @@ use brocanth_auth::storage::{AuthStore, NewAccount};
 use common::Fixture;
 use serde_json::json;
 
-fn identity(provider: &str, subject: &str, email: Option<&str>, verified: bool) -> ProviderIdentity {
+fn identity(
+    provider: &str,
+    subject: &str,
+    email: Option<&str>,
+    verified: bool,
+) -> ProviderIdentity {
     ProviderIdentity {
         provider: provider.into(),
         subject: subject.into(),
@@ -94,8 +99,18 @@ async fn an_unverified_matching_email_never_links() {
 
     // Nothing was created and nothing was attached.
     assert_eq!(f.store.account_count(), 1);
-    assert!(f.store.link("github", "attacker-subject").await.unwrap().is_none());
-    assert!(f.store.links_for_account(&victim.id).await.unwrap().is_empty());
+    assert!(f
+        .store
+        .link("github", "attacker-subject")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(f
+        .store
+        .links_for_account(&victim.id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -189,11 +204,7 @@ async fn an_identity_owned_by_another_account_cannot_be_linked() {
 async fn relinking_the_same_identity_to_the_same_account_is_fine() {
     let f = Fixture::new();
     let linking = Linking::new(f.store.clone(), f.clock.clone());
-    let ada = f
-        .store
-        .create_account(NewAccount::default())
-        .await
-        .unwrap();
+    let ada = f.store.create_account(NewAccount::default()).await.unwrap();
     let id = identity("discord", "d-1", Some("ada@example.com"), true);
     linking.link(&ada.id, &id).await.unwrap();
     linking.link(&ada.id, &id).await.expect("idempotent");
@@ -215,7 +226,10 @@ async fn unlinking_the_last_way_in_is_refused() {
     };
 
     let err = linking.unlink(&account.id, "slack").await.unwrap_err();
-    assert!(err.to_string().contains("only way into this account"), "{err}");
+    assert!(
+        err.to_string().contains("only way into this account"),
+        "{err}"
+    );
 
     // With a second provider attached it is allowed.
     linking
@@ -274,7 +288,12 @@ async fn an_unverified_address_on_a_new_account_is_stored_unverified() {
     let f = Fixture::new();
     let linking = Linking::new(f.store.clone(), f.clock.clone());
     match linking
-        .sign_in(identity("microsoft", "m-1", Some("nobody@example.com"), false))
+        .sign_in(identity(
+            "microsoft",
+            "m-1",
+            Some("nobody@example.com"),
+            false,
+        ))
         .await
         .unwrap()
     {

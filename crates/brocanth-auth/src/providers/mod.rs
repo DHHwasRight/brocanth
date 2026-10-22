@@ -230,8 +230,8 @@ impl Provider {
         // dropped rather than fatal: the sign-in still works, the account just
         // has no email, and that is a better outcome than refusing to let
         // somebody in because their directory has a malformed entry.
-        let email = first_string(raw, self.profile.email)
-            .and_then(|e| EmailAddress::parse(&e).ok());
+        let email =
+            first_string(raw, self.profile.email).and_then(|e| EmailAddress::parse(&e).ok());
 
         let email_verified = email.is_some() && self.verified_flag(raw);
 
@@ -301,7 +301,9 @@ mod tests {
     #[test]
     fn a_numeric_id_is_still_a_subject() {
         let p = catalog::GITHUB;
-        let id = p.map_profile(&json!({"id": 4242, "login": "octocat"})).unwrap();
+        let id = p
+            .map_profile(&json!({"id": 4242, "login": "octocat"}))
+            .unwrap();
         assert_eq!(id.subject, "4242");
     }
 
@@ -344,7 +346,11 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), count, "two providers share an id");
         for p in all() {
-            assert!(!p.profile.subject.is_empty(), "{} has no subject path", p.id);
+            assert!(
+                !p.profile.subject.is_empty(),
+                "{} has no subject path",
+                p.id
+            );
             assert!(p.authorize_url.starts_with("https://"), "{}", p.id);
             assert!(p.token_url.starts_with("https://"), "{}", p.id);
         }

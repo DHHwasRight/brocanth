@@ -32,8 +32,7 @@ fn ratio(a: Duration, b: Duration) -> f64 {
 #[tokio::test]
 async fn login_gives_one_answer_for_four_different_reasons() {
     let f = Fixture::new();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
     accounts
         .register("ada@example.com", "the right password")
         .await
@@ -45,9 +44,7 @@ async fn login_gives_one_answer_for_four_different_reasons() {
         .sign_in(brocanth_auth::identity::ProviderIdentity {
             provider: "google".into(),
             subject: "g-1".into(),
-            email: Some(
-                brocanth_auth::identity::EmailAddress::parse("grace@example.com").unwrap(),
-            ),
+            email: Some(brocanth_auth::identity::EmailAddress::parse("grace@example.com").unwrap()),
             email_verified: true,
             name: None,
             avatar_url: None,
@@ -77,15 +74,17 @@ async fn login_gives_one_answer_for_four_different_reasons() {
         .login("ada@example.com", "the right password")
         .await
         .expect("the real credentials");
-    assert_eq!(ada.account().email.as_ref().unwrap().as_str(), "ada@example.com");
+    assert_eq!(
+        ada.account().email.as_ref().unwrap().as_str(),
+        "ada@example.com"
+    );
     assert_eq!(ada.proof().kinds(), FactorSet::of([FactorKind::Password]));
 }
 
 #[tokio::test]
 async fn registration_succeeds_whether_or_not_the_address_is_taken() {
     let f = Fixture::new();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
 
     let first = accounts
         .register("ada@example.com", "a long enough password")
@@ -115,8 +114,7 @@ async fn registration_succeeds_whether_or_not_the_address_is_taken() {
 #[tokio::test]
 async fn a_reset_request_succeeds_for_an_address_nobody_has() {
     let f = Fixture::new();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
     accounts
         .register("ada@example.com", "a long enough password")
         .await
@@ -142,8 +140,7 @@ async fn a_reset_request_succeeds_for_an_address_nobody_has() {
 #[tokio::test]
 async fn login_takes_comparable_time_for_a_known_and_an_unknown_address() {
     let f = Fixture::with_measurable_cost();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
     accounts
         .register("ada@example.com", "the right password")
         .await
@@ -154,11 +151,15 @@ async fn login_takes_comparable_time_for_a_known_and_an_unknown_address() {
     let mut unknown = Vec::with_capacity(samples);
     for _ in 0..samples {
         let t = Instant::now();
-        let _ = accounts.login("ada@example.com", "the wrong password").await;
+        let _ = accounts
+            .login("ada@example.com", "the wrong password")
+            .await;
         known.push(t.elapsed());
 
         let t = Instant::now();
-        let _ = accounts.login("nobody@example.com", "the wrong password").await;
+        let _ = accounts
+            .login("nobody@example.com", "the wrong password")
+            .await;
         unknown.push(t.elapsed());
     }
 
@@ -176,8 +177,7 @@ async fn login_takes_comparable_time_for_a_known_and_an_unknown_address() {
 #[tokio::test]
 async fn a_reset_request_takes_comparable_time_either_way() {
     let f = Fixture::new();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
     accounts
         .register("ada@example.com", "a long enough password")
         .await
@@ -209,8 +209,7 @@ async fn a_reset_request_takes_comparable_time_either_way() {
 #[tokio::test]
 async fn registration_takes_comparable_time_for_a_free_and_a_taken_address() {
     let f = Fixture::with_measurable_cost();
-    let accounts =
-        Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
+    let accounts = Accounts::new(f.store.clone(), f.clock.clone(), f.passwords.clone()).unwrap();
     accounts.register("taken@example.com", "pw").await.unwrap();
 
     let samples = 9;
@@ -269,7 +268,10 @@ fn password_verification_does_not_depend_on_where_the_password_goes_wrong() {
     }
 
     let (r, wf, wl) = (median(right), median(wrong_first), median(wrong_last));
-    for (name, d) in [("wrong in the first byte", wf), ("wrong in the last byte", wl)] {
+    for (name, d) in [
+        ("wrong in the first byte", wf),
+        ("wrong in the last byte", wl),
+    ] {
         let ratio = ratio(d, r);
         assert!(
             (0.5..=2.0).contains(&ratio),

@@ -59,8 +59,7 @@ async fn an_expired_token_is_rejected() {
         .unwrap();
 
     // One second short of the lifetime: still good.
-    f.clock
-        .advance(tokens.ttl(TokenPurpose::PasswordReset) - 1);
+    f.clock.advance(tokens.ttl(TokenPurpose::PasswordReset) - 1);
     let reissued = {
         let spent = tokens
             .consume(TokenPurpose::PasswordReset, issued.secret())

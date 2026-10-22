@@ -146,7 +146,9 @@ impl<S: AuthStore, C: Clock> Tokens<S, C> {
         purpose: TokenPurpose,
         account: &AccountId,
     ) -> Result<IssuedToken, AuthError> {
-        self.store.delete_tokens_for_account(account, purpose).await?;
+        self.store
+            .delete_tokens_for_account(account, purpose)
+            .await?;
         let selector = random_secret()?;
         let verifier = random_secret()?;
         self.store

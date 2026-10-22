@@ -118,7 +118,10 @@ async fn the_whole_code_flow_runs_and_the_pkce_halves_match() {
     assert!(done.identity.email_verified);
     assert_eq!(done.identity.name.as_deref(), Some("Ada Lovelace"));
     assert_eq!(done.tokens.refresh_token.as_deref(), Some("rt-1"));
-    assert_eq!(done.tokens.expires_at(clock_now(&clock)), Some(clock_now(&clock) + 3600));
+    assert_eq!(
+        done.tokens.expires_at(clock_now(&clock)),
+        Some(clock_now(&clock) + 3600)
+    );
 
     // 3. The token request carried the verifier — not the challenge — and the
     //    verifier is the one from this flow.
@@ -135,8 +138,12 @@ async fn the_whole_code_flow_runs_and_the_pkce_halves_match() {
         .expect("code_verifier is sent");
     assert_eq!(verifier, request.flow.pkce_verifier);
     assert!(pkce::verify(&verifier, &challenge));
-    assert!(form.iter().any(|(k, v)| k == "grant_type" && v == "authorization_code"));
-    assert!(form.iter().any(|(k, v)| k == "client_secret" && v == "client-secret-456"));
+    assert!(form
+        .iter()
+        .any(|(k, v)| k == "grant_type" && v == "authorization_code"));
+    assert!(form
+        .iter()
+        .any(|(k, v)| k == "client_secret" && v == "client-secret-456"));
 }
 
 fn clock_now(clock: &Arc<TestClock>) -> i64 {
@@ -541,7 +548,9 @@ async fn a_refresh_sends_the_refresh_grant_and_returns_the_rotated_token() {
     let stub = Arc::new(StubHttp::new().on(
         http::Method::POST,
         "https://oauth2.googleapis.com/token",
-        json(json!({"access_token": "at-2", "refresh_token": "rt-2", "expires_in": 60}).to_string()),
+        json(
+            json!({"access_token": "at-2", "refresh_token": "rt-2", "expires_in": 60}).to_string(),
+        ),
     ));
     let oauth = oauth_client(stub.clone(), clock);
     let tokens = oauth
@@ -552,8 +561,12 @@ async fn a_refresh_sends_the_refresh_grant_and_returns_the_rotated_token() {
     assert_eq!(tokens.refresh_token.as_deref(), Some("rt-2"));
 
     let form = stub.requests()[0].form.clone().expect("form");
-    assert!(form.iter().any(|(k, v)| k == "grant_type" && v == "refresh_token"));
-    assert!(form.iter().any(|(k, v)| k == "refresh_token" && v == "rt-1"));
+    assert!(form
+        .iter()
+        .any(|(k, v)| k == "grant_type" && v == "refresh_token"));
+    assert!(form
+        .iter()
+        .any(|(k, v)| k == "refresh_token" && v == "rt-1"));
 }
 
 #[test]

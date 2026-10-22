@@ -518,11 +518,7 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
         if let Some(secret) = secret {
             match provider.auth_style {
                 AuthStyle::ClientSecretBasic => {
-                    let raw = format!(
-                        "{}:{}",
-                        urlencode(&client.client_id),
-                        urlencode(&secret)
-                    );
+                    let raw = format!("{}:{}", urlencode(&client.client_id), urlencode(&secret));
                     request = request.header(
                         "Authorization",
                         format!("Basic {}", BASE64_STANDARD.encode(raw)),
@@ -563,7 +559,10 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
                 .get("id_token")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            scope: body.get("scope").and_then(|v| v.as_str()).map(str::to_string),
+            scope: body
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             raw: body,
         })
     }
@@ -580,7 +579,8 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
 
         // Slack answers 200 with `{"ok": false, "error": "..."}`. Reading only
         // the status turns a refusal into a success with every field missing.
-        if provider.has(Quirk::OkEnvelope) && body.get("ok").and_then(|v| v.as_bool()) == Some(false)
+        if provider.has(Quirk::OkEnvelope)
+            && body.get("ok").and_then(|v| v.as_bool()) == Some(false)
         {
             return Err(AuthError::ProviderRefused {
                 error: body
@@ -672,10 +672,7 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
                     .http
                     .send(
                         HttpRequest::get(url)
-                            .header(
-                                "Authorization",
-                                format!("Bearer {}", tokens.access_token),
-                            )
+                            .header("Authorization", format!("Bearer {}", tokens.access_token))
                             .header("Accept", "application/json")
                             // GitHub requires a User-Agent and answers 403
                             // without one.

@@ -179,7 +179,9 @@ mod tests {
     #[test]
     fn addresses_normalise_but_are_not_mangled() {
         assert_eq!(
-            EmailAddress::parse("  Alice@Example.COM ").unwrap().as_str(),
+            EmailAddress::parse("  Alice@Example.COM ")
+                .unwrap()
+                .as_str(),
             "alice@example.com"
         );
         // Gmail would treat these as one person. Email does not, and neither
@@ -196,7 +198,15 @@ mod tests {
 
     #[test]
     fn obvious_nonsense_is_refused() {
-        for bad in ["", "alice", "@example.com", "alice@", "a@b", "a b@c.com", "a@b@c.com"] {
+        for bad in [
+            "",
+            "alice",
+            "@example.com",
+            "alice@",
+            "a@b",
+            "a b@c.com",
+            "a@b@c.com",
+        ] {
             assert!(EmailAddress::parse(bad).is_err(), "accepted `{bad}`");
         }
     }
