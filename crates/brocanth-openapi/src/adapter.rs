@@ -37,7 +37,10 @@
 //!    value's `type` array.
 //! 3. **A node has no name.** Nothing in `SchemaNode` says "this is a
 //!    `Post`", so this crate cannot decide on its own what belongs in
-//!    `components/schemas`. The caller names it:
+//!    `components/schemas`. (This is true of this source and not of the
+//!    other one: a `zod::Node` carries the struct's own name, so
+//!    [`crate::zod_node`] registers its components by itself.) The caller
+//!    names it:
 //!    `.component("Post", schema_for(&Post::describe()))`, and then refers to
 //!    it with `Schema::reference("Post")`. That is a real limitation and the
 //!    alternative — inventing names from Rust type paths — produces

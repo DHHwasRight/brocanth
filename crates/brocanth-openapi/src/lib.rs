@@ -63,6 +63,32 @@
 //! # }
 //! ```
 //!
+//! # Two schema sources
+//!
+//! A document needs the shape of every body, and this crate asks for it
+//! through [`SchemaSource`]: a shape, an optional component name, and the
+//! named schemas it refers to. Three things, so anything can supply them.
+//!
+//! Two do.
+//!
+//! | | |
+//! |---|---|
+//! | [`adapter`] | `brocanth-schema`, through a mirrored node type and `schema_for` |
+//! | [`zod_node`] | `zod`, behind the `zod` feature |
+//!
+//! The second one can do something the first cannot, and it is worth saying
+//! why rather than leaving a reader to find out. `adapter`'s header records
+//! that a `SchemaNode` has no name, so this crate cannot decide what belongs
+//! in `components/schemas` and the caller has to name every type by hand. A
+//! `zod::Node` does carry a name, because `#[derive(Entry)]` is the one
+//! place that knows what the struct is called. So one call registers a
+//! struct and every struct it holds, each once, with a `$ref` at each use
+//! site:
+//!
+//! ```ignore
+//! SpecBuilder::new("Shop", "1.0.0").describing::<Order>()
+//! ```
+//!
 //! # What this crate deliberately does not build
 //!
 //! **No client generators.** `openapi-generator` emits clients for fifty
@@ -129,6 +155,10 @@ pub mod plugin;
 pub mod schema;
 pub mod spec;
 
+/// Reading a `zod` schema into the document.
+#[cfg(feature = "zod")]
+pub mod zod_node;
+
 /// What `brocanth create` writes when somebody asks for a document.
 ///
 /// Behind an off-by-default feature, so an application that publishes a
@@ -159,6 +189,9 @@ pub use crate::drift::{
 pub use crate::json::{Json, JsonError};
 pub use crate::plugin::{document_of, OpenApiConfig, OpenApiPlugin, SharedDocument};
 pub use crate::schema::{Additional, NamedSchema, Schema, SchemaKind, SchemaSource, SchemaType};
+#[cfg(feature = "zod")]
+pub use crate::zod_node::{body_for, body_of, Body};
+
 pub use crate::spec::{
     check_path_parameters, openapi_path, operation_id_for, DescribeOperation, HeadPolicy,
     OperationIdStyle, OperationSpec, SpecBuilder, SpecError,

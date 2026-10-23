@@ -138,6 +138,32 @@ impl Schema {
         }
     }
 
+    /// One declared property, or [`None`] for a schema that is not an
+    /// object or has no such property.
+    ///
+    /// A reader, because a document is built here and asserted about
+    /// elsewhere: a test that has to match on [`SchemaKind`] to ask "what
+    /// is the type of `id`" is a test nobody writes.
+    #[must_use]
+    pub fn property_named(&self, name: &str) -> Option<&Schema> {
+        match &self.kind {
+            SchemaKind::Object { properties, .. } => properties
+                .iter()
+                .find(|(declared, _)| declared == name)
+                .map(|(_, schema)| schema),
+            _ => None,
+        }
+    }
+
+    /// Whether a declared property is in the `required` list.
+    #[must_use]
+    pub fn requires(&self, name: &str) -> bool {
+        match &self.kind {
+            SchemaKind::Object { required, .. } => required.iter().any(|held| held == name),
+            _ => false,
+        }
+    }
+
     /// The empty schema: anything at all.
     ///
     /// This is the honest default for a body nobody described, and it is why

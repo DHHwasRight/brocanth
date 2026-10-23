@@ -50,6 +50,13 @@ brocanth-admin = { workspace = true, optional = true }
 # is linked.
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
 
+# The second schema source. `src/adapter.rs` mirrors `brocanth-schema`'s
+# node type and explains why; this one does not need a mirror, because a
+# `zod::Node` carries the name of the struct it came from and so can
+# register its own components. Optional and off: a document hand-written
+# with `Schema::object()` needs neither source.
+zod = { workspace = true, optional = true }
+
 # The panel's trait is async and object-safe, which `async fn` in a trait
 # still is not. Same spelling the admin uses, so one copy is linked.
 async-trait = { version = "0.1", optional = true }
@@ -71,3 +78,7 @@ scaffold = ["dep:brocanth-scaffold"]
 
 # The backoffice tab. Off, like every other way out of this crate.
 admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
+
+# Read a schema out of a `zod::Node`, so a struct that derives
+# `zod::Entry` describes its own request and response bodies.
+zod = ["dep:zod"]
