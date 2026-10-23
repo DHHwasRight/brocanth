@@ -73,7 +73,7 @@ format strings over fields brocanth already has.
 | `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `AsyncRequestHook` + `sessions` | **blocked** on dp-swap's missing mutating verb (gaps G2) |
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
-| `gorilla/schema` | fills a struct from form values | `brocanth-schema` validates, it does not decode a form | open, and it is what a POST handler needs first |
+| `gorilla/schema` | fills a struct from form values | `brocanth-schema` validates, it does not decode a form | **done**: `brocanth-input`, and a form, a JSON body and a query string all read the same struct. See `docs/input.md` |
 | `gorilla/websocket` | the WebSocket protocol | `realtime-websocket` is on the menu and blocked | open; needs an HTTP upgrade, a second exit from `brocanth-server` |
 
 ## 4. What this leaves
@@ -81,10 +81,11 @@ format strings over fields brocanth already has.
 Two findings worth carrying into the plan.
 
 **Form decoding is the real gap, not CSRF.** `gorilla/schema` looks like the
-least interesting entry in the table and it is the one blocking the most: a
-POST handler in a generated project today reads `Vec<u8>` and parses it by
-hand. `brocanth-schema` is a validation vocabulary, which is the half after
-this one.
+least interesting entry in the table and it is the one blocking the most.
+Done since, and the gap was deeper than this paragraph said: a POST handler
+did not read `Vec<u8>` and parse it by hand, it had no body to read.
+`dispatch` took the verb and the path off the request and dropped the rest.
+`docs/input.md` is what closed it.
 
 **`CORSMethodMiddleware` is a case where brocanth can beat the original.**
 Gorilla has to ask the router at request time which methods a path has.

@@ -460,13 +460,22 @@ because the argument is still why each one matters.
 | G2 | dp-swap has no mutating verb | open, and now the single biggest blocker |
 | G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
 | G4 | the model layer publishes to nobody | open |
-| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore` and `AgentsSections` are read now. Six remain, and the `Ctx` and `mount_routes` halves are untouched |
+| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections` and `PagesItems` are read now. Five remain. `Ctx` carries the request at last, but has no extractor; `mount_routes` is untouched |
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | open |
 | G8 | the cache is key/value only | open; G1 no longer blocks the route-cache half |
 | G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
+| G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
+
+**G11 was worse than the audit said.** `docs/middleware.md` §4 called form
+decoding "the real gap" and described a POST handler reading `Vec<u8>` and
+parsing it by hand. Reading the generated code showed it could not do even
+that: `Ctx` had no body, and `dispatch` dropped the query string, the
+headers and the bytes on the floor. `brocanth-schema` was stranded by the
+same hole, because `Validation::check` takes a value a generated project
+had no way to make.
 
 **G10 is new, and it is the one this audit missed.** Part 1 compared
 brocanth against five frameworks and did not ask what every one of them

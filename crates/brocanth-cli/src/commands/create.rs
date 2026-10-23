@@ -807,7 +807,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // Always: it is the one answer to what this application is, and both
         // shapes of `main` read it.
         ("src/app.rs".to_string(), app_rs(a, &built)),
-        ("src/pages/mod.rs".to_string(), pages_mod_rs(a)),
+        ("src/pages/mod.rs".to_string(), pages_mod_rs(a, &built)),
         ("src/pages/index.rs".to_string(), index_rs(a)),
         ("src/pages/about.rs".to_string(), about_rs(a)),
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
@@ -1327,10 +1327,20 @@ fn source_of(a: &Answers, dep: &Dep) -> String {
     let crate_name = dep.name;
     let note = dep.note.map_or_else(String::new, |n| format!("  # {n}"));
     match &dep.source {
-        // Not a brocanth crate, so `--brocanth-path` has nothing to say
-        // about where it comes from.
+        // Not a brocanth crate, but `--brocanth-path` still has something
+        // to say: a checkout beside the brocanth repository stands in for
+        // the repository, the same way the flag does for brocanth's own
+        // crates. It is what makes `the_scaffold_compiles` able to build a
+        // project against work that is not pushed yet. Without the flag, a
+        // generated project always gets the URL.
         Source::Git { url, branch } => {
-            return format!("{crate_name} = {{ git = {url:?}, branch = {branch:?} }}{note}")
+            if let Some(dir) = a.local.as_deref().and_then(|at| sibling(at, crate_name)) {
+                return format!(
+                    "{crate_name} = {{ path = {:?} }}{note}",
+                    dir.display().to_string()
+                );
+            }
+            return format!("{crate_name} = {{ git = {url:?}, branch = {branch:?} }}{note}");
         }
         Source::Version(req) => return format!("{crate_name} = {{ version = {req:?} }}{note}"),
         Source::Brocanth => {}
@@ -1354,6 +1364,17 @@ fn source_of(a: &Answers, dep: &Dep) -> String {
         }
         None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}{note}"),
     }
+}
+
+/// A checkout of `name` beside the brocanth repository, or `None`.
+///
+/// `--brocanth-path` points at `crates/brocanth`, so the repository is two
+/// levels up and its siblings are one more. A directory with no
+/// `Cargo.toml` is not a checkout and does not count.
+fn sibling(brocanth_crate: &str, name: &str) -> Option<std::path::PathBuf> {
+    let repo = Path::new(brocanth_crate).parent()?.parent()?;
+    let dir = repo.parent()?.join(name);
+    dir.join("Cargo.toml").exists().then_some(dir)
 }
 
 /// One of brocanth's own crates, which every project gets whatever it chose.
@@ -1757,12 +1778,28 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     // One of two shapes, and the difference is whether anything can skip a
     // layout. Without templates there is no `html!`, so counting layers
     // would be counting for nobody.
+    // What the router matched, then what the client sent. The second is a
+    // copy: the server's request lives for the connection, the handler's
+    // context lives for the handler, and a borrow would tie the two.
+    // Two shapes, because rustfmt has two: one call after `Ctx::new` stays
+    // on the line, and two break the chain.
+    let args = "\x20               &request.query,\n\
+         \x20               request.body.to_vec(),\n\
+         \x20               request\n\
+         \x20                   .headers()\n\
+         \x20                   .map(|(name, value)| (name.to_string(), value.to_string()))\n\
+         \x20                   .collect(),\n";
+    let deeper: String = args.lines().map(|line| format!("    {line}\n")).collect();
     out.replace(
         "@CTX@",
-        if a.has("rsx-htmx") {
-            "Ctx::new(verb, path, matched.params()).holding(holding(request))"
+        &if a.has("rsx-htmx") {
+            format!(
+                "Ctx::new(verb, path, matched.params())\n\
+                 \x20               .holding(holding(request))\n\
+                 \x20               .sent(\n{deeper}\x20               )"
+            )
         } else {
-            "Ctx::new(verb, path, matched.params())"
+            format!("Ctx::new(verb, path, matched.params()).sent(\n{args}\x20           )")
         },
     )
 }
@@ -2056,6 +2093,12 @@ impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
 pub struct Error {
     pub status: u16,
     pub message: String,
+    /// Headers the failure needs. A `content-type` for a body that is not
+    /// HTML, a `www-authenticate` for a 401, a `retry-after` for a 429.
+    ///
+    /// `Response` always had these and `Error` did not, which made a
+    /// machine-readable error body impossible to send.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Error {
@@ -2063,6 +2106,7 @@ impl Error {
         Self {
             status,
             message: message.into(),
+            headers: Vec::new(),
         }
     }
 
@@ -2070,6 +2114,18 @@ impl Error {
     /// mistake by the caller.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
+    }
+
+    /// The same, carrying a header.
+    ///
+    /// `allow(dead_code)` for the same reason the request readers below
+    /// have it: it is here for the first handler that needs it, and a
+    /// brand-new project has none yet.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 }
 
@@ -2089,16 +2145,33 @@ impl IntoResponse for Error {
         } else {
             String::from("Internal Server Error")
         };
-        Response::new(self.status, body)
+        Response {
+            status: self.status,
+            body,
+            // A 5xx keeps its headers: the body is withheld, not the
+            // framing the client needs to read what is left.
+            headers: self.headers,
+        }
     }
 }
 
 /// What a handler is given. Middleware sees it too, and may change it before
 /// the handler runs or after it returns.
 pub struct Ctx {
+    /// Which verb matched. A layer reads it; a page usually does not,
+    /// because the verb is already in the name of the function it is in.
+    #[allow(dead_code)]
     pub verb: Verb,
     pub path: String,
-    params: Vec<(String, String)>,@DEPTH_FIELD@
+    /// Everything after the first `?`, without it. Empty when there was none.
+    #[allow(dead_code)]
+    pub query: String,
+    /// The body as it arrived. Empty for the verbs that carry none, and for
+    /// a context built by a test that did not set one.
+    #[allow(dead_code)]
+    pub body: Vec<u8>,
+    params: Vec<(String, String)>,
+    headers: Vec<(String, String)>,@DEPTH_FIELD@
 }
 
 impl Ctx {
@@ -2106,11 +2179,31 @@ impl Ctx {
         Self {
             verb,
             path: path.to_string(),
+            query: String::new(),
+            body: Vec::new(),
             params: params
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect(),@DEPTH_INIT@
+                .collect(),
+            headers: Vec::new(),@DEPTH_INIT@
         }
+    }
+
+    /// The rest of the request: what the client sent, rather than what the
+    /// router matched.
+    ///
+    /// Two calls and not one, because a test that exercises a handler
+    /// usually wants the first and not the second. `src/app.rs` makes both.
+    ///
+    /// The three are copied out of the server's request, which lives for
+    /// the connection and not for the handler. One copy per request, and
+    /// the handler owns what it reads.
+    #[must_use]
+    pub fn sent(mut self, query: &str, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        self.query = query.to_string();
+        self.body = body;
+        self.headers = headers;
+        self
     }@DEPTH_IMPL@
 
     /// A route parameter, or `None`.
@@ -2133,6 +2226,44 @@ impl Ctx {
     pub fn require(&self, name: &str) -> Result<&str, Error> {
         self.param(name)
             .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
+}
+
+/// What the client sent, as opposed to what the router matched.
+///
+/// A second block, and `allow(dead_code)`, for one reason: the request is
+/// on the context whether or not this project reads it yet. The other way
+/// round is a context whose shape depends on which modules were chosen,
+/// and then a page that starts reading a header needs the generator rather
+/// than a line.
+#[allow(dead_code)]
+impl Ctx {
+    /// A request header by name, case-insensitively, or `None`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every request header, in the order they arrived.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// What the body is written in, or `None` when the client did not say.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    /// The body as text, or `None` when it is not UTF-8.
+    ///
+    /// `Option` and not a lossy conversion: a body that is not text is a
+    /// request to answer, not a string to repair.
+    pub fn body_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.body).ok()
     }
 }
 
@@ -2411,7 +2542,7 @@ mod tests {
 
 /// `src/pages/mod.rs`, in three parts so the rsx bridge can land before the
 /// test module rather than after it, which clippy refuses.
-fn pages_mod_rs(a: &Answers) -> String {
+fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // The partial-navigation members exist only where something reads them.
     // `html!` is the only reader, and it is written only with templates, so
     // without them these would be a field nobody sets and a method nobody
@@ -2458,6 +2589,23 @@ fn pages_mod_rs(a: &Answers) -> String {
             a.title
         ));
         out.push_str(PAGES_RSX_RS);
+        out.push('\n');
+    }
+    // What the chosen modules add to the pages: another `impl Ctx`, a
+    // helper every handler shares. Before the tests, because an item after
+    // a `mod tests` block is what clippy calls `items_after_test_module`.
+    for block in built.slot(Slot::PagesItems) {
+        // One blank line before each, whatever the piece above ended with.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out.push('\n');
+        out.push_str(block.trim_start_matches('\n'));
+    }
+    if !built.slot_is_empty(Slot::PagesItems) {
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
         out.push('\n');
     }
     out.push_str(PAGES_MOD_RS_TESTS);
@@ -3163,13 +3311,20 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
 
     // -- layer --------------------------------------------------------
     out.push_str(
-        "/// The function behind a middleware name the application mounted.\n\
+        "/// One middleware layer, as the stack stores it.\n\
+         ///\n\
+         /// A name rather than the type written out: clippy calls the bare\n\
+         /// form a very complex type, and it is also the type `src/app.rs`\n\
+         /// would have to spell to hold one.\n\
+         pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;\n\
+         \n\
+         /// The function behind a middleware name the application mounted.\n\
          ///\n\
          /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a\n\
          /// decision and the decision is the application's. Which function answers\n\
          /// to `\"request_log\"` is not a decision, so it is here, where adding a\n\
          /// plugin can write it.\n\
-         pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response> {\n",
+         pub fn layer(name: &str) -> Option<Layer> {\n",
     );
     if built.slot_is_empty(Slot::PluginsLayers) {
         out.push_str(
@@ -3789,7 +3944,7 @@ mod tests {
         // list: `pages!` reads the directory. So what this checks is that
         // nothing crept back in.
         let a = answers(&available());
-        let table = pages_mod_rs(&a);
+        let table = pages_mod_rs(&a, &Built::new());
         assert!(
             table.contains(r#"brocanth_pages::pages!("src/pages");"#),
             "{table}"
@@ -3850,7 +4005,7 @@ mod tests {
         );
         // And the bridge is not in the source either, so there is no function
         // to call and no `rsx::` path to copy from.
-        assert!(!pages_mod_rs(&a).contains("pub fn html("));
+        assert!(!pages_mod_rs(&a, &Built::new()).contains("pub fn html("));
         assert!(!main_with_commands_rs(&a).contains("mod views;"));
     }
 
@@ -3895,7 +4050,7 @@ mod tests {
         // `load_dir!` emits `pub mod index` for `index.rsx` and `pages!`
         // emits one for `index.rs`. Both land in this file, so one of them
         // has to be nested or the scaffold does not compile.
-        let pages = pages_mod_rs(&answers(&["rsx"]));
+        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
         assert!(
             pages.contains("pub mod views {\n    rsx::load_dir!(\"src/pages\");\n}"),
             "{pages}"
@@ -3927,7 +4082,7 @@ mod tests {
                 "a handler names a layout:\n{page}"
             );
         }
-        let pages = pages_mod_rs(&a);
+        let pages = pages_mod_rs(&a, &Built::new());
         assert!(
             !pages.contains("layout::Layout"),
             "the chain is written down somewhere: {pages}"
@@ -4131,7 +4286,7 @@ mod tests {
     fn a_page_can_opt_out_of_every_layout() {
         // A fragment -- an htmx swap, a partial -- is not a document, and
         // wrapping one in a shell would be wrong rather than merely verbose.
-        let pages = pages_mod_rs(&answers(&["rsx"]));
+        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
         assert!(
             pages.contains("pub fn render(content: impl rsx::Template)"),
             "{pages}"
@@ -4141,7 +4296,7 @@ mod tests {
     #[test]
     fn a_handler_reaches_a_template_through_one_function_and_no_other() {
         let a = answers(&["rsx"]);
-        let pages = pages_mod_rs(&a);
+        let pages = pages_mod_rs(&a, &Built::new());
         assert!(pages.contains("pub use brocanth_pages::html;"));
         assert!(pages.contains("pub fn render(content: impl rsx::Template)"));
         // It returns the handler's own Result, which is what lets a template
@@ -4158,7 +4313,8 @@ mod tests {
         );
         // One place spells the application's name, and the layout reads it.
         assert!(
-            pages_mod_rs(&a).contains(&format!("pub const TITLE: &str = {:?};", a.title)),
+            pages_mod_rs(&a, &Built::new())
+                .contains(&format!("pub const TITLE: &str = {:?};", a.title)),
             "the title is not declared once"
         );
         assert!(!index.contains("Ok(html("), "{index}");
@@ -4172,7 +4328,7 @@ mod tests {
     fn the_bridge_lands_before_the_test_module() {
         // `items_after_test_module` is a clippy error, and the three-part
         // assembly of this file exists for no other reason.
-        let pages = pages_mod_rs(&answers(&["rsx"]));
+        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
         let html = pages
             .find("pub use brocanth_pages::html;")
             .expect("the bridge is written");
@@ -4237,4 +4393,94 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// The same, for the shape that reads a body.
+    ///
+    /// Separate because it is the one that proves the entrance: the
+    /// `impl Ctx` the `input` module writes into `src/pages/mod.rs` has to
+    /// compile against the `Ctx` the generator writes above it, and
+    /// nothing else in this file checks that the two agree.
+    ///
+    /// `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    fn the_entrance_compiles() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-entrance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            name: "entrance-test".into(),
+            title: "Entrance Test".into(),
+            picks: vec!["logging", "config", "input"],
+            local: Some(brocanth.display().to_string()),
+            git: false,
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        // A page that reads a body, which is the whole point of the module
+        // and the one thing the generator does not write for you.
+        std::fs::write(root.join("src/pages/signup.rs"), SIGNUP_PAGE).unwrap();
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("build")
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the entrance did not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A handler written the way the module's documentation says to write
+    /// one. If this stops compiling, the documentation is wrong.
+    const SIGNUP_PAGE: &str = r##"//! `/signup`.
+
+use crate::pages::{Ctx, Error, IntoResponse, Response, Sent};
+
+#[derive(zod::Entry)]
+struct Signup {
+    #[check(zod::Text::new().min(3).max(16).slug())]
+    #[label("Handle")]
+    #[says("Pick 3 to 16 lowercase letters, digits or hyphens")]
+    handle: String,
+
+    #[check(zod::Int::new().from(13).to(130))]
+    age: i64,
+
+    subscribed: bool,
+}
+
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let signup: Signup = ctx.body_as()?;
+    Ok(Response::ok(format!("{} is {}", signup.handle, signup.age)))
+}
+
+pub fn handle_put(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // The other half: every fault, for a page that draws the form again.
+    match ctx.read::<Signup>() {
+        Sent::Good(signup) => Ok(Response::ok(signup.handle)),
+        Sent::Faulty(faults) => {
+            let said: Vec<String> = faults
+                .by_name()
+                .into_iter()
+                .map(|(name, says)| format!("{name}: {}", says.join("; ")))
+                .collect();
+            Ok(Response::new(422, said.join("\n")))
+        }
+        Sent::Unreadable(why) => Ok(Response::new(why.status(), why.to_string())),
+    }
+}
+"##;
 }

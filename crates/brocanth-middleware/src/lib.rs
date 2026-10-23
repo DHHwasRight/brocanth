@@ -61,7 +61,7 @@ pub use proxy_headers::{ClientInfo, ProxyHeaders, ProxyHeadersConfig};
 /// A header value is bytes. Every header this crate reads is a token or a
 /// host name, so one that is not UTF-8 is malformed rather than exotic, and
 /// treating it as absent is the same answer with less code than refusing it.
-fn text<'a>(headers: &'a http::HeaderMap, name: http::header::HeaderName) -> Option<&'a str> {
+fn text(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<&str> {
     headers.get(name)?.to_str().ok()
 }
 

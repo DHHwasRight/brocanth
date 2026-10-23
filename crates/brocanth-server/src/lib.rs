@@ -208,6 +208,25 @@ pub struct Response {
 }
 
 impl Response {
+    /// A header by name, case-insensitively, or `None`.
+    ///
+    /// The same reader [`Request::header`] has. A response is read as well
+    /// as written: a hook checks what an earlier one set, and a test checks
+    /// what the handler sent.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every header, in the order they were added.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     /// A response with a body and an explicit content type.
     pub fn new(status: u16, content_type: &str, body: impl Into<Bytes>) -> Self {
         Self {

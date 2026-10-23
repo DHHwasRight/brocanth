@@ -658,6 +658,7 @@ dependencies = [
  "brocanth-auth",
  "brocanth-cache",
  "brocanth-config",
+ "brocanth-input",
  "brocanth-jobs",
  "brocanth-middleware",
  "brocanth-openapi",
@@ -719,6 +720,16 @@ name = "brocanth-events"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "brocanth-input"
+version = "0.1.0"
+dependencies = [
+ "brocanth-scaffold",
+ "brocanth-server",
+ "serde_json",
+ "zod",
 ]
 
 [[package]]
@@ -5991,6 +6002,23 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zod"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zod-derive",
+]
+
+[[package]]
+name = "zod-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zune-core"

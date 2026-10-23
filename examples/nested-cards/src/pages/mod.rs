@@ -153,6 +153,12 @@ impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
 pub struct Error {
     pub status: u16,
     pub message: String,
+    /// Headers the failure needs. A `content-type` for a body that is not
+    /// HTML, a `www-authenticate` for a 401, a `retry-after` for a 429.
+    ///
+    /// `Response` always had these and `Error` did not, which made a
+    /// machine-readable error body impossible to send.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Error {
@@ -160,6 +166,7 @@ impl Error {
         Self {
             status,
             message: message.into(),
+            headers: Vec::new(),
         }
     }
 
@@ -167,6 +174,18 @@ impl Error {
     /// mistake by the caller.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
+    }
+
+    /// The same, carrying a header.
+    ///
+    /// `allow(dead_code)` for the same reason the request readers below
+    /// have it: it is here for the first handler that needs it, and a
+    /// brand-new project has none yet.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 }
 
@@ -186,16 +205,33 @@ impl IntoResponse for Error {
         } else {
             String::from("Internal Server Error")
         };
-        Response::new(self.status, body)
+        Response {
+            status: self.status,
+            body,
+            // A 5xx keeps its headers: the body is withheld, not the
+            // framing the client needs to read what is left.
+            headers: self.headers,
+        }
     }
 }
 
 /// What a handler is given. Middleware sees it too, and may change it before
 /// the handler runs or after it returns.
 pub struct Ctx {
+    /// Which verb matched. A layer reads it; a page usually does not,
+    /// because the verb is already in the name of the function it is in.
+    #[allow(dead_code)]
     pub verb: Verb,
     pub path: String,
+    /// Everything after the first `?`, without it. Empty when there was none.
+    #[allow(dead_code)]
+    pub query: String,
+    /// The body as it arrived. Empty for the verbs that carry none, and for
+    /// a context built by a test that did not set one.
+    #[allow(dead_code)]
+    pub body: Vec<u8>,
     params: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// How many layout layers the client says it already holds.
     ///
     /// Zero unless a request asked for less, so a first load, a crawler
@@ -208,12 +244,32 @@ impl Ctx {
         Self {
             verb,
             path: path.to_string(),
+            query: String::new(),
+            body: Vec::new(),
             params: params
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
+            headers: Vec::new(),
             partial: 0,
         }
+    }
+
+    /// The rest of the request: what the client sent, rather than what the
+    /// router matched.
+    ///
+    /// Two calls and not one, because a test that exercises a handler
+    /// usually wants the first and not the second. `src/app.rs` makes both.
+    ///
+    /// The three are copied out of the server's request, which lives for
+    /// the connection and not for the handler. One copy per request, and
+    /// the handler owns what it reads.
+    #[must_use]
+    pub fn sent(mut self, query: &str, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        self.query = query.to_string();
+        self.body = body;
+        self.headers = headers;
+        self
     }
 
     /// The same, for a request that said how much of the page it has.
@@ -251,6 +307,44 @@ impl Ctx {
     pub fn require(&self, name: &str) -> Result<&str, Error> {
         self.param(name)
             .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
+}
+
+/// What the client sent, as opposed to what the router matched.
+///
+/// A second block, and `allow(dead_code)`, for one reason: the request is
+/// on the context whether or not this project reads it yet. The other way
+/// round is a context whose shape depends on which modules were chosen,
+/// and then a page that starts reading a header needs the generator rather
+/// than a line.
+#[allow(dead_code)]
+impl Ctx {
+    /// A request header by name, case-insensitively, or `None`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every request header, in the order they arrived.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// What the body is written in, or `None` when the client did not say.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    /// The body as text, or `None` when it is not UTF-8.
+    ///
+    /// `Option` and not a lossy conversion: a body that is not text is a
+    /// request to answer, not a string to repair.
+    pub fn body_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.body).ok()
     }
 }
 
@@ -405,7 +499,12 @@ mod tests {
         // neither, and had been failing since the example was added.
         assert_eq!(
             patterns,
-            ["/", "/{section}", "/{section}/{card}", "/{section}/{card}/{tab}"]
+            [
+                "/",
+                "/{section}",
+                "/{section}/{card}",
+                "/{section}/{card}/{tab}"
+            ]
         );
     }
 

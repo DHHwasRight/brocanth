@@ -171,7 +171,16 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
     let (verb, path) = (request.verb, request.path.as_str());
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
-            let mut ctx = Ctx::new(verb, path, matched.params()).holding(holding(request));
+            let mut ctx = Ctx::new(verb, path, matched.params())
+                .holding(holding(request))
+                .sent(
+                    &request.query,
+                    request.body.to_vec(),
+                    request
+                        .headers()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                );
             // The one place a failed handler becomes a response --
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the

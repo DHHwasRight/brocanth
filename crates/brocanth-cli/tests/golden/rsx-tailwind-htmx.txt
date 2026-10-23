@@ -20,6 +20,7 @@ default-run = "my-blog"
 #   brocanth-auth        no accounts; nothing hashes a password and nothing signs a session cookie
 #   brocanth-policy      no rule algebra; authorisation is whatever each handler remembered to check
 #   brocanth-storage     no file storage; an upload has nowhere to go and no address to be read back from
+#   brocanth-input       no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
 #   brocanth-openapi     no document; a client learns this API by reading the handlers
 #   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
@@ -288,7 +289,16 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
     let (verb, path) = (request.verb, request.path.as_str());
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
-            let mut ctx = Ctx::new(verb, path, matched.params()).holding(holding(request));
+            let mut ctx = Ctx::new(verb, path, matched.params())
+                .holding(holding(request))
+                .sent(
+                    &request.query,
+                    request.body.to_vec(),
+                    request
+                        .headers()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                );
             // The one place a failed handler becomes a response --
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the
@@ -461,6 +471,12 @@ impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
 pub struct Error {
     pub status: u16,
     pub message: String,
+    /// Headers the failure needs. A `content-type` for a body that is not
+    /// HTML, a `www-authenticate` for a 401, a `retry-after` for a 429.
+    ///
+    /// `Response` always had these and `Error` did not, which made a
+    /// machine-readable error body impossible to send.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Error {
@@ -468,6 +484,7 @@ impl Error {
         Self {
             status,
             message: message.into(),
+            headers: Vec::new(),
         }
     }
 
@@ -475,6 +492,18 @@ impl Error {
     /// mistake by the caller.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
+    }
+
+    /// The same, carrying a header.
+    ///
+    /// `allow(dead_code)` for the same reason the request readers below
+    /// have it: it is here for the first handler that needs it, and a
+    /// brand-new project has none yet.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 }
 
@@ -494,16 +523,33 @@ impl IntoResponse for Error {
         } else {
             String::from("Internal Server Error")
         };
-        Response::new(self.status, body)
+        Response {
+            status: self.status,
+            body,
+            // A 5xx keeps its headers: the body is withheld, not the
+            // framing the client needs to read what is left.
+            headers: self.headers,
+        }
     }
 }
 
 /// What a handler is given. Middleware sees it too, and may change it before
 /// the handler runs or after it returns.
 pub struct Ctx {
+    /// Which verb matched. A layer reads it; a page usually does not,
+    /// because the verb is already in the name of the function it is in.
+    #[allow(dead_code)]
     pub verb: Verb,
     pub path: String,
+    /// Everything after the first `?`, without it. Empty when there was none.
+    #[allow(dead_code)]
+    pub query: String,
+    /// The body as it arrived. Empty for the verbs that carry none, and for
+    /// a context built by a test that did not set one.
+    #[allow(dead_code)]
+    pub body: Vec<u8>,
     params: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     /// How many layout layers the client says it already holds.
     ///
     /// Zero unless a request asked for less, so a first load, a crawler
@@ -516,12 +562,32 @@ impl Ctx {
         Self {
             verb,
             path: path.to_string(),
+            query: String::new(),
+            body: Vec::new(),
             params: params
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
+            headers: Vec::new(),
             partial: 0,
         }
+    }
+
+    /// The rest of the request: what the client sent, rather than what the
+    /// router matched.
+    ///
+    /// Two calls and not one, because a test that exercises a handler
+    /// usually wants the first and not the second. `src/app.rs` makes both.
+    ///
+    /// The three are copied out of the server's request, which lives for
+    /// the connection and not for the handler. One copy per request, and
+    /// the handler owns what it reads.
+    #[must_use]
+    pub fn sent(mut self, query: &str, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        self.query = query.to_string();
+        self.body = body;
+        self.headers = headers;
+        self
     }
 
     /// The same, for a request that said how much of the page it has.
@@ -559,6 +625,44 @@ impl Ctx {
     pub fn require(&self, name: &str) -> Result<&str, Error> {
         self.param(name)
             .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
+}
+
+/// What the client sent, as opposed to what the router matched.
+///
+/// A second block, and `allow(dead_code)`, for one reason: the request is
+/// on the context whether or not this project reads it yet. The other way
+/// round is a context whose shape depends on which modules were chosen,
+/// and then a page that starts reading a header needs the generator rather
+/// than a line.
+#[allow(dead_code)]
+impl Ctx {
+    /// A request header by name, case-insensitively, or `None`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every request header, in the order they arrived.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// What the body is written in, or `None` when the client did not say.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    /// The body as text, or `None` when it is not UTF-8.
+    ///
+    /// `Option` and not a lossy conversion: a body that is not text is a
+    /// request to answer, not a string to repair.
+    pub fn body_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.body).ok()
     }
 }
 
@@ -1022,20 +1126,27 @@ macro_rules! announce {
 }
 pub(crate) use announce;
 
+/// One middleware layer, as the stack stores it.
+///
+/// A name rather than the type written out: clippy calls the bare
+/// form a very complex type, and it is also the type `src/app.rs`
+/// would have to spell to hold one.
+pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
+
 /// The function behind a middleware name the application mounted.
 ///
 /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
 /// decision and the decision is the application's. Which function answers
 /// to `"request_log"` is not a decision, so it is here, where adding a
 /// plugin can write it.
-pub fn layer(name: &str) -> Option<fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response> {
+pub fn layer(name: &str) -> Option<Layer> {
     // Nothing in this binary offers middleware, so nothing can be
     // mounted and nothing is ever looked up.
     let _ = name;
     None
 }
 
-// brocanth-digest: 6debaf7916f5a6ac
+// brocanth-digest: 7df285b3be677a53
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own is a file beside this one; nothing lists it.
@@ -1202,7 +1313,7 @@ request.
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `middleware`, `openapi`, `validation`, `realtime` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `middleware`, `openapi`, `validation`, `realtime` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1365,7 +1476,7 @@ The stylesheet is embedded, so a new one is a new binary. `css` rewrites
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 3827dccb035eb2a2 -->
+<!-- brocanth-digest: b312c2f3c1c85c0a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

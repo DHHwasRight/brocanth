@@ -10,6 +10,7 @@ members = [
     "crates/brocanth-cli",
     "crates/brocanth-config",
     "crates/brocanth-events",
+    "crates/brocanth-input",
     "crates/brocanth-jobs",
     "crates/brocanth-middleware",
     "crates/brocanth-model",
@@ -57,3 +58,9 @@ brocanth-pages = { path = "crates/brocanth-pages", version = "0.1.0" }
 brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
 brocanth-test = { path = "crates/brocanth-test", version = "0.1.0" }
 brocanth-middleware = { path = "crates/brocanth-middleware", version = "0.1.0" }
+brocanth-input = { path = "crates/brocanth-input", version = "0.1.0" }
+
+# The schema vocabulary the entrance reads input with. Its own repository,
+# like rsx: it is a Rust library about rules and literals, and nothing in it
+# knows what HTTP is.
+zod = { path = "../zod", version = "0.1.0" }

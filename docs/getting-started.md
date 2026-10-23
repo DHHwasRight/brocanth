@@ -388,6 +388,70 @@ return is fixed-arity and this is the unbounded form:
 Ok(Response::empty(303).with_header("location", "/users/7"))
 ```
 
+## Read a body: `--with input`
+
+`ctx` carries the request whatever this project chose: `ctx.query`,
+`ctx.body`, `ctx.header("accept")`, `ctx.content_type()`. Picking `input`
+adds the part that turns those into a struct.
+
+The struct is the schema. The rules sit on the fields, and they are
+ordinary values:
+
+```rust
+#[derive(zod::Entry)]
+struct Signup {
+    #[check(zod::Text::new().min(3).max(16).slug())]
+    #[label("Handle")]
+    #[says("Pick 3 to 16 lowercase letters, digits or hyphens")]
+    handle: String,
+
+    #[check(zod::Int::new().from(13).to(130))]
+    age: i64,
+
+    subscribed: bool,
+}
+
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let signup: Signup = ctx.body_as()?;
+    Ok(Response::empty(303).with_header("location", "/"))
+}
+```
+
+A form and a JSON body both reach that handler, and the content type
+decides how text is read: a form has no types to lose, so `age=36` is a
+number there and is text in JSON. `ctx.query_as()` reads `?page=2` the same
+way.
+
+Every fault comes back at once, never the first, each with the path that
+finds it. A page that draws the form again matches instead of using `?`:
+
+```rust
+match ctx.read::<Signup>() {
+    Sent::Good(signup) => { /* .. */ }
+    Sent::Faulty(faults) => { /* faults.by_name(), beside the inputs */ }
+    Sent::Unreadable(why) => { /* 400 or 415: nobody could read it */ }
+}
+```
+
+Three answers because they are three statuses. A body that broke a rule is
+422 and the client can fix it; a body nobody could read is not.
+
+One trap, and the generated comment says it too: do not write `?` on a
+`zod::Faults`. `Error` has a blanket `From` for any `std::error::Error`
+that answers 500, and a bad body is a 422. `body_as` is the call that gets
+the status right.
+
+The rules are values, so the compiler runs them as well:
+
+```rust
+const HANDLE: zod::Text = zod::Text::new().min(3).max(16).slug();
+
+zod::accepts!(HANDLE, "ada-lovelace");   // a build failure if it is wrong
+```
+
+`docs/input.md` is the longer version, including how this sits beside
+`--with validation`.
+
 ## HTML from templates: `--with rsx`
 
 Without it, a page builds the String it returns and the manifest says so:

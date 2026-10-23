@@ -1,0 +1,26 @@
+[package]
+name = "brocanth-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The entrance: a request becomes a struct the handler asked for, or an answer that says why not."
+
+[dependencies]
+brocanth-server = { workspace = true }
+zod = { workspace = true, features = ["json"] }
+serde_json = "1"
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `input`. It lives beside the crate it writes into a project, and not in the
+# CLI, because everything it writes is a statement about this crate and about
+# zod: that `Entrance` takes three parts of a request, that a `Faults` is
+# every fault and not the first, and that 422 is the status a refused body
+# gets. A copy of that in the CLI rots the first time a name here changes.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[features]
+default = []
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "deny"
