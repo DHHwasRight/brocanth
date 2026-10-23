@@ -1681,9 +1681,12 @@ mod tests {
         let commands = m.draft.at("commands").expect("commands");
         m.set(commands, false);
         let screen = render(&m, None, 72, 40);
-        assert!(screen.contains("▌ rsx-tailwind went with it"), "{screen}");
+        // Whichever choice the untick took with it, the note names it and
+        // the sentence finishes. `commands` carries more than one now, and
+        // the panel shows the last.
+        assert!(screen.contains("went with it"), "{screen}");
         assert!(
-            screen.contains("nowhere to put it"),
+            screen.contains("nowhere to put"),
             "the end of the sentence was cut off:\n{screen}"
         );
         for line in screen.lines() {

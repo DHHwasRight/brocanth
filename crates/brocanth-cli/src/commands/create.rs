@@ -863,7 +863,10 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // cargo is the build tool; hooking one into the other conflates them.
         // The ways in are `brocanth <command>` from anywhere inside the
         // project, and the built binary itself.
-        files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(a)));
+        files.push((
+            "src/commands/mod.rs".to_string(),
+            commands_mod_rs(a, &built),
+        ));
         files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
         if a.has("rsx-tailwind") {
             // The CSS build. A command and not `scripts/build-css.sh`,
@@ -1298,7 +1301,7 @@ header and never changes for it.
 // produces code you would not write by hand, the framework below it is wrong"
 // -- and nobody writes an unindented struct body.
 /// `src/commands/mod.rs`: the `mod` lines, and nothing else.
-fn commands_mod_rs(a: &Answers) -> String {
+fn commands_mod_rs(a: &Answers, built: &Built) -> String {
     let mut out = String::from(
         r#"//! Every command in this project.
 //!
@@ -1314,10 +1317,22 @@ fn commands_mod_rs(a: &Answers) -> String {
     // Alphabetical, which is also what rustfmt wants. A scaffold that hands
     // a developer a diff on their first `cargo fmt` is a scaffold that got
     // it wrong.
+    // Alphabetical, which is also what rustfmt wants, so a module's line
+    // is sorted in with the two this file writes rather than appended.
+    let mut lines: Vec<String> = built
+        .slot(Slot::CommandsMod)
+        .map(str::to_string)
+        .chain(std::iter::once("pub mod serve;".to_string()))
+        .collect();
     if a.has("rsx-tailwind") {
-        out.push_str("pub mod css;\n");
+        lines.push("pub mod css;".to_string());
     }
-    out.push_str("pub mod serve;\n");
+    lines.sort();
+    lines.dedup();
+    for line in lines {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out
 }
 
@@ -1326,7 +1341,21 @@ fn commands_mod_rs(a: &Answers) -> String {
 fn source_of(a: &Answers, dep: &Dep) -> String {
     let crate_name = dep.name;
     let note = dep.note.map_or_else(String::new, |n| format!("  # {n}"));
-    match &dep.source {
+    // Features and `default-features` belong to the dependency whatever it
+    // is fetched from, so they are written once here rather than in each
+    // of the four shapes below. `Dep::feature` existed, was merged across
+    // modules, and was never written out: a module could ask for a feature
+    // and the manifest would not have it.
+    let mut extra = String::new();
+    if !dep.features.is_empty() {
+        let names: Vec<String> = dep.features.iter().map(|f| format!("{f:?}")).collect();
+        extra.push_str(&format!(", features = [{}]", names.join(", ")));
+    }
+    if !dep.defaults {
+        extra.push_str(", default-features = false");
+    }
+
+    let where_from = match &dep.source {
         // Not a brocanth crate, but `--brocanth-path` still has something
         // to say: a checkout beside the brocanth repository stands in for
         // the repository, the same way the flag does for brocanth's own
@@ -1334,36 +1363,31 @@ fn source_of(a: &Answers, dep: &Dep) -> String {
         // project against work that is not pushed yet. Without the flag, a
         // generated project always gets the URL.
         Source::Git { url, branch } => {
-            if let Some(dir) = a.local.as_deref().and_then(|at| sibling(at, crate_name)) {
-                return format!(
-                    "{crate_name} = {{ path = {:?} }}{note}",
-                    dir.display().to_string()
-                );
+            match a.local.as_deref().and_then(|at| sibling(at, crate_name)) {
+                Some(dir) => format!("path = {:?}", dir.display().to_string()),
+                None => format!("git = {url:?}, branch = {branch:?}"),
             }
-            return format!("{crate_name} = {{ git = {url:?}, branch = {branch:?} }}{note}");
         }
-        Source::Version(req) => return format!("{crate_name} = {{ version = {req:?} }}{note}"),
-        Source::Brocanth => {}
-    }
-    match &a.local {
-        // `--brocanth-path` points at `crates/brocanth`; its siblings are the
-        // other crates of the same checkout.
-        Some(path) => {
-            let dir = if crate_name == "brocanth" {
-                Path::new(path).to_path_buf()
-            } else {
-                Path::new(path)
-                    .parent()
-                    .map(|p| p.join(crate_name))
-                    .unwrap_or_else(|| Path::new(path).to_path_buf())
-            };
-            format!(
-                "{crate_name} = {{ path = {:?} }}{note}",
-                dir.display().to_string()
-            )
-        }
-        None => format!("{crate_name} = {{ git = {REPOSITORY:?} }}{note}"),
-    }
+        Source::Version(req) => format!("version = {req:?}"),
+        Source::Brocanth => match &a.local {
+            // `--brocanth-path` points at `crates/brocanth`; its siblings
+            // are the other crates of the same checkout.
+            Some(path) => {
+                let dir = if crate_name == "brocanth" {
+                    Path::new(path).to_path_buf()
+                } else {
+                    Path::new(path)
+                        .parent()
+                        .map(|p| p.join(crate_name))
+                        .unwrap_or_else(|| Path::new(path).to_path_buf())
+                };
+                format!("path = {:?}", dir.display().to_string())
+            }
+            None => format!("git = {REPOSITORY:?}"),
+        },
+    };
+
+    format!("{crate_name} = {{ {where_from}{extra} }}{note}")
 }
 
 /// A checkout of `name` beside the brocanth repository, or `None`.
@@ -1952,7 +1976,7 @@ const PAGES_MOD_RS_HEAD: &str = r##"//! The route table, which is this directory
 //!
 //! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
 
-brocanth_pages::pages!("src/pages");
+brocanth_pages::pages!("src/pages"@DESCRIBE@);
 
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
@@ -2609,9 +2633,15 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
         out.push('\n');
     }
     out.push_str(PAGES_MOD_RS_TESTS);
+    // `describe` makes the macro emit what every route takes and gives,
+    // which names `brocanth_input` and `zod`. A project that chose
+    // neither must not be made to depend on them by a macro.
+    let describe = if a.has("input") { ", describe" } else { "" };
+
     out.replace("@DEPTH_FIELD@", field)
         .replace("@DEPTH_INIT@", init)
         .replace("@DEPTH_IMPL@", &format!("{setter}{methods}"))
+        .replace("@DESCRIBE@", describe)
 }
 
 fn index_rs(a: &Answers) -> String {
@@ -3946,7 +3976,7 @@ mod tests {
         let a = answers(&available());
         let table = pages_mod_rs(&a, &Built::new());
         assert!(
-            table.contains(r#"brocanth_pages::pages!("src/pages");"#),
+            table.contains(r#"brocanth_pages::pages!("src/pages", describe);"#),
             "{table}"
         );
         // Code, not prose: the comment beside the templates explains why the
@@ -4418,7 +4448,9 @@ mod tests {
         let a = Answers {
             name: "entrance-test".into(),
             title: "Entrance Test".into(),
-            picks: vec!["logging", "config", "input"],
+            picks: vec![
+                "logging", "config", "commands", "input", "openapi", "client",
+            ],
             local: Some(brocanth.display().to_string()),
             git: false,
         };
@@ -4431,13 +4463,17 @@ mod tests {
         // and the one thing the generator does not write for you.
         std::fs::write(root.join("src/pages/signup.rs"), SIGNUP_PAGE).unwrap();
         let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .arg("build")
+            // The page this test adds is a route, so the project's own
+            // "the table is the shape of the directory" test disagrees
+            // with its recorded list. Run the module this test wrote.
+            .args(["test", "surface"])
             .current_dir(&root)
             .output()
             .expect("run cargo");
         assert!(
             output.status.success(),
-            "the entrance did not compile:\n{}",
+            "the entrance did not hold:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -4447,28 +4483,42 @@ mod tests {
     /// one. If this stops compiling, the documentation is wrong.
     const SIGNUP_PAGE: &str = r##"//! `/signup`.
 
-use crate::pages::{Ctx, Error, IntoResponse, Response, Sent};
+use crate::pages::{Ctx, Error, IntoResponse, Json, Response, Sent};
 
+/// `pub`, because the table `pages!` writes names this type from one
+/// module up. The same rule the handler follows.
 #[derive(zod::Entry)]
-struct Signup {
-    #[check(zod::Text::new().min(3).max(16).slug())]
+pub struct Signup {
+    #[text(min = 3, max = 16, slug)]
     #[label("Handle")]
     #[says("Pick 3 to 16 lowercase letters, digits or hyphens")]
-    handle: String,
+    pub handle: String,
 
-    #[check(zod::Int::new().from(13).to(130))]
-    age: i64,
+    #[int(min = 13, max = 130)]
+    pub age: i64,
 
-    subscribed: bool,
+    pub subscribed: bool,
 }
 
-pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let signup: Signup = ctx.body_as()?;
-    Ok(Response::ok(format!("{} is {}", signup.handle, signup.age)))
+#[derive(zod::Entry)]
+pub struct Created {
+    #[text(uuid)]
+    pub id: String,
+    pub handle: String,
 }
 
+/// The signature is the declaration. A second parameter is the body, read
+/// and checked before this runs; a `Json<T>` return is what the document
+/// publishes as the answer.
+pub fn handle_post(_ctx: &mut Ctx, body: Signup) -> Result<Json<Created>, Error> {
+    Ok(Json(Created {
+        id: "0191a3f0-0000-7000-8000-000000000000".to_string(),
+        handle: body.handle,
+    }))
+}
+
+/// The other half: every fault, for a page that draws the form again.
 pub fn handle_put(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    // The other half: every fault, for a page that draws the form again.
     match ctx.read::<Signup>() {
         Sent::Good(signup) => Ok(Response::ok(signup.handle)),
         Sent::Faulty(faults) => {
@@ -4480,6 +4530,197 @@ pub fn handle_put(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
             Ok(Response::new(422, said.join("\n")))
         }
         Sent::Unreadable(why) => Ok(Response::new(why.status(), why.to_string())),
+    }
+}
+
+/// What the generated project proves about itself: the table `pages!`
+/// wrote, asserted from inside the project rather than from the text the
+/// generator hoped it would write.
+#[cfg(test)]
+mod surface {
+    use crate::pages;
+
+    #[test]
+    fn the_signature_of_a_handler_is_what_the_table_says() {
+        let rows = pages::described();
+        let signup = rows
+            .iter()
+            .find(|row| row.path == "/signup" && row.verb.as_str() == "POST")
+            .expect("the page is a route");
+
+        let takes = signup.takes.as_ref().expect("a second parameter is a body");
+        assert_eq!(takes.name(), Some("Signup"));
+        assert!(takes.object().unwrap().fields.iter().any(|f| f.name == "handle"));
+
+        let gives = signup.gives.as_ref().expect("a Json<T> return is an answer");
+        assert_eq!(gives.name(), Some("Created"));
+
+        let plain = rows
+            .iter()
+            .find(|row| row.path == "/signup" && row.verb.as_str() == "PUT")
+            .expect("the other verb");
+        assert!(plain.takes.is_none(), "one parameter, so no body in the table");
+        assert!(plain.gives.is_none(), "impl IntoResponse says nothing, on purpose");
+    }
+
+    #[test]
+    fn the_document_describes_the_body_without_anybody_writing_it_down() {
+        // The same three pieces `src/plugins/openapi/mod.rs` puts
+        // together, without driving a plugin lifecycle by hand: the route
+        // table, the description table, and the builder.
+        use brocanth_openapi::{Schema, SpecBuilder};
+
+        let router = pages::router().expect("the pages produce a table");
+        let mut spec = SpecBuilder::new("Entrance Test", "1.0.0").routes_from_router(&router);
+        for route in pages::described() {
+            if let Some(node) = &route.takes {
+                spec = spec.describing_node(node);
+            }
+            if let Some(node) = &route.gives {
+                spec = spec.describing_node(node);
+            }
+            let takes = route.takes.as_ref().and_then(|node| node.name());
+            let gives = route.gives.as_ref().and_then(|node| node.name());
+            spec = spec.describe(route.path, route.verb, move |mut op| {
+                if let Some(name) = takes {
+                    op = op.json_body(Schema::reference(name));
+                }
+                if let Some(name) = gives {
+                    // A description is required and may not be empty, which
+                    // the document's own validator says before anything is
+                    // served. One sentence, the same for every operation,
+                    // and `.describe(..)` is where a better one goes.
+                    op = op.json_response(200, "The answer", Schema::reference(name));
+                }
+                op
+            });
+        }
+
+        let json = spec
+            .build()
+            .expect("the document is valid")
+            .to_json()
+            .to_json();
+
+        assert!(json.contains("\"Signup\""), "the request body is a component: {json}");
+        assert!(json.contains("\"Created\""), "the answer is a component");
+        assert!(json.contains("post_signup"), "the operation is there");
+        assert!(
+            json.contains("Pick 3 to 16 lowercase letters"),
+            "the field's own sentence is its description"
+        );
+        assert!(
+            json.contains("\"^[a-z0-9]+(-[a-z0-9]+)*$\""),
+            "and the slug rule is the pattern a client validates with"
+        );
+    }
+
+    #[test]
+    fn the_command_line_is_the_same_table_with_flags_on_it() {
+        let routes = pages::described();
+        let tree = brocanth_client::command("api", &routes);
+
+        let operation = tree
+            .find_subcommand("signup-post")
+            .expect("one subcommand per operation");
+        let help = operation.clone().render_help().to_string();
+        assert!(help.contains("--handle"), "a field is a flag: {help}");
+        assert!(
+            help.contains("Pick 3 to 16 lowercase letters"),
+            "and the field's own sentence is its help: {help}"
+        );
+
+        let matches = tree
+            .try_get_matches_from([
+                "api",
+                "--base",
+                "https://example.test",
+                "signup-post",
+                "--handle",
+                "ada-lovelace",
+                "--age",
+                "36",
+            ])
+            .expect("the flags parse");
+        let call = brocanth_client::plan(&routes, &matches).expect("one request");
+
+        assert_eq!(call.url, "https://example.test/signup");
+        assert_eq!(call.verb.as_str(), "POST");
+        assert_eq!(
+            call.body.as_deref(),
+            Some(r#"{"handle":"ada-lovelace","age":36,"subscribed":false}"#)
+        );
+    }
+
+    #[test]
+    fn the_command_line_refuses_a_number_the_schema_refuses() {
+        let routes = pages::described();
+        let error = brocanth_client::command("api", &routes)
+            .try_get_matches_from(["api", "signup-post", "--handle", "ada-lovelace", "--age", "200"])
+            .expect_err("130 is the maximum the handler accepts");
+        assert!(error.to_string().contains("200"), "{error}");
+    }
+
+    #[test]
+    fn an_operation_names_itself_the_same_way_twice() {
+        let rows = pages::described();
+        let signup = rows.iter().find(|row| row.verb.as_str() == "POST").unwrap();
+        assert_eq!(signup.id(), "post_signup");
+        assert_eq!(signup.command(), "signup-post");
+    }
+
+    #[test]
+    fn a_body_that_breaks_a_rule_is_refused_before_the_handler_runs() {
+        use brocanth::routing::{Dispatch, Verb};
+
+        let router = pages::router().expect("the pages produce a table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Post, "/signup") else {
+            panic!("POST /signup is a route");
+        };
+        let mut ctx = pages::Ctx::new(Verb::Post, "/signup", matched.params()).sent(
+            "",
+            b"handle=A&age=9".to_vec(),
+            vec![(
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            )],
+        );
+
+        // A match and not `unwrap_err`: that one wants the Ok type to be
+        // `Debug`, and a `Response` holding a rendered page has no reason
+        // to be.
+        let Err(refused) = handler(&mut ctx) else {
+            panic!("the body broke two rules and was not refused");
+        };
+        assert_eq!(refused.status, 422);
+        assert!(refused.message.contains("handle"), "{}", refused.message);
+        assert!(refused.message.contains("age"), "both faults: {}", refused.message);
+    }
+
+    #[test]
+    fn a_body_that_passes_reaches_the_handler_and_comes_back_as_json() {
+        use brocanth::routing::{Dispatch, Verb};
+
+        let router = pages::router().expect("the pages produce a table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Post, "/signup") else {
+            panic!("POST /signup is a route");
+        };
+        let mut ctx = pages::Ctx::new(Verb::Post, "/signup", matched.params()).sent(
+            "",
+            b"handle=ada-lovelace&age=36&subscribed=on".to_vec(),
+            vec![(
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            )],
+        );
+
+        let answered = handler(&mut ctx).expect("the body passed");
+        assert_eq!(answered.status, 200);
+        assert!(answered.body.contains("\"handle\":\"ada-lovelace\""), "{}", answered.body);
+        assert!(answered
+            .headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "application/json"));
     }
 }
 "##;

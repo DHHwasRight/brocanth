@@ -473,6 +473,12 @@ pub enum Slot {
     PluginsLayers,
     /// `src/pages/mod.rs`, items the pages share.
     PagesItems,
+    /// `src/commands/mod.rs`, one `pub mod` line per subcommand a module
+    /// writes.
+    ///
+    /// A project with no command line has nowhere to put one, so a module
+    /// that writes here declares `needs("commands", ..)`.
+    CommandsMod,
     /// `config/<env>.toml`, one section per module that claims one.
     ConfigSections,
     /// `.gitignore`, one path per line.
@@ -499,6 +505,7 @@ impl fmt::Display for Slot {
             Slot::PluginsMod => "src/plugins/mod.rs",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesItems => "src/pages/mod.rs",
+            Slot::CommandsMod => "src/commands/mod.rs",
             Slot::ConfigSections => "config/<env>.toml",
             Slot::GitIgnore => ".gitignore",
             Slot::MiseTasks => "mise.toml",

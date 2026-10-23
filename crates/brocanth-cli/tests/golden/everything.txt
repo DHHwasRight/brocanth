@@ -22,8 +22,9 @@ brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
+brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -331,7 +332,7 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
 //!
 //! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
 
-brocanth_pages::pages!("src/pages");
+brocanth_pages::pages!("src/pages", describe);
 
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
@@ -803,6 +804,39 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
 //
 // Written because this project chose `input`. A body arrives as bytes and
 // leaves as a struct, or as every reason it could not.
+
+/// A body the framework reads and checks before the handler runs.
+///
+/// `pages!` registers a handler through this one when its signature takes
+/// a second parameter, so the page cannot forget to check and cannot
+/// check twice.
+pub fn page_with_body<H, B, T>(handler: H) -> Handler
+where
+    H: Fn(&mut Ctx, B) -> Result<T, Error> + Send + Sync + 'static,
+    B: zod::Entry,
+    T: IntoResponse,
+{
+    Box::new(move |ctx| {
+        let body = ctx.body_as::<B>()?;
+        handler(ctx, body).map(IntoResponse::into_response)
+    })
+}
+
+/// An answer sent as JSON, and described in the document.
+///
+/// Wrapping the return type is the opt-in: a page that writes
+/// `-> Result<impl IntoResponse, Error>` keeps working and says nothing
+/// about its answer, and one that writes `-> Result<Json<Created>, Error>`
+/// publishes `Created` as its response schema. The wrapper is the only
+/// place that difference is spelled.
+pub struct Json<T>(pub T);
+
+impl<T: zod::Give> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        Response::new(200, zod::write(&self.0.give()))
+            .with_header("content-type", "application/json")
+    }
+}
 
 /// What came of reading a body.
 ///
@@ -1501,10 +1535,12 @@ overflow = "drop-oldest"
 //! `serve` arrived with the scaffold and is ordinary code here: rename it,
 //! give it flags, or delete it. The framework does not own this command line.
 
+pub mod api;
+
 pub mod css;
 pub mod serve;
 
-// brocanth-digest: aafdf56a3d187101
+// brocanth-digest: 48f0c1b2e40d0ce1
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
 //!
@@ -1622,6 +1658,58 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     let same = std::fs::read(path)?;
     std::fs::write(path, same)?;
     Ok(())
+}
+===== src/commands/api.rs =====
+//! This application, from the outside.
+//!
+//! `cargo run -- api --help` lists every operation, because the list is
+//! `crate::pages::described()` -- the same table the OpenAPI document is
+//! built from, read off the handler signatures while this crate compiled.
+//! There is nothing to regenerate: add a page and the client grows a
+//! subcommand.
+//!
+//! ```text
+//! $ cargo run -- api signup-post --handle ada-lovelace --age 36
+//! {"id":"0191a3f0-0000-7000-8000-000000000000","handle":"ada-lovelace"}
+//! ```
+//!
+//! The flags come from the request body's own schema, and their help text
+//! is the sentence each field carries. Nothing here re-checks a rule: the
+//! server is the authority, and a client that validated too would be a
+//! second opinion that can disagree with it.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Call this application's own API.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Api {
+    /// The operation and its flags. `api --help` lists them.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+    pub rest: Vec<String>,
+}
+
+impl Command for Api {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        let routes = crate::pages::described();
+        let wire = brocanth_client::Reqwest::new().map_err(anyhow::Error::msg)?;
+
+        let mut argv: Vec<std::ffi::OsString> = vec!["api".into()];
+        argv.extend(self.rest.into_iter().map(std::ffi::OsString::from));
+
+        let answered =
+            brocanth_client::run("api", &routes, &wire, argv).map_err(anyhow::Error::msg)?;
+
+        println!("{}", answered.body);
+        // The status is the exit code, so `api ... && something` means what
+        // it looks like in a shell. The body is still printed, because a
+        // 422 from this framework carries every fault and that is the part
+        // worth reading.
+        if !answered.ok() {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
 }
 ===== src/pages/openapi.json.rs =====
 //! `/openapi.json` -- because the file is called `openapi.json.rs`.
@@ -2490,15 +2578,18 @@ impl Plugin for Model {
 //!
 //! # What is derived, and what is not
 //!
-//! Every route, with its path parameters, an `operationId` and a 200. What a
-//! page accepts and returns is not derivable from a `Fn(&mut Ctx)`, so bodies
-//! are added by hand with `SpecBuilder::describe`, beside the
-//! `routes_from_router` line below:
+//! Every route, with its path parameters, an `operationId` and a 200. What a page takes and gives comes
+//! from `pages::described()`, which `pages!` wrote off the handler
+//! signatures: a second parameter is the request body, a `Json<T>`
+//! return is the answer. Neither is written here, so neither can be
+//! out of date.
+//!
+//! Anything else -- a summary, a second status, an example -- is added by
+//! hand with `SpecBuilder::describe`, beside the lines below:
 //!
 //! ```ignore
 //! .describe("/users/{id}", Verb::Get, |op| {
 //!     op.summary("One user")
-//!         .json_response(200, "The user", Schema::reference("User"))
 //! })
 //! ```
 //!
@@ -2521,7 +2612,7 @@ use std::sync::OnceLock;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Verb;
-use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, SpecBuilder};
+use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder};
 
 /// Where the document is served.
 ///
@@ -2599,9 +2690,38 @@ impl Plugin for OpenApi {
         let router = crate::pages::router().map_err(|e| {
             PluginError::new(format!("[openapi] the route table does not build: {e}"))
         })?;
-        let document = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
+        let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
-            .hide(ROUTE, Verb::Get)
+            .hide(ROUTE, Verb::Get);
+
+        // What each page takes and gives. `pages!` read it off the handler
+        // signatures, so the document says what the code does rather than
+        // what somebody remembered to write down.
+        for route in crate::pages::described() {
+            if let Some(node) = &route.takes {
+                spec = spec.describing_node(node);
+            }
+            if let Some(node) = &route.gives {
+                spec = spec.describing_node(node);
+            }
+            let takes = route.takes.as_ref().and_then(|node| node.name());
+            let gives = route.gives.as_ref().and_then(|node| node.name());
+            spec = spec.describe(route.path, route.verb, move |mut op| {
+                if let Some(name) = takes {
+                    op = op.json_body(Schema::reference(name));
+                }
+                if let Some(name) = gives {
+                    // A description is required and may not be empty, which
+                    // the document's own validator says before anything is
+                    // served. One sentence, the same for every operation,
+                    // and `.describe(..)` is where a better one goes.
+                    op = op.json_response(200, "The answer", Schema::reference(name));
+                }
+                op
+            });
+        }
+
+        let document = spec
             .build()
             .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
 
@@ -3574,6 +3694,7 @@ request.
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 - `input`  a form or a JSON body, read into a struct, with every fault at once
+- `client`  a subcommand that calls this application's own API, built from its routes
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
@@ -3771,7 +3892,19 @@ which proxy to trust, which host is canonical, which origins may call
 enable them as a set, and do not invent an address or an origin to
 make one compile.
 
-<!-- brocanth-digest: 6020f27b3dcb60e9 -->
+## The client
+
+`src/commands/api.rs` is a command line for this application's own
+API. It is built from `crate::pages::described()` at run time, not
+generated, so there is nothing to regenerate and nothing to keep in
+step: add a page with a typed signature and the client grows a
+subcommand with the right flags.
+
+Do not add validation to it. The server checks the body and answers
+422 with every fault; a client that checked as well would be a second
+opinion, and the two would disagree the first time a rule changed.
+
+<!-- brocanth-digest: c999b0be6ac9890f -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -3783,7 +3916,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "middleware", "openapi", "validation", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
+enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "openapi", "validation", "realtime", "commands", "rsx", "rsx-tailwind", "rsx-htmx"]
 
 [modules.logging]
 files = ["src/plugins/logging/"]
@@ -3835,6 +3968,11 @@ files = []
 config = []
 crates = ["brocanth-input", "zod"]
 
+[modules.client]
+files = ["src/commands/api.rs"]
+config = []
+crates = ["brocanth-client"]
+
 [modules.middleware]
 files = []
 config = []
@@ -3875,4 +4013,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 21451ffa62b230a6
+# brocanth-digest: 06a8abc85b8bdae3

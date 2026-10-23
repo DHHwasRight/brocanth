@@ -1,0 +1,41 @@
+[package]
+name = "brocanth-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A command line that is a client for the application that generated it, built from the same table the document is."
+
+[dependencies]
+brocanth = { workspace = true }
+brocanth-input = { workspace = true }
+zod = { workspace = true }
+
+# Already the command crate's dependency and re-exported by it, so a
+# project with both links one copy. `string` because a subcommand's name
+# comes out of a table rather than out of a literal.
+clap = { version = "4", features = ["derive", "string"] }
+
+# The same choice `brocanth-auth` made, for the same reason: reqwest is
+# what the ecosystem already has in the tree, rustls keeps it off the
+# system TLS stack, and `Wire` is the contract -- an application holding
+# its own client sets `default-features = false`, implements `Wire`, and
+# reqwest appears nowhere in its lock file. `blocking` because a command
+# line sends one request and exits, and starting a reactor to do that is
+# a reactor nobody asked for.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "charset",
+    "blocking",
+], optional = true }
+
+brocanth-scaffold = { workspace = true, optional = true }
+
+[features]
+default = ["reqwest-client"]
+# The shipped sender. Off, and this crate plans the request and hands it
+# back for a caller that has its own way to send one.
+reqwest-client = ["dep:reqwest"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "deny"

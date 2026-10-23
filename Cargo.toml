@@ -10,6 +10,7 @@ members = [
     "crates/brocanth-cli",
     "crates/brocanth-config",
     "crates/brocanth-events",
+    "crates/brocanth-client",
     "crates/brocanth-input",
     "crates/brocanth-jobs",
     "crates/brocanth-middleware",
@@ -59,6 +60,7 @@ brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
 brocanth-test = { path = "crates/brocanth-test", version = "0.1.0" }
 brocanth-middleware = { path = "crates/brocanth-middleware", version = "0.1.0" }
 brocanth-input = { path = "crates/brocanth-input", version = "0.1.0" }
+brocanth-client = { path = "crates/brocanth-client", version = "0.1.0" }
 
 # The schema vocabulary the entrance reads input with. Its own repository,
 # like rsx: it is a Rust library about rules and literals, and nothing in it

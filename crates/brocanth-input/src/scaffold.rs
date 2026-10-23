@@ -72,6 +72,39 @@ const HEAD: &str = r##"
 // Written because this project chose `input`. A body arrives as bytes and
 // leaves as a struct, or as every reason it could not.
 
+/// A body the framework reads and checks before the handler runs.
+///
+/// `pages!` registers a handler through this one when its signature takes
+/// a second parameter, so the page cannot forget to check and cannot
+/// check twice.
+pub fn page_with_body<H, B, T>(handler: H) -> Handler
+where
+    H: Fn(&mut Ctx, B) -> Result<T, Error> + Send + Sync + 'static,
+    B: zod::Entry,
+    T: IntoResponse,
+{
+    Box::new(move |ctx| {
+        let body = ctx.body_as::<B>()?;
+        handler(ctx, body).map(IntoResponse::into_response)
+    })
+}
+
+/// An answer sent as JSON, and described in the document.
+///
+/// Wrapping the return type is the opt-in: a page that writes
+/// `-> Result<impl IntoResponse, Error>` keeps working and says nothing
+/// about its answer, and one that writes `-> Result<Json<Created>, Error>`
+/// publishes `Created` as its response schema. The wrapper is the only
+/// place that difference is spelled.
+pub struct Json<T>(pub T);
+
+impl<T: zod::Give> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        Response::new(200, zod::write(&self.0.give()))
+            .with_header("content-type", "application/json")
+    }
+}
+
 /// What came of reading a body.
 ///
 /// Three answers and not two, because they are three different statuses. A

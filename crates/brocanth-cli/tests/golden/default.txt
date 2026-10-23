@@ -20,6 +20,7 @@ default-run = "my-blog"
 #   brocanth-policy      no rule algebra; authorisation is whatever each handler remembered to check
 #   brocanth-storage     no file storage; an upload has nowhere to go and no address to be read back from
 #   brocanth-input       no entrance; `handle_post` reads `ctx.body` and parses it by hand
+#   brocanth-client      no client; calling this application means writing the URL and the JSON by hand
 #   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
 #   brocanth-openapi     no document; a client learns this API by reading the handlers
 #   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
@@ -953,7 +954,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `middleware`, `openapi`, `validation`, `realtime`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `openapi`, `validation`, `realtime`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1009,7 +1010,7 @@ brocanth serve
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 84ca5e841a45dc57 -->
+<!-- brocanth-digest: 5dd7d6ee6fead456 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

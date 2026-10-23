@@ -86,6 +86,7 @@ pub const ALL: &[&dyn Module] = &[
     // job is to implement `HookSource`: the pipeline was there, tested,
     // and every implementation of it was a test fixture.
     &brocanth_input::scaffold::Entry,
+    &brocanth_client::scaffold::Client,
     &brocanth_middleware::scaffold::Middleware,
     // The document, served at `/openapi.json` as a page, because a route
     // here is a file.

@@ -22,8 +22,30 @@ struct Page {
     source: PathBuf,
     /// Module names from the pages root down, already made into identifiers.
     module: Vec<String>,
-    /// `(handler fn, Verb variant)`, in the order the file declares them.
-    handlers: Vec<(String, &'static str, Verb)>,
+    /// What each handler takes and gives, in the order the file declares
+    /// them.
+    handlers: Vec<Found>,
+    /// The route this file is, as a document writes it: `/users/{id}`.
+    template: String,
+}
+
+/// One handler, read off its signature.
+///
+/// The name says the verb, the second parameter says what it takes, and
+/// the return type says what it gives. Three facts a page already states
+/// and nothing read until now.
+struct Found {
+    /// The function's name.
+    name: String,
+    /// The `Verb` variant, as an identifier to emit.
+    verb_ident: &'static str,
+    /// The verb itself.
+    verb: Verb,
+    /// The second parameter's type, for a handler that takes a body.
+    body: Option<syn::Type>,
+    /// The `T` of a `Json<T>` return, for a handler that says what it
+    /// gives.
+    gives: Option<syn::Type>,
 }
 
 /// `handle` is GET and `handle_<verb>` is that verb.
@@ -41,7 +63,7 @@ const VERBS: [(&str, &str, Verb); 7] = [
     ("handle_options", "Options", Verb::Options),
 ];
 
-pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
+pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
     let absolute = manifest.join(root);
     let mut pages = Vec::new();
     if let Err(message) = collect(&absolute, &absolute, &mut pages) {
@@ -74,12 +96,21 @@ pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
         let file = &page.route_file;
         let path = page.module.iter().map(|part| ident(part));
         let path: Vec<_> = path.collect();
-        page.handlers.iter().map(move |(handler, verb, _)| {
-            let handler = ident(handler);
-            let verb = ident(verb);
+        page.handlers.iter().map(move |found| {
+            let handler = ident(&found.name);
+            let verb = ident(found.verb_ident);
             let path = path.iter();
+            // A handler that takes a body is registered through the
+            // wrapper that reads one. Both produce the same `Handler`, so
+            // the table does not know the difference and the page does
+            // not have to say it twice.
+            let register = if found.body.is_some() {
+                quote!(page_with_body)
+            } else {
+                quote!(page)
+            };
             quote! {
-                routes.file(#file, "", Verb::#verb, page(#(#path ::)* #handler))?;
+                routes.file(#file, "", Verb::#verb, #register(#(#path ::)* #handler))?;
             }
         })
     });
@@ -99,12 +130,20 @@ pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
         Err(message) => return error(&message),
     };
 
+    let described = if describe {
+        described(&pages)
+    } else {
+        TokenStream2::new()
+    };
+
     quote! {
         #mods
 
         #(#watched)*
 
         #helpers
+
+        #described
 
         /// The table, read off `src/pages` while this crate was compiled.
         ///
@@ -121,6 +160,86 @@ pub fn expand(root: &Path, manifest: &Path) -> TokenStream2 {
             routes.build()
         }
     }
+}
+
+/// What every route takes and gives, for the one reader that needs it.
+///
+/// Emitted only for `pages!("src/pages", describe)`, because the rows name
+/// `brocanth_input` and `zod` and a project that chose neither should not
+/// be made to depend on them by a macro.
+///
+/// One table, two readers. An OpenAPI document is this plus the route
+/// table; a command-line client is this plus a base URL. Deriving both
+/// from the same rows is what stops a document, a client and a handler
+/// from disagreeing -- which is the whole claim, and it is checked by the
+/// compiler rather than by a review.
+fn described(pages: &[Page]) -> TokenStream2 {
+    let rows = pages.iter().flat_map(|page| {
+        let template = &page.template;
+        let module: Vec<_> = page.module.iter().map(|part| ident(part)).collect();
+        page.handlers.iter().map(move |found| {
+            let verb = ident(found.verb_ident);
+            let named = |ty: &Option<syn::Type>| match ty {
+                Some(ty) => {
+                    let ty = qualified(ty, &module);
+                    quote!(::core::option::Option::Some(
+                        <#ty as ::zod::Entry>::describe()
+                    ))
+                }
+                None => quote!(::core::option::Option::None),
+            };
+            let takes = named(&found.body);
+            let gives = named(&found.gives);
+            quote! {
+                ::brocanth_input::Described {
+                    path: #template,
+                    verb: Verb::#verb,
+                    takes: #takes,
+                    gives: #gives,
+                }
+            }
+        })
+    });
+
+    quote! {
+        /// What every route takes and gives, read off the pages while this
+        /// crate was compiled.
+        ///
+        /// A route is a file, a verb is a function, and the signature of
+        /// that function says the rest: a second parameter is the body it
+        /// takes, and a `Json<T>` return is what it gives. Nothing here is
+        /// written by hand, so nothing here can be out of date.
+        pub fn described() -> ::std::vec::Vec<::brocanth_input::Described> {
+            ::std::vec![#(#rows),*]
+        }
+    }
+}
+
+/// A type as written in a page, said from `src/pages/mod.rs`.
+///
+/// A page writes `Signup`, and that name means something in the page's own
+/// module. The table is emitted one level up, so the name has to carry the
+/// module with it: `signup::Signup`.
+///
+/// A path that already starts somewhere absolute -- `crate`, `::`, `self`,
+/// `super` -- is left alone, because it means the same thing from both
+/// places. Everything else gets the page's module in front of it, which is
+/// the rule the handler itself follows and the reason a body type has to
+/// be `pub` in the page that names it.
+fn qualified(ty: &syn::Type, module: &[proc_macro2::Ident]) -> TokenStream2 {
+    let syn::Type::Path(path) = ty else {
+        return quote!(#ty);
+    };
+    if path.qself.is_some() || path.path.leading_colon.is_some() {
+        return quote!(#ty);
+    }
+    let rooted = path.path.segments.first().is_some_and(|first| {
+        first.ident == "crate" || first.ident == "self" || first.ident == "super"
+    });
+    if rooted {
+        return quote!(#ty);
+    }
+    quote!(#(#module ::)* #ty)
 }
 
 /// The `mod` lines, nested to match the directories.
@@ -249,11 +368,18 @@ fn page(root: &Path, path: &Path) -> Result<Page, String> {
         &path.file_stem().unwrap_or_default().to_string_lossy(),
     ));
 
+    // The route a document writes, derived by the core from the same file
+    // name the table is. One reader, so the two cannot disagree.
+    let template = brocanth::routing::route_for_file(&route_file, "")
+        .map(|route| route.pattern().to_string())
+        .map_err(|e| format!("`{route_file}` is not a route: {e}"))?;
+
     Ok(Page {
         handlers: handlers(path, &route_file)?,
         route_file,
         source: path.to_path_buf(),
         module,
+        template,
     })
 }
 
@@ -262,7 +388,7 @@ fn page(root: &Path, path: &Path) -> Result<Page, String> {
 /// Parsed rather than scanned for `pub fn handle`: that text appears in a doc
 /// comment in the file the scaffold writes, and a route table that depends on
 /// where a comment is would be a route table nobody could trust.
-fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str, Verb)>, String> {
+fn handlers(path: &Path, route_file: &str) -> Result<Vec<Found>, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     let file = syn::parse_file(&source)
@@ -280,24 +406,88 @@ fn handlers(path: &Path, route_file: &str) -> Result<Vec<(String, &'static str, 
         if !name.starts_with("handle") {
             continue;
         }
-        match VERBS.iter().find(|(candidate, _, _)| *candidate == name) {
-            Some((_, verb, kind)) => found.push((name, *verb, *kind)),
-            None => {
-                let known = VERBS
-                    .iter()
-                    .map(|(name, _, _)| *name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "`{route_file}` has `pub fn {name}`, which is not a verb: \
-                     the framework reads the verb off the name, and the names \
-                     it reads are {known}. Rename it, or make it private if it \
-                     is not a handler"
-                ));
-            }
-        }
+        let Some((_, verb_ident, verb)) = VERBS.iter().find(|(candidate, _, _)| *candidate == name)
+        else {
+            let known = VERBS
+                .iter()
+                .map(|(name, _, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "`{route_file}` has `pub fn {name}`, which is not a verb: \
+                 the framework reads the verb off the name, and the names \
+                 it reads are {known}. Rename it, or make it private if it \
+                 is not a handler"
+            ));
+        };
+        found.push(Found {
+            body: body_of(&function.sig, route_file, &name)?,
+            gives: gives_of(&function.sig),
+            name,
+            verb_ident,
+            verb: *verb,
+        });
     }
     Ok(found)
+}
+
+/// What the handler takes, past the context.
+///
+/// One parameter is the context and nothing else; two is the context and a
+/// body, which the framework reads and checks before the handler runs. A
+/// third has nowhere to come from, and saying so here is better than a
+/// trait bound nobody can read.
+fn body_of(
+    sig: &syn::Signature,
+    route_file: &str,
+    name: &str,
+) -> Result<Option<syn::Type>, String> {
+    match sig.inputs.len() {
+        0 | 1 => Ok(None),
+        2 => match &sig.inputs[1] {
+            syn::FnArg::Typed(arg) => Ok(Some((*arg.ty).clone())),
+            syn::FnArg::Receiver(_) => Err(format!(
+                "`{route_file}`: `{name}` takes `self`, and a page is a \
+                 function rather than a method"
+            )),
+        },
+        many => Err(format!(
+            "`{route_file}`: `{name}` takes {many} parameters. A handler \
+             takes the context, and may take one more -- the body, which \
+             the framework reads and checks before calling it"
+        )),
+    }
+}
+
+/// What the handler gives, for one that says.
+///
+/// `Result<Json<T>, Error>` names `T`; anything else names nothing. That
+/// is the opt-in, and it is deliberate: `impl IntoResponse` is the
+/// documented way to write a page and must keep working, so a page
+/// contributes a response schema when it wraps one and not otherwise.
+fn gives_of(sig: &syn::Signature) -> Option<syn::Type> {
+    let syn::ReturnType::Type(_, returned) = &sig.output else {
+        return None;
+    };
+    inside(returned, "Result").and_then(|ok| inside(ok, "Json").cloned())
+}
+
+/// The first type argument of `Name<..>`, as written.
+fn inside<'t>(ty: &'t syn::Type, outer: &str) -> Option<&'t syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let last = path.path.segments.last()?;
+    if last.ident != outer {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// `routes::users::id::path(7)`, one function per route.
@@ -318,7 +508,7 @@ fn helpers(root: &Path, pages: &[Page]) -> Result<TokenStream2, String> {
         let file = format!("{base}/{}", page.route_file);
         let helper = RouteHelper::for_file(&file, &base)
             .map_err(|e| format!("`{}` is not a route: {e}", page.route_file))?;
-        let verbs: Vec<Verb> = page.handlers.iter().map(|(_, _, verb)| *verb).collect();
+        let verbs: Vec<Verb> = page.handlers.iter().map(|found| found.verb).collect();
         routes.push(helper.with_verbs(verbs));
     }
 
@@ -365,7 +555,7 @@ mod tests {
 
     fn table(files: &[(&str, &str)]) -> String {
         let root = tree(files);
-        let out = expand(Path::new("src/pages"), &root).to_string();
+        let out = expand(Path::new("src/pages"), &root, false).to_string();
         let _ = std::fs::remove_dir_all(&root);
         out
     }

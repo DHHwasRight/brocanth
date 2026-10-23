@@ -60,9 +60,12 @@
 
 use std::fmt;
 
+pub use described::Described;
 pub use zod;
 
 use zod::{Faults, Input, Refusal, Value};
+
+pub mod described;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;

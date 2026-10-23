@@ -44,6 +44,39 @@
 use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
+/// What the plugin does with `pages::described()`.
+///
+/// Written out here rather than inline in the template so it reads as
+/// Rust: the format string around it escapes every brace.
+const BODIES: &str = r#"
+        // What each page takes and gives. `pages!` read it off the handler
+        // signatures, so the document says what the code does rather than
+        // what somebody remembered to write down.
+        for route in crate::pages::described() {
+            if let Some(node) = &route.takes {
+                spec = spec.describing_node(node);
+            }
+            if let Some(node) = &route.gives {
+                spec = spec.describing_node(node);
+            }
+            let takes = route.takes.as_ref().and_then(|node| node.name());
+            let gives = route.gives.as_ref().and_then(|node| node.name());
+            spec = spec.describe(route.path, route.verb, move |mut op| {
+                if let Some(name) = takes {
+                    op = op.json_body(Schema::reference(name));
+                }
+                if let Some(name) = gives {
+                    // A description is required and may not be empty, which
+                    // the document's own validator says before anything is
+                    // served. One sentence, the same for every operation,
+                    // and `.describe(..)` is where a better one goes.
+                    op = op.json_response(200, "The answer", Schema::reference(name));
+                }
+                op
+            });
+        }
+"#;
+
 /// The document, as a choice on the `brocanth create` menu.
 ///
 /// A unit struct, because a module is asked once per run and everything it
@@ -57,7 +90,14 @@ impl Module for OpenApi {
             "an OpenAPI 3.1 document derived from src/pages, served at /openapi.json",
         )
         .asked_in("doors", "An OpenAPI document, derived from your routes")
-        .krate(Dep::brocanth("brocanth-openapi"))
+        .krate(
+            Dep::brocanth("brocanth-openapi")
+                // The bodies come out of `zod` nodes, which is the one
+                // way this document learns what a page takes and gives.
+                // Declared here and not by whether `input` was chosen,
+                // because a manifest is read before the picks are known.
+                .feature("zod"),
+        )
         // Only for the order of the `[openapi]` section and the builder line:
         // the title and the version come from the file the config plugin
         // loaded, so this belongs under it rather than above it.
@@ -169,6 +209,22 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "openapi");
+
+    // With `input`, a page's signature says what it takes and gives, and
+    // `pages::described()` is that table. Without it there is no table, so
+    // the document is paths and verbs and the honest sentence saying so.
+    let (bodies, bodies_code) = if project.has("input") {
+        (
+            " What a page takes and gives comes\n//! from `pages::described()`, which `pages!` wrote off the handler\n//! signatures: a second parameter is the request body, a `Json<T>`\n//! return is the answer. Neither is written here, so neither can be\n//! out of date.",
+            BODIES,
+        )
+    } else {
+        (
+            " What a page takes and gives is not\n//! derivable from a `Fn(&mut Ctx)`, so a body is added by hand.\n//! `brocanth create --with input` is what makes the signature say\n//! it instead.",
+            "",
+        )
+    };
+
     format!(
         r##"//! The OpenAPI document, as this application derives it.
 //!
@@ -185,15 +241,14 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # What is derived, and what is not
 //!
-//! Every route, with its path parameters, an `operationId` and a 200. What a
-//! page accepts and returns is not derivable from a `Fn(&mut Ctx)`, so bodies
-//! are added by hand with `SpecBuilder::describe`, beside the
-//! `routes_from_router` line below:
+//! Every route, with its path parameters, an `operationId` and a 200.{bodies}
+//!
+//! Anything else -- a summary, a second status, an example -- is added by
+//! hand with `SpecBuilder::describe`, beside the lines below:
 //!
 //! ```ignore
 //! .describe("/users/{{id}}", Verb::Get, |op| {{
 //!     op.summary("One user")
-//!         .json_response(200, "The user", Schema::reference("User"))
 //! }})
 //! ```
 //!
@@ -216,7 +271,7 @@ use std::sync::OnceLock;
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Verb;
-use brocanth_openapi::{{Format, OpenApiConfig, OpenApiPlugin, SpecBuilder}};
+use brocanth_openapi::{{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder}};
 
 /// Where the document is served.
 ///
@@ -291,9 +346,11 @@ impl Plugin for OpenApi {{
         let router = crate::pages::router().map_err(|e| {{
             PluginError::new(format!("[openapi] the route table does not build: {{e}}"))
         }})?;
-        let document = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
+        let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
-            .hide(ROUTE, Verb::Get)
+            .hide(ROUTE, Verb::Get);
+{bodies_code}
+        let document = spec
             .build()
             .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {{e}}")))?;
 

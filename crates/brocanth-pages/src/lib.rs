@@ -96,13 +96,31 @@ use naming::{ident, to_module_name};
 #[proc_macro]
 pub fn pages(input: TokenStream) -> TokenStream {
     let raw = input.to_string();
-    let Some(root) = string_literal(&raw) else {
+    let (head, rest) = match raw.split_once(',') {
+        Some((head, rest)) => (head, rest.trim()),
+        None => (raw.as_str(), ""),
+    };
+    let Some(root) = string_literal(head) else {
         return error(
             "expected a string literal with the pages root, as in \
              `brocanth_pages::pages!(\"src/pages\")`",
         );
     };
-    table::expand(Path::new(&root), &manifest_dir()).into()
+    // The one word this macro takes after the path. Spelled out rather
+    // than a `bool`, because `pages!("src/pages", true)` says nothing at
+    // the call site about what is true.
+    let describe = match rest {
+        "" => false,
+        "describe" => true,
+        other => {
+            return error(&format!(
+                "`{other}` is not a word this macro knows. After the path \
+                 it takes `describe`, which emits what every route takes \
+                 and gives, as in `pages!(\"src/pages\", describe)`"
+            ))
+        }
+    };
+    table::expand(Path::new(&root), &manifest_dir(), describe).into()
 }
 
 /// The path out of `pages!("...")`, without pulling in a parser for it.

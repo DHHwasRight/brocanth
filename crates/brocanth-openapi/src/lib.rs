@@ -91,7 +91,12 @@
 //!
 //! # What this crate deliberately does not build
 //!
-//! **No client generators.** `openapi-generator` emits clients for fifty
+//! **No client generators.** (One exception arrived later and argues its
+//! own case: `brocanth-client` builds a command line out of the route
+//! table, in the one language the server is already written in, with no
+//! files emitted. See `docs/surface.md` §4. The paragraph below is still
+//! the answer for every other language.)
+//! `openapi-generator` emits clients for fifty
 //! languages, `oapi-codegen` and `progenitor` do Go and Rust better than a
 //! side project would, and every one of them consumes exactly the artefact
 //! this crate produces. Writing a fifty-first would mean competing with

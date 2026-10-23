@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "The entrance: a request becomes a struct the handler asked for, or an answer that says why not."
 
 [dependencies]
+brocanth = { workspace = true }
 brocanth-server = { workspace = true }
 zod = { workspace = true, features = ["json"] }
 serde_json = "1"

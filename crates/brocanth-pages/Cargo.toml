@@ -15,11 +15,14 @@ quote = "1"
 # its Rust source rather than its name. Scanning the text for `pub fn handle`
 # would read one inside a comment or a string; parsing it cannot.
 #
-# `full` for item bodies, `parsing` is the default. No `printing`: nothing
-# here turns a `syn` type back into tokens.
+# `full` for item bodies, `parsing` is the default. `printing` and
+# `clone-impls` because `pages!("src/pages", describe)` carries a handler's
+# body and return types straight from its signature into the table it
+# emits: the type a page wrote is the type a document describes, with no
+# second spelling to keep in step.
 # The route helpers are the core's: `generate_helpers` already emits one
 # `path()` per route, taking exactly that route's parameters. Reimplementing
 # it here would be a second answer to "what is this route's URL", and the two
 # would disagree the first time a segment rule changed.
 brocanth = { path = "../brocanth", version = "0.1.0" }
-syn = { version = "2", default-features = false, features = ["full", "parsing", "proc-macro"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "clone-impls", "proc-macro"] }

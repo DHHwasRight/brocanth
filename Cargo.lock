@@ -657,6 +657,7 @@ dependencies = [
  "brocanth",
  "brocanth-auth",
  "brocanth-cache",
+ "brocanth-client",
  "brocanth-config",
  "brocanth-input",
  "brocanth-jobs",
@@ -673,6 +674,18 @@ dependencies = [
  "ratatui",
  "toml_edit",
  "unicode-width",
+]
+
+[[package]]
+name = "brocanth-client"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-input",
+ "brocanth-scaffold",
+ "clap",
+ "reqwest",
+ "zod",
 ]
 
 [[package]]
@@ -726,6 +739,7 @@ dependencies = [
 name = "brocanth-input"
 version = "0.1.0"
 dependencies = [
+ "brocanth",
  "brocanth-scaffold",
  "brocanth-server",
  "serde_json",
@@ -3810,7 +3824,9 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
