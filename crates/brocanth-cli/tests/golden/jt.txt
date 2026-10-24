@@ -1,0 +1,984 @@
+===== Cargo.toml =====
+[package]
+name = "my-blog"
+version = "0.1.0"
+edition = "2021"
+
+# Exactly what was chosen when this application was scaffolded.
+#
+# The core is a router handing a request and a context to a handler, and it
+# depends on none of the rest. A capability that is not listed below is not
+# compiled, not linked, and contributes nothing: no section in the config, no
+# field on the context, no bytes in the binary.
+#
+# Not here, because nothing asked for it:
+#   brocanth-config      no TOML parser; main builds each plugin from a literal
+#   brocanth-model       no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache       no cache; every read does the work a hit would have skipped
+#   brocanth-jobs        no queue; slow work happens inside the request that asked for it
+#   brocanth-auth        no accounts; nothing hashes a password and nothing signs a session cookie
+#   brocanth-policy      no rule algebra; authorisation is whatever each handler remembered to check
+#   brocanth-storage     no file storage; an upload has nowhere to go and no address to be read back from
+#   brocanth-input       no entrance; `handle_post` reads `ctx.body` and parses it by hand
+#   brocanth-client      no client; calling this application means writing the URL and the JSON by hand
+#   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
+#   brocanth-openapi     no document; a client learns this API by reading the handlers
+#   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
+#   brocanth-realtime    no broker; a write tells nobody, and a client finds out by asking again
+#   rsx                  no template engine; a page builds the String it returns
+#   serde                nothing here is deserialised
+[dependencies]
+brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
+brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git" }
+tokio = { version = "1", features = ["rt-multi-thread"] }  # the reactor `serve` runs on
+===== .gitignore =====
+/target
+===== rust-toolchain.toml =====
+[toolchain]
+channel = "1.98"
+===== mise.toml =====
+[tools]
+# Must match the toolchain brocanth's proc-macro artifacts were built with:
+# they are not compatible across patch releases.
+rust = "1.98"
+
+# Named for what it does, and not `run`: `run` is one of mise's own
+# subcommands, so a task called that is only reachable as `mise run run`.
+# The alias keeps a bare `mise run` working, because mise runs the task
+# called `default` when it is given no name.
+[tasks.serve]
+alias = ["default"]
+run = "cargo run"
+
+[tasks.test]
+run = "cargo test"
+===== src/main.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! My Blog -- a brocanth application.
+//!
+//! No command line was asked for, so this binary does one thing. Everything it
+//! contains is in `src/app.rs`; `brocanth add commands` turns this into a
+//! command line with `serve` as one of its commands.
+
+mod app;
+mod pages;
+mod plugins;
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match app::serve("127.0.0.1:3000") {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// brocanth-digest: 54be3755a6887e81
+===== src/app.rs =====
+//! My Blog -- everything this binary contains, in the order it happens.
+//!
+//! This file is yours. `brocanth add` does not rewrite it: what it would
+//! have to say is in `src/plugins/mod.rs`, which is generated, and this one
+//! only asks that file three questions.
+//!
+//! A plugin that is not named in `plugins::register!` is not registered, and
+//! one that is not in `Cargo.toml` is not compiled at all. "The framework
+//! decided for you and you cannot see where" is the thing this layout exists
+//! to make impossible.
+//!
+//! `serve` and every other command read this, so there is one answer to what
+//! this application is.
+
+use std::sync::Arc;
+
+use brocanth::plugin_app::AppBuilder;
+use brocanth::routing::{Dispatch, MiddlewareStack, Router};
+
+use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
+use crate::plugins;
+
+/// The application name. Every environment variable this binary reads is
+/// `MY_BLOG_<SUFFIX>`: one convention, derived once, whatever spelling the
+/// name arrived in.
+pub const APP: &str = "my-blog";
+
+/// What a request needs, built once and shared by every connection.
+pub struct App {
+    pub router: Router<Handler>,
+    pub stack: MiddlewareStack<Ctx, Response>,
+    pub plugins: Vec<String>,
+}
+
+/// Builds it. The only place that decides what this binary is.
+pub fn build() -> Result<App, String> {
+    // 1. The application, and every plugin it contains. The chain is in
+    //    `src/plugins/mod.rs`, one line per plugin and each one a line a
+    //    reader can delete. It is there rather than here because the
+    //    generator rewrites it whenever the module list changes.
+    let app = plugins::register!(AppBuilder::new())
+        .setup(|setup| {
+            // A plugin *offers* middleware and cannot mount it: a
+            // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
+            // pattern is a decision, and the decision is the application's --
+            // which is why these lines are here, in the file you own.
+            // Nothing in this binary offers middleware, so nothing is mounted.
+            let _ = setup.router();
+            Ok(())
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 2. The route table: the shape of src/pages and nothing else. A file is
+    //    a route, and `pages::router` is the only place that says so.
+    let router = pages::router().map_err(|e| e.to_string())?;
+
+    // 3. The chain, from exactly what the block above mounted. A name this
+    //    binary has no layer for stops the application rather than silently
+    //    not running.
+    let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();
+    for mount in app.router_plan().mounts() {
+        let layer = plugins::layer(&mount.middleware).ok_or_else(|| {
+            format!(
+                "`{}` is mounted, but this binary has no layer for it",
+                mount.middleware
+            )
+        })?;
+        stack
+            .use_at(&mount.pattern, layer)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 4. What the plugins put on the per-request context, said once.
+    plugins::announce!(&app);
+
+    Ok(App {
+        router,
+        stack,
+        plugins: app.instance_names().map(str::to_string).collect(),
+    })
+}
+
+/// Turns a page's answer into the bytes the server writes.
+///
+/// `html` rather than a guess: most pages return markup, and a handler that
+/// wants another type says so with a `content-type` header.
+///
+/// That header replaces the seeded one rather than joining it. `with_header`
+/// appends, because `set-cookie` has to repeat, so a page answering JSON
+/// used to put two `content-type` lines on the wire and let the client pick.
+fn sent(answered: Response) -> brocanth_server::Response {
+    let mut out = brocanth_server::Response::html(answered.status, answered.body);
+    if answered
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        out = out.without_header("content-type");
+    }
+    for (name, value) in &answered.headers {
+        out = out.with_header(name, value);
+    }
+    out
+}
+
+/// Serves until the process is stopped.
+///
+/// Synchronous on the outside because the command that calls it is, and
+/// the runtime is built here rather than wrapped around `main`: a command
+/// that never serves should not start a reactor to run.
+pub fn serve(addr: &str) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // The runtime first, and the application inside it. A plugin
+    // that opens a connection pool does it in `before_start`,
+    // where the hook is synchronous and connecting is not, so it
+    // reaches for the current runtime handle and blocks on a
+    // scoped thread. Building the application first would leave
+    // it with no handle to reach for.
+    let app = {
+        let _guard = runtime.enter();
+        Arc::new(build()?)
+    };
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+
+    runtime.block_on(async move {
+        let server = brocanth_server::Server::bind(addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        let bound = server.local_addr().map_err(|e| e.to_string())?;
+        eprintln!("{APP}: listening on http://{bound}");
+
+        server
+            .run(move |request| {
+                // Dispatch is synchronous and runs here, outside the
+                // future, so what crosses the await is a finished
+                // response and nothing borrowed.
+                let out = sent(dispatch(&app, &request));
+                async move { out }
+            })
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// One request: the table, then the chain, then the handler.
+///
+/// The chain runs only for a route that matched. A 404 has no route and
+/// therefore no context, which is also why the request hooks the plan
+/// reserves for a logger are the core's job and not a layer's.
+pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
+    let (verb, path) = (request.verb, request.path.as_str());
+    match app.router.dispatch(verb, path) {
+        Dispatch::Found { handler, matched } => {
+            let mut ctx = Ctx::new(verb, path, matched.params()).sent(
+                &request.query,
+                request.body.to_vec(),
+                request
+                    .headers()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            );
+            // The one place a failed handler becomes a response --
+            // what Echo calls an HTTPErrorHandler. It sits inside
+            // the chain's terminal, so a layer still sees what the
+            // error turned into and can rewrite it.
+            app.stack.run(path, &mut ctx, |c| {
+                handler(c).unwrap_or_else(IntoResponse::into_response)
+            })
+        }
+        Dispatch::MethodNotAllowed { allow, .. } => Response {
+            status: 405,
+            headers: vec![("allow".to_string(), allow.to_string())],
+            ..Default::default()
+        },
+        Dispatch::NotFound => Response::new(404, "Not Found"),
+    }
+}
+===== src/pages/mod.rs =====
+//! The route table, which is this directory.
+//!
+//! One file is one route, and the path on disk is the URL: `index.rs` is `/`,
+//! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`.
+//!
+//! Nothing below lists them. The macro reads this directory while the crate
+//! is compiled and writes the `mod` lines and [`router`] from what is there,
+//! so adding a page is adding a file and renaming one renames its route.
+//! The verb comes off the handler's name: `handle` is GET, `handle_post` is
+//! POST, and a `pub fn handle_*` that is not a verb is a build error rather
+//! than a handler nothing reaches.
+//!
+//! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
+
+brocanth_pages::pages!("src/pages");
+
+use brocanth::routing::{BuildError, Params, Router, Verb};
+
+/// What a handler produces.
+///
+/// The framework owns rendering: a handler returns a value and never writes a
+/// response itself, so a half-written body on an error is not something that
+/// can happen. Echo and Gin hand the handler a writer and take an error back,
+/// and both carry the scar -- once a 200 has gone out, the central error
+/// handler cannot take it back. Here there is nothing to take back.
+pub struct Response {
+    pub status: u16,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Written by hand rather than derived, and the difference matters.
+///
+/// A derived `Default` would give `status: 0`, which is not an HTTP status, so
+/// `Response { body: .., ..Default::default() }` would compile and be wrong.
+/// 200 is what "I did not say" means for a response.
+impl Default for Response {
+    fn default() -> Self {
+        Self {
+            status: 200,
+            body: String::new(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+impl Response {
+    pub fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn ok(body: impl Into<String>) -> Self {
+        Self::new(200, body)
+    }
+
+    pub fn empty(status: u16) -> Self {
+        Self::new(status, "")
+    }
+
+    /// For what the struct literal does not cover: several headers, added one
+    /// at a time. Rust has no variadic generics, so a tuple return is
+    /// fixed-arity and this is the unbounded form.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+/// What a handler may return instead of building a [`Response`] by hand.
+///
+/// The Crystal brocanth overloads `write_response` on the handler's return
+/// type, so a page returns the simplest thing that says what it means. Rust
+/// spells the same idea as a trait: each handler still returns exactly one
+/// type, and this is what lets different handlers return different ones.
+pub trait IntoResponse {
+    fn into_response(self) -> Response;
+}
+
+impl IntoResponse for Response {
+    fn into_response(self) -> Response {
+        self
+    }
+}
+
+/// A body, answered 200.
+impl IntoResponse for String {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+impl IntoResponse for &str {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+/// Nothing: 200 with no body. Crystal's `Nil` return.
+impl IntoResponse for () {
+    fn into_response(self) -> Response {
+        Response::empty(200)
+    }
+}
+
+/// A status and nothing else -- `Ok(404)`.
+impl IntoResponse for u16 {
+    fn into_response(self) -> Response {
+        Response::empty(self)
+    }
+}
+
+/// A body and a status.
+impl<T: IntoResponse> IntoResponse for (T, u16) {
+    fn into_response(self) -> Response {
+        Response {
+            status: self.1,
+            ..self.0.into_response()
+        }
+    }
+}
+
+/// A body and headers.
+impl<T: IntoResponse> IntoResponse for (T, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.headers.extend(self.1);
+        response
+    }
+}
+
+/// A body, a status and headers.
+impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.status = self.1;
+        response.headers.extend(self.2);
+        response
+    }
+}
+
+/// What a handler may fail with.
+///
+/// Deliberately **not** an `impl std::error::Error`, which is what lets the
+/// blanket `From` below exist without colliding with the reflexive
+/// `impl<T> From<T> for T`. `anyhow::Error` is this shape for the same reason.
+/// The effect is that `?` works on anything in a handler.
+#[derive(Debug)]
+pub struct Error {
+    pub status: u16,
+    pub message: String,
+    /// Headers the failure needs. A `content-type` for a body that is not
+    /// HTML, a `www-authenticate` for a 401, a `retry-after` for a 429.
+    ///
+    /// `Response` always had these and `Error` did not, which made a
+    /// machine-readable error body impossible to send.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Error {
+    pub fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// The default for a failure nobody classified: it is a bug here, not a
+    /// mistake by the caller.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(500, message)
+    }
+
+    /// The same, carrying a header.
+    ///
+    /// `allow(dead_code)` for the same reason the request readers below
+    /// have it: it is here for the first handler that needs it, and a
+    /// brand-new project has none yet.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
+    fn from(error: E) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        // Everything a client sees for a 5xx is the status. The message is for
+        // whoever is reading the logs, and putting it in the body is how an
+        // internal path ends up on a stranger's screen.
+        let body = if self.status < 500 {
+            self.message
+        } else {
+            String::from("Internal Server Error")
+        };
+        Response {
+            status: self.status,
+            body,
+            // A 5xx keeps its headers: the body is withheld, not the
+            // framing the client needs to read what is left.
+            headers: self.headers,
+        }
+    }
+}
+
+/// What a handler is given. Middleware sees it too, and may change it before
+/// the handler runs or after it returns.
+pub struct Ctx {
+    /// Which verb matched. A layer reads it; a page usually does not,
+    /// because the verb is already in the name of the function it is in.
+    #[allow(dead_code)]
+    pub verb: Verb,
+    pub path: String,
+    /// Everything after the first `?`, without it. Empty when there was none.
+    #[allow(dead_code)]
+    pub query: String,
+    /// The body as it arrived. Empty for the verbs that carry none, and for
+    /// a context built by a test that did not set one.
+    #[allow(dead_code)]
+    pub body: Vec<u8>,
+    params: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+}
+
+impl Ctx {
+    pub fn new(verb: Verb, path: &str, params: Params<'_>) -> Self {
+        Self {
+            verb,
+            path: path.to_string(),
+            query: String::new(),
+            body: Vec::new(),
+            params: params
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// The rest of the request: what the client sent, rather than what the
+    /// router matched.
+    ///
+    /// Two calls and not one, because a test that exercises a handler
+    /// usually wants the first and not the second. `src/app.rs` makes both.
+    ///
+    /// The three are copied out of the server's request, which lives for
+    /// the connection and not for the handler. One copy per request, and
+    /// the handler owns what it reads.
+    #[must_use]
+    pub fn sent(mut self, query: &str, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        self.query = query.to_string();
+        self.body = body;
+        self.headers = headers;
+        self
+    }
+
+    /// A route parameter, or `None`.
+    ///
+    /// Never `""`. The Crystal prototype returned an empty string for a name
+    /// nobody declared, so a typo read as a present-but-blank value and went
+    /// unnoticed; `Option` is that bug deleted rather than documented.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The same, for a parameter the route declares and so must be there.
+    ///
+    /// Returns `Result` rather than `Option` so it composes with `?`. A name
+    /// the route does not declare is this file disagreeing with its own
+    /// filename, which is a 500 and not a 400: nobody sent a bad request.
+    pub fn require(&self, name: &str) -> Result<&str, Error> {
+        self.param(name)
+            .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
+}
+
+/// What the client sent, as opposed to what the router matched.
+///
+/// A second block, and `allow(dead_code)`, for one reason: the request is
+/// on the context whether or not this project reads it yet. The other way
+/// round is a context whose shape depends on which modules were chosen,
+/// and then a page that starts reading a header needs the generator rather
+/// than a line.
+#[allow(dead_code)]
+impl Ctx {
+    /// A request header by name, case-insensitively, or `None`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every request header, in the order they arrived.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// What the body is written in, or `None` when the client did not say.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    /// The body as text, or `None` when it is not UTF-8.
+    ///
+    /// `Option` and not a lossy conversion: a body that is not text is a
+    /// request to answer, not a string to repair.
+    pub fn body_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.body).ok()
+    }
+}
+
+/// A handler, as the table stores it. One per verb a page answers.
+///
+/// Boxed rather than a bare `fn` pointer, because every handler returns its
+/// own type and a `fn` pointer can only hold one of them. [`page`] is what
+/// unifies them, and it runs once per route at startup rather than per
+/// request.
+pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+
+/// Puts a handler in the table whatever it returns.
+///
+/// Generic over the return type, so `-> Result<impl IntoResponse, Error>` on
+/// the handler and one concrete `Handler` in the table are the same thing.
+pub fn page<H, T>(handler: H) -> Handler
+where
+    H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
+    T: IntoResponse,
+{
+    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+}
+
+/// Every JSON template in this application.
+///
+/// The `.jt` files sit next to the pages they answer -- `status.jt` beside
+/// `status.rs` -- and `load_dir!` compiles the tree while this crate is
+/// being compiled. Nothing is parsed when a request arrives, and a template
+/// that does not parse is a compile error on its own line.
+///
+/// A module of their own, for the same reason the templates have one:
+/// `load_dir!` emits a `pub mod status` for `status.jt` and `pages!` emits
+/// one for `status.rs`, so unnested they collide. The path is relative to
+/// the package root and not to this file, because a proc macro cannot learn
+/// where it was written on stable Rust.
+///
+/// A file whose name is not an identifier gets the nearest one, by the same
+/// rule the templates and the route table use: `[id].jt` is
+/// `payload::users::_id_`.
+pub mod payload {
+    jt::load_dir!("src/pages");
+}
+
+/// Renders a JSON template as the answer.
+///
+/// The counterpart of `render` above, and deliberately a second function
+/// rather than a second `impl IntoResponse`: a template is an ordinary
+/// value, so a blanket impl would claim types that are not answers.
+///
+/// It returns the handler's own `Result` so a page reads the same whichever
+/// engine it uses. For another status or a header, compose:
+/// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
+pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
+    // Into its own String first, so a page that fails half way through
+    // leaves nothing behind. Same property the HTML path has.
+    Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_is_the_shape_of_the_directory() {
+        let router = router().expect("the pages produce a table");
+        let mut patterns: Vec<&str> = router
+            .routes()
+            .iter()
+            .map(|(template, _)| template.pattern())
+            .collect();
+        patterns.sort();
+        assert_eq!(patterns, ["/", "/about", "/status", "/users/{id}"]);
+    }
+
+    #[test]
+    fn a_path_that_exists_with_a_verb_that_does_not_is_a_405() {
+        let router = router().expect("the pages produce a table");
+        let allow = router.allow_for("/about").expect("/about is a route");
+        assert_eq!(allow.to_string(), "GET, HEAD");
+    }
+}
+===== src/pages/index.rs =====
+//! `/` -- because the file is called `index.rs`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET. The framework reads the verb off the function name: `handle` is GET,
+/// `handle_post` is POST, and `handle_json` would be a content-negotiation hook
+/// rather than a verb.
+///
+/// The return type is the simplest thing that says what this page means. A
+/// `&str` is a 200 with that body; see `users/[id].rs` for the other shapes.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    Ok("<!doctype html><title>My Blog</title>\
+         <h1>My Blog</h1>\
+         <p>This file is <code>src/pages/index.rs</code>. Rename it and the route \
+         moves with it.</p>\
+         <ul><li><a href=\"/about\">/about</a></li>\
+         <li><a href=\"/users/7\">/users/7</a></li></ul>")
+}
+===== src/pages/about.rs =====
+//! `/about` -- one file, one route.
+
+use crate::pages::{Ctx, Error, IntoResponse, Response};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // The context is the request. The framework owns the response, so a
+    // handler returns a value and never writes one itself -- which is what
+    // makes a half-written body on an error impossible rather than unlikely.
+    //
+    // The struct literal is the form that scales: name the fields that differ
+    // and `..Default::default()` fills the rest. Rust will not let you omit a
+    // field without it, and there are no implicit zero values.
+    Ok(Response {
+        body: format!(
+            "<!doctype html><title>About \u{b7} My Blog</title>\
+             <h1>About</h1>\
+             <p>You asked for <code>{} {}</code>. This page answers GET and \
+             nothing else, so a DELETE to it is a 405 carrying an \
+             <code>Allow</code> header rather than a 404.</p>",
+            ctx.verb, ctx.path
+        ),
+        ..Default::default()
+    })
+}
+===== src/pages/users/[id].rs =====
+//! `/users/{id}` -- the brackets in the file name are the parameter.
+//!
+//! There is no ceiling on how many a route may have. The Crystal prototype had
+//! `MAX_PARAMS = 4` and dropped the fifth without saying so, because its
+//! collector could not prove a captured parameter does not outlive the request.
+//! Here the parameters borrow the path, so the question does not arise.
+
+use crate::pages::{routes, Ctx, Error, IntoResponse, Response};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // `?` is why a handler returns `Result`. Anything that fails converts
+    // into `Error` through a blanket `From`, so a parse, a query or a file
+    // read is one character rather than a match arm.
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response {
+        body: format!("<!doctype html><title>User {id}</title><h1>User {id}</h1>"),
+        ..Default::default()
+    })
+}
+
+/// POST to the same path. One file, one route, one handler per verb.
+///
+/// A redirect is a status, one header and no body. The struct literal above is
+/// the other form; this one stays readable when there are several headers,
+/// because Rust has no variadic generics and a tuple return is therefore
+/// fixed-arity.
+///
+/// The location is built rather than written. `routes` is generated from the
+/// directory alongside the table, so a link to a route that does not exist
+/// does not compile, and neither does one missing a parameter.
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
+}
+===== src/plugins/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! The plugins this application contains, and the three things `src/app.rs`
+//! asks this file for.
+//!
+//! Each plugin is also named in `register!`: being here makes it compile,
+//! being named there makes it run. The core depends on none of them, and the
+//! dependency arrow points this way and never back.
+//!
+//! The registration chain sits here and not in `src/app.rs` because the
+//! generator rewrites it every time the module list changes, and `src/app.rs`
+//! is yours.
+
+use brocanth::routing::Next;
+
+use crate::pages::{Ctx, Response};
+
+/// Every plugin this application contains, in dependency order.
+///
+/// A macro and not a function, and the reason is the builder's type:
+/// registering a plugin that provides a context item widens
+/// `AppBuilder`'s type-level provider list, so the type this chain ends
+/// on is one nested associated type per plugin. A function would have to
+/// spell that type out and re-spell it on every change. The macro expands
+/// at its one call site in `src/app.rs`, where the compiler works it out
+/// and nobody has to read it.
+///
+/// Each registration is still one line, and a line a reader can delete.
+macro_rules! register {
+    ($builder:expr) => {{
+        // No file lookup, no merge order, no TOML parser: the core takes
+        // values that are already built, so each plugin below is handed a
+        // literal the compiler checks. Add the config plugin when a file is
+        // wanted; nothing else changes.
+        $builder
+    }};
+}
+pub(crate) use register;
+
+/// What this binary puts on the context, said once at startup.
+///
+/// The lines are a demonstration and they are load-bearing: the installed
+/// provider set lives in the application's *type*, so an `extract` for a
+/// plugin nobody registered does not compile. That is the modularity claim,
+/// checked by the compiler rather than written in a README.
+///
+/// A macro for the reason `register!` is one: the context's type is the
+/// builder's type, and neither is worth spelling.
+macro_rules! announce {
+    ($app:expr) => {{
+        // Nothing in this binary puts a value on the context.
+        let _ = $app;
+    }};
+}
+pub(crate) use announce;
+
+/// One middleware layer, as the stack stores it.
+///
+/// A name rather than the type written out: clippy calls the bare
+/// form a very complex type, and it is also the type `src/app.rs`
+/// would have to spell to hold one.
+pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
+
+/// The function behind a middleware name the application mounted.
+///
+/// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
+/// decision and the decision is the application's. Which function answers
+/// to `"request_log"` is not a decision, so it is here, where adding a
+/// plugin can write it.
+pub fn layer(name: &str) -> Option<Layer> {
+    // Nothing in this binary offers middleware, so nothing can be
+    // mounted and nothing is ever looked up.
+    let _ = name;
+    None
+}
+
+// brocanth-digest: 7df285b3be677a53
+===== src/pages/status.jt =====
+// The body of `/status`. A template is a function whose body is JSON with
+// holes, and the macro compiles it into straight-line writes: every static
+// run below is one memcpy, and the commas are resolved while this file is
+// compiled rather than counted when a request arrives.
+//
+// Take parameters by reference. A `&str` is borrowed into the template and
+// nothing is copied to render it.
+
+pub fn Status(name: &str, version: &str, parts: &[&str]) -> Json {
+    "name": name,
+    "version": version,
+    "ok": true,
+    "parts": [ for p in parts { p } ],
+}
+===== src/pages/status.rs =====
+//! `/status` -- because the file is called `status.rs`.
+//!
+//! The answer is JSON, and its shape is in `status.jt` beside this file.
+//! Nothing here builds a struct for the response: the template is the
+//! shape, and it is compiled into the binary rather than parsed per
+//! request.
+
+use crate::pages::{payload, render_json, Ctx, Error, IntoResponse};
+
+/// GET. The verb comes off the function name, the same as every other page.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    render_json(payload::status::Status(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        &["pages", "router"],
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_template_is_the_shape_of_the_answer() {
+        // Rendered without a request, because a template takes values and
+        // not a context. Edit `status.jt` and this is what changes.
+        let body = jt::to_string(&payload::status::Status("api", "0.1.0", &["pages"]));
+        assert_eq!(
+            body,
+            r#"{"name":"api","version":"0.1.0","ok":true,"parts":["pages"]}"#
+        );
+    }
+
+    #[test]
+    fn the_answer_says_it_is_json() {
+        let answered = render_json(payload::status::Status("api", "0.1.0", &[])).expect("renders");
+        assert!(answered
+            .headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "application/json"));
+    }
+}
+===== AGENTS.md =====
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Notes of your own go in a file of your own, beside this one. -->
+# Working in My Blog
+
+A brief for a coding agent. Written by `brocanth`, so the lists
+below are this project's and not the framework's in general.
+
+## Check your work
+
+Run these after every change, in this order. They are ordered by how
+fast they fail.
+
+```
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+The route table is `pages::router()` and the test beside it asserts the
+shape of the directory. Read it rather than guessing what covers a
+request.
+
+## What this binary contains
+
+- `core`  the router, the context, the plugin seams
+- `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
+
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `openapi`, `validation`, `realtime`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+
+That is the framework's central rule: a capability nobody asked for is
+not compiled and not linked. If you need one, add it to `Cargo.toml`
+*and* name its plugin in `src/main.rs`. Nothing registers itself.
+
+## Adding a route
+
+A route is a file. `src/pages/about.rs` is `/about`;
+`src/pages/users/[id].rs` is `/users/{id}`. **Write the file. That is
+the whole of it** -- no `mod` line, no row to register, because there is
+no list. `brocanth_pages::pages!` in `src/pages/mod.rs` reads this
+directory while the crate compiles and writes both.
+
+The verb comes off the handler's name: `handle` is GET, then
+`handle_head`, `handle_post`, `handle_put`, `handle_patch`,
+`handle_delete`, `handle_options`. A `pub fn handle_*` outside that
+list is a build error naming the list, rather than a handler nothing
+reaches; a page with no handler is a build error too. A private
+`fn handle_*` is a helper and is left alone.
+
+**Adding a file does not rebuild on its own** -- nothing referenced it
+yet. Run `touch src/pages/mod.rs` after creating a page or a layout.
+Editing or deleting one is noticed.
+
+A handler returns a value and never writes a response itself. That is
+what makes a half-written body on an error impossible rather than
+unlikely.
+
+## House style
+
+- A comment says **why**, next to the decision, and what was chosen
+  against. Not what the line does.
+- A test name is a sentence describing the guarantee it protects.
+- Prefer a type that cannot be built wrong over a check that can be
+  forgotten.
+- State a limit where someone would look for it rather than leaving it
+  to be discovered.
+
+## Framework reference
+
+`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
+cannot compile and can therefore be relied on, what can still go wrong
+and therefore needs a test, and the crate map.
+
+<!-- brocanth-digest: e22ba850e535e9cd -->
+===== brocanth.toml =====
+# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+# Change the module list with `brocanth add`, not here.
+#
+# What this project is made of. Every other generated file follows from it.
+
+[project]
+name = "my-blog"
+title = "My Blog"
+
+[modules]
+enabled = ["jt"]
+
+[modules.jt]
+files = ["src/pages/status.jt", "src/pages/status.rs"]
+config = []
+crates = ["jt"]
+
+# brocanth-digest: 1a2ee0e4bfa7ccb9

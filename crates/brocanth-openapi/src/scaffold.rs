@@ -118,6 +118,12 @@ impl Module for OpenApi {
         // and because a `yaml()` nothing called was a function the
         // compiler warned about on a generated project's first build.
         s.file("src/pages/openapi.yaml.rs", YAML_PAGE_RS);
+        // Two pages, so two routes, and the table's own test lists every
+        // route a project has. Until this slot existed the test was a
+        // literal three entries and `--with openapi` shipped a project
+        // whose `cargo test` failed on the day it was generated.
+        s.at(Slot::PagesRoutes).line("/openapi.json");
+        s.at(Slot::PagesRoutes).line("/openapi.yaml");
         s.at(Slot::PluginsMod).line("pub mod openapi;");
         s.at(Slot::AppPlugins)
             .block(plugin_line(project, "openapi", "OpenApi"));

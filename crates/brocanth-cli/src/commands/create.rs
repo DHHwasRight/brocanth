@@ -1346,10 +1346,28 @@ fn source_of(a: &Answers, dep: &Dep) -> String {
 /// `--brocanth-path` points at `crates/brocanth`, so the repository is two
 /// levels up and its siblings are one more. A directory with no
 /// `Cargo.toml` is not a checkout and does not count.
+///
+/// Two layouts, because the neighbours have both. `rsx` and `zod` are one
+/// package at the root of their repository. `jt` is a workspace whose
+/// package is `crates/jt`, which is how this repository is laid out too.
+/// A path pointing at a virtual manifest is not a dependency cargo can
+/// read -- it says so, and names neither the flag nor the fix -- so the
+/// member is found here instead.
 fn sibling(brocanth_crate: &str, name: &str) -> Option<std::path::PathBuf> {
     let repo = Path::new(brocanth_crate).parent()?.parent()?;
-    let dir = repo.parent()?.join(name);
-    dir.join("Cargo.toml").exists().then_some(dir)
+    let root = repo.parent()?.join(name);
+    [root.join("crates").join(name), root]
+        .into_iter()
+        .find(|dir| is_package(dir))
+}
+
+/// Whether this directory holds a manifest cargo can depend on.
+///
+/// A `[workspace]` with no `[package]` is a virtual manifest: a real file,
+/// and not a crate.
+fn is_package(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .is_ok_and(|text| text.lines().any(|line| line.trim_start().starts_with("[package]")))
 }
 
 /// One of brocanth's own crates, which every project gets whatever it chose.
@@ -2287,11 +2305,21 @@ fn holding(request: &brocanth_server::Request) -> u32 {
 /// `serve` go through it, so one place turns a `Response` into bytes.
 const SENT_FN: &str = r#"/// Turns a page's answer into the bytes the server writes.
 ///
-/// `html` rather than a guess: every page returns markup, and a handler that
-/// wants another type says so with a `content-type` header, which is applied
-/// after and therefore wins.
+/// `html` rather than a guess: most pages return markup, and a handler that
+/// wants another type says so with a `content-type` header.
+///
+/// That header replaces the seeded one rather than joining it. `with_header`
+/// appends, because `set-cookie` has to repeat, so a page answering JSON
+/// used to put two `content-type` lines on the wire and let the client pick.
 fn sent(answered: Response) -> brocanth_server::Response {
     let mut out = brocanth_server::Response::html(answered.status, answered.body);
+    if answered
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        out = out.without_header("content-type");
+    }
     for (name, value) in &answered.headers {
         out = out.with_header(name, value);
     }
@@ -2353,7 +2381,7 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(patterns, ["/", "/about", "/users/{id}"]);
+        assert_eq!(@ROUTES@);
     }
 
     #[test]
@@ -2435,7 +2463,36 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // neither must not be made to depend on them by a macro.
     let describe = if a.has("input") { ", describe" } else { "" };
 
-    out.replace("@DEPTH_FIELD@", field)
+    // Every route this project has, including the ones a module's own page
+    // brought. The list is written down because a route is a file and the
+    // directory is the only other record of it; a module that writes a page
+    // says so here, or the test it is not allowed to edit starts failing.
+    let mut routes: Vec<String> = ["/", "/about", "/users/{id}"]
+        .iter()
+        .map(|r| (*r).to_string())
+        .chain(built.slot(Slot::PagesRoutes).map(|r| r.trim_end().to_string()))
+        .collect();
+    routes.sort();
+    routes.dedup();
+    let quoted: Vec<String> = routes.iter().map(|r| format!("{r:?}")).collect();
+    // One line while it fits, and rustfmt's own broken form when it does
+    // not. `every_generated_rust_file_is_already_formatted` rejects the
+    // long line, and a generated project nobody can `cargo fmt --check` is
+    // a generated project with a chore in it.
+    let one_line = format!("        assert_eq!(patterns, [{}]);", quoted.join(", "));
+    let routes = if one_line.len() <= 100 {
+        format!("patterns, [{}]", quoted.join(", "))
+    } else {
+        let items = quoted
+            .iter()
+            .map(|r| format!("                {r}"))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("\n            patterns,\n            [\n{items}\n            ]\n        ")
+    };
+
+    out.replace("@ROUTES@", &routes)
+        .replace("@DEPTH_FIELD@", field)
         .replace("@DEPTH_INIT@", init)
         .replace("@DEPTH_IMPL@", &format!("{setter}{methods}"))
         .replace("@DESCRIBE@", describe)
@@ -2876,6 +2933,15 @@ mod tests {
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
             ("rsx", vec!["rsx"]),
+            // The second renderer, alone: a project that answers JSON and
+            // has no HTML engine at all. The shape that would catch
+            // anything in `src/pages/mod.rs` that only works because rsx
+            // happened to be there too.
+            ("jt", vec!["jt"]),
+            // And the two together, which is the claim the renderer seam
+            // makes: a page tree holds `index.rsx` beside `status.jt`, and
+            // each engine compiles its own extension out of the same tree.
+            ("jt-rsx", vec!["jt", "rsx"]),
             // `commands` and not because this shape is about a command
             // line: the CSS build is a subcommand, so tailwind cannot be
             // written without one. `rsx-tailwind` declares it.
@@ -3844,7 +3910,7 @@ mod tests {
         let a = Answers {
             name: "scaffold-test".into(),
             title: "Scaffold Test".into(),
-            picks: vec!["logging", "config", "sessions", "rsx"],
+            picks: vec!["logging", "config", "sessions", "rsx", "jt"],
             local: Some(brocanth.display().to_string()),
             git: false,
         };
@@ -3853,8 +3919,11 @@ mod tests {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
+        // `test` and not `build`: a generated project carries its own test
+        // suite, and `--with openapi` wrote one that failed from the day it
+        // landed because nothing here ever ran it.
         let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .arg("build")
+            .arg("test")
             .current_dir(&root)
             .output()
             .expect("run cargo");

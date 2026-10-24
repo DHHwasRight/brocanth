@@ -88,8 +88,10 @@ developer owns it from then on. The generator *is* the publish step.
 
 ## 3. The inventory
 
-Twenty-six crates. Twenty-one offer a module; twelve of those keep it beside
-the crate behind an off-by-default `scaffold` feature, which is the pattern.
+Twenty-six crates and two outside engines. Twenty-two offer a module;
+twelve keep it beside the crate behind an off-by-default `scaffold`
+feature, which is the pattern. `rsx` and `jt` are in the CLI, because
+neither has a crate in this workspace to host one.
 
 | Crate | Kind (§4) | Build-time seams | Run-time seams |
 | --- | --- | --- | --- |
@@ -117,7 +119,7 @@ the crate behind an off-by-default `scaffold` feature, which is the pattern.
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
 | `brocanth-test` | tooling | dev-dependency only | — |
-| **`jt`** | **renderer** | `PagesRenderers`, waiting | — |
+| `jt` | renderer | `PagesRenderers`, `PagesRoutes`, two files | — |
 
 Three rows say "written by hand". `rsx::Rsx::contribute()`, `Tailwind::contribute()`
 and `Htmx::contribute()` are each one comment: *"Still written by `create.rs`.
@@ -303,18 +305,108 @@ golden shapes, except two:
 
 **A `.jt` template is an output schema.** `jt-core` holds the AST: it knows
 the keys, the nesting, which fields are `?:`, and which values are loops.
-Step 4 of the surface work derives a page's `gives` from `Result<Json<T>, _>`
-and a `zod::Node`. A `.jt` page could produce the same `Node` from the
-template itself.
+Step 4 of the surface work derives a page's `gives` from
+`Result<Json<T>, _>` and a `zod::Node`. A `.jt` page could produce the same
+`Node` from the template itself.
 
 That closes the last hand-written line in the document: today a response
 schema needs a `#[derive(Entry)]` struct *and* the code that fills it. With
 `jt`, the template that writes the JSON is the thing that describes it.
 
-This is a second step and not a condition of the first. The seam is worth
-building for the extension alone.
+This is a second step and not a condition of the first. A `.jt` page
+appears in the OpenAPI document today with no response schema.
 
----
+### `jt` attached, and the seam held
+
+The test of §5 was whether a second renderer costs a manifest and a
+dependency. It did. `crates/brocanth-cli/src/modules/jt.rs` is one
+`Manifest`, one `Dep`, one block into `Slot::PagesRenderers` and two files,
+plus one line in `ALL`. **Nothing in `brocanth-pages`, `create.rs` or the
+route table knows it exists.**
+
+```rust
+fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+    s.at(Slot::PagesRenderers).block(PAGES_JT_RS);
+    s.file("src/pages/status.rs", STATUS_RS);
+    s.file("src/pages/status.jt", STATUS_JT);
+    s.at(Slot::PagesRoutes).line("/status");
+}
+```
+
+Two renderers in one project is two `pub mod`s over one tree:
+
+```rust
+pub mod views   { rsx::load_dir!("src/pages"); }   // compiles .rsx
+pub mod payload { jt::load_dir!("src/pages"); }    // compiles .jt
+```
+
+and a real request:
+
+```
+$ curl -i localhost:3000/status
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"name":"api","version":"0.1.0","ok":true,"parts":["pages","router"]}
+```
+
+Three things the attachment cost that the sketch did not predict.
+
+**`jt` named modules by a different rule.** It replaced `-` and `.` and
+nothing else, so `[id].jt` would have panicked in `format_ident!`. A page
+tree holds `users/[id].rs`, and a route and its template have to land on
+the same module path. `jt` now uses rsx's rule, which `brocanth-pages`
+already reimplements. Three implementations agree on purpose.
+
+**`sibling()` could not find a workspace.** `--brocanth-path` resolves a git
+dependency to a checkout beside the repository. `rsx` and `zod` are one
+package at their root; `jt` is a workspace whose package is `crates/jt`,
+which is how this repository is laid out too. Cargo's error for a path
+pointing at a virtual manifest names neither the flag nor the fix.
+
+**`Slot::PagesRoutes` had to exist.** A route is a file, so a module that
+writes a page adds a route, and `src/pages/mod.rs` carries a test asserting
+the whole table. §6b.
+
+## 6b. The bug `jt` found
+
+`brocanth create --with openapi` has been writing projects whose own test
+suite fails, since the day that module landed.
+
+```
+---- pages::tests::the_table_is_the_shape_of_the_directory ----
+  left: ["/", "/about", "/openapi.json", "/openapi.yaml", "/users/{id}"]
+ right: ["/", "/about", "/users/{id}"]
+```
+
+The generated test lists every route the project has, because a route is a
+file and the list is the only other record of it. The list was a literal.
+`openapi` writes two pages, so from its first day a project that chose it
+did not pass `cargo test`.
+
+Nothing caught it because **`the_scaffold_compiles` ran `cargo build`**. A
+generated project carries a test suite and the generator never ran it.
+
+Both are fixed: `Slot::PagesRoutes` carries a module's routes into the
+list, and the compile test runs `cargo test`.
+
+A second one, found by reading the response `jt` produces:
+
+```
+HTTP/1.1 200 OK
+content-type: text/html; charset=utf-8
+content-type: application/json
+```
+
+`sent()` seeds `text/html` and its comment says a page's own header "is
+applied after and therefore wins". `with_header` appends, because
+`set-cookie` has to repeat, so both went on the wire and the client picked.
+`brocanth-input`'s `Json<T>` had the same bug and its test passed, because
+the header was present — twice. `Response::without_header` now exists and
+`sent` drops the seeded type when the page set one.
+
+Both bugs are the same shape: **a claim in a comment that no test read
+back.**
 
 ## 6. The context seam, which is broken
 
@@ -361,6 +453,7 @@ cannot hand anything forward.
 | `MiseTasks` | read — `rsx-tailwind` was its first customer |
 | `NodeDependencies` | **declared, never read** — `rsx-tailwind` wants it |
 | `PagesRenderers` | read — the renderer seam, §5 |
+| `PagesRoutes` | read — a module's page joins the table's own test, §6b |
 | `AppMounts` | **missing** — §4.6, for `mount_routes` |
 
 A module that writes into an unread slot is recorded and discarded in
@@ -397,8 +490,11 @@ silence. That has already happened once, with a `.gitignore` line.
    which are interpolated at a position rather than appended. Each needs a
    slot that does not exist. None of them blocks a second renderer: `jt`
    adds no field to `Ctx`, serves no static file and mounts nothing.
-2. **Add `jt` as the second renderer.** This is the test of step 1. If it
-   takes more than a manifest and a `Cargo.toml` line, step 1 is not done.
+2. ~~**Add `jt` as the second renderer.**~~ **Done.** A manifest, a
+   dependency, one block and two files. It cost three things the sketch did
+   not predict, all of them written up in §5: `jt` named modules by its own
+   rule, `sibling()` could not resolve a workspace checkout, and
+   `Slot::PagesRoutes` had to exist. It also found two live bugs (§6b).
 3. **Give `Ctx` the plugin context and an extractor.** Unblocks the edge
    kind, and with it the request logger the user named.
 4. **Add `Slot::AppMounts` and emit a mount.** Unblocks `brocanth-resource`

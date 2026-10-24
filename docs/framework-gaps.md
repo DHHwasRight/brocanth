@@ -469,7 +469,8 @@ because the argument is still why each one matters.
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
-| G13 | **a template engine is a special case, not a module** | **half**: `Slot::PagesRenderers` exists, `rsx` writes through it, and `brocanth-pages` no longer names an engine. A second renderer can attach; sixteen `rsx` branches remain in `create.rs` for seams that do not exist yet. See `docs/modules.md` |
+| G13 | **a template engine is a special case, not a module** | **done**: `Slot::PagesRenderers`, and `jt` attached through it with a manifest, a dependency and one block. A project can hold two engines over one page tree. Sixteen `rsx` branches remain in `create.rs` for seams that do not exist yet. See `docs/modules.md` |
+| G14 | **a generated project's own tests were never run** | **done**: `the_scaffold_compiles` ran `cargo build`, so `--with openapi` shipped a failing `cargo test` from its first day. Now `cargo test`, and `Slot::PagesRoutes` carries a module's pages into the table's test. See `docs/modules.md` §6b |
 
 **G11 was worse than the audit said.** `docs/middleware.md` §4 called form
 decoding "the real gap" and described a POST handler reading `Vec<u8>` and

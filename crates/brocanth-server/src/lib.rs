@@ -283,6 +283,19 @@ impl Response {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
+
+    /// Drops every header with this name, ignoring case.
+    ///
+    /// The counterpart of [`with_header`](Self::with_header), which appends
+    /// because `set-cookie` has to repeat. A single-valued header does not:
+    /// two `content-type` lines are not an override, they are two claims
+    /// and the client picks. A caller replacing one drops it first.
+    #[must_use]
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self
+    }
 }
 
 /// Stops a running server.
@@ -675,6 +688,35 @@ mod tests {
         assert_eq!(
             Response::html(200, "<p>").headers[0].1,
             "text/html; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn a_replaced_header_is_not_a_second_one() {
+        // `Response::html` seeds a content type and a page may answer
+        // JSON. Appending left both on the wire, and which one applied was
+        // the client's choice.
+        let out = Response::html(200, "{}")
+            .without_header("Content-Type")
+            .with_header("content-type", "application/json");
+        let types: Vec<&str> = out
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(types, ["application/json"]);
+
+        // And a header that is meant to repeat still does.
+        let out = Response::html(200, "")
+            .with_header("set-cookie", "a=1")
+            .with_header("set-cookie", "b=2");
+        assert_eq!(
+            out.headers
+                .iter()
+                .filter(|(name, _)| name == "set-cookie")
+                .count(),
+            2
         );
     }
 

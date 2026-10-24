@@ -486,6 +486,16 @@ pub enum Slot {
     /// `report.jt`, the route table ignores both because neither is a
     /// `.rs` file, and each engine compiles its own tree.
     PagesRenderers,
+    /// One route pattern per page a module writes, as the route table
+    /// spells it: `/status`, `/users/{id}`.
+    ///
+    /// `src/pages/mod.rs` carries a test asserting the whole table, which
+    /// is the point of a route being a file: the list is written down once
+    /// and the directory has to match it. A module that writes a page adds
+    /// a route, so without this the generated test failed the moment the
+    /// module was chosen -- which it did, for `openapi`, in every project
+    /// that picked it.
+    PagesRoutes,
     /// `src/pages/mod.rs`, items the pages share.
     PagesItems,
     /// `src/commands/mod.rs`, one `pub mod` line per subcommand a module
@@ -520,6 +530,7 @@ impl fmt::Display for Slot {
             Slot::PluginsMod => "src/plugins/mod.rs",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
+            Slot::PagesRoutes => "src/pages/mod.rs (the route table test)",
             Slot::PagesItems => "src/pages/mod.rs",
             Slot::CommandsMod => "src/commands/mod.rs",
             Slot::ConfigSections => "config/<env>.toml",

@@ -49,6 +49,7 @@ use brocanth_scaffold::Module;
 
 pub mod commands;
 pub mod config;
+pub mod jt;
 pub mod logging;
 pub mod model;
 pub mod rsx;
@@ -107,6 +108,10 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_realtime::scaffold::WebSocket,
     &commands::Commands,
     &rsx::Rsx,
+    // The second renderer, and the reason there is a seam for one. It
+    // attaches with a manifest, a dependency and one block: nothing in
+    // `brocanth-pages`, `create.rs` or the route table knows it exists.
+    &jt::Jt,
     &rsx::Tailwind,
     &rsx::Htmx,
 ];
