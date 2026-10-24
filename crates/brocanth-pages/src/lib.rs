@@ -49,7 +49,8 @@
 //!
 //! - pages live under `src/pages`;
 //! - `src/pages/mod.rs` has `pub mod views { rsx::load_dir!("src/pages"); }`;
-//! - a layout is a file called `layout.rsx`;
+//! - a layout is a file called `layout.<ext>`, where the extension is
+//!   the template engine's -- `layout.rsx` for rsx;
 //! - a layout component takes `children: Element`, and optionally
 //!   `layout: &str`, which `html!` fills with the URL prefix that layout
 //!   covers -- `/` at the root, `/users` one directory down;
@@ -151,7 +152,10 @@ pub fn html(input: TokenStream) -> TokenStream {
         );
     };
 
-    let layouts = layouts_above(&within_package(&file));
+    let layouts = match layouts_above(&within_package(&file)) {
+        Ok(layouts) => layouts,
+        Err(why) => return error(&why),
+    };
     expand(&layouts, &ctx, &content).into()
 }
 
@@ -204,12 +208,53 @@ fn split_once_comma(input: TokenStream2) -> Option<(TokenStream2, TokenStream2)>
     Some((first, rest))
 }
 
+/// The layout file in this directory, whatever engine wrote it.
+///
+/// `layout.rsx` was a literal here until there was a second template
+/// engine. The extension is the engine's and not this macro's: what makes
+/// a file a layout is its name and where it sits, which is the same rule
+/// that makes a `.rs` file a route.
+///
+/// `.rs` is excluded because `layout.rs` would be a page at `/layout`, and
+/// a file cannot be both. Two layouts in one directory is an error rather
+/// than a silent pick, because which one wrapped the page would depend on
+/// the order the filesystem listed them.
+fn layout_in(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(None);
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.is_file()
+                && path.file_stem().is_some_and(|stem| stem == "layout")
+                && path.extension().is_some_and(|ext| ext != "rs")
+        })
+        .collect();
+    found.sort();
+    if found.len() > 1 {
+        let names: Vec<String> = found
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        return Err(format!(
+            "`{}` holds two layouts, {}: a directory has one, because which \
+             of them wrapped a page would depend on the order the filesystem \
+             listed them. Delete one, or move the pages it wraps into a \
+             directory of their own",
+            dir.display(),
+            names.join(" and "),
+        ));
+    }
+    Ok(found.pop())
+}
+
 /// The layouts covering `file`, outermost first.
 ///
 /// Walking up rather than down: a page is covered by what is above it, and
 /// the directories above a file are a fact about its path rather than
 /// something to search for.
-fn layouts_above(file: &Path) -> Vec<Layout> {
+fn layouts_above(file: &Path) -> Result<Vec<Layout>, String> {
     let root = manifest_dir();
     let mut found = Vec::new();
 
@@ -220,8 +265,7 @@ fn layouts_above(file: &Path) -> Vec<Layout> {
         if current.file_name().is_some_and(|name| name == "src") || current.as_os_str().is_empty() {
             break;
         }
-        let candidate = root.join(current).join("layout.rsx");
-        if candidate.is_file() {
+        if let Some(candidate) = layout_in(&root.join(current))? {
             found.push(Layout {
                 module: module_path_from(current),
                 prefix: prefix_of(current),
@@ -239,7 +283,7 @@ fn layouts_above(file: &Path) -> Vec<Layout> {
 
     // Collected leaf to root, applied root to leaf.
     found.reverse();
-    found
+    Ok(found)
 }
 
 struct Layout {
@@ -417,7 +461,7 @@ fn expand(layouts: &[Layout], ctx: &TokenStream2, content: &TokenStream2) -> Tok
                     fields = quote!(#fields path: &(#ctx).path,);
                 }
                 Some(quote! {
-                    rsx::Template::render_to_string(
+                    crate::pages::render_oob(
                         crate:: #(#path ::)* layout::Oob { #fields }
                     )?
                 })
@@ -599,7 +643,35 @@ mod tests {
             "only the deepest kept layer corrects itself: {out}"
         );
         assert!(out.contains("layout :: Oob"), "{out}");
-        assert!(out.contains("render_to_string"), "{out}");
+        // Through the project's own function, like the other two renders.
+        // This used to name `rsx::Template` and was the one place the
+        // macro knew which engine made the page.
+        assert!(out.contains("render_oob"), "{out}");
+        assert!(!out.contains("rsx ::"), "{out}");
+    }
+
+    #[test]
+    fn two_layouts_in_one_directory_is_an_error_that_names_both() {
+        let dir = std::env::temp_dir().join("brocanth-pages-two-layouts");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        std::fs::write(dir.join("layout.rsx"), "pub fn Layout() {}").expect("write");
+        std::fs::write(dir.join("layout.jt"), "pub fn Layout() {}").expect("write");
+
+        let why = layout_in(&dir).expect_err("two layouts is not a choice");
+        assert!(why.contains("layout.jt"), "{why}");
+        assert!(why.contains("layout.rsx"), "{why}");
+
+        // One of them, and the engine is not this macro's business.
+        std::fs::remove_file(dir.join("layout.rsx")).expect("remove");
+        let found = layout_in(&dir).expect("one layout").expect("found");
+        assert_eq!(found.extension().expect("an extension"), "jt");
+
+        // `layout.rs` would be a page at `/layout`, so it is not one.
+        std::fs::remove_file(dir.join("layout.jt")).expect("remove");
+        std::fs::write(dir.join("layout.rs"), "pub fn handle() {}").expect("write");
+        assert!(layout_in(&dir).expect("no layout").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

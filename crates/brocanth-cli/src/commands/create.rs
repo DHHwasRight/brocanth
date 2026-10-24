@@ -763,19 +763,13 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         ("Cargo.toml".to_string(), cargo_toml(a, &built)),
         (".gitignore".to_string(), {
             let mut out = String::from("/target\n");
-            if a.has("rsx-tailwind") {
-                // `assets/css/site.css` is **not** ignored. It is
-                // embedded at compile time, so a checkout without it
-                // does not build, and "run npm first" is a worse
-                // answer than 3 kB in git.
-                out.push_str("/node_modules\n");
-            }
             // And whatever a module keeps under the working tree. The
             // slot was declared and never read until a module wrote a
             // line into it and the line went nowhere.
             for line in built.slot(Slot::GitIgnore) {
+                // `Writer::line` already ended it. This used to add a
+                // second newline and leave a blank after every entry.
                 out.push_str(line);
-                out.push('\n');
             }
             out
         }),
@@ -794,7 +788,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
             "mise.toml".to_string(),
             // Raw, because the `\n\` form this file used here kept the source's
             // own indentation and wrote it into the TOML.
-            mise_toml(a),
+            mise_toml(&built),
         ),
         (
             "src/main.rs".to_string(),
@@ -812,42 +806,6 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         ("src/pages/about.rs".to_string(), about_rs(a)),
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
-    if a.has("rsx") {
-        // Beside the page each one renders, and named after it. The Crystal
-        // page_router does the same with `layout.cr`, and the reason carries
-        // over: a route is a file, so the markup for a route is the file
-        // next to it rather than a mirror tree to keep in step.
-        files.push(("src/pages/layout.rsx".to_string(), layout_rsx(a)));
-        files.push(("src/pages/index.rsx".to_string(), index_rsx(a)));
-        files.push(("src/pages/about.rsx".to_string(), ABOUT_RSX.to_string()));
-        files.push((
-            "src/pages/users/layout.rsx".to_string(),
-            users_layout_rsx(a),
-        ));
-        files.push(("src/pages/users/[id].rsx".to_string(), USER_RSX.to_string()));
-    }
-    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        files.push(("src/assets.rs".to_string(), ASSETS_RS.to_string()));
-    }
-    if a.has("rsx-tailwind") {
-        files.push((
-            "assets/css/_tailwind.css".to_string(),
-            TAILWIND_CSS.to_string(),
-        ));
-        // So the first `cargo build` works before anyone has run node.
-        files.push((
-            "assets/css/site.css".to_string(),
-            SITE_CSS_PLACEHOLDER.to_string(),
-        ));
-        files.push(("package.json".to_string(), package_json(a)));
-    }
-    if a.has("rsx-htmx") {
-        // Vendored into the brocanth binary, written out here. A project
-        // that has to fetch a script to finish is a project that fails on a
-        // train.
-        files.push(("public/dpswap.min.js".to_string(), DPSWAP_JS.to_string()));
-        files.push(("src/pages/link.rsx".to_string(), LINK_RSX.to_string()));
-    }
     // For every project, including one with no plugins. `src/app.rs` asks
     // this file the same three questions whatever the module list is, which
     // is what lets `brocanth add` leave `src/app.rs` alone.
@@ -865,15 +823,9 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // project, and the built binary itself.
         files.push((
             "src/commands/mod.rs".to_string(),
-            commands_mod_rs(a, &built),
+            commands_mod_rs(&built),
         ));
         files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
-        if a.has("rsx-tailwind") {
-            // The CSS build. A command and not `scripts/build-css.sh`,
-            // because this project has a command line and a second way to
-            // run things is a second thing to keep in step.
-            files.push(("src/commands/css.rs".to_string(), CSS_RS.to_string()));
-        }
     }
     // The modules' own files, after the ones every project has. A clash
     // with a path above is caught here rather than by whichever happened to
@@ -1301,7 +1253,7 @@ header and never changes for it.
 // produces code you would not write by hand, the framework below it is wrong"
 // -- and nobody writes an unindented struct body.
 /// `src/commands/mod.rs`: the `mod` lines, and nothing else.
-fn commands_mod_rs(a: &Answers, built: &Built) -> String {
+fn commands_mod_rs(built: &Built) -> String {
     let mut out = String::from(
         r#"//! Every command in this project.
 //!
@@ -1321,12 +1273,11 @@ fn commands_mod_rs(a: &Answers, built: &Built) -> String {
     // is sorted in with the two this file writes rather than appended.
     let mut lines: Vec<String> = built
         .slot(Slot::CommandsMod)
-        .map(str::to_string)
+        // A slot line arrives with its newline; the sort and the writer
+        // below both want it without one.
+        .map(|line| line.trim_end().to_string())
         .chain(std::iter::once("pub mod serve;".to_string()))
         .collect();
-    if a.has("rsx-tailwind") {
-        lines.push("pub mod css;".to_string());
-    }
     lines.sort();
     lines.dedup();
     for line in lines {
@@ -1925,22 +1876,14 @@ impl Command for Serve {
 }
 "#;
 
-fn mise_toml(a: &Answers) -> String {
+fn mise_toml(built: &Built) -> String {
     let mut out = String::from(MISE_TOML);
-    if a.has("rsx-tailwind") {
-        out.push_str(
-            // The same build `brocanth css` runs, spelled for a tool that
-            // does not know this project has a command line. `cargo run`
-            // and not `brocanth`, so a checkout works before anything is
-            // installed globally.
-            "\n[tasks.css]\n\
-             description = \"build assets/css/site.css from _tailwind.css\"\n\
-             run = \"cargo run -- css\"\n\
-             \n\
-             [tasks.\"css:watch\"]\n\
-             description = \"the same, again on each change\"\n\
-             run = \"cargo run -- css --watch\"\n",
-        );
+    // The tasks the modules asked for. The slot was declared with the rest
+    // and never read, so `rsx-tailwind` wrote its two here by hand and a
+    // module from anywhere else had nowhere to write one at all.
+    for task in built.slot(Slot::MiseTasks) {
+        out.push('\n');
+        out.push_str(task);
     }
     out
 }
@@ -2313,12 +2256,6 @@ where
 
 "##;
 
-/// dp-swap, the client half of partial navigation.
-///
-/// Embedded rather than fetched: `brocanth create` has to finish on a
-/// machine with no network, and a scaffold that sometimes leaves a file out
-/// is worse than a binary a few kilobytes larger. See `vendor/README.md`.
-const DPSWAP_JS: &str = include_str!("../../vendor/dpswap.min.js");
 
 /// How many layout layers the client says it holds, from `DP-Partial`.
 ///
@@ -2402,142 +2339,6 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 
 "##;
 
-/// `src/assets.rs`: two directories, embedded.
-const ASSETS_RS: &str = r#"//! Every static file this binary serves.
-//!
-//! Two directories, two rules. `assets/` is **fingerprinted** -- `site.css`
-//! is published at `/css/site.<hash>.css`, so it can be cached forever and a
-//! new build invalidates it by having a different name. `public/` is served
-//! **verbatim**, because `robots.txt`, `favicon.ico` and anything linked to
-//! from outside must keep the name they were given.
-//!
-//! Write a reference with `assets::url`, never by hand:
-//!
-//! ```ignore
-//! <link rel="stylesheet" href={assets::url("css/site.css")}>
-//! ```
-//!
-//! A name nothing publishes panics there rather than 404ing in a browser.
-//!
-//! Embedded, like the templates and the route table, so `serve` works from
-//! any directory and nothing can go missing after the build passed. A file
-//! added where there was none needs `touch src/assets.rs`, because nothing
-//! referenced it yet.
-
-brocanth_assets::assets!("assets", "public");
-"#;
-
-/// The templates and the bridge to them, written only when the project asked
-/// for them.
-const PAGES_RSX_RS: &str = r##"/// Every template in this application.
-///
-/// The `.rsx` files sit next to the pages they render -- `index.rsx` beside
-/// `index.rs` -- and `load_dir!` compiles the tree while this crate is being
-/// compiled. Nothing is read from disk when a request arrives, and a template
-/// that does not parse is a compile error on its own line.
-///
-/// A module of their own, because `load_dir!` emits a `pub mod index` for
-/// `index.rsx` and `pages!` emits one for `index.rs`: unnested they collide.
-/// The path is relative to the package root and not to this file, because a
-/// proc macro cannot learn where it was written on stable Rust.
-///
-/// A file whose name is not an identifier gets the nearest one: `[id].rsx` is
-/// `views::users::_id_`.
-pub mod views {
-    rsx::load_dir!("src/pages");
-}
-
-/// Renders a page inside the layouts that cover it.
-///
-/// `layout.rsx` wraps every page in its directory and in every directory
-/// below it, and they stack from the root down. A page never names one,
-/// because which layout covers a page is a property of where the page is --
-/// the rule Crystal's page_router uses for `layout.cr`.
-///
-/// The macro reads that off the directory tree at compile time: it knows
-/// which file it was written in, walks up to `src/`, and wraps the page in
-/// every `layout.rsx` it passes. Add one to a directory and every page under
-/// it is wrapped, with nothing to register and no chain to keep in step.
-///
-/// Re-exported here so a page imports it from the same place as everything
-/// else it uses, and so the layout rule lives beside the route table rather
-/// than in a crate name.
-pub use brocanth_pages::html;
-
-/// The URL prefix a layout covers, for a layout under a parameter.
-///
-/// `html!` passes a layout the prefix it wraps, which is the marker dp-swap
-/// reads to work out how much of a page two URLs share. A directory named
-/// after a parameter has no prefix of its own until a request arrives, so
-/// the macro hands this function the template and the request fills it:
-/// `/{section}` under `/alpha/card-2` is `/alpha`.
-///
-/// Called only from the expansion, and only for a layout that sits under a
-/// parameter. A marker reading `/[section]` would be the same string on
-/// every section, and the client would conclude that two pages share a
-/// layer they do not.
-pub fn prefix(ctx: &Ctx, template: &str) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let Some(close) = rest[open..].find('}') else {
-            break;
-        };
-        // A parameter the router did not match cannot happen: this template
-        // is built from the directory the route was read out of, so the
-        // name is one the pattern declares.
-        out.push_str(ctx.param(&rest[open + 1..open + close]).unwrap_or_default());
-        rest = &rest[open + close + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// A partial, and the replacements for the chrome it left behind.
-///
-/// A layout the client keeps is a layout this answer does not contain, which
-/// is the point of asking for a partial and the reason its chrome goes
-/// stale: the sidebar still marks the section you came from. A layout that
-/// has something to correct defines `Oob` beside its `Layout`, and `html!`
-/// renders one per skipped layer and passes them here.
-///
-/// They lead, because the static version of this writes them that way. The
-/// client reads the whole body before it swaps anything, so the order is a
-/// convention rather than a requirement, and one convention is better than
-/// two.
-pub fn render_with(
-    out_of_band: Vec<String>,
-    content: impl rsx::Template,
-) -> Result<Response, Error> {
-    let mut body = out_of_band.concat();
-    body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
-}
-
-/// A page with no layout at all: a fragment, a partial, an htmx swap.
-///
-/// What `html!` expands into, once it has wrapped the page, so this is also
-/// the escape hatch -- name a layout by hand and pass it here.
-///
-/// It returns the handler's own `Result` rather than a value, so a template
-/// that bails propagates with `?` instead of turning into a blank 200. For
-/// another status or a header, compose with the forms above:
-/// `Ok((html!(ctx, tpl)?, 404))`, or `Ok(html!(ctx, tpl)?.with_header("x-kind", "page"))`.
-///
-/// Deliberately a function and not `impl<T: rsx::Template> IntoResponse for T`.
-/// `()`, `Option<T>` and `Vec<T>` are templates, so a blanket impl overlaps
-/// the ones above and does not compile -- and an `into_response` that cannot
-/// fail would have to swallow a render error. A blanket impl could not apply
-/// a layout either, since it would not know which page it was rendering.
-pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
-    // `render_to_string` builds into its own String, so a page that fails
-    // half way through its layout leaves nothing behind. There is no partial
-    // body to take back, which is the property the rest of this file is
-    // built on.
-    Ok(Response::ok(content.render_to_string()?))
-}
-"##;
 
 const PAGES_MOD_RS_TESTS: &str = r##"#[cfg(test)]
 mod tests {
@@ -2604,16 +2405,12 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
         ""
     };
     let mut out = String::from(PAGES_MOD_RS_HEAD);
-    if a.has("rsx") {
-        // The root layout writes the name, so there is one place it is
-        // spelled rather than one per page.
-        out.push_str(&format!(
-            "/// The application's name, as the root layout writes it.\n\
-             pub const TITLE: &str = {:?};\n\n",
-            a.title
-        ));
-        out.push_str(PAGES_RSX_RS);
-        out.push('\n');
+    // The renderers: one `pub mod` per template engine, each wrapping its
+    // own `load_dir!`. Read from a slot rather than written here, because
+    // which engine makes a page is the engine's own statement -- `rsx` was
+    // a literal in this function until there was a second one.
+    for block in built.slot(Slot::PagesRenderers) {
+        out.push_str(block);
     }
     // What the chosen modules add to the pages: another `impl Ctx`, a
     // helper every handler shares. Before the tests, because an item after
@@ -2829,366 +2626,6 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 ///
 /// A layout is not a special kind of thing here. It is a component with a
 /// parameter of type `Element`, which is what the page below it fills.
-fn layout_rsx(a: &Answers) -> String {
-    let mut head = String::new();
-    if a.has("rsx-tailwind") {
-        // `assets::url`, never the path by hand: the published name carries
-        // a content hash, so writing it would be writing a name that changes
-        // every time the stylesheet does.
-        head.push_str(
-            "            <link rel=\"stylesheet\" href={crate::assets::url(\"css/site.css\")}>\n",
-        );
-    }
-    if a.has("rsx-htmx") {
-        head.push_str(
-            "            <script src={crate::assets::url(\"dpswap.min.js\")} defer></script>\n",
-        );
-    }
-    let body_class = if a.has("rsx-tailwind") {
-        " class=\"min-h-screen bg-white text-slate-900\""
-    } else {
-        ""
-    };
-    let main_open = if a.has("rsx-htmx") {
-        // The marker dp-swap walks. It wraps exactly this layout's children
-        // and nothing else, which is what lets the client find the deepest
-        // layer both documents share.
-        "<main dp-layout={layout} id=\"outlet\">"
-    } else {
-        "<main>"
-    };
-    LAYOUT_RSX
-        .replace("@HEAD@\n", &head)
-        .replace("@BODY_CLASS@", body_class)
-        .replace("@MAIN@", main_open)
-        .replace(
-            "@PARAMS@",
-            if a.has("rsx-htmx") {
-                "layout: &str, "
-            } else {
-                ""
-            },
-        )
-}
-
-const LAYOUT_RSX: &str = r#"// The document every page in this directory, and every directory below it,
-// is rendered inside. A page never names it: which layout wraps a page is a
-// property of where the page is, which is the rule the Crystal page_router
-// uses for layout.cr.
-//
-// A layout is an ordinary component with a parameter of type `Element`, and
-// `children` is the only parameter `html!` fills -- it cannot know what a
-// second one would mean. A value every page shares comes from a const, as
-// the title does here; a value belonging to one request belongs on the page
-// component, which the handler builds and which already has the context.
-
-use crate::pages::TITLE;
-
-pub fn Layout(@PARAMS@children: Element) -> Element {
-    <!DOCTYPE html>
-    <html lang="en">
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>{TITLE}</title>
-@HEAD@
-        </head>
-        <body@BODY_CLASS@>
-            <header><a href="/">{TITLE}</a></header>
-            @MAIN@{children}</main>
-        </body>
-    </html>
-}
-"#;
-
-/// `<Link>`: an anchor that swaps instead of reloading.
-///
-/// An ordinary `<a href>` first, enhanced second. With JavaScript off, with
-/// a crawler, or on the first load of any page, it is a link and the browser
-/// does what it always did. dp-swap turns it into a partial navigation only
-/// where it can.
-///
-/// `to` takes what the route helpers return, so a link to a route that does
-/// not exist does not compile -- `routes::users::id::path(7)`, never a
-/// string. That is Crystal page_router's `UserPage.path(123)`.
-const LINK_RSX: &str = r#"// An anchor that swaps instead of reloading the document.
-//
-// Written as a real <a href> and enhanced afterwards. With JavaScript off,
-// to a crawler, and on the first load of any page it is a link and the
-// browser does what it always did -- which is why `to` is required and why
-// there is no version of this that renders a <span> with a click handler.
-//
-// `to` takes what the route helpers return:
-//
-//     <Link to={routes::users::id::path(7)}>User 7</Link>
-//
-// never a string. A route that does not exist is then a compile error
-// rather than a 404 somebody finds later.
-
-pub fn Link(to: &str, children: Element) -> Element {
-    <a href={to} dp-boost>{children}</a>
-}
-"#;
-
-/// The layout one directory down, to show that they stack.
-fn users_layout_rsx(a: &Answers) -> String {
-    if a.has("rsx-htmx") {
-        return USERS_LAYOUT_RSX
-            .replace("@PARAMS@", "layout: &str, ")
-            .replace("@MARK@", " dp-layout={layout}");
-    }
-    USERS_LAYOUT_RSX
-        .replace("@PARAMS@", "")
-        .replace("@MARK@", "")
-}
-
-const USERS_LAYOUT_RSX: &str = r#"// Wraps every page under src/pages/users/, inside the root layout rather
-// than instead of it. Nothing declares the stacking: `html!` reads it off
-// the directory tree.
-//
-// `layout` is the URL prefix this layout covers, filled in by `html!`, and
-// `dp-layout` is the marker dp-swap walks to find the deepest layer two
-// pages share. It goes on the element wrapping exactly the children and
-// nothing else: anything inside it is replaced along with them, so a
-// sidebar in here would lose its scroll position on every navigation.
-
-pub fn Layout(@PARAMS@children: Element) -> Element {
-    <section class="users">
-        <nav><a href="/">home</a></nav>
-        <div@MARK@>{children}</div>
-    </section>
-}
-"#;
-
-fn index_rsx(a: &Answers) -> String {
-    if a.has("rsx-htmx") {
-        return INDEX_RSX
-            .replace("@USE@", "use crate::pages::views::link::Link;\n\n")
-            .replace(
-                "<a href=\"/about\">/about</a>",
-                "<Link to=\"/about\">/about</Link>",
-            )
-            .replace(
-                "<a href=\"/users/7\">/users/7</a>",
-                "<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>",
-            );
-    }
-    INDEX_RSX.replace("@USE@", "")
-}
-
-const INDEX_RSX: &str = r#"@USE@// The page, and only the page. The document around it is layout.rsx, and
-// this file does not know it exists.
-
-pub fn Index(title: &str) -> Element {
-    <h1>{title}</h1>
-    <p>
-        This file is <code>src/pages/index.rsx</code>, beside the handler
-        in <code>index.rs</code>, and it is compiled into the binary. Edit it
-        and cargo rebuilds; break it and the build stops on the line you broke.
-    </p>
-    <p>
-        An interpolated value is escaped on the way out, always. Writing
-        markup verbatim needs a different and greppable hole, so an injection
-        is something you can search for rather than something you have to
-        remember.
-    </p>
-    <ul>
-        <li><a href="/about">/about</a></li>
-        <li><a href="/users/7">/users/7</a></li>
-    </ul>
-}
-"#;
-
-const ABOUT_RSX: &str = r#"// The parameters are this page's contract with its handler. Rename one and
-// src/pages/about.rs stops compiling, which is the point.
-
-pub fn About(title: &str, verb: &str, path: &str) -> Element {
-    <h1>About</h1>
-    <p>
-        You asked for <code>{verb} {path}</code>. This page answers GET
-        and nothing else, so a DELETE to it is a 405 carrying
-        an <code>Allow</code> header rather than a 404.
-    </p>
-    <p>The shell around this is <code>src/pages/layout.rsx</code>, which {title} shares with every page.</p>
-}
-"#;
-
-const USER_RSX: &str = r#"// Two layouts wrap this one: the root, and users/layout.rsx beside it.
-// Neither is named here or anywhere else -- `html!` reads the directory
-// tree. Delete users/layout.rsx and this page is wrapped in one.
-
-pub fn User(id: u64) -> Element {
-    <h1>User {id}</h1>
-    <p>
-        The <code>id</code> came out of the path. A component takes typed
-        parameters, so this one is a <code>u64</code> the whole way
-        from <code>src/pages/users/[id].rs</code>, never a string that
-        might not be a number.
-    </p>
-}
-"#;
-
-// -- tailwind ----------------------------------------------------------------
-
-/// The input of the CSS build. Never published: the leading underscore is
-/// the mark `assets!` reads for a file that is bundled into another.
-const TAILWIND_CSS: &str = r#"/* The input of the CSS build. Never published.
- *
- * The leading underscore marks an input: a file that is bundled into another
- * and that `assets!` must not publish on its own. The build reads this file
- * and writes assets/css/site.css, which is the one that ships:
- *
- *     brocanth css          # once, minified
- *     brocanth css -W       # again on each change
- */
-
-@import "tailwindcss";
-
-/* Where the class names are.
- *
- * Tailwind resolves each path against this stylesheet and keeps its automatic
- * detection on as well. These are explicit for two reasons: `.rsx` is not an
- * extension Tailwind knows, and an explicit glob states the contract.
- */
-
-/* The templates. A .rsx file is Rust with an HTML-shaped body. */
-@source "../../src/pages/**/*.rsx";
-
-/* Plain Rust holds class names too -- a helper that builds a class string,
- * or a handler choosing one. */
-@source "../../src/**/*.rs";
-"#;
-
-/// Written so the first `cargo build` works before anyone has run node.
-///
-/// Without it `assets::url("css/site.css")` names a file nothing publishes,
-/// and a brand-new project would fail on its first request with a message
-/// about an asset rather than about node. depoth's build script writes
-/// placeholders for the same reason.
-const SITE_CSS_PLACEHOLDER: &str = "/* Written by `brocanth create` so the \
-                                    first build works.\n   `brocanth css` \
-                                    replaces it with the real one. */\n";
-
-/// `src/commands/css.rs`: the CSS build, as a subcommand of this project.
-///
-/// A shell script was the obvious thing and the wrong one. The project
-/// already has a command line whose subcommands register themselves at link
-/// time, so the build belongs there: it gets `--help` for free, it is found
-/// by `brocanth --help` beside `serve`, and it is Rust that a reader can
-/// change without leaving the language the rest of the project is in.
-const CSS_RS: &str = r##"//! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
-//!
-//!     brocanth css          once, minified
-//!     brocanth css -W       again on each change
-//!
-//! Ordinary project code, like `serve`: rename it, give it more flags, or
-//! delete it. It is here rather than in a shell script because this project
-//! already has a command line, and a second way to run things is a second
-//! thing to keep in step.
-//!
-//! The Tailwind CLI comes out of `node_modules` and there is no fallback to
-//! `npx`. A fallback downloads some other version and hides the one fact
-//! worth knowing, which is that nobody ran `npm install`.
-
-use std::path::Path;
-use std::process::Command as Child;
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Build the stylesheet from the Tailwind input.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Css {
-    /// Rebuild on each change instead of once.
-    #[arg(short = 'W', long)]
-    pub watch: bool,
-}
-
-const INPUT: &str = "assets/css/_tailwind.css";
-const OUTPUT: &str = "assets/css/site.css";
-const CLI: &str = "node_modules/.bin/tailwindcss";
-
-impl Command for Css {
-    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        // The project root and not the working directory: `brocanth css`
-        // runs from wherever you happen to be, and every path below is
-        // written relative to the project.
-        let root = ctx.root();
-        let cli = root.join(CLI);
-        if !cli.is_file() {
-            anyhow::bail!(
-                "the Tailwind CLI is absent at {}\n       run `npm install` in {} first",
-                cli.display(),
-                root.display()
-            );
-        }
-
-        let mut child = Child::new(&cli);
-        child
-            .current_dir(root)
-            .args(["--input", INPUT, "--output", OUTPUT]);
-        if self.watch {
-            child.arg("--watch");
-        } else {
-            child.arg("--minify");
-        }
-
-        let status = child.status()?;
-        if !status.success() {
-            // No message beyond this: the CLI has already written its own
-            // on the stderr this process inherited.
-            anyhow::bail!("the Tailwind CLI failed");
-        }
-
-        // `--watch` only ever returns when it was interrupted, and the
-        // output it leaves behind is whatever the last change produced.
-        // Checking it, or touching the module below, would both be about a
-        // build that is over.
-        if self.watch {
-            return Ok(());
-        }
-
-        let written = root.join(OUTPUT);
-        let bytes = std::fs::metadata(&written)?.len();
-        if bytes == 0 {
-            anyhow::bail!("the build wrote no CSS to {}", written.display());
-        }
-
-        touch(&root.join("src/assets.rs"))?;
-        println!("built {OUTPUT} ({bytes} bytes)");
-        Ok(())
-    }
-}
-
-/// Make cargo notice a stylesheet it has already compiled in.
-///
-/// The CSS is embedded at compile time, so a new one is a new binary, and
-/// nothing rebuilds until the module that embeds it looks newer than the
-/// artefact. Rewriting its own bytes is the portable way to say so: there is
-/// no `utimes` in `std`, and a dependency for one call is not worth it.
-fn touch(path: &Path) -> anyhow::Result<()> {
-    let same = std::fs::read(path)?;
-    std::fs::write(path, same)?;
-    Ok(())
-}
-"##;
-
-fn package_json(a: &Answers) -> String {
-    format!(
-        r#"{{
-  "name": {name:?},
-  "version": "0.0.0",
-  "private": true,
-  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
-  "devDependencies": {{
-    "@tailwindcss/cli": "^4.1.14"
-  }}
-}}
-"#,
-        name = a.name
-    )
-}
-
 /// Four spaces on every line that has anything on it.
 ///
 /// The slots were written for the depth they used to land at, in
@@ -3603,6 +3040,14 @@ mod tests {
     ///
     /// Read the diff before committing it. A blessed snapshot nobody read is
     /// a test that asserts whatever the bug does.
+    /// What the chosen modules contributed, for a test that reads a file
+    /// the generator assembles from slots. `Built::new()` is the empty
+    /// scaffold and reads as "no module wrote anything", which since the
+    /// renderers moved out of this file is a project with no templates.
+    fn built_for(a: &Answers) -> Built {
+        contributions(a).expect("these picks are a project")
+    }
+
     #[test]
     fn the_generator_writes_what_it_wrote_yesterday() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
@@ -3974,7 +3419,7 @@ mod tests {
         // list: `pages!` reads the directory. So what this checks is that
         // nothing crept back in.
         let a = answers(&available());
-        let table = pages_mod_rs(&a, &Built::new());
+        let table = pages_mod_rs(&a, &built_for(&a));
         assert!(
             table.contains(r#"brocanth_pages::pages!("src/pages", describe);"#),
             "{table}"
@@ -4035,7 +3480,7 @@ mod tests {
         );
         // And the bridge is not in the source either, so there is no function
         // to call and no `rsx::` path to copy from.
-        assert!(!pages_mod_rs(&a, &Built::new()).contains("pub fn html("));
+        assert!(!pages_mod_rs(&a, &built_for(&a)).contains("pub fn html("));
         assert!(!main_with_commands_rs(&a).contains("mod views;"));
     }
 
@@ -4080,7 +3525,7 @@ mod tests {
         // `load_dir!` emits `pub mod index` for `index.rsx` and `pages!`
         // emits one for `index.rs`. Both land in this file, so one of them
         // has to be nested or the scaffold does not compile.
-        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
+        let pages = pages_mod_rs(&answers(&["rsx"]), &built_for(&answers(&["rsx"])));
         assert!(
             pages.contains("pub mod views {\n    rsx::load_dir!(\"src/pages\");\n}"),
             "{pages}"
@@ -4099,20 +3544,16 @@ mod tests {
         // property of where the page is. `html!` reads that off the
         // directory tree, so a chain written down anywhere would be a chain
         // that can disagree with the tree.
+        // The templates' half of this is in `modules::rsx`, beside the
+        // templates. This half is the handlers, which are written here.
         let a = answers(&["rsx"]);
-        for template in [INDEX_RSX, ABOUT_RSX, USER_RSX] {
-            assert!(
-                !template.contains("<Layout"),
-                "a page names its own shell:\n{template}"
-            );
-        }
         for page in [index_rs(&a), about_rs(&a), user_rs(&a)] {
             assert!(
                 !page.contains("Layout"),
                 "a handler names a layout:\n{page}"
             );
         }
-        let pages = pages_mod_rs(&a, &Built::new());
+        let pages = pages_mod_rs(&a, &built_for(&a));
         assert!(
             !pages.contains("layout::Layout"),
             "the chain is written down somewhere: {pages}"
@@ -4203,8 +3644,9 @@ mod tests {
     fn every_generated_toml_line_starts_in_the_first_column() {
         // A stray indent in an assembled string is valid TOML and still
         // wrong: the reader cannot tell a continuation from a mistake.
-        for a in [answers(&["rsx", "rsx-tailwind"]), answers(&[])] {
-            for line in mise_toml(&a).lines() {
+        for a in [answers(&["rsx", "rsx-tailwind", "commands"]), answers(&[])] {
+            let built = contributions(&a).expect("a project");
+            for line in mise_toml(&built).lines() {
                 assert_eq!(line, line.trim_start(), "indented: {line:?}");
             }
         }
@@ -4316,7 +3758,7 @@ mod tests {
     fn a_page_can_opt_out_of_every_layout() {
         // A fragment -- an htmx swap, a partial -- is not a document, and
         // wrapping one in a shell would be wrong rather than merely verbose.
-        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
+        let pages = pages_mod_rs(&answers(&["rsx"]), &built_for(&answers(&["rsx"])));
         assert!(
             pages.contains("pub fn render(content: impl rsx::Template)"),
             "{pages}"
@@ -4326,7 +3768,7 @@ mod tests {
     #[test]
     fn a_handler_reaches_a_template_through_one_function_and_no_other() {
         let a = answers(&["rsx"]);
-        let pages = pages_mod_rs(&a, &Built::new());
+        let pages = pages_mod_rs(&a, &built_for(&a));
         assert!(pages.contains("pub use brocanth_pages::html;"));
         assert!(pages.contains("pub fn render(content: impl rsx::Template)"));
         // It returns the handler's own Result, which is what lets a template
@@ -4343,7 +3785,7 @@ mod tests {
         );
         // One place spells the application's name, and the layout reads it.
         assert!(
-            pages_mod_rs(&a, &Built::new())
+            pages_mod_rs(&a, &built_for(&a))
                 .contains(&format!("pub const TITLE: &str = {:?};", a.title)),
             "the title is not declared once"
         );
@@ -4358,7 +3800,7 @@ mod tests {
     fn the_bridge_lands_before_the_test_module() {
         // `items_after_test_module` is a clippy error, and the three-part
         // assembly of this file exists for no other reason.
-        let pages = pages_mod_rs(&answers(&["rsx"]), &Built::new());
+        let pages = pages_mod_rs(&answers(&["rsx"]), &built_for(&answers(&["rsx"])));
         let html = pages
             .find("pub use brocanth_pages::html;")
             .expect("the bridge is written");

@@ -112,12 +112,12 @@ the crate behind an off-by-default `scaffold` feature, which is the pattern.
 | `brocanth-admin` | bundle | not on the menu | `RouteSource`, nothing mounts it |
 | `brocanth-events` | service | — | `ModelEvent` carrier |
 | `brocanth-assets` | **renderer-like** | written by hand in `create.rs` | — |
-| `rsx` | **renderer** | **written by hand in `create.rs`** | — |
+| `rsx` | **renderer** | `PagesRenderers`, five template files | — |
 | `rsx-tailwind` | tooling | `CommandsMod`, `NodeDependencies`, `MiseTasks` | — |
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
 | `brocanth-test` | tooling | dev-dependency only | — |
-| **`jt`** | **renderer** | **nothing to write into** | — |
+| **`jt`** | **renderer** | `PagesRenderers`, waiting | — |
 
 Three rows say "written by hand". `rsx::Rsx::contribute()`, `Tailwind::contribute()`
 and `Htmx::contribute()` are each one comment: *"Still written by `create.rs`.
@@ -141,7 +141,7 @@ What it needs to declare: an extension, a loader line, whether it has
 layouts and what one is called, and a content type. What it must *not* need:
 a change to `brocanth-pages`.
 
-**Seams: none exist.** §5.
+**Seam: `Slot::PagesRenderers`.** §5.
 
 ### 4.2 Edge
 
@@ -237,52 +237,67 @@ Both `include_bytes!` each file so cargo rebuilds. Both turn `[id]` into
 `jt` makes a value with a `ToJson`, and `jt` has no layouts because JSON has
 no document to wrap.
 
-### The proposal
+### What was built
 
-A manifest declares a renderer, and `brocanth-pages` reads the declaration
-instead of a literal.
+**`Slot::PagesRenderers`**, and no new type. The sketch here proposed a
+`Render` declaration carrying an extension, a loader and a content type.
+Writing it showed the extension and the content type have no reader: the
+route table in `table.rs` already takes `.rs` files and ignores every other
+extension, so a `.jt` file beside a `.rs` page needs nothing said about it,
+and the content type is the page handler's. What was left was the line
+itself, which is what every other module already writes into a slot. A
+second mechanism for one line would be a second mechanism.
 
-```rust
-// in a module's manifest
-.renders(
-    Render::new("jt", "jt::load_dir!")
-        .content_type("application/json")
-        .no_layout()
-        .render_with("jt::to_string"),
-)
-```
-
-Which produces, in `src/pages/mod.rs`:
+So `rsx` writes its own half of `src/pages/mod.rs`:
 
 ```rust
-pub mod views   { rsx::load_dir!("src/pages"); }   // from the rsx module
-pub mod payload { jt::load_dir!("src/pages"); }    // from the jt module
+// crates/brocanth-cli/src/modules/rsx.rs
+fn contribute(&self, p: &Project, s: &mut Scaffold) {
+    s.at(Slot::PagesRenderers).block(format!(
+        "pub const TITLE: &str = {:?};\n\n{PAGES_RSX_RS}\n", p.title
+    ));
+    s.file("src/pages/layout.rsx", layout_rsx(p));
+    // ...
+}
 ```
 
-and one new slot for the lines:
+and the generator reads the slot where it used to write `rsx` by hand:
 
 ```rust
-/// `src/pages/mod.rs`, one `pub mod` per renderer, each wrapping a
-/// `load_dir!`. Written in declared order, so a project with two
-/// renderers reads top to bottom.
-PagesRenderers,
+for block in built.slot(Slot::PagesRenderers) {
+    out.push_str(block);
+}
 ```
 
-`brocanth-pages` takes the set of renderers as a macro argument rather than
-a literal — `pages!("src/pages", describe, renderers = [..])` — and the
-layout walk at line 223 asks each renderer for its layout name instead of
-joining `"layout.rsx"`.
+Two renderers in one project is two blocks and not a conflict.
 
-Three properties this keeps:
+**The two literals in `brocanth-pages` are gone.**
 
-1. **Two renderers in one project is the normal case, not a conflict.** A
-   page tree holds `index.rsx` beside `users.jt`. They are different
-   extensions, so the table never has to choose.
-2. **A renderer that is not chosen costs nothing.** No dependency, no
-   `pub mod`, no line in the table.
-3. **The extension decides the content type.** `handle` in a `.jt` page
-   answers `application/json` without saying so, the same way a `.rsx` page
-   answers `text/html` without saying so.
+`layout.rsx` became `layout_in(dir)`: the layout is the file named `layout`
+with any extension that is not `.rs`. `.rs` is excluded because `layout.rs`
+would be a page at `/layout`, and a file cannot be both. Two layouts in one
+directory is an error that names both, through the macro's own error path
+rather than a panic.
+
+`rsx::Template::render_to_string(..)` became `crate::pages::render_oob(..)`.
+The other two renders in the expansion already came back through the
+project's own `crate::pages::render` and `render_with`; the out-of-band one
+reached past them and named the engine. It was the only place the macro knew
+which engine made the page.
+
+### What the move cost, measured
+
+Every file a generated project gets is **byte-identical**, across all five
+golden shapes, except two:
+
+- `brocanth.toml`, the receipt, which lists files in the order they were
+  written. A module's files now sort by path instead of by the order they
+  were pushed.
+- `.gitignore` and `src/commands/mod.rs` each lost a stray blank line.
+  `Writer::line` ends the line it writes, and both readers added a second
+  newline. Nobody saw it until a second module wrote into those slots.
+
+`create.rs` lost 558 lines and 15 of its 31 `rsx` branches.
 
 ### The part worth more than the seam
 
@@ -343,9 +358,9 @@ cannot hand anything forward.
 | `CargoExtra` | **declared, never read** |
 | `AppItems` | **declared, never read** |
 | `AppBeforeRouter` | **declared, never read** |
-| `MiseTasks` | **declared, never read** — `rsx-tailwind` wants it |
+| `MiseTasks` | read — `rsx-tailwind` was its first customer |
 | `NodeDependencies` | **declared, never read** — `rsx-tailwind` wants it |
-| `PagesRenderers` | **missing** — §5 |
+| `PagesRenderers` | read — the renderer seam, §5 |
 | `AppMounts` | **missing** — §4.6, for `mount_routes` |
 
 A module that writes into an unread slot is recorded and discarded in
@@ -370,10 +385,18 @@ silence. That has already happened once, with a `.gitignore` line.
 
 ## 8. What to do, in order
 
-1. **Make `rsx` a real module.** Move the four hardcoded places behind a
-   `Render` declaration and fill the three empty `contribute()` bodies. No
-   new capability; the generated output must not change by one byte, which
-   the golden snapshots already check.
+1. ~~**Make `rsx` a real module.**~~ **Done.** `Slot::PagesRenderers`, the
+   three `contribute()` bodies filled, and `brocanth-pages` no longer names
+   `rsx`. `Slot::MiseTasks` and `Slot::GitIgnore` got their first real
+   customer on the way, and `Slot::CommandsMod` its second.
+
+   **Sixteen `rsx` branches are still in `create.rs`**, and they are the
+   ones the slot model does not reach: the three `@DEPTH_*` markers
+   substituted into `Ctx`, the `app.rs` and `main.rs` pieces for static
+   files, the `brocanth-assets` dependency, and the `AGENTS.md` sections,
+   which are interpolated at a position rather than appended. Each needs a
+   slot that does not exist. None of them blocks a second renderer: `jt`
+   adds no field to `Ctx`, serves no static file and mounts nothing.
 2. **Add `jt` as the second renderer.** This is the test of step 1. If it
    takes more than a manifest and a `Cargo.toml` line, step 1 is not done.
 3. **Give `Ctx` the plugin context and an extractor.** Unblocks the edge

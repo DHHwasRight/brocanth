@@ -471,6 +471,21 @@ pub enum Slot {
     /// decision and stays in `src/app.rs`; *finding* the function for a
     /// mounted name is mechanism, and mechanism the generator owns.
     PluginsLayers,
+    /// `src/pages/mod.rs`, the renderers: one `pub mod` per template
+    /// engine, each wrapping that engine's `load_dir!`, plus whatever the
+    /// engine needs beside it.
+    ///
+    /// Written **before** [`Slot::PagesItems`], because a block there may
+    /// call a renderer's bridge.
+    ///
+    /// This is the seam a second template engine attaches to. Until it
+    /// existed, `rsx` was named as a literal in the generator and a
+    /// project could have exactly one way to make a page. A renderer
+    /// writes its own `pub mod`, so two of them in one project is two
+    /// blocks and not a conflict: a page tree holds `index.rsx` beside
+    /// `report.jt`, the route table ignores both because neither is a
+    /// `.rs` file, and each engine compiles its own tree.
+    PagesRenderers,
     /// `src/pages/mod.rs`, items the pages share.
     PagesItems,
     /// `src/commands/mod.rs`, one `pub mod` line per subcommand a module
@@ -504,6 +519,7 @@ impl fmt::Display for Slot {
             Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
+            Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
             Slot::PagesItems => "src/pages/mod.rs",
             Slot::CommandsMod => "src/commands/mod.rs",
             Slot::ConfigSections => "config/<env>.toml",

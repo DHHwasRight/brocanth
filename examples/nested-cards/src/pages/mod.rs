@@ -436,6 +436,14 @@ pub fn prefix(ctx: &Ctx, template: &str) -> String {
     out
 }
 
+/// One skipped layout's replacement chrome, rendered on its own.
+///
+/// `html!` calls this once per layer it left out, and `render_with` puts
+/// the results in front of the page.
+pub fn render_oob(content: impl rsx::Template) -> Result<String, Error> {
+    Ok(content.render_to_string()?)
+}
+
 /// A partial, and the replacements for the chrome it left behind.
 ///
 /// A layout the client keeps is a layout this answer does not contain, which
