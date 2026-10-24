@@ -49,8 +49,9 @@
 //!
 //! - pages live under `src/pages`;
 //! - `src/pages/mod.rs` has `pub mod views { rsx::load_dir!("src/pages"); }`;
-//! - a layout is a file called `layout.<ext>`, where the extension is
-//!   the template engine's -- `layout.rsx` for rsx;
+//! - a layout is a file called `layout.rsx`. `html!` resolves it under
+//!   `views`, which is rsx's module, so the extension and the module are
+//!   one decision and `LAYOUT_EXTENSIONS` holds both ends of it;
 //! - a layout component takes `children: Element`, and optionally
 //!   `layout: &str`, which `html!` fills with the URL prefix that layout
 //!   covers -- `/` at the root, `/users` one directory down;
@@ -208,18 +209,36 @@ fn split_once_comma(input: TokenStream2) -> Option<(TokenStream2, TokenStream2)>
     Some((first, rest))
 }
 
-/// The layout file in this directory, whatever engine wrote it.
+/// The extensions a layout may have.
 ///
-/// `layout.rsx` was a literal here until there was a second template
-/// engine. The extension is the engine's and not this macro's: what makes
-/// a file a layout is its name and where it sits, which is the same rule
-/// that makes a `.rs` file a route.
+/// An allow-list and not "anything that is not `.rs`". That rule was
+/// wrong twice: `layout.css` beside `layout.rsx` is the natural thing to
+/// write in a framework where a route is a file, and it made every page
+/// in the directory fail with "holds two layouts" naming a stylesheet;
+/// and an editor backup, `layout.rsx~`, did the same.
 ///
-/// `.rs` is excluded because `layout.rs` would be a page at `/layout`, and
-/// a file cannot be both. Two layouts in one directory is an error rather
-/// than a silent pick, because which one wrapped the page would depend on
-/// the order the filesystem listed them.
-fn layout_in(dir: &Path) -> Result<Option<PathBuf>, String> {
+/// One entry, and adding a second is **not** only an entry here.
+/// [`expand`] resolves a layout under `views`, which is the module
+/// `rsx::load_dir!` writes, so a layout another engine wrote would expand
+/// to a path that engine never generated. A second entry needs
+/// [`module_path_from`] to learn which engine owns which extension. The
+/// list is here, with this note, so that seam is visible rather than
+/// implied.
+const LAYOUT_EXTENSIONS: &[&str] = &["rsx"];
+
+/// The layout file in this directory.
+///
+/// `layout.rsx` was a literal in the walk below until the generator grew
+/// a second template engine. It is a named list now, which is a smaller
+/// claim than the one this function first made and the one that is true:
+/// what makes a file a layout is its name, its place, **and** an engine
+/// that owns its extension.
+///
+/// `.rs` is excluded by construction: `layout.rs` would be a page at
+/// `/layout`, and a file cannot be both. Two layouts in one directory is
+/// an error rather than a silent pick, because which one wrapped the page
+/// would depend on the order the filesystem listed them.
+fn layout_in(dir: &Path, owned: &[&str]) -> Result<Option<PathBuf>, String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(None);
     };
@@ -228,7 +247,10 @@ fn layout_in(dir: &Path) -> Result<Option<PathBuf>, String> {
         .filter(|path| {
             path.is_file()
                 && path.file_stem().is_some_and(|stem| stem == "layout")
-                && path.extension().is_some_and(|ext| ext != "rs")
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| owned.contains(&ext))
         })
         .collect();
     found.sort();
@@ -265,7 +287,7 @@ fn layouts_above(file: &Path) -> Result<Vec<Layout>, String> {
         if current.file_name().is_some_and(|name| name == "src") || current.as_os_str().is_empty() {
             break;
         }
-        if let Some(candidate) = layout_in(&root.join(current))? {
+        if let Some(candidate) = layout_in(&root.join(current), LAYOUT_EXTENSIONS)? {
             found.push(Layout {
                 module: module_path_from(current),
                 prefix: prefix_of(current),
@@ -651,26 +673,46 @@ mod tests {
     }
 
     #[test]
+    fn a_file_no_engine_owns_is_not_a_layout() {
+        // The rule was "anything but `.rs`", and it made a stylesheet
+        // beside a layout break every page in the directory.
+        let dir = std::env::temp_dir().join("brocanth-pages-sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        // `layout.rs` is in here too: it would be a page at `/layout`, and
+        // a file cannot be both.
+        for name in ["layout.css", "layout.md", "layout.svg", "layout.rsx~", "layout.rs"] {
+            std::fs::write(dir.join(name), "not a layout").expect("write");
+        }
+        assert!(
+            layout_in(&dir, LAYOUT_EXTENSIONS).expect("no layout here").is_none(),
+            "a sidecar was taken for a layout"
+        );
+
+        // And the one that is.
+        std::fs::write(dir.join("layout.rsx"), "pub fn Layout() {}").expect("write");
+        let found = layout_in(&dir, LAYOUT_EXTENSIONS).expect("one layout").expect("found");
+        assert_eq!(found.file_name().expect("a name"), "layout.rsx");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn two_layouts_in_one_directory_is_an_error_that_names_both() {
         let dir = std::env::temp_dir().join("brocanth-pages-two-layouts");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temp directory");
+        // Two entries in `LAYOUT_EXTENSIONS` is the case this guards. With
+        // one entry it cannot happen, so the fixture builds the state
+        // directly rather than pretending an engine wrote it.
         std::fs::write(dir.join("layout.rsx"), "pub fn Layout() {}").expect("write");
         std::fs::write(dir.join("layout.jt"), "pub fn Layout() {}").expect("write");
 
-        let why = layout_in(&dir).expect_err("two layouts is not a choice");
+        // Two owned extensions, which is the state a second engine would
+        // create. The list is passed in so this is reachable with one
+        // entry shipped, rather than a guard nothing can exercise.
+        let why = layout_in(&dir, &["rsx", "jt"]).expect_err("two layouts is not a choice");
         assert!(why.contains("layout.jt"), "{why}");
         assert!(why.contains("layout.rsx"), "{why}");
-
-        // One of them, and the engine is not this macro's business.
-        std::fs::remove_file(dir.join("layout.rsx")).expect("remove");
-        let found = layout_in(&dir).expect("one layout").expect("found");
-        assert_eq!(found.extension().expect("an extension"), "jt");
-
-        // `layout.rs` would be a page at `/layout`, so it is not one.
-        std::fs::remove_file(dir.join("layout.jt")).expect("remove");
-        std::fs::write(dir.join("layout.rs"), "pub fn handle() {}").expect("write");
-        assert!(layout_in(&dir).expect("no layout").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

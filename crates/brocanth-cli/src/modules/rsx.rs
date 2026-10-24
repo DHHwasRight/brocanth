@@ -190,6 +190,11 @@ pub use brocanth_pages::html;
 /// parameter. A marker reading `/[section]` would be the same string on
 /// every section, and the client would conclude that two pages share a
 /// layer they do not.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn prefix(ctx: &Ctx, template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -220,6 +225,11 @@ pub fn prefix(ctx: &Ctx, template: &str) -> String {
 /// client reads the whole body before it swaps anything, so the order is a
 /// convention rather than a requirement, and one convention is better than
 /// two.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn render_with(
     out_of_band: Vec<String>,
     content: impl rsx::Template,
@@ -236,6 +246,11 @@ pub fn render_with(
 /// `rsx::Template` inside the macro: the other two renders already come
 /// back through this file, and the macro naming one engine was the reason
 /// a project could have only that engine.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn render_oob(content: impl rsx::Template) -> Result<String, Error> {
     Ok(content.render_to_string()?)
 }

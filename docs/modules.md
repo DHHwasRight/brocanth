@@ -508,6 +508,50 @@ that, and it answers `Option` for a reason that is about the path.
 
 ---
 
+## 6c. What five reviewers found
+
+Steps 1 to 3 were reviewed by five independent agents with identical
+briefs, so agreement would mean something rather than be a product of how
+the work was split. Eleven findings reached three or more votes and were
+fixed; the rest are listed here rather than dropped.
+
+**Unanimous (5/5), and each reproduced before it was changed.**
+
+| Finding | What it was |
+| --- | --- |
+| the rustfmt width | `pages_mod_rs` gated the one-line route list on `max_width` (100). rustfmt breaks a macro call on the width of its **arguments** (60). Every list in the gap was emitted one-line and reformatted — and `--with openapi` lands in it, so that project failed `cargo fmt --check` on day one |
+| `layout_in` took any non-`.rs` file | `layout.css` beside `layout.rsx` broke every page in the directory with "holds two layouts", naming a stylesheet. So did an editor backup, `layout.rsx~` |
+| the layout seam was half-built | `layout_in` accepted any extension and `expand` resolved it under `views`, which is **rsx's** module. A `layout.jt` was detected and then unresolvable |
+| `With{Ty}` collided | the alias was named after the plugin's type, not its key. Two modules whose types share a final segment emitted `type WithCache` twice |
+| `provided` panicked | it returned `Option` and called `Context::get`, which **panics** when a provider declares `T` and inserts nothing — the shape every plugin template teaches (`if let Some(..) { cx.insert(..) }`) |
+
+**Three or four votes.** An unused `After` import in six of the twelve
+shapes, `--core-only` among them. `render_oob` (and the pre-existing
+`prefix`, `render_with`) dead in every rsx project. Nothing stopped a
+module writing `Slot::AppPlugins` without `PluginsInstalled`. The crate's
+own doc example still taught that unpaired form, and `plugin_line` had
+lost its doc to a splice. A handler composing `with_header` could still
+put two `content-type` values on the wire. A 5xx kept a `content-type`
+describing a body that had been replaced.
+
+**Raised and not acted on, because the reviewers disagreed or it is out of
+scope.** The per-request cost of `(app.context)()` — one `HashMap` and one
+box per provider, on every matched request, read or not — was flagged by
+four and called sound-but-costly by three. It is a real design cost and a
+`OnceCell` in `Ctx` would remove it; it is not a defect, and changing the
+eager/lazy semantics is a decision rather than a fix. Three single-vote
+items are open: the `jt-rsx` golden snapshots a module order the CLI
+re-sorts away, two renderers writing one slot rely on array order the
+scaffold says must never be load-bearing, and `/openapi.yaml` is listed in
+the document it serves.
+
+**The two that matter most are not in the table.** `--with openapi`
+shipped a project failing `cargo fmt --check`, and `--with openapi`
+shipped one failing its own `cargo test` (§6b) — both for the same reason:
+the generator never ran what it writes. A ten-shape sweep now checks
+`cargo fmt --check`, `cargo check` warnings and `cargo test` on real
+generated projects, and all ten are clean.
+
 ## 7. Every seam, and its state
 
 ### Build time — `Slot`, 16 variants

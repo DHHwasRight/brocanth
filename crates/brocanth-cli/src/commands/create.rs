@@ -701,11 +701,39 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
             .contribute(&project, &mut built);
     }
 
+    // A registration the provider list does not know about. `register!`
+    // widens the builder's type and `plugins::Installed` does not, so the
+    // generated `src/app.rs` fails on `App { context }` with a nested
+    // associated type that names neither the module nor the slot. One
+    // call writes both halves; this catches a module that wrote only the
+    // first, and names it.
+    let listed: Vec<&str> = built.slot_owners(Slot::PluginsInstalled).collect();
+    let unpaired: Vec<&str> = built
+        .slot_owners(Slot::AppPlugins)
+        .zip(built.slot(Slot::AppPlugins))
+        // A module may write commented guidance into the chain without
+        // registering anything -- `middleware` writes five of them. Only
+        // an uncommented `let builder = ..` is a registration.
+        .filter(|(_, block)| block.lines().any(registers))
+        .map(|(owner, _)| owner)
+        .filter(|owner| !listed.contains(owner))
+        .collect();
+
     let mut wrong: Vec<Diagnostic> = built
         .problems()
         .iter()
         .map(|problem| Diagnostic::error("module", problem.clone()))
         .collect();
+    for owner in unpaired {
+        wrong.push(
+            Diagnostic::error(
+                "module",
+                format!("`{owner}` registers a plugin that the provider list does not have"),
+            )
+            .note("`Slot::AppPlugins` was written without `Slot::PluginsInstalled`")
+            .help("call `brocanth_scaffold::snippet::plugin`, which writes both"),
+        );
+    }
     for key in project.unknown_keys() {
         wrong.push(
             Diagnostic::error("module", format!("a module asked about `{key}`"))
@@ -2029,6 +2057,30 @@ impl Response {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    /// Drops every header with this name, ignoring case.
+    ///
+    /// `with_header` appends, because `set-cookie` has to repeat. A
+    /// single-valued header does not: two `content-type` lines are two
+    /// claims and the client picks. Replacing one drops it first, which
+    /// is what `set_header` below does.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// The one value for this header, replacing any already set.
+    ///
+    /// What to compose with when overriding a type an earlier step chose:
+    /// `Ok(render_json(tpl)?.set_header("content-type", "application/problem+json"))`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn set_header(self, name: &str, value: impl Into<String>) -> Self {
+        self.without_header(name).with_header(name, value)
+    }
 }
 
 /// What a handler may return instead of building a [`Response`] by hand.
@@ -2160,17 +2212,27 @@ impl IntoResponse for Error {
         // Everything a client sees for a 5xx is the status. The message is for
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
-        let body = if self.status < 500 {
-            self.message
-        } else {
+        let withheld = self.status >= 500;
+        let body = if withheld {
             String::from("Internal Server Error")
+        } else {
+            self.message
         };
+        let mut headers = self.headers;
+        if withheld {
+            // The body is replaced, so a `content-type` describing the
+            // original no longer describes anything. Keeping it labelled a
+            // plain sentence `application/problem+json` -- harmless while
+            // `sent` sent two types and the client could pick the other,
+            // and wrong now that the replacement is exact.
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        }
         Response {
             status: self.status,
             body,
-            // A 5xx keeps its headers: the body is withheld, not the
-            // framing the client needs to read what is left.
-            headers: self.headers,
+            // The rest survive: the body is withheld, not the framing the
+            // client needs to read what is left.
+            headers,
         }
     }
 }
@@ -2248,11 +2310,12 @@ impl Ctx {
     /// no string key to misspell and no guard to forget. That check is the
     /// whole point, and it is the compiler's, not this method's.
     ///
-    /// `Option` is the other half, and it is about where the `Ctx` came
-    /// from rather than about `T`. A request dispatched by `src/app.rs`
-    /// always has a context, so this is always `Some`. A `Ctx` built by
-    /// hand in a test has no application behind it and so no providers,
-    /// and `None` says that instead of panicking.
+    /// `Option` is the other half, and it is not about `T`'s type. It is
+    /// `None` in two cases: a `Ctx` built by hand in a test, which has no
+    /// application behind it and so no providers; and a provider that
+    /// declared `T` and inserted nothing, which `Plugin::provide` allows
+    /// because it is one method and `Provides` is a separate declaration.
+    /// A dispatched request whose provider wrote its value gets `Some`.
     ///
     /// The `_` is the position of `T` in the provider list, which is
     /// always inferred. It is there so two impls do not overlap, and it is
@@ -2267,7 +2330,13 @@ impl Ctx {
         T: ContextItem,
         plugins::Installed: Has<T, I>,
     {
-        self.plugins.as_ref().map(|cx| cx.get::<T, I>())
+        // `and_then` with `try_get`, not `map` with `get`: `get` panics
+        // when the provider list claims `T` and the provider inserted
+        // nothing, which the generated plugin templates make easy --
+        // `Provides` is unconditional and `provide` is often
+        // `if let Some(..)`. A method returning `Option` must not abort
+        // the process to say no.
+        self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
     }@DEPTH_IMPL@
 
     /// A route parameter, or `None`.
@@ -2472,6 +2541,33 @@ mod tests {
 }
 "##;
 
+/// Whether this line of a `register!` chain registers something.
+///
+/// Text, because the slot holds text. A commented line does not count:
+/// `brocanth-middleware` writes five of them on purpose, as guidance at
+/// the place they would be uncommented.
+fn registers(line: &str) -> bool {
+    let line = line.trim_start();
+    !line.starts_with("//") && line.starts_with("let builder")
+}
+
+/// `my-store` -> `MyStore`, for a type name built from a module key.
+fn upper_camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut head = true;
+    for ch in key.chars() {
+        if ch == '-' || ch == '_' {
+            head = true;
+        } else if head {
+            out.extend(ch.to_uppercase());
+            head = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// The header over the generated `Installed` alias.
 ///
 /// A const rather than a `\n\`-continued literal: that form keeps this
@@ -2576,9 +2672,14 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // not. `every_generated_rust_file_is_already_formatted` rejects the
     // long line, and a generated project nobody can `cargo fmt --check` is
     // a generated project with a chore in it.
-    let one_line = format!("        assert_eq!(patterns, [{}]);", quoted.join(", "));
-    let routes = if one_line.len() <= 100 {
-        format!("patterns, [{}]", quoted.join(", "))
+    // rustfmt breaks a macro call on `fn_call_width` (60) applied to the
+    // ARGUMENT LIST, not on `max_width` (100) applied to the line. This
+    // read 100 and so emitted a one-liner for any argument list between
+    // the two, which `--with openapi` lands in exactly: a brand-new
+    // project that fails `cargo fmt --check` on its first day.
+    let args = format!("patterns, [{}]", quoted.join(", "));
+    let routes = if args.len() <= 60 {
+        args
     } else {
         let items = quoted
             .iter()
@@ -2832,8 +2933,15 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     if !mods.is_empty() {
         out.push('\n');
     }
+    // `After` only appears when something registered. Six of the twelve
+    // golden shapes have no plugin at all, `--core-only` among them, and
+    // each warned `unused import` on its very first build.
+    out.push_str(if built.slot_is_empty(Slot::PluginsInstalled) {
+        "use brocanth::plugin_context::Base;\n"
+    } else {
+        "use brocanth::plugin_context::{After, Base};\n"
+    });
     out.push_str(concat!(
-        "use brocanth::plugin_context::{After, Base};\n",
         "use brocanth::routing::Next;\n",
         "\n",
         "use crate::pages::{Ctx, Response};\n",
@@ -2925,13 +3033,13 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // reimplement to stay byte-identical.
     out.push_str(PROVIDER_LIST_DOC);
     let mut held = String::from("Base");
-    for path in built.slot(Slot::PluginsInstalled) {
-        let path = path.trim_end();
-        // `crate::plugins::logging::Logging` -> `WithLogging`, which is
-        // the name of the list and not of the plugin: it is what is
-        // installed *after* that registration.
-        let ty = path.rsplit("::").next().unwrap_or(path);
-        let name = format!("With{ty}");
+    for line in built.slot(Slot::PluginsInstalled) {
+        // `cache crate::plugins::cache::Cache`. The key leads because the
+        // alias is named after it: a key is unique by construction and a
+        // type name is not, so two modules whose plugin types share a
+        // final segment used to emit one `type WithCache` twice.
+        let (key, path) = line.trim_end().split_once(' ').unwrap_or(("", line.trim_end()));
+        let name = format!("With{}", upper_camel(key));
         out.push_str(&format!("type {name} = After<{path}, {held}>;\n"));
         held = name;
     }
@@ -3247,6 +3355,70 @@ mod tests {
     /// renderers moved out of this file is a project with no templates.
     fn built_for(a: &Answers) -> Built {
         contributions(a).expect("these picks are a project")
+    }
+
+    #[test]
+    fn a_registration_without_a_provider_list_entry_is_refused_by_name() {
+        // What `snippet::plugin` exists to prevent. Writing only the
+        // chain line gives a generated `src/app.rs` that fails on
+        // `App { context }` with a nested associated type naming nothing.
+        use brocanth_scaffold::Scaffold;
+        let mut built = Scaffold::new();
+        built.now_writing("stripe");
+        built
+            .at(Slot::AppPlugins)
+            .block("        let builder = builder.plugin(Stripe::new(s));\n");
+
+        let listed: Vec<&str> = built.slot_owners(Slot::PluginsInstalled).collect();
+        let unpaired: Vec<&str> = built
+            .slot_owners(Slot::AppPlugins)
+            .zip(built.slot(Slot::AppPlugins))
+            .filter(|(_, block)| block.lines().any(registers))
+            .map(|(owner, _)| owner)
+            .filter(|owner| !listed.contains(owner))
+            .collect();
+        assert_eq!(unpaired, ["stripe"]);
+    }
+
+    #[test]
+    fn commented_guidance_in_the_chain_is_not_a_registration() {
+        // `brocanth-middleware` writes five commented registrations at
+        // the place they would be uncommented, and must not be reported.
+        assert!(registers("        let builder = builder.plugin(X::new(s));"));
+        assert!(!registers("        // let builder = builder.plugin(X::new(s));"));
+        assert!(!registers("        // Five edge hooks, none of them on."));
+    }
+
+    #[test]
+    fn an_alias_is_named_after_the_key_because_two_types_may_share_a_name() {
+        // `crate::plugins::cache::Cache` and a third-party
+        // `crate::plugins::billing::Cache` both end in `Cache`, and the
+        // generated project had two `type WithCache` lines.
+        assert_eq!(upper_camel("cache"), "Cache");
+        assert_eq!(upper_camel("billing"), "Billing");
+        assert_eq!(upper_camel("file-storage"), "FileStorage");
+        assert_eq!(upper_camel("admin_model"), "AdminModel");
+    }
+
+    #[test]
+    fn the_route_assertion_is_emitted_in_the_shape_rustfmt_wants() {
+        // The threshold read `max_width` and rustfmt breaks a macro call
+        // on the width of its arguments, so every route list between the
+        // two was emitted one-line and reformatted. `--with openapi` is
+        // in that window, and shipped a project failing `cargo fmt`.
+        for picks in [vec!["openapi", "input", "config"], vec!["jt"], vec![]] {
+            let a = answers(&picks);
+            let pages = pages_mod_rs(&a, &built_for(&a));
+            let line = pages
+                .lines()
+                .find(|l| l.contains("assert_eq!(patterns,"))
+                .unwrap_or("");
+            assert!(
+                line.is_empty() || line.len() <= 72,
+                "one-line form too wide for rustfmt: {} chars\n{line}",
+                line.len()
+            );
+        }
     }
 
     #[test]

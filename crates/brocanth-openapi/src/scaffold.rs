@@ -218,15 +218,22 @@ fn plugin_rs(project: &Project) -> String {
     // With `input`, a page's signature says what it takes and gives, and
     // `pages::described()` is that table. Without it there is no table, so
     // the document is paths and verbs and the honest sentence saying so.
-    let (bodies, bodies_code) = if project.has("input") {
+    // `Schema` is named only inside `BODIES`, and `spec` is only rebound
+    // there. Without `input` both were written anyway, so every
+    // `--with openapi` project warned twice on its first build.
+    let (bodies, bodies_code, schema_use, spec_binding) = if project.has("input") {
         (
             " What a page takes and gives comes\n//! from `pages::described()`, which `pages!` wrote off the handler\n//! signatures: a second parameter is the request body, a `Json<T>`\n//! return is the answer. Neither is written here, so neither can be\n//! out of date.",
             BODIES,
+            ", Schema",
+            "let mut spec",
         )
     } else {
         (
             " What a page takes and gives is not\n//! derivable from a `Fn(&mut Ctx)`, so a body is added by hand.\n//! `brocanth create --with input` is what makes the signature say\n//! it instead.",
             "",
+            "",
+            "let spec",
         )
     };
 
@@ -276,7 +283,7 @@ use std::sync::OnceLock;
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Verb;
-use brocanth_openapi::{{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder}};
+use brocanth_openapi::{{Format, OpenApiConfig, OpenApiPlugin{schema_use}, SpecBuilder}};
 
 /// Where the document is served.
 ///
@@ -351,7 +358,7 @@ impl Plugin for OpenApi {{
         let router = crate::pages::router().map_err(|e| {{
             PluginError::new(format!("[openapi] the route table does not build: {{e}}"))
         }})?;
-        let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
+        {spec_binding} = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
             .hide(ROUTE, Verb::Get);
 {bodies_code}

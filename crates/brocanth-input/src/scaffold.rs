@@ -77,6 +77,11 @@ const HEAD: &str = r##"
 /// `pages!` registers a handler through this one when its signature takes
 /// a second parameter, so the page cannot forget to check and cannot
 /// check twice.
+///
+/// `allow(dead_code)`: nothing references it until a page declares a body
+/// or a `Json<T>` answer, and a brand-new project has neither. It is here
+/// for the first one that does, like the request readers on `Ctx`.
+#[allow(dead_code)]
 pub fn page_with_body<H, B, T>(handler: H) -> Handler
 where
     H: Fn(&mut Ctx, B) -> Result<T, Error> + Send + Sync + 'static,
@@ -96,6 +101,11 @@ where
 /// about its answer, and one that writes `-> Result<Json<Created>, Error>`
 /// publishes `Created` as its response schema. The wrapper is the only
 /// place that difference is spelled.
+///
+/// `allow(dead_code)`: nothing references it until a page declares a body
+/// or a `Json<T>` answer, and a brand-new project has neither. It is here
+/// for the first one that does, like the request readers on `Ctx`.
+#[allow(dead_code)]
 pub struct Json<T>(pub T);
 
 impl<T: zod::Give> IntoResponse for Json<T> {

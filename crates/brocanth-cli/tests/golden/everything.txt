@@ -426,6 +426,30 @@ impl Response {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    /// Drops every header with this name, ignoring case.
+    ///
+    /// `with_header` appends, because `set-cookie` has to repeat. A
+    /// single-valued header does not: two `content-type` lines are two
+    /// claims and the client picks. Replacing one drops it first, which
+    /// is what `set_header` below does.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// The one value for this header, replacing any already set.
+    ///
+    /// What to compose with when overriding a type an earlier step chose:
+    /// `Ok(render_json(tpl)?.set_header("content-type", "application/problem+json"))`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn set_header(self, name: &str, value: impl Into<String>) -> Self {
+        self.without_header(name).with_header(name, value)
+    }
 }
 
 /// What a handler may return instead of building a [`Response`] by hand.
@@ -557,17 +581,27 @@ impl IntoResponse for Error {
         // Everything a client sees for a 5xx is the status. The message is for
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
-        let body = if self.status < 500 {
-            self.message
-        } else {
+        let withheld = self.status >= 500;
+        let body = if withheld {
             String::from("Internal Server Error")
+        } else {
+            self.message
         };
+        let mut headers = self.headers;
+        if withheld {
+            // The body is replaced, so a `content-type` describing the
+            // original no longer describes anything. Keeping it labelled a
+            // plain sentence `application/problem+json` -- harmless while
+            // `sent` sent two types and the client could pick the other,
+            // and wrong now that the replacement is exact.
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        }
         Response {
             status: self.status,
             body,
-            // A 5xx keeps its headers: the body is withheld, not the
-            // framing the client needs to read what is left.
-            headers: self.headers,
+            // The rest survive: the body is withheld, not the framing the
+            // client needs to read what is left.
+            headers,
         }
     }
 }
@@ -651,11 +685,12 @@ impl Ctx {
     /// no string key to misspell and no guard to forget. That check is the
     /// whole point, and it is the compiler's, not this method's.
     ///
-    /// `Option` is the other half, and it is about where the `Ctx` came
-    /// from rather than about `T`. A request dispatched by `src/app.rs`
-    /// always has a context, so this is always `Some`. A `Ctx` built by
-    /// hand in a test has no application behind it and so no providers,
-    /// and `None` says that instead of panicking.
+    /// `Option` is the other half, and it is not about `T`'s type. It is
+    /// `None` in two cases: a `Ctx` built by hand in a test, which has no
+    /// application behind it and so no providers; and a provider that
+    /// declared `T` and inserted nothing, which `Plugin::provide` allows
+    /// because it is one method and `Provides` is a separate declaration.
+    /// A dispatched request whose provider wrote its value gets `Some`.
     ///
     /// The `_` is the position of `T` in the provider list, which is
     /// always inferred. It is there so two impls do not overlap, and it is
@@ -670,7 +705,13 @@ impl Ctx {
         T: ContextItem,
         plugins::Installed: Has<T, I>,
     {
-        self.plugins.as_ref().map(|cx| cx.get::<T, I>())
+        // `and_then` with `try_get`, not `map` with `get`: `get` panics
+        // when the provider list claims `T` and the provider inserted
+        // nothing, which the generated plugin templates make easy --
+        // `Provides` is unconditional and `provide` is often
+        // `if let Some(..)`. A method returning `Option` must not abort
+        // the process to say no.
+        self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
     }
 
     /// The same, for a request that said how much of the page it has.
@@ -819,6 +860,11 @@ pub use brocanth_pages::html;
 /// parameter. A marker reading `/[section]` would be the same string on
 /// every section, and the client would conclude that two pages share a
 /// layer they do not.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn prefix(ctx: &Ctx, template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -849,6 +895,11 @@ pub fn prefix(ctx: &Ctx, template: &str) -> String {
 /// client reads the whole body before it swaps anything, so the order is a
 /// convention rather than a requirement, and one convention is better than
 /// two.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn render_with(
     out_of_band: Vec<String>,
     content: impl rsx::Template,
@@ -865,6 +916,11 @@ pub fn render_with(
 /// `rsx::Template` inside the macro: the other two renders already come
 /// back through this file, and the macro naming one engine was the reason
 /// a project could have only that engine.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
 pub fn render_oob(content: impl rsx::Template) -> Result<String, Error> {
     Ok(content.render_to_string()?)
 }
@@ -921,6 +977,10 @@ pub mod payload {
 /// It returns the handler's own `Result` so a page reads the same whichever
 /// engine it uses. For another status or a header, compose:
 /// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
+///
+/// To override the type this sets, reach for `set_header` and not
+/// `with_header`: the second appends, so two `content-type` values would
+/// reach the wire and the client would pick between them.
 pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
     // Into its own String first, so a page that fails half way through
     // leaves nothing behind. Same property the HTML path has.
@@ -937,6 +997,11 @@ pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
 /// `pages!` registers a handler through this one when its signature takes
 /// a second parameter, so the page cannot forget to check and cannot
 /// check twice.
+///
+/// `allow(dead_code)`: nothing references it until a page declares a body
+/// or a `Json<T>` answer, and a brand-new project has neither. It is here
+/// for the first one that does, like the request readers on `Ctx`.
+#[allow(dead_code)]
 pub fn page_with_body<H, B, T>(handler: H) -> Handler
 where
     H: Fn(&mut Ctx, B) -> Result<T, Error> + Send + Sync + 'static,
@@ -956,6 +1021,11 @@ where
 /// about its answer, and one that writes `-> Result<Json<Created>, Error>`
 /// publishes `Created` as its response schema. The wrapper is the only
 /// place that difference is spelled.
+///
+/// `allow(dead_code)`: nothing references it until a page declares a body
+/// or a `Json<T>` answer, and a brand-new project has neither. It is here
+/// for the first one that does, like the request readers on `Ctx`.
+#[allow(dead_code)]
 pub struct Json<T>(pub T);
 
 impl<T: zod::Give> IntoResponse for Json<T> {
@@ -1322,10 +1392,10 @@ type WithModel = After<crate::plugins::model::Model, WithSessions>;
 type WithCache = After<crate::plugins::cache::Cache, WithModel>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
-type WithPolicies = After<crate::plugins::policy::Policies, WithAuth>;
-type WithFiles = After<crate::plugins::storage::Files, WithPolicies>;
-type WithOpenApi = After<crate::plugins::openapi::OpenApi, WithFiles>;
-type WithValidation = After<crate::plugins::validation::Validation, WithOpenApi>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithAuth>;
+type WithStorage = After<crate::plugins::storage::Files, WithPolicy>;
+type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithStorage>;
+type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
 pub type Installed = WithRealtime;
 
@@ -1394,7 +1464,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-// brocanth-digest: 6e2f32bb755e1189
+// brocanth-digest: 7b82e8e842b1056d
 ===== config/development.toml =====
 # The configuration of this environment.
 #

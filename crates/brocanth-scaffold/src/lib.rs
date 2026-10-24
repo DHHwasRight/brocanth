@@ -20,8 +20,9 @@
 //!     fn contribute(&self, project: &Project, s: &mut Scaffold) {
 //!         s.file("src/plugins/cache/mod.rs", "// ...\n");
 //!         s.at(Slot::PluginsMod).line("pub mod cache;");
-//!         s.at(Slot::AppPlugins)
-//!             .block(snippet::plugin_line(project, "cache", "Cache"));
+//!         // Writes the chain line *and* the provider list, which have
+//!         // to agree. `plugin_line` alone writes only the first.
+//!         snippet::plugin(s, project, "cache", "Cache");
 //!     }
 //! }
 //! ```
@@ -950,9 +951,19 @@ pub mod snippet {
     pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str) {
         s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
         s.at(Slot::PluginsInstalled)
-            .line(format!("crate::plugins::{key}::{ty}"));
+            .line(format!("{key} crate::plugins::{key}::{ty}"));
     }
 
+    /// The registration statement alone, without the provider list.
+    ///
+    /// **Prefer [`plugin`].** This one writes half of what a registration
+    /// is, and a module that writes only this half registers a plugin the
+    /// generated `Installed` type does not know about. If that plugin
+    /// provides a context item, the generated `src/app.rs` fails to
+    /// compile on a type the developer did not write and cannot fix.
+    ///
+    /// It stays public for a caller that builds the chain some other way
+    /// and writes [`Slot::PluginsInstalled`] itself.
     pub fn plugin_line(project: &Project, key: &str, ty: &str) -> String {
         if project.has("config") {
             format!(

@@ -364,6 +364,30 @@ impl Response {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    /// Drops every header with this name, ignoring case.
+    ///
+    /// `with_header` appends, because `set-cookie` has to repeat. A
+    /// single-valued header does not: two `content-type` lines are two
+    /// claims and the client picks. Replacing one drops it first, which
+    /// is what `set_header` below does.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// The one value for this header, replacing any already set.
+    ///
+    /// What to compose with when overriding a type an earlier step chose:
+    /// `Ok(render_json(tpl)?.set_header("content-type", "application/problem+json"))`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn set_header(self, name: &str, value: impl Into<String>) -> Self {
+        self.without_header(name).with_header(name, value)
+    }
 }
 
 /// What a handler may return instead of building a [`Response`] by hand.
@@ -495,17 +519,27 @@ impl IntoResponse for Error {
         // Everything a client sees for a 5xx is the status. The message is for
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
-        let body = if self.status < 500 {
-            self.message
-        } else {
+        let withheld = self.status >= 500;
+        let body = if withheld {
             String::from("Internal Server Error")
+        } else {
+            self.message
         };
+        let mut headers = self.headers;
+        if withheld {
+            // The body is replaced, so a `content-type` describing the
+            // original no longer describes anything. Keeping it labelled a
+            // plain sentence `application/problem+json` -- harmless while
+            // `sent` sent two types and the client could pick the other,
+            // and wrong now that the replacement is exact.
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        }
         Response {
             status: self.status,
             body,
-            // A 5xx keeps its headers: the body is withheld, not the
-            // framing the client needs to read what is left.
-            headers: self.headers,
+            // The rest survive: the body is withheld, not the framing the
+            // client needs to read what is left.
+            headers,
         }
     }
 }
@@ -583,11 +617,12 @@ impl Ctx {
     /// no string key to misspell and no guard to forget. That check is the
     /// whole point, and it is the compiler's, not this method's.
     ///
-    /// `Option` is the other half, and it is about where the `Ctx` came
-    /// from rather than about `T`. A request dispatched by `src/app.rs`
-    /// always has a context, so this is always `Some`. A `Ctx` built by
-    /// hand in a test has no application behind it and so no providers,
-    /// and `None` says that instead of panicking.
+    /// `Option` is the other half, and it is not about `T`'s type. It is
+    /// `None` in two cases: a `Ctx` built by hand in a test, which has no
+    /// application behind it and so no providers; and a provider that
+    /// declared `T` and inserted nothing, which `Plugin::provide` allows
+    /// because it is one method and `Provides` is a separate declaration.
+    /// A dispatched request whose provider wrote its value gets `Some`.
     ///
     /// The `_` is the position of `T` in the provider list, which is
     /// always inferred. It is there so two impls do not overlap, and it is
@@ -602,7 +637,13 @@ impl Ctx {
         T: ContextItem,
         plugins::Installed: Has<T, I>,
     {
-        self.plugins.as_ref().map(|cx| cx.get::<T, I>())
+        // `and_then` with `try_get`, not `map` with `get`: `get` panics
+        // when the provider list claims `T` and the provider inserted
+        // nothing, which the generated plugin templates make easy --
+        // `Provides` is unconditional and `provide` is often
+        // `if let Some(..)`. A method returning `Option` must not abort
+        // the process to say no.
+        self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
     }
 
     /// A route parameter, or `None`.
@@ -805,7 +846,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
-use brocanth::plugin_context::{After, Base};
+use brocanth::plugin_context::Base;
 use brocanth::routing::Next;
 
 use crate::pages::{Ctx, Response};
@@ -885,7 +926,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
-// brocanth-digest: 351a232ce1aef4b5
+// brocanth-digest: 281adfb1a1e07a53
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->

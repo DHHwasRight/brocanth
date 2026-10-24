@@ -104,6 +104,10 @@ pub mod payload {
 /// It returns the handler's own `Result` so a page reads the same whichever
 /// engine it uses. For another status or a header, compose:
 /// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
+///
+/// To override the type this sets, reach for `set_header` and not
+/// `with_header`: the second appends, so two `content-type` values would
+/// reach the wire and the client would pick between them.
 pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
     // Into its own String first, so a page that fails half way through
     // leaves nothing behind. Same property the HTML path has.
