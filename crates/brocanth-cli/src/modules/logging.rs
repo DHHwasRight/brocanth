@@ -1,6 +1,6 @@
 //! `logging` -- a line per request.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Slot};
 
 /// A request logger, written out into the project rather than linked.
@@ -22,8 +22,7 @@ impl Module for Logging {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/logging/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod logging;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "logging", "Logging"));
+        plugin(s, project, "logging", "Logging");
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin

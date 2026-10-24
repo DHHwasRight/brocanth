@@ -35,7 +35,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// File storage, as a choice on the `brocanth create` menu.
@@ -78,8 +78,7 @@ impl Module for FileStorage {
             \x20   );"
                 .to_string(),
         );
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "storage", "Files"));
+        plugin(s, project, "storage", "Files");
         // The one module so far that writes files into the working tree, so
         // the one that has to say they are not source. The path matches the
         // `root` below; change one and change the other.
@@ -140,7 +139,7 @@ fn plugin_rs(project: &Project) -> String {
 //! generator cannot answer. A handler that has already asked it writes:
 //!
 //! ```ignore
-//! let files: &FileStore = cx.extract();
+//! let files = ctx.provided::<FileStore, _>().expect("a dispatched request");
 //! let about = ObjectInfo::new()
 //!     .with_filename(sent_name)
 //!     .with_declared_type(sent_type);

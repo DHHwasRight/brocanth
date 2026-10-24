@@ -1,6 +1,6 @@
 //! `model` -- SeaORM, validations and migrations.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The model layer.
@@ -26,8 +26,7 @@ impl Module for Model {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/model/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod model;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "model", "Model"));
+        plugin(s, project, "model", "Model");
         s.at(Slot::AppContext).block(
             "    let db: &crate::plugins::model::Db = cx.extract();\n\
             \x20   eprintln!(\"database: {}\", db.url);"

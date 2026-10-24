@@ -1597,6 +1597,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          use std::sync::Arc;\n\
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
+         use brocanth::plugin_context::Context;\n\
          use brocanth::routing::{{Dispatch, MiddlewareStack, Router}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
@@ -1616,7 +1617,23 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20   pub router: Router<Handler>,\n\
         \x20   pub stack: MiddlewareStack<Ctx, Response>,\n\
         \x20   pub plugins: Vec<String>,\n\
+        \x20   /// Makes this request's context. `pub` because a test that\n\
+        \x20   /// drives a handler by hand needs one, which is the same\n\
+        \x20   /// reason `router` and `stack` are.\n\
+        \x20   pub context: ContextFor,\n\
          }}\n\
+         \n\
+         /// Makes one request's context, from the plugins that provide one.\n\
+         ///\n\
+         /// A boxed closure, because the type the builder ends on is one\n\
+         /// nested associated type per plugin and `App` is a written struct.\n\
+         /// The closure holds the built application, which is the only thing\n\
+         /// that knows which providers to call.\n\
+         ///\n\
+         /// Called per request and not once, because that is what\n\
+         /// `App::context` is for: a provider that reads the clock or counts\n\
+         /// gets a fresh answer each time.\n\
+         type ContextFor = Box<dyn Fn() -> Context<plugins::Installed> + Send + Sync>;\n\
          \n\
          /// Builds it. The only place that decides what this binary is.\n\
          pub fn build() -> Result<App, String> {{\n\
@@ -1671,10 +1688,16 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20   // 4. What the plugins put on the per-request context, said once.\n\
         \x20   plugins::announce!(&app);\n\
          \n\
+        \x20   let plugins = app.instance_names().map(str::to_string).collect();\n\
+         \n\
         \x20   Ok(App {\n\
         \x20       router,\n\
         \x20       stack,\n\
-        \x20       plugins: app.instance_names().map(str::to_string).collect(),\n\
+        \x20       plugins,\n\
+        \x20       // The application moves in here. Nothing else needs it, and\n\
+        \x20       // this is what keeps the providers reachable once `build`\n\
+        \x20       // has returned a struct that cannot name their type.\n\
+        \x20       context: Box::new(move || app.context()),\n\
         \x20   })\n\
          }\n\
          \n",
@@ -1783,16 +1806,25 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          \x20                   .map(|(name, value)| (name.to_string(), value.to_string()))\n\
          \x20                   .collect(),\n";
     let deeper: String = args.lines().map(|line| format!("    {line}\n")).collect();
+    // `.with_plugins` last, and always: a handler reads what a plugin put
+    // on the context, and `Ctx::new` cannot build one because the
+    // providers live in the application. This is the one place that has
+    // both.
     out.replace(
         "@CTX@",
         &if a.has("rsx-htmx") {
             format!(
                 "Ctx::new(verb, path, matched.params())\n\
                  \x20               .holding(holding(request))\n\
+                 \x20               .with_plugins((app.context)())\n\
                  \x20               .sent(\n{deeper}\x20               )"
             )
         } else {
-            format!("Ctx::new(verb, path, matched.params()).sent(\n{args}\x20           )")
+            format!(
+                "Ctx::new(verb, path, matched.params())\n\
+                 \x20               .with_plugins((app.context)())\n\
+                 \x20               .sent(\n{deeper}\x20               )"
+            )
         },
     )
 }
@@ -1939,7 +1971,10 @@ const PAGES_MOD_RS_HEAD: &str = r##"//! The route table, which is this directory
 
 brocanth_pages::pages!("src/pages"@DESCRIBE@);
 
+use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::routing::{BuildError, Params, Router, Verb};
+
+use crate::plugins;
 
 /// What a handler produces.
 ///
@@ -2156,7 +2191,10 @@ pub struct Ctx {
     #[allow(dead_code)]
     pub body: Vec<u8>,
     params: Vec<(String, String)>,
-    headers: Vec<(String, String)>,@DEPTH_FIELD@
+    headers: Vec<(String, String)>,
+    /// What the plugins put here for this request, or `None` for a context
+    /// built by hand.
+    plugins: Option<Context<plugins::Installed>>,@DEPTH_FIELD@
 }
 
 impl Ctx {
@@ -2170,7 +2208,8 @@ impl Ctx {
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
-            headers: Vec::new(),@DEPTH_INIT@
+            headers: Vec::new(),
+            plugins: None,@DEPTH_INIT@
         }
     }
 
@@ -2189,6 +2228,46 @@ impl Ctx {
         self.body = body;
         self.headers = headers;
         self
+    }
+
+    /// What the plugins put on this request's context.
+    ///
+    /// `src/app.rs` calls it once per request, with a context the
+    /// application made from its providers. A `Ctx` built in a test has
+    /// none, which is what the `Option` says.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
+    /// The value a plugin published for this request.
+    ///
+    /// **Compiles only when some registered plugin provides `T`.** Ask for
+    /// a type nothing installs and the build stops and names it; there is
+    /// no string key to misspell and no guard to forget. That check is the
+    /// whole point, and it is the compiler's, not this method's.
+    ///
+    /// `Option` is the other half, and it is about where the `Ctx` came
+    /// from rather than about `T`. A request dispatched by `src/app.rs`
+    /// always has a context, so this is always `Some`. A `Ctx` built by
+    /// hand in a test has no application behind it and so no providers,
+    /// and `None` says that instead of panicking.
+    ///
+    /// The `_` is the position of `T` in the provider list, which is
+    /// always inferred. It is there so two impls do not overlap, and it is
+    /// the same `_` `Context::get` takes.
+    ///
+    /// ```ignore
+    /// let session = ctx.provided::<Session, _>().expect("dispatched");
+    /// ```
+    #[allow(dead_code)]
+    pub fn provided<T, I>(&self) -> Option<&T>
+    where
+        T: ContextItem,
+        plugins::Installed: Has<T, I>,
+    {
+        self.plugins.as_ref().map(|cx| cx.get::<T, I>())
     }@DEPTH_IMPL@
 
     /// A route parameter, or `None`.
@@ -2392,6 +2471,24 @@ mod tests {
     }
 }
 "##;
+
+/// The header over the generated `Installed` alias.
+///
+/// A const rather than a `\n\`-continued literal: that form keeps this
+/// file's own indentation and writes it into the generated one, which has
+/// already happened twice.
+const PROVIDER_LIST_DOC: &str = "\
+/// What this binary installs on a request's context, as a type.
+///
+/// One `Install` per registered plugin, innermost first, which is exactly
+/// what `register!` builds. The two have to be the same type: if they
+/// drift this file does not compile, which is why the list is written
+/// once and both readers derive from it.
+///
+/// A plugin that puts nothing on the context folds away, because
+/// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
+/// plugins all provide nothing.
+";
 
 /// `src/pages/mod.rs`, in three parts so the rsx bridge can land before the
 /// test module rather than after it, which clippy refuses.
@@ -2735,7 +2832,13 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     if !mods.is_empty() {
         out.push('\n');
     }
-    out.push_str("use brocanth::routing::Next;\n\nuse crate::pages::{Ctx, Response};\n\n");
+    out.push_str(concat!(
+        "use brocanth::plugin_context::{After, Base};\n",
+        "use brocanth::routing::Next;\n",
+        "\n",
+        "use crate::pages::{Ctx, Response};\n",
+        "\n",
+    ));
 
     // -- register -----------------------------------------------------
     out.push_str(
@@ -2806,6 +2909,34 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     }
     out.push_str("    }};\n}\npub(crate) use register;\n\n");
 
+    // -- the provider list, as a type ---------------------------------
+    //
+    // `register!` is a macro because the builder's type is not worth
+    // spelling. `App` is a struct, and a struct field needs a type to name,
+    // so the one piece of that type anything else needs is written out
+    // here: the list of what is on the context.
+    //
+    // Built from the same slot order the chain above uses, which is why
+    // `snippet::plugin` writes both. A plugin that provides nothing folds
+    // away, because `NoContext::Install<E>` is `E`.
+    // One alias per plugin rather than one nested type, so every line is
+    // short. The nested form is a single 200-character type by the third
+    // plugin, and rustfmt wraps it in a shape a generator would have to
+    // reimplement to stay byte-identical.
+    out.push_str(PROVIDER_LIST_DOC);
+    let mut held = String::from("Base");
+    for path in built.slot(Slot::PluginsInstalled) {
+        let path = path.trim_end();
+        // `crate::plugins::logging::Logging` -> `WithLogging`, which is
+        // the name of the list and not of the plugin: it is what is
+        // installed *after* that registration.
+        let ty = path.rsplit("::").next().unwrap_or(path);
+        let name = format!("With{ty}");
+        out.push_str(&format!("type {name} = After<{path}, {held}>;\n"));
+        held = name;
+    }
+    out.push_str(&format!("pub type Installed = {held};\n\n"));
+
     // -- announce -----------------------------------------------------
     out.push_str(
         "/// What this binary puts on the context, said once at startup.\n\
@@ -2814,6 +2945,10 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
          /// provider set lives in the application's *type*, so an `extract` for a\n\
          /// plugin nobody registered does not compile. That is the modularity claim,\n\
          /// checked by the compiler rather than written in a README.\n\
+         ///\n\
+         /// A handler reads the same values through `Ctx::provided`, which carries\n\
+         /// the same check. This runs at startup so a misconfiguration is a failure\n\
+         /// to start rather than a failure on the first request that needed it.\n\
          ///\n\
          /// A macro for the reason `register!` is one: the context's type is the\n\
          /// builder's type, and neither is worth spelling.\n\
@@ -3919,6 +4054,15 @@ mod tests {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
+        // The context reaches a handler, asserted from inside the project.
+        // `sessions` is the one generated plugin that provides a value, so
+        // this is the whole claim: a handler reads what a plugin published,
+        // and a `Ctx` with no application behind it says so.
+        let about = root.join("src/pages/about.rs");
+        let mut page = std::fs::read_to_string(&about).expect("the scaffold wrote about.rs");
+        page.push_str(CONTEXT_REACHES_A_HANDLER);
+        std::fs::write(&about, page).unwrap();
+
         // `test` and not `build`: a generated project carries its own test
         // suite, and `--with openapi` wrote one that failed from the day it
         // landed because nothing here ever ran it.
@@ -3934,6 +4078,43 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Appended to the generated `about.rs` by the test above.
+    ///
+    /// Not written into every project: it names `sessions::Session`, which
+    /// exists only when that module was chosen, and a scaffold that writes
+    /// a test about a plugin a project does not have is a scaffold that
+    /// does not compile.
+    const CONTEXT_REACHES_A_HANDLER: &str = r#"
+#[cfg(test)]
+mod context {
+    use crate::pages::Ctx;
+    use crate::plugins::sessions::Session;
+
+    fn bare() -> Ctx {
+        Ctx::new(
+            brocanth::routing::Verb::Get,
+            "/about",
+            brocanth::routing::Params::empty(),
+        )
+    }
+
+    #[test]
+    fn a_handler_reads_what_a_plugin_published() {
+        let app = crate::app::build().expect("the application builds");
+        let ctx = bare().with_plugins((app.context)());
+        let session = ctx
+            .provided::<Session, _>()
+            .expect("a dispatched request has a context");
+        assert_eq!(session.cookie, "_scaffold_test_session");
+    }
+
+    #[test]
+    fn a_context_built_by_hand_has_no_plugins_and_does_not_pretend() {
+        assert!(bare().provided::<Session, _>().is_none());
+    }
+}
+"#;
 
     /// The same, for the shape that reads a body.
     ///

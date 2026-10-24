@@ -460,7 +460,7 @@ because the argument is still why each one matters.
 | G2 | dp-swap has no mutating verb | open, and now the single biggest blocker |
 | G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
 | G4 | the model layer publishes to nobody | open |
-| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. `MiseTasks` is read now too, so three remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`. `Ctx` carries the request at last, but has no extractor; `mount_routes` is untouched. See `docs/modules.md` §7 |
+| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. `MiseTasks` is read now too, so three remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`. `Ctx` carries the request **and the plugin context** now, read with `Ctx::provided`; `mount_routes` is still untouched. See `docs/modules.md` §6 and §7 |
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | open |

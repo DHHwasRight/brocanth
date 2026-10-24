@@ -37,7 +37,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The validation vocabulary, as a choice on the `brocanth create` menu.
@@ -70,8 +70,7 @@ impl Module for Validation {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/validation/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod validation;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "validation", "Validation"));
+        plugin(s, project, "validation", "Validation");
         // The context item, read once at startup. It is a demonstration and
         // it is load-bearing: the installed provider set lives in the
         // application's type, so this line stops compiling the moment the
@@ -126,7 +125,9 @@ fn plugin_rs(project: &Project) -> String {
 //! finish rather than a bug that reaches production.
 //!
 //! ```ignore
-//! let checks: &brocanth_schema::Validation = cx.extract();
+//! let checks = ctx
+//!     .provided::<brocanth_schema::Validation, _>()
+//!     .expect("a dispatched request");
 //! match checks.check(SignUp {{ username, email }}) {{
 //!     Ok(body) => create(body),
 //!     Err(issues) => Response {{

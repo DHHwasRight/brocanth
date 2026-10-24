@@ -463,6 +463,19 @@ pub enum Slot {
     AppBeforeRouter,
     /// `src/plugins/mod.rs`, one `pub mod` line per plugin.
     PluginsMod,
+    /// One plugin type path per registered plugin, in registration order:
+    /// `crate::plugins::logging::Logging`.
+    ///
+    /// The generated `App` is a written struct, and one of its fields is a
+    /// context whose type carries the provider list. That list is one
+    /// `Provided::Install` per registered plugin, in the order
+    /// `plugins::register!` applies them, and it has to be *the same* list
+    /// or the two types do not match.
+    ///
+    /// So it is not written by hand. [`snippet::plugin`] writes the chain
+    /// line and this one together, which is the only way the two cannot
+    /// drift.
+    PluginsInstalled,
     /// `src/plugins/mod.rs`, one arm of `layer`, for a module that offers
     /// middleware: `"request_log" => Some(logging::layer),`.
     ///
@@ -528,6 +541,7 @@ impl fmt::Display for Slot {
             Slot::AppItems => "src/app.rs (items)",
             Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",
+            Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
             Slot::PagesRoutes => "src/pages/mod.rs (the route table test)",
@@ -894,7 +908,7 @@ mod tests {
 /// Not sugar: each one is a place where two modules must agree, and the
 /// agreement belongs in one function rather than in each of them.
 pub mod snippet {
-    use super::Project;
+    use super::{Project, Scaffold, Slot};
 
     /// The statement that registers a plugin instance in the application.
     ///
@@ -926,6 +940,19 @@ pub mod snippet {
     ///
     /// `key` is the module's key, which is also the plugin's module name
     /// and its config section. `ty` is the plugin type in that module.
+    /// Registers a plugin: the line in the chain, and the type in the
+    /// provider list.
+    ///
+    /// Both, from one call, because they have to agree. The chain's type
+    /// is `Install` applied once per plugin in registration order, and the
+    /// generated `App` names that type to hold a context. Writing the two
+    /// separately is writing the same list twice.
+    pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str) {
+        s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+        s.at(Slot::PluginsInstalled)
+            .line(format!("crate::plugins::{key}::{ty}"));
+    }
+
     pub fn plugin_line(project: &Project, key: &str, ty: &str) -> String {
         if project.has("config") {
             format!(

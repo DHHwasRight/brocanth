@@ -53,7 +53,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// Authorisation, as a choice on the `brocanth create` menu.
@@ -89,8 +89,7 @@ impl Module for Policy {
         let dialect = dialect(project);
         s.file("src/plugins/policy/mod.rs", plugin_rs(project, dialect));
         s.at(Slot::PluginsMod).line("pub mod policy;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "policy", "Policies"));
+        plugin(s, project, "policy", "Policies");
         // The dialect is read at startup, so a brand-new project uses the
         // value it was given rather than warning that nothing does.
         s.at(Slot::AppContext).block(
@@ -199,7 +198,7 @@ fn plugin_rs(project: &Project, dialect: &str) -> String {
 //! A list is a `WHERE` fragment, so the paginator keeps its totals:
 //!
 //! ```ignore
-//! let rules: &Rules = cx.extract();
+//! let rules = ctx.provided::<Rules, _>().expect("a dispatched request");
 //! let condition = PostPolicy.list(&visitor).condition::<Post>(rules.dialect)?;
 //! // "SELECT .. FROM posts WHERE " + condition.sql(), bound to condition.binds()
 //! ```

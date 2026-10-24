@@ -41,7 +41,7 @@
 //!
 //! [`OpenApiPlugin::configure`]: crate::OpenApiPlugin
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// What the plugin does with `pages::described()`.
@@ -125,8 +125,7 @@ impl Module for OpenApi {
         s.at(Slot::PagesRoutes).line("/openapi.json");
         s.at(Slot::PagesRoutes).line("/openapi.yaml");
         s.at(Slot::PluginsMod).line("pub mod openapi;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "openapi", "OpenApi"));
+        plugin(s, project, "openapi", "OpenApi");
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait method,
             // so the trait has to be in scope. Every plugin module needs the

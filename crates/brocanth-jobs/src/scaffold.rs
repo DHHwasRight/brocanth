@@ -28,7 +28,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// Background jobs, as a choice on the `brocanth create` menu.
@@ -57,8 +57,7 @@ impl Module for Jobs {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/jobs/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod jobs;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "jobs", "Jobs"));
+        plugin(s, project, "jobs", "Jobs");
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
@@ -103,22 +102,26 @@ fn plugin_rs(project: &Project) -> String {
 //! # Enqueuing, and what does not work yet
 //!
 //! This plugin publishes the `Queue` on the per-request context, and a
-//! handler in this project **cannot reach it today**. The `Ctx` in
-//! `src/pages/mod.rs` carries the verb, the path, the parameters and the
-//! partial depth, and has no extractor on it. `cx.extract()` works in
-//! `plugins::announce!`, at startup, where the context builder is in
-//! scope -- which is the one place this project calls it.
+//! handler reaches it through `Ctx`:
 //!
-//! So enqueue from `src/app.rs`, from a command under `src/commands/`, or
-//! from anything else holding the `Queue`:
+//! ```ignore
+//! let queue = ctx.provided::<Queue, _>().expect("a dispatched request");
+//! queue.enqueue(Welcome {{ user_id: 7 }}).await?;
+//! ```
+//!
+//! `provided` compiles only because this plugin is registered. Drop it and
+//! the line stops building and names `Queue`, which is the whole reason
+//! the provider list lives in the application's type.
+//!
+//! Anything else holding the `Queue` can enqueue too -- `src/app.rs`, a
+//! command under `src/commands/`:
 //!
 //! ```ignore
 //! queue.enqueue(Welcome {{ user_id: 7 }}).await?;
 //! ```
 //!
-//! The plugin half is right and the handler half is missing: `Ctx` needs
-//! to carry the plugin context and expose an extractor. Until it does,
-//! a line claiming otherwise would be a line that does not compile.
+//! The note here used to say a handler could not reach it, because `Ctx`
+//! carried no context. It does now.
 //!
 //! # Where job types go
 //!

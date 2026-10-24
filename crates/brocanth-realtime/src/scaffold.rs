@@ -28,7 +28,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The broker, as a choice on the `brocanth create` menu.
@@ -58,8 +58,7 @@ impl Module for Realtime {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/realtime/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod realtime;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "realtime", "Realtime"));
+        plugin(s, project, "realtime", "Realtime");
         // Also what makes the broker a thing the project reads rather than
         // a field nothing touches: a generated application that warns on
         // its first build is a bad first minute.
@@ -180,7 +179,7 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! ```ignore
 //! // Not from a handler yet: `Ctx` has no extractor. See below.
-//! let realtime: &Broadcast = cx.extract();
+//! let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
 //! let row = Row::new().with("author_id", author);
 //! realtime
 //!     .broker

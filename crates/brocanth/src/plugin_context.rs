@@ -123,6 +123,22 @@ impl<T: ContextItem> Provided for ProvidesContext<T> {
     type Install<E> = With<T, E>;
 }
 
+/// The provider list after `P` is registered on top of `E`.
+///
+/// `AppBuilder` computes this as it goes and never names it. A generated
+/// application has to, because its `App` is a written struct and a struct
+/// field needs a type: the chain is `After<Last, After<.., Base>>`, in
+/// registration order, innermost first.
+///
+/// Spelled out it is
+/// `<<P as Plugin>::Provides as Provided>::Install<E>`, which is correct,
+/// unreadable, and long enough that a generator emitting it has to
+/// reimplement rustfmt's wrapping to produce a formatted file.
+///
+/// A plugin that provides nothing folds away: `NoContext::Install<E>` is
+/// `E`, so `After<P, E>` is `E`.
+pub type After<P, E> = <<P as crate::plugin_api::Plugin>::Provides as Provided>::Install<E>;
+
 // ---------------------------------------------------------------------------
 // The context itself
 // ---------------------------------------------------------------------------

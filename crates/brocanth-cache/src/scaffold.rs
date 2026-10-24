@@ -9,7 +9,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The cache, as a choice on the `brocanth create` menu.
@@ -39,8 +39,7 @@ impl Module for Cache {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/cache/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod cache;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "cache", "Cache"));
+        plugin(s, project, "cache", "Cache");
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin

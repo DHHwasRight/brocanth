@@ -155,7 +155,8 @@ Seams: `MiddlewareCatalog` to *offer* a layer, `Slot::PluginsLayers` to make
 the offer findable by name, `Slot::AppSetup` to mount it at a pattern, and
 `ProvidesContext<T>` to publish a value.
 
-**The offer and the mount work. The context does not reach a handler.** §6.
+**All four work.** §6. What a provider still cannot do is read the
+request it is providing for.
 
 ### 4.3 Service
 
@@ -408,32 +409,102 @@ the header was present — twice. `Response::without_header` now exists and
 Both bugs are the same shape: **a claim in a comment that no test read
 back.**
 
-## 6. The context seam, which is broken
+## 6. The context seam, which reaches a handler now
 
 The user's second kind — *"middleware which needs config and injects into
-context, such as a request logger"* — does not work end to end today, and the
-failure is quiet.
+context, such as a request logger"* — did not work end to end. The failure
+was quiet.
 
-`plugin_context.rs` is good work. The installed provider set lives in the
-application's type, so `cx.get::<RequestId, _>()` either compiles or names
-the missing type. `Slot::AppContext` lets a module write a line that
-publishes a value.
+`plugin_context.rs` was already good work: the installed provider set lives
+in the application's type, so `cx.get::<RequestId, _>()` either compiles or
+names the missing type. What was missing was the last hop. The generated
+`Ctx` was a plain struct — verb, path, query, body, params, headers — and
+the `Slot::AppContext` lines landed inside `plugins::announce!`, which runs
+**once at startup**. Five generated modules told the developer to call
+`cx.extract()` from a handler, and that line did not compile.
 
-**But the generated `Ctx` is a plain struct** (`create.rs:2184`): a verb, a
-path, a query, a body, params and headers. No plugin context, no `extract`.
-The `AppContext` lines land inside `plugins::announce!`, which runs **once at
-startup**. A handler cannot read what a layer published for *this* request.
+### What it took
 
-Three generated modules told the developer to call `cx.extract()` from a
-handler. That line does not compile. The prose was corrected; the gap is the
-type.
+`App` cannot name the builder's type, and `Ctx` has to. So the generator
+writes the provider list out, once, from the same ordered list `register!`
+uses:
 
-**What is needed:** `Ctx` carries the per-request `Context<E>`, and
-`ctx.get::<RequestId>()` is bounded by the same `Has` trait, so a handler
-reading a value no layer publishes fails the build with the module to add.
+```rust
+// src/plugins/mod.rs, written
+type WithLogging = After<crate::plugins::logging::Logging, Base>;
+type WithSessions = After<crate::plugins::sessions::Sessions, WithLogging>;
+pub type Installed = WithSessions;
+```
 
-Until then the "edge" kind is half a kind: it can wrap a request and it
-cannot hand anything forward.
+`After<P, E>` is new in `brocanth::plugin_context`, and it exists for
+legibility: spelled out, one entry is
+`<<P as Plugin>::Provides as Provided>::Install<E>`, and three of those
+nested is a 200-character type whose rustfmt wrapping a generator would
+have to reimplement. One alias per plugin keeps every line short.
+
+The list cannot drift from the chain, because one call writes both:
+
+```rust
+// brocanth_scaffold::snippet
+pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str) {
+    s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+    s.at(Slot::PluginsInstalled).line(format!("crate::plugins::{key}::{ty}"));
+}
+```
+
+Eleven modules call it. If the two lists ever disagree the project does not
+compile, which is the right failure.
+
+`App` then keeps a factory rather than a context, because `App::context()`
+is per-request by design:
+
+```rust
+type ContextFor = Box<dyn Fn() -> Context<plugins::Installed> + Send + Sync>;
+```
+
+The built application moves into that closure at the end of `build()`.
+Nothing else needs it, and it is what keeps the providers reachable once
+`build` has returned a struct that cannot name their type.
+
+### What a handler writes
+
+```rust
+let session = ctx.provided::<Session, _>().expect("a dispatched request");
+```
+
+Ask for a type nothing installs and the build stops:
+
+```text
+error[E0277]: the trait bound `Base: Has<NobodyProvides, _>` is not satisfied
+  --> src/pages/about.rs:62:32
+   |
+62 |         let _ = ctx.provided::<NobodyProvides, _>();
+   |                                ^^^^^^^^^^^^^^ the trait `Has<NobodyProvides, _>`
+   |                                               is not implemented for `Base`
+```
+
+**Why `Option` and not `&T`.** The compile-time claim is untouched: the
+`Has` bound is the whole check, and it fires on the type. The `Option` is
+about where the `Ctx` came from, not about `T`. A request dispatched by
+`src/app.rs` always carries a context, so it is always `Some`; a `Ctx`
+built by hand in a test has no application behind it and therefore no
+providers, and `None` says that rather than panicking. Returning `&T` would
+have meant a panic on exactly the path the module exists to make safe.
+
+`the_scaffold_compiles` appends both assertions to the generated `about.rs`
+and runs them, so the claim is checked from inside a real project.
+
+### What is still a provider and not a layer
+
+`Plugin::provide(&self, &mut ContextBuilder)` does not see the request. A
+value that depends on the request — a session read from a cookie, a current
+user — cannot be built there yet. That is the next piece of this seam, and
+it is a change to the `Plugin` trait rather than to the generator.
+
+A value a *layer* writes is a different thing again, and it cannot have
+this guarantee: a layer is mounted at a pattern, so a type it publishes is
+present on some paths and not others. `try_get` is the honest reader for
+that, and it answers `Option` for a reason that is about the path.
 
 ---
 
@@ -445,6 +516,7 @@ cannot hand anything forward.
 | --- | --- |
 | `AppUses`, `AppPlugins`, `AppSetup`, `AppContext` | read |
 | `PluginsMod`, `PluginsLayers` | read |
+| `PluginsInstalled` | read — the provider list, §6 |
 | `PagesItems`, `CommandsMod`, `ConfigSections` | read |
 | `GitIgnore`, `AgentsSections` | read |
 | `CargoExtra` | **declared, never read** |
@@ -470,7 +542,8 @@ silence. That has already happened once, with a `.gitignore` line.
 | `ModelEvent` / `ModelHook` | works |
 | `plugin_order`, declared `after`/`before` | works |
 | `ShutdownPhase::Begin` / `Drain` | works |
-| `ProvidesContext<T>` | works at startup; **unreachable from a handler** (§6) |
+| `ProvidesContext<T>` | works, and reaches a handler through `Ctx::provided` (§6) |
+| `Plugin::provide` seeing the request | **missing** — a provider cannot read a cookie (§6) |
 | `RouteSource` + `mount_routes` | works; **never generated** (§4.6) |
 | A renderer registry | **does not exist** (§5) |
 
@@ -495,8 +568,10 @@ silence. That has already happened once, with a `.gitignore` line.
    not predict, all of them written up in §5: `jt` named modules by its own
    rule, `sibling()` could not resolve a workspace checkout, and
    `Slot::PagesRoutes` had to exist. It also found two live bugs (§6b).
-3. **Give `Ctx` the plugin context and an extractor.** Unblocks the edge
-   kind, and with it the request logger the user named.
+3. ~~**Give `Ctx` the plugin context and an extractor.**~~ **Done.**
+   `Ctx::provided::<T, _>()`, bounded by `Has`, over a provider list the
+   generator writes from the same ordered list `register!` uses. What
+   remains of this seam is `Plugin::provide` seeing the request (§6).
 4. **Add `Slot::AppMounts` and emit a mount.** Unblocks `brocanth-resource`
    and the admin, both of which are written and unreachable.
 5. **Read the five unread slots, or delete them.** `MiseTasks` and

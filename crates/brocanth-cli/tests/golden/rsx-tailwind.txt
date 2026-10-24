@@ -109,6 +109,7 @@ fn main() -> brocanth_command::anyhow::Result<()> {
 use std::sync::Arc;
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_context::Context;
 use brocanth::routing::{Dispatch, MiddlewareStack, Router};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
@@ -124,7 +125,23 @@ pub struct App {
     pub router: Router<Handler>,
     pub stack: MiddlewareStack<Ctx, Response>,
     pub plugins: Vec<String>,
+    /// Makes this request's context. `pub` because a test that
+    /// drives a handler by hand needs one, which is the same
+    /// reason `router` and `stack` are.
+    pub context: ContextFor,
 }
+
+/// Makes one request's context, from the plugins that provide one.
+///
+/// A boxed closure, because the type the builder ends on is one
+/// nested associated type per plugin and `App` is a written struct.
+/// The closure holds the built application, which is the only thing
+/// that knows which providers to call.
+///
+/// Called per request and not once, because that is what
+/// `App::context` is for: a provider that reads the clock or counts
+/// gets a fresh answer each time.
+type ContextFor = Box<dyn Fn() -> Context<plugins::Installed> + Send + Sync>;
 
 /// Builds it. The only place that decides what this binary is.
 pub fn build() -> Result<App, String> {
@@ -168,10 +185,16 @@ pub fn build() -> Result<App, String> {
     // 4. What the plugins put on the per-request context, said once.
     plugins::announce!(&app);
 
+    let plugins = app.instance_names().map(str::to_string).collect();
+
     Ok(App {
         router,
         stack,
-        plugins: app.instance_names().map(str::to_string).collect(),
+        plugins,
+        // The application moves in here. Nothing else needs it, and
+        // this is what keeps the providers reachable once `build`
+        // has returned a struct that cannot name their type.
+        context: Box::new(move || app.context()),
     })
 }
 
@@ -282,14 +305,16 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
     let (verb, path) = (request.verb, request.path.as_str());
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
-            let mut ctx = Ctx::new(verb, path, matched.params()).sent(
-                &request.query,
-                request.body.to_vec(),
-                request
-                    .headers()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
-                    .collect(),
-            );
+            let mut ctx = Ctx::new(verb, path, matched.params())
+                .with_plugins((app.context)())
+                .sent(
+                    &request.query,
+                    request.body.to_vec(),
+                    request
+                        .headers()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                );
             // The one place a failed handler becomes a response --
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the
@@ -323,7 +348,10 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
 
 brocanth_pages::pages!("src/pages");
 
+use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::routing::{BuildError, Params, Router, Verb};
+
+use crate::plugins;
 
 /// What a handler produces.
 ///
@@ -541,6 +569,9 @@ pub struct Ctx {
     pub body: Vec<u8>,
     params: Vec<(String, String)>,
     headers: Vec<(String, String)>,
+    /// What the plugins put here for this request, or `None` for a context
+    /// built by hand.
+    plugins: Option<Context<plugins::Installed>>,
     /// How many layout layers the client says it already holds.
     ///
     /// Zero unless a request asked for less, so a first load, a crawler
@@ -560,6 +591,7 @@ impl Ctx {
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
             headers: Vec::new(),
+            plugins: None,
             partial: 0,
         }
     }
@@ -579,6 +611,46 @@ impl Ctx {
         self.body = body;
         self.headers = headers;
         self
+    }
+
+    /// What the plugins put on this request's context.
+    ///
+    /// `src/app.rs` calls it once per request, with a context the
+    /// application made from its providers. A `Ctx` built in a test has
+    /// none, which is what the `Option` says.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
+    /// The value a plugin published for this request.
+    ///
+    /// **Compiles only when some registered plugin provides `T`.** Ask for
+    /// a type nothing installs and the build stops and names it; there is
+    /// no string key to misspell and no guard to forget. That check is the
+    /// whole point, and it is the compiler's, not this method's.
+    ///
+    /// `Option` is the other half, and it is about where the `Ctx` came
+    /// from rather than about `T`. A request dispatched by `src/app.rs`
+    /// always has a context, so this is always `Some`. A `Ctx` built by
+    /// hand in a test has no application behind it and so no providers,
+    /// and `None` says that instead of panicking.
+    ///
+    /// The `_` is the position of `T` in the provider list, which is
+    /// always inferred. It is there so two impls do not overlap, and it is
+    /// the same `_` `Context::get` takes.
+    ///
+    /// ```ignore
+    /// let session = ctx.provided::<Session, _>().expect("dispatched");
+    /// ```
+    #[allow(dead_code)]
+    pub fn provided<T, I>(&self) -> Option<&T>
+    where
+        T: ContextItem,
+        plugins::Installed: Has<T, I>,
+    {
+        self.plugins.as_ref().map(|cx| cx.get::<T, I>())
     }
 
     /// What `html!` asks, to leave out the layouts the client has.
@@ -897,6 +969,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
+use brocanth::plugin_context::{After, Base};
 use brocanth::routing::Next;
 
 use crate::pages::{Ctx, Response};
@@ -923,12 +996,28 @@ macro_rules! register {
 }
 pub(crate) use register;
 
+/// What this binary installs on a request's context, as a type.
+///
+/// One `Install` per registered plugin, innermost first, which is exactly
+/// what `register!` builds. The two have to be the same type: if they
+/// drift this file does not compile, which is why the list is written
+/// once and both readers derive from it.
+///
+/// A plugin that puts nothing on the context folds away, because
+/// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
+/// plugins all provide nothing.
+pub type Installed = Base;
+
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
 /// provider set lives in the application's *type*, so an `extract` for a
 /// plugin nobody registered does not compile. That is the modularity claim,
 /// checked by the compiler rather than written in a README.
+///
+/// A handler reads the same values through `Ctx::provided`, which carries
+/// the same check. This runs at startup so a misconfiguration is a failure
+/// to start rather than a failure on the first request that needed it.
 ///
 /// A macro for the reason `register!` is one: the context's type is the
 /// builder's type, and neither is worth spelling.
@@ -960,7 +1049,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
-// brocanth-digest: 7df285b3be677a53
+// brocanth-digest: 351a232ce1aef4b5
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own is a file beside this one; nothing lists it.

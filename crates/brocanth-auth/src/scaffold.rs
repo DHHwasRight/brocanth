@@ -34,7 +34,7 @@
 //!
 //! * **Registration, login, password reset, email verification, sessions and
 //!   identity linking.** All of [`Auth`](crate::Auth), which is one `Arc` and
-//!   one context item, so a handler writes `cx.extract()` and a handler in an
+//!   one context item, so a handler writes `ctx.provided()` and a handler in an
 //!   application that never registered the plugin does not compile.
 //! * **No provider.** The crate's own `default = []` is the argument, in its
 //!   own words: the common case is local accounts and no provider, and that
@@ -79,7 +79,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin_line, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// Accounts, as a choice on the `brocanth create` menu.
@@ -111,8 +111,7 @@ impl Module for Auth {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/auth/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod auth;");
-        s.at(Slot::AppPlugins)
-            .block(plugin_line(project, "auth", "Auth"));
+        plugin(s, project, "auth", "Auth");
         // The services are read at startup, so a brand-new project uses the
         // value it was given rather than warning that nothing does. It also
         // prints the provider count, which is zero, because the number a
@@ -206,7 +205,7 @@ fn plugin_rs(project: &Project) -> String {
 //! ```ignore
 //! use brocanth_auth::mfa::{{Admission, Enrolled, FactorPolicy, FactorSet}};
 //!
-//! let auth: &Services = cx.extract();
+//! let auth = ctx.provided::<Services, _>().expect("a dispatched request");
 //!
 //! // 1. The credential. `login` answers the same shape and takes the same
 //! //    time whether or not the address has an account.
