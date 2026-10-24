@@ -460,7 +460,7 @@ because the argument is still why each one matters.
 | G2 | dp-swap has no mutating verb | open, and now the single biggest blocker |
 | G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
 | G4 | the model layer publishes to nobody | open |
-| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. Four remain. `Ctx` carries the request at last, but has no extractor; `mount_routes` is untouched |
+| G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. Five remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`, `MiseTasks`, `NodeDependencies`. `Ctx` carries the request at last, but has no extractor; `mount_routes` is untouched. See `docs/modules.md` §7 |
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | open |
@@ -469,6 +469,7 @@ because the argument is still why each one matters.
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
+| G13 | **a template engine is a special case, not a module** | open: `rsx` is named as a literal in four places and its three `contribute()` bodies are empty, so a second renderer has nowhere to attach. See `docs/modules.md` |
 
 **G11 was worse than the audit said.** `docs/middleware.md` §4 called form
 decoding "the real gap" and described a POST handler reading `Vec<u8>` and
