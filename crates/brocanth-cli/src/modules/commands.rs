@@ -232,7 +232,10 @@ mod tests {
         let out = written(&["commands"]);
         assert!(!out.contains("described()"), "{out}");
         assert!(!out.contains("TAKES"), "{out}");
-        assert!(out.contains(r#"vec!["VERB", "PATTERN", "HANDLER"]"#), "{out}");
+        assert!(
+            out.contains(r#"vec!["VERB", "PATTERN", "HANDLER"]"#),
+            "{out}"
+        );
     }
 
     #[test]

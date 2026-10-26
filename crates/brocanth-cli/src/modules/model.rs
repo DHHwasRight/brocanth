@@ -58,7 +58,11 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 //! through no other route. An application that stores nothing pays nothing for
 //! it: not a crate in the lock file, not a section in the config, not a byte.
 //!
-//! The entity modules go under `src/models/`, from `brocanth generate model`.
+//! The entity modules go under `src/models/`, and you write them by hand: a
+//! struct deriving `DeriveEntityModel` with `#[brocanth_model::validates(..)]`
+//! above it, as `brocanth_model`'s own documentation sets out. There is no
+//! `brocanth generate model` -- the CLI scaffolds a project and adds a module
+//! to one, and a generator for a single entity is not written yet.
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
@@ -114,11 +118,13 @@ impl Plugin for Model {{
         // The pool opens here, at the last hook before the server is handed the
         // application, and drains on the matching shutdown hook.
         //
-        // The registry below is what makes the generators and an admin UI
+        // The registry below is what would make a generator and an admin UI
         // tractable: every entity compiled into this binary can be enumerated,
-        // with its columns, nullability and keys. It is empty until the first
-        // `brocanth generate model`, and the line is here so it is not a
-        // surprise when it fills.
+        // with its columns, nullability and keys. It reads an inventory that
+        // `DeriveEntityModel` fills, so it counts every model linked in,
+        // whoever wrote it. The count is zero until the first entity module
+        // exists under `src/models/`, and the line is here so that it is not
+        // a surprise when it fills.
         let registry = ModelRegistry::new();
         eprintln!("[model] {{}} entities registered", registry.names().len());
         Ok(())
