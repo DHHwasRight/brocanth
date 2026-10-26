@@ -136,6 +136,8 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
         TokenStream2::new()
     };
 
+    let handlers = handler_table(&pages);
+
     quote! {
         #mods
 
@@ -144,6 +146,8 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
         #helpers
 
         #described
+
+        #handlers
 
         /// The table, read off `src/pages` while this crate was compiled.
         ///
@@ -158,6 +162,46 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
             let mut routes = Router::builder();
             #(#rows)*
             routes.build()
+        }
+    }
+}
+
+/// Every route, the verb that answers it, and the function behind it.
+///
+/// [`Router`] keeps a pattern and a verb set and drops the file on the way,
+/// and the file cannot be worked back from the URL: `users.rs` and
+/// `users/index.rs` are both `/users`. So "which function answers this" is
+/// a fact that has to be carried rather than derived, and `brocanth routes`
+/// is the reader that needs it -- a listing that cannot name the file to
+/// open is a listing somebody has to grep around.
+///
+/// Emitted always, unlike [`described`]: it names nothing outside this
+/// expansion, so it costs a project no dependency.
+///
+/// [`Router`]: brocanth::routing::Router
+fn handler_table(pages: &[Page]) -> TokenStream2 {
+    let rows = pages.iter().flat_map(|page| {
+        let template = &page.template;
+        let module = page.module.join("::");
+        page.handlers.iter().map(move |found| {
+            let verb = ident(found.verb_ident);
+            let path = format!("{module}::{}", found.name);
+            quote!((Verb::#verb, #template, #path))
+        })
+    });
+
+    quote! {
+        /// Every route, with the page function that answers it.
+        ///
+        /// One row per verb: the verb, the route as a document writes it,
+        /// and the path of the handler from this module down, such as
+        /// `users::_id_::handle_post`.
+        ///
+        /// Read off `src/pages` while this crate was compiled, like the
+        /// router itself, so the two cannot disagree.
+        #[allow(dead_code)]
+        pub fn handlers() -> &'static [(Verb, &'static str, &'static str)] {
+            &[#(#rows),*]
         }
     }
 }
@@ -675,6 +719,34 @@ mod tests {
         assert!(out.contains(r#""GET""#), "{out}");
         assert!(out.contains(r#""POST""#), "{out}");
         assert!(!out.contains(r#""DELETE""#), "{out}");
+    }
+
+    #[test]
+    fn every_route_carries_the_function_that_answers_it() {
+        // The pattern does not say which file it came from, so a listing
+        // that printed only the URL would send a reader grepping.
+        let out = table(&[(
+            "users/[id].rs",
+            "pub fn handle(c: &mut Ctx) -> R { }\npub fn handle_post(c: &mut Ctx) -> R { }",
+        )]);
+        assert!(
+            out.contains(r#"(Verb :: Get , "/users/{id}" , "users::_id_::handle")"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"(Verb :: Post , "/users/{id}" , "users::_id_::handle_post")"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_handler_table_is_there_without_describe() {
+        // `described` names `brocanth_input` and `zod`, so it is the
+        // opt-in. This one names nothing, so it costs nothing and is
+        // always emitted.
+        let out = table(&[("index.rs", GET)]);
+        assert!(out.contains("pub fn handlers ()"), "{out}");
+        assert!(!out.contains("pub fn described ()"), "{out}");
     }
 
     #[test]
