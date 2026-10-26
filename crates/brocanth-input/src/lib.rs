@@ -40,6 +40,23 @@
 //! has no types to lose; a JSON body that sends text for a number has a bug
 //! this will not hide.
 //!
+//! # An upload
+//!
+//! A `multipart/form-data` body is the third carrier, and it is the one that
+//! carries two kinds of thing at once. The same struct reads its text
+//! fields, under the same rules a urlencoded form gets, and the files arrive
+//! beside the struct rather than inside it:
+//!
+//! ```ignore
+//! let signup: Signup = Signup::parse(at.input()?)?;   // the text fields
+//! let photo = at.multipart()?.file("photo");          // the bytes
+//! ```
+//!
+//! A file goes on to `brocanth-storage`, which reads the real media type off
+//! the bytes and treats the client's claim as a claim. Every cap a multipart
+//! body is read under is in [`multipart::Limits`], and a body over one of
+//! them is a 413.
+//!
 //! # Where this sits beside `brocanth-schema`
 //!
 //! They answer different questions and they do not overlap.
@@ -61,11 +78,13 @@
 use std::fmt;
 
 pub use described::Described;
+pub use multipart::{FilePart, Limits, Multipart};
 pub use zod;
 
 use zod::{Faults, Input, Refusal, Value};
 
 pub mod described;
+pub mod multipart;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
@@ -79,6 +98,7 @@ pub struct Entrance<'r> {
     content_type: Option<&'r str>,
     query: &'r str,
     body: &'r [u8],
+    limits: Limits,
 }
 
 /// What the body is written in.
@@ -88,6 +108,8 @@ pub enum Carrier<'r> {
     Form,
     /// `application/json`, or a type that ends in `+json`.
     Json,
+    /// `multipart/form-data`: text fields and files in one body.
+    Multipart,
     /// A type this crate does not read.
     Other(&'r str),
     /// No `content-type` header at all.
@@ -95,7 +117,7 @@ pub enum Carrier<'r> {
 }
 
 impl<'r> Entrance<'r> {
-    /// Build one from the parts of a request.
+    /// Build one from the parts of a request, under [`Limits::DEFAULT`].
     pub const fn new(
         content_type: Option<&'r str>,
         query: &'r str,
@@ -105,7 +127,21 @@ impl<'r> Entrance<'r> {
             content_type,
             query,
             body,
+            limits: Limits::DEFAULT,
         }
+    }
+
+    /// The same entrance, under caps the caller chose.
+    ///
+    /// Only multipart reads them. A urlencoded or JSON body is capped by the
+    /// server, which refuses it before this crate sees a byte.
+    pub const fn with_limits(self, limits: Limits) -> Entrance<'r> {
+        Entrance { limits, ..self }
+    }
+
+    /// The caps this entrance reads a multipart body under.
+    pub const fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// What the body is written in.
@@ -122,9 +158,34 @@ impl<'r> Entrance<'r> {
             || kind.to_ascii_lowercase().ends_with("+json")
         {
             Carrier::Json
+        } else if kind.eq_ignore_ascii_case("multipart/form-data") {
+            Carrier::Multipart
         } else {
             Carrier::Other(said)
         }
+    }
+
+    /// The boundary the content type names, for a multipart body.
+    pub fn boundary(&self) -> Option<&'r str> {
+        multipart::boundary(self.content_type?)
+    }
+
+    /// Read a `multipart/form-data` body: the text fields and the files.
+    ///
+    /// Whatever the content type says, as long as it names a boundary --
+    /// the same deliberate call [`Entrance::as_form`] is, for the same
+    /// reason.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable::Unsaid`] when no content type arrived, and
+    /// [`Unreadable::Multipart`] for a body this crate cannot follow or one
+    /// over a cap. A cap answers 413 and the rest answer 400.
+    pub fn multipart(&self) -> Result<Multipart, Unreadable> {
+        let said = self.content_type.ok_or(Unreadable::Unsaid)?;
+        let boundary =
+            multipart::boundary(said).ok_or(Unreadable::Multipart(multipart::Fault::NoBoundary))?;
+        Multipart::parse_with(self.body, boundary, self.limits).map_err(Unreadable::Multipart)
     }
 
     /// Read the body into input a schema can take.
@@ -133,12 +194,17 @@ impl<'r> Entrance<'r> {
     /// then reports itself missing, which is a 422 a person can act on
     /// rather than a 400 that says only that something was wrong.
     ///
+    /// An upload gives its text fields here and its files to
+    /// [`Entrance::multipart`], because a schema has no rule that reads
+    /// bytes.
+    ///
     /// # Errors
     ///
-    /// A body this crate cannot read: not UTF-8, not valid JSON, or a
-    /// content type it has no reader for. A body with no content type at
-    /// all is refused for the same reason `ContentTypes` refuses one --
-    /// the alternative is to guess.
+    /// A body this crate cannot read: not UTF-8, not valid JSON, an upload
+    /// it cannot follow or one over a cap, or a content type it has no
+    /// reader for. A body with no content type at all is refused for the
+    /// same reason `ContentTypes` refuses one -- the alternative is to
+    /// guess.
     pub fn input(&self) -> Result<Input, Unreadable> {
         if self.body.is_empty() {
             return Ok(Input::flat(Value::Map(Vec::new())));
@@ -149,6 +215,18 @@ impl<'r> Entrance<'r> {
                 let parsed: serde_json::Value = serde_json::from_slice(self.body)
                     .map_err(|e| Unreadable::BadJson(e.to_string()))?;
                 Ok(Input::json(parsed))
+            }
+            Carrier::Multipart => {
+                // Only the text fields. A handler that wants the files calls
+                // `multipart()`, which is the one call that holds bytes --
+                // this one walks them, counts them against their cap and
+                // copies none of them.
+                let said = self.content_type.unwrap_or_default();
+                let boundary = multipart::boundary(said)
+                    .ok_or(Unreadable::Multipart(multipart::Fault::NoBoundary))?;
+                let sent = Multipart::fields_only(self.body, boundary, self.limits)
+                    .map_err(Unreadable::Multipart)?;
+                Ok(sent.input())
             }
             Carrier::Other(kind) => Err(Unreadable::NoReader(kind.to_string())),
             Carrier::Unsaid => Err(Unreadable::Unsaid),
@@ -202,17 +280,22 @@ pub enum Unreadable {
     NoReader(String),
     /// A body arrived with no content type.
     Unsaid,
+    /// A `multipart/form-data` body this crate could not follow, or one over
+    /// a cap.
+    Multipart(multipart::Fault),
 }
 
 impl Unreadable {
     /// The status this deserves.
     ///
     /// 415 when the type is the problem and the client can pick another
-    /// one; 400 when the bytes are the problem and no type would help.
+    /// one; 400 when the bytes are the problem and no type would help; 413
+    /// when the body is over a cap, which only a multipart body can be.
     pub const fn status(&self) -> u16 {
         match self {
             Unreadable::NoReader(_) | Unreadable::Unsaid => 415,
             Unreadable::NotText | Unreadable::BadJson(_) => 400,
+            Unreadable::Multipart(fault) => fault.status(),
         }
     }
 }
@@ -228,6 +311,7 @@ impl fmt::Display for Unreadable {
             Unreadable::Unsaid => {
                 f.write_str("a body arrived with no content-type; send a form or JSON")
             }
+            Unreadable::Multipart(fault) => write!(f, "the upload could not be read: {fault}"),
         }
     }
 }
@@ -424,6 +508,137 @@ mod tests {
             age: 200,
         };
         assert_eq!(wrong.check().len(), 3);
+    }
+
+    // -- multipart -------------------------------------------------------
+
+    const MULTI: &str = "multipart/form-data; boundary=x";
+
+    /// A body with a text field and a file, written the way a browser does.
+    fn upload() -> Vec<u8> {
+        b"--x\r\n\
+          Content-Disposition: form-data; name=\"handle\"\r\n\r\n\
+          ada-lovelace\r\n\
+          --x\r\n\
+          Content-Disposition: form-data; name=\"age\"\r\n\r\n\
+          36\r\n\
+          --x\r\n\
+          Content-Disposition: form-data; name=\"photo\"; filename=\"cat.png\"\r\n\
+          Content-Type: image/png\r\n\r\n\
+          \x89PNG\r\n\x1a\n\r\n\
+          --x--\r\n"
+            .to_vec()
+    }
+
+    #[test]
+    fn a_multipart_body_is_a_carrier_of_its_own() {
+        let at = Entrance::new(Some(MULTI), "", b"");
+        assert_eq!(at.carrier(), Carrier::Multipart);
+        assert_eq!(at.boundary(), Some("x"));
+
+        let cased = Entrance::new(Some("Multipart/Form-Data; boundary=\"a b\""), "", b"");
+        assert_eq!(cased.carrier(), Carrier::Multipart);
+        assert_eq!(cased.boundary(), Some("a b"));
+    }
+
+    #[test]
+    fn a_multipart_bodys_text_fields_are_checked_by_the_rules_a_form_gets() {
+        let body = upload();
+        let at = Entrance::new(Some(MULTI), "", &body);
+        let signup = Signup::parse(at.input().unwrap()).unwrap();
+
+        assert_eq!(
+            signup,
+            Signup {
+                handle: "ada-lovelace".into(),
+                age: 36
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_struct_reads_a_form_a_json_body_and_an_upload() {
+        let body = upload();
+        let cases: [(&str, &[u8]); 3] = [
+            (FORM, b"handle=ada-lovelace&age=36"),
+            (
+                "application/json",
+                br#"{"handle": "ada-lovelace", "age": 36}"#,
+            ),
+            (MULTI, &body),
+        ];
+        for (kind, bytes) in cases {
+            let at = Entrance::new(Some(kind), "", bytes);
+            assert_eq!(
+                Signup::parse(at.input().unwrap()).unwrap().age,
+                36,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_upload_refuses_the_whole_body_rather_than_half_of_it() {
+        let at = Entrance::new(Some(MULTI), "", b"--x\r\nContent-Dispo");
+        let why = at.input().unwrap_err();
+
+        assert_eq!(why, Unreadable::Multipart(multipart::Fault::NoHeaderEnd));
+        assert_eq!(why.status(), 400);
+        assert!(why.to_string().contains("headers have no end"));
+    }
+
+    #[test]
+    fn a_multipart_type_with_no_boundary_is_four_hundred_and_not_a_guess() {
+        let at = Entrance::new(Some("multipart/form-data"), "", b"--x--\r\n");
+        let why = at.input().unwrap_err();
+
+        assert_eq!(why, Unreadable::Multipart(multipart::Fault::NoBoundary));
+        assert_eq!(why.status(), 400);
+    }
+
+    #[test]
+    fn the_files_arrive_beside_the_struct_and_not_inside_it() {
+        let body = upload();
+        let at = Entrance::new(Some(MULTI), "", &body);
+
+        let signup = Signup::parse(at.input().unwrap()).unwrap();
+        assert_eq!(signup.handle, "ada-lovelace");
+
+        let sent = at.multipart().unwrap();
+        let photo = sent.file("photo").unwrap();
+        assert_eq!(photo.filename(), Some("cat.png"));
+        assert_eq!(photo.declared_type(), Some("image/png"));
+        assert_eq!(photo.bytes(), b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn a_body_over_a_cap_is_four_hundred_and_thirteen_at_the_entrance() {
+        let tight = Limits {
+            total_bytes: 32,
+            ..Limits::DEFAULT
+        };
+        let body = upload();
+        let at = Entrance::new(Some(MULTI), "", &body).with_limits(tight);
+
+        assert_eq!(at.limits().total_bytes, 32);
+        for why in [at.input().unwrap_err(), at.multipart().unwrap_err()] {
+            assert_eq!(why.status(), 413);
+            assert_eq!(unreadable(&why).status, 413);
+        }
+    }
+
+    #[test]
+    fn an_upload_with_no_content_type_at_all_is_refused_before_it_is_parsed() {
+        let body = upload();
+        let at = Entrance::new(None, "", &body);
+        assert_eq!(at.multipart().unwrap_err(), Unreadable::Unsaid);
+    }
+
+    #[test]
+    fn an_empty_upload_is_an_empty_object_like_every_other_empty_body() {
+        let at = Entrance::new(Some(MULTI), "", b"");
+        let faults = Signup::parse(at.input().unwrap()).unwrap_err();
+        assert_eq!(faults.len(), 2);
     }
 
     #[test]
