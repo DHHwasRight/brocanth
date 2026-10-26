@@ -500,6 +500,29 @@ pub enum Slot {
     /// `report.jt`, the route table ignores both because neither is a
     /// `.rs` file, and each engine compiles its own tree.
     PagesRenderers,
+    /// One line per route source a module contributes, placed inside the
+    /// generated `pages::mounted`.
+    ///
+    /// A generated project has one route table. The pages fill it from the
+    /// directory; a module fills it from here; a declarative routes file
+    /// fills it the same way. Because it is one table, a path claimed
+    /// twice is a build error rather than whichever source ran last.
+    ///
+    /// The line calls a function with the shape every route source in a
+    /// generated project offers:
+    ///
+    /// ```ignore
+    /// pub fn mount(
+    ///     routes: &mut RouterBuilder<Handler>,
+    ///     prefix: &str,
+    /// ) -> Result<(), BuildError>;
+    /// ```
+    ///
+    /// The prefix is the application's decision and not the module's,
+    /// which is the rule `plugin_routes` already states for the core: a
+    /// path is a decision, and a module that mounted itself would be
+    /// making it.
+    RouterMounts,
     /// One route pattern per page a module writes, as the route table
     /// spells it: `/status`, `/users/{id}`.
     ///
@@ -545,6 +568,7 @@ impl fmt::Display for Slot {
             Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
+            Slot::RouterMounts => "src/pages/mod.rs (the mounted routes)",
             Slot::PagesRoutes => "src/pages/mod.rs (the route table test)",
             Slot::PagesItems => "src/pages/mod.rs",
             Slot::CommandsMod => "src/commands/mod.rs",

@@ -108,21 +108,27 @@ pub fn pages(input: TokenStream) -> TokenStream {
              `brocanth_pages::pages!(\"src/pages\")`",
         );
     };
-    // The one word this macro takes after the path. Spelled out rather
-    // than a `bool`, because `pages!("src/pages", true)` says nothing at
-    // the call site about what is true.
-    let describe = match rest {
-        "" => false,
-        "describe" => true,
-        other => {
-            return error(&format!(
-                "`{other}` is not a word this macro knows. After the path \
-                 it takes `describe`, which emits what every route takes \
-                 and gives, as in `pages!(\"src/pages\", describe)`"
-            ))
+    // Words rather than booleans, because `pages!("src/pages", true, true)`
+    // says nothing at the call site about what is true. Order does not
+    // matter and a word may appear once.
+    let mut describe = false;
+    let mut mounts = false;
+    for word in rest.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        match word {
+            "describe" => describe = true,
+            "mounts" => mounts = true,
+            other => {
+                return error(&format!(
+                    "`{other}` is not a word this macro knows. After the path \
+                     it takes `describe`, which emits what every route takes \
+                     and gives, and `mounts`, which lets the table hold routes \
+                     a module contributed -- as in \
+                     `pages!(\"src/pages\", describe, mounts)`"
+                ))
+            }
         }
-    };
-    table::expand(Path::new(&root), &manifest_dir(), describe).into()
+    }
+    table::expand(Path::new(&root), &manifest_dir(), describe, mounts).into()
 }
 
 /// The path out of `pages!("...")`, without pulling in a parser for it.

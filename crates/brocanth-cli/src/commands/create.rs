@@ -1625,7 +1625,6 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          use std::sync::Arc;\n\
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
-
          use brocanth::routing::{{Dispatch, MiddlewareStack, Router}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
@@ -2583,6 +2582,25 @@ fn upper_camel(key: &str) -> String {
     out
 }
 
+/// The opening of the generated `pages::mounted`.
+///
+/// `pages!("src/pages", mounts)` calls this and does not write it, so the
+/// generator owns the body and a module owns one line of it.
+const MOUNTED_HEAD: &str = "\
+/// Every route this project did not read off `src/pages`.
+///
+/// One table holds all of them. A module contributes routes by offering a
+/// `mount` and the application decides the prefix, which is the same rule
+/// the core states for a plugin: a path is a decision, so a module that
+/// mounted itself would be making one on the application's behalf.
+///
+/// A prefix two sources both claim is a `BuildError` naming the pattern,
+/// rather than whichever of them happened to run last.
+fn mounted(
+    routes: &mut ::brocanth::routing::RouterBuilder<Handler>,
+) -> Result<(), ::brocanth::routing::BuildError> {
+";
+
 /// The header over the generated `Installed` alias.
 ///
 /// A const rather than a `\n\`-continued literal: that form keeps this
@@ -2648,6 +2666,19 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     for block in built.slot(Slot::PagesRenderers) {
         out.push_str(block);
     }
+    // The other two sources of the one route table. A module that
+    // contributes routes writes a line here; a declarative routes file
+    // writes one too. The pages are already in the builder by the time
+    // this runs, so a path claimed twice is a `BuildError` naming both --
+    // which is the property that makes one table worth having.
+    if !built.slot_is_empty(Slot::RouterMounts) {
+        out.push_str(MOUNTED_HEAD);
+        for line in built.slot(Slot::RouterMounts) {
+            out.push_str(line);
+        }
+        out.push_str("    Ok(())\n}\n\n");
+    }
+
     // What the chosen modules add to the pages: another `impl Ctx`, a
     // helper every handler shares. Before the tests, because an item after
     // a `mod tests` block is what clippy calls `items_after_test_module`.
@@ -2670,6 +2701,14 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // which names `brocanth_input` and `zod`. A project that chose
     // neither must not be made to depend on them by a macro.
     let describe = if a.has("input") { ", describe" } else { "" };
+    // The second word, and only when something mounts. `mounted` is a
+    // function the macro calls and does not write, so a project with
+    // nothing to mount must not be told to call it.
+    let mounts = if built.slot_is_empty(Slot::RouterMounts) {
+        ""
+    } else {
+        ", mounts"
+    };
 
     // Every route this project has, including the ones a module's own page
     // brought. The list is written down because a route is a file and the
@@ -2708,7 +2747,7 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
         .replace("@DEPTH_FIELD@", field)
         .replace("@DEPTH_INIT@", init)
         .replace("@DEPTH_IMPL@", &format!("{setter}{methods}"))
-        .replace("@DESCRIBE@", describe)
+        .replace("@DESCRIBE@", &format!("{describe}{mounts}"))
 }
 
 fn index_rs(a: &Answers) -> String {
@@ -3435,6 +3474,42 @@ mod tests {
                 line.len()
             );
         }
+    }
+
+    #[test]
+    fn a_module_that_mounts_routes_reaches_the_one_table() {
+        // The seam a declarative routes file and a route bundle both use.
+        // Nothing in the menu writes it yet, so the test writes the line a
+        // module would and reads the file the generator makes.
+        let a = answers(&["rsx"]);
+        let mut built = contributions(&a).expect("a project");
+        built.now_writing("records");
+        built.at(Slot::RouterMounts).line(
+            "    crate::plugins::records::mount(routes, \"/api\")?;",
+        );
+
+        let pages = pages_mod_rs(&a, &built);
+        assert!(
+            pages.contains("fn mounted(") && pages.contains("records::mount(routes, \"/api\")"),
+            "the module's line did not reach `mounted`:\n{pages}"
+        );
+        // And the macro is told to call it. Without the word the function
+        // would be written and never run, which is the failure this pair
+        // of changes exists to make impossible.
+        assert!(
+            pages.contains("pages!(\"src/pages\", mounts)"),
+            "the macro was not told to call `mounted`:\n{pages}"
+        );
+    }
+
+    #[test]
+    fn a_project_that_mounts_nothing_is_not_told_to_call_mounted() {
+        // `mounted` is a function the macro calls and does not write, so a
+        // project with no mounts must not be asked for one.
+        let a = answers(&["rsx"]);
+        let pages = pages_mod_rs(&a, &built_for(&a));
+        assert!(!pages.contains("fn mounted("), "{pages}");
+        assert!(!pages.contains(", mounts"), "{pages}");
     }
 
     #[test]

@@ -63,7 +63,7 @@ const VERBS: [(&str, &str, Verb); 7] = [
     ("handle_options", "Options", Verb::Options),
 ];
 
-pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
+pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> TokenStream2 {
     let absolute = manifest.join(root);
     let mut pages = Vec::new();
     if let Err(message) = collect(&absolute, &absolute, &mut pages) {
@@ -136,6 +136,20 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
         TokenStream2::new()
     };
 
+    // One table, three sources. The pages are the rows above; a module's
+    // routes and a declarative routes file arrive through `mounted`, which
+    // the generator writes from what the modules asked for.
+    //
+    // Behind a word rather than always, because `mounted` is a function
+    // this macro does not write: a project that never mounts anything must
+    // not be made to define an empty one, and every `pages!` call written
+    // before this existed has to keep compiling.
+    let mounted = if mounts {
+        quote!(crate::pages::mounted(&mut routes)?;)
+    } else {
+        TokenStream2::new()
+    };
+
     let handlers = handler_table(&pages);
 
     quote! {
@@ -161,6 +175,7 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool) -> TokenStream2 {
         pub fn router() -> Result<Router<Handler>, BuildError> {
             let mut routes = Router::builder();
             #(#rows)*
+            #mounted
             routes.build()
         }
     }
@@ -599,9 +614,26 @@ mod tests {
 
     fn table(files: &[(&str, &str)]) -> String {
         let root = tree(files);
-        let out = expand(Path::new("src/pages"), &root, false).to_string();
+        let out = expand(Path::new("src/pages"), &root, false, false).to_string();
         let _ = std::fs::remove_dir_all(&root);
         out
+    }
+
+    #[test]
+    fn the_table_calls_mounted_only_when_it_was_asked_to() {
+        // `mounted` is written by the generator, not by this macro, so a
+        // project that mounts nothing must not be told to call a function
+        // nobody wrote.
+        let root = tree(&[("index.rs", "pub fn handle() {}")]);
+        let plain = expand(Path::new("src/pages"), &root, false, false).to_string();
+        assert!(!plain.contains("mounted"), "{plain}");
+
+        let mounting = expand(Path::new("src/pages"), &root, false, true).to_string();
+        assert!(
+            mounting.contains("crate :: pages :: mounted (& mut routes)"),
+            "{mounting}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     const GET: &str = "pub fn handle(ctx: &mut Ctx) -> Result<(), Error> { Ok(()) }";
