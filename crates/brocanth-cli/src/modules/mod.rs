@@ -89,6 +89,10 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_input::scaffold::Entry,
     &brocanth_client::scaffold::Client,
     &brocanth_middleware::scaffold::Middleware,
+    // The sixth hook in that crate, and the only one that arrives ticked:
+    // the other five are a fact about somebody's network, and this one is
+    // a fact about browsers.
+    &brocanth_middleware::scaffold::Csrf,
     // The document, served at `/openapi.json` as a page, because a route
     // here is a file.
     &brocanth_openapi::scaffold::OpenApi,

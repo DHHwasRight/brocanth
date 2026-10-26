@@ -1680,7 +1680,10 @@ mod tests {
         let mut m = registry(Tab::Expert);
         let commands = m.draft.at("commands").expect("commands");
         m.set(commands, false);
-        let screen = render(&m, None, 72, 40);
+        // Taller than the table, with room to spare. This test is about
+        // wrapping, and a height that exactly fits today's menu is a test
+        // that fails the next time a module joins it.
+        let screen = render(&m, None, 72, 60);
         // Whichever choice the untick took with it, the note names it and
         // the sentence finishes. `commands` carries more than one now, and
         // the panel shows the last.

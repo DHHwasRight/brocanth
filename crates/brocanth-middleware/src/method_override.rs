@@ -22,7 +22,7 @@ use brocanth::plugin_hooks::{
     Flow, HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState,
 };
 
-use crate::text;
+use crate::{form_field, text};
 
 /// The header Gorilla reads, and the one every client library sends.
 const HEADER: &str = "x-http-method-override";
@@ -147,61 +147,8 @@ fn from_header(request: &Request) -> Option<http::Method> {
 }
 
 fn from_field(request: &Request, field: &str) -> Option<http::Method> {
-    let kind = text(request.headers(), http::header::CONTENT_TYPE)?;
-    // `application/x-www-form-urlencoded; charset=utf-8` is the same type.
-    if !kind
-        .split(';')
-        .next()
-        .unwrap_or(kind)
-        .trim()
-        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-    {
-        return None;
-    }
-    let body = std::str::from_utf8(request.body()).ok()?;
-    let raw = body.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (decode(key) == field).then(|| decode(value))
-    })?;
+    let raw = form_field(request, field)?;
     raw.trim().to_ascii_uppercase().parse().ok()
-}
-
-/// Percent and plus decoding, enough for a field name and a verb.
-///
-/// A full form decoder belongs in the crate that fills a struct from a
-/// body. This reads two short ASCII tokens, and a dependency for that
-/// would be the whole cost of this crate.
-fn decode(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut out = String::with_capacity(raw.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'+' => {
-                out.push(' ');
-                at += 1;
-            }
-            b'%' if at + 2 < bytes.len() => {
-                let hex = &raw[at + 1..at + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte as char);
-                        at += 3;
-                    }
-                    Err(_) => {
-                        out.push('%');
-                        at += 1;
-                    }
-                }
-            }
-            _ => {
-                let ch = raw[at..].chars().next().expect("at a boundary");
-                out.push(ch);
-                at += ch.len_utf8();
-            }
-        }
-    }
-    out
 }
 
 /// The verbs a form is allowed to become.
@@ -334,9 +281,9 @@ mod tests {
 
     #[test]
     fn a_percent_encoded_field_still_matches() {
-        assert_eq!(decode("_method"), "_method");
-        assert_eq!(decode("a+b"), "a b");
-        assert_eq!(decode("%44ELETE"), "DELETE");
+        assert_eq!(crate::decode("_method"), "_method");
+        assert_eq!(crate::decode("a+b"), "a b");
+        assert_eq!(crate::decode("%44ELETE"), "DELETE");
         let (request, _) = run(post(
             &[("content-type", "application/x-www-form-urlencoded")],
             "_method=%44elete",

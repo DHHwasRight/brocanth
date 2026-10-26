@@ -70,7 +70,7 @@ format strings over fields brocanth already has.
 | Repository | What it is | brocanth | State |
 |---|---|---|---|
 | `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | the route table knows this | open, and better here than in Gorilla: the table is complete at build time |
-| `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `AsyncRequestHook` + `sessions` | **blocked** on dp-swap's missing mutating verb (gaps G2) |
+| `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `Csrf`, in this crate | **written**: a double-submit cookie, and §5 says what is still between it and a generated project |
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
 | `gorilla/schema` | fills a struct from form values | `brocanth-schema` validates, it does not decode a form | **done**: `brocanth-input`, and a form, a JSON body and a query string all read the same struct. See `docs/input.md` |
@@ -92,3 +92,36 @@ Gorilla has to ask the router at request time which methods a path has.
 Here the route table is complete when the binary is built, so the allowed
 methods for a path are known before the first request — and so is the
 answer to a preflight for a path that exists with the wrong verb.
+
+## 5. CSRF, and what it is waiting for
+
+`brocanth_middleware::Csrf` is a `RequestHook` that refuses any verb that
+is not GET, HEAD, OPTIONS or TRACE without a token, and a `ResponseHook`
+that mints the token and sets the cookie. The comparison is constant time
+and folds the two lengths in, so a short token costs what a long one
+costs.
+
+**Why double-submit and not a synchroniser token.** The scaffolded
+`Session` carries one field, `cookie`, and it is the cookie *name*. There
+is no per-session secret to bind a signed token to, so a plugin that
+claimed to be a synchroniser token would be claiming a secret it does not
+have. This one owns both halves: it mints the value, sets its own cookie,
+and compares the field against that cookie. What it does not stop is
+written in the module header -- chiefly somebody who can write a cookie on
+this site's domain.
+
+**What is between it and a generated project.** Two pieces of the
+generator, and neither is in this crate:
+
+1. `plugins::Hooks` is written as `NoHooks` whatever registered.
+   `plugin_hooking` widens that record, so the registration does not
+   compile until the alias is built the way `Installed` already is.
+2. `dispatch` in a generated `src/app.rs` goes from the route table to the
+   handler. The hook pipeline is `App::run`, which that file never calls,
+   so no hook in this crate runs in a generated project -- the five above
+   included. `brocanth_server::Bridge` is the piece that runs it.
+
+Both were found by generating a project, serving it and posting to it, not
+by reading. The dp-swap gap G2 is still real and still separate: it is
+about a client sending the token on a mutating request, and the server-side
+check does not wait on it.

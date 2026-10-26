@@ -109,7 +109,6 @@ fn main() -> brocanth_command::anyhow::Result<()> {
 use std::sync::Arc;
 
 use brocanth::plugin_app::AppBuilder;
-use brocanth::plugin_context::Context;
 use brocanth::routing::{Dispatch, MiddlewareStack, Router};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
@@ -125,23 +124,21 @@ pub struct App {
     pub router: Router<Handler>,
     pub stack: MiddlewareStack<Ctx, Response>,
     pub plugins: Vec<String>,
-    /// Makes this request's context. `pub` because a test that
-    /// drives a handler by hand needs one, which is the same
-    /// reason `router` and `stack` are.
-    pub context: ContextFor,
+    /// The application the plugins built.
+    ///
+    /// Held rather than dropped, because three things need it
+    /// after `build` returns: a per-request context, the routes a
+    /// plugin contributed, and an HTTP test client. It used to be
+    /// a boxed closure over `context()` alone, which cost an
+    /// indirect call per request and reached none of the rest.
+    ///
+    /// Nameable at last: `plugins::Installed` and `plugins::Hooks`
+    /// are the two type parameters, and the generator writes both.
+    pub core: Core,
 }
 
-/// Makes one request's context, from the plugins that provide one.
-///
-/// A boxed closure, because the type the builder ends on is one
-/// nested associated type per plugin and `App` is a written struct.
-/// The closure holds the built application, which is the only thing
-/// that knows which providers to call.
-///
-/// Called per request and not once, because that is what
-/// `App::context` is for: a provider that reads the clock or counts
-/// gets a fresh answer each time.
-type ContextFor = Box<dyn Fn() -> Context<plugins::Installed> + Send + Sync>;
+/// The built application, with its provider list and hook record.
+type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;
 
 /// Builds it. The only place that decides what this binary is.
 pub fn build() -> Result<App, String> {
@@ -191,10 +188,7 @@ pub fn build() -> Result<App, String> {
         router,
         stack,
         plugins,
-        // The application moves in here. Nothing else needs it, and
-        // this is what keeps the providers reachable once `build`
-        // has returned a struct that cannot name their type.
-        context: Box::new(move || app.context()),
+        core: app,
     })
 }
 
@@ -326,7 +320,7 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
                 .holding(holding(request))
-                .with_plugins((app.context)())
+                .with_plugins(app.core.context())
                 .sent(
                     &request.query,
                     request.body.to_vec(),
@@ -1362,6 +1356,47 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: CSRF ------------------------------------
+        //
+        // Not one of the five above. Each of those encodes a fact about
+        // this deployment; this one encodes a fact about browsers: any
+        // page on any site can post a form here, and the cookies ride
+        // along. That is true wherever this runs, so this is the hook
+        // that should be on, and the only thing to decide is which paths
+        // are exempt -- a webhook, or anything else whose caller is not a
+        // browser:
+        //
+        //     CsrfConfig::default().exempt(["/webhooks"])
+        //
+        // The token for the request is on the request state as a
+        // `CsrfToken`; `token.hidden_field()` is the input a form carries.
+        //
+        // READ THIS BEFORE YOU UNCOMMENT: this project has no CSRF check
+        // today, and uncommenting the line below does not give it one.
+        // Two things in the generated code are in the way.
+        //
+        // 1. `pub type Hooks` below says `NoHooks` whatever registered,
+        //    and `plugin_hooking` widens that record, so the line does
+        //    not compile until the alias says:
+        //
+        //        pub type Hooks = ::brocanth::plugin_hooks::Both<
+        //            <::brocanth_middleware::Csrf
+        //                as ::brocanth::plugin_hooks::HookSource>::Families,
+        //            ::brocanth::plugin_hooks::NoHooks,
+        //        >;
+        //
+        // 2. `dispatch` in `src/app.rs` goes from the route table to the
+        //    handler. The hook pipeline is `App::run`, which nothing in
+        //    that file calls, so no hook in this crate runs -- these
+        //    five included. `brocanth_server::Bridge` is the piece that
+        //    runs it, and serving through it is the change.
+        //
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::CsrfConfig::default(),
+        //     ),
+        // );
         let builder = builder
             .plugin_from_config::<crate::plugins::openapi::OpenApi>("openapi")
             .map_err(|e| e.to_string())?;
@@ -1399,6 +1434,12 @@ type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
 pub type Installed = WithRealtime;
 
+/// Which hook families this binary installed, as a type.
+///
+/// `NoHooks` while nothing registers with `plugin_hooking`. A hook nobody
+/// registers costs nothing, and this type is how the compiler knows:
+/// every hook entry point opens with a constant `if` on this record.
+pub type Hooks = ::brocanth::plugin_hooks::NoHooks;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1464,7 +1505,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-// brocanth-digest: 7b82e8e842b1056d
+// brocanth-digest: c5fe9f36983f4b79
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1591,9 +1632,10 @@ overflow = "drop-oldest"
 
 pub mod api;
 pub mod css;
+pub mod routes;
 pub mod serve;
 
-// brocanth-digest: 5c92df46225f8299
+// brocanth-digest: b7b48badfdf74b0f
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
 //!
@@ -1828,6 +1870,131 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     let same = std::fs::read(path)?;
     std::fs::write(path, same)?;
     Ok(())
+}
+===== src/commands/routes.rs =====
+//! Every route this application answers.
+//!
+//! `brocanth routes` builds this project and runs this command, so the
+//! listing is the binary's own answer rather than a second reading of the
+//! directory. The rows are `crate::pages::handlers()`, read off `src/pages`
+//! while the crate compiled: a route is a file, so there is nothing to
+//! regenerate and nothing that can fall behind.
+//!
+//! ```text
+//! $ brocanth routes
+//! VERB    PATTERN        HANDLER                      TAKES   GIVES
+//! GET     /              pages::index::handle         -       -
+//! GET     /about         pages::about::handle         -       -
+//! POST    /signup        pages::signup::handle_post   Signup  Created
+//! ```
+//!
+//! `TAKES` and `GIVES` are the body a handler reads and the `Json<T>` it
+//! returns, from `crate::pages::described()`. A page that writes
+//! `-> Result<impl IntoResponse, Error>` says neither, and prints `-`: the
+//! wrapper is the opt-in, and these columns report it rather than ask for
+//! it.
+//!
+//! An argument keeps the rows that contain it, in any column, so
+//! `routes signup` is the one page and `routes POST` is every route that
+//! writes.
+//!
+//! These are the pages. A plugin that mounts its own routes through a
+//! `RouteSource` would not be in the list, and nothing this project has
+//! mounts one -- so today the two are the same table. Say so here if that
+//! stops being true.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// List the routes this application answers.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Routes {
+    /// Keep only the rows containing this text
+    pub filter: Option<String>,
+}
+
+impl Command for Routes {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        let (header, mut rows) = table();
+        if let Some(filter) = &self.filter {
+            rows.retain(|row| row.iter().any(|cell| cell.contains(filter)));
+        }
+        if rows.is_empty() {
+            // An application with no page and a filter that matched nothing
+            // both print nothing, and only one of the two is the reader's
+            // own doing.
+            match &self.filter {
+                Some(filter) => println!("no route matches `{filter}`"),
+                None => println!("this application answers no route"),
+            }
+            return Ok(());
+        }
+
+        let mut widths: Vec<usize> = header.iter().map(|title| title.chars().count()).collect();
+        for row in &rows {
+            for (column, cell) in row.iter().enumerate() {
+                widths[column] = widths[column].max(cell.chars().count());
+            }
+        }
+
+        print_row(&widths, header.iter().copied());
+        for row in &rows {
+            print_row(&widths, row.iter().map(String::as_str));
+        }
+        Ok(())
+    }
+}
+
+/// One line, every cell padded to its column but the last.
+///
+/// The last is left alone, because trailing spaces are invisible until
+/// something pipes this into a diff.
+fn print_row<'a>(widths: &[usize], cells: impl Iterator<Item = &'a str>) {
+    let mut line = String::new();
+    for (column, cell) in cells.enumerate() {
+        if column > 0 {
+            line.push_str("  ");
+        }
+        if column + 1 == widths.len() {
+            line.push_str(cell);
+        } else {
+            line.push_str(&format!("{cell:<width$}", width = widths[column]));
+        }
+    }
+    println!("{line}");
+}
+
+/// The header, and one row per route.
+///
+/// Five columns, because this project has `input`: `described()` read every
+/// handler's signature while the crate compiled, so what a route takes and
+/// gives is known here and worth a column.
+fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
+    let described = crate::pages::described();
+    let rows = crate::pages::handlers()
+        .iter()
+        .map(|(verb, pattern, handler)| {
+            let shape = described
+                .iter()
+                .find(|row| row.verb == *verb && row.path == *pattern);
+            let takes = shape
+                .and_then(|row| row.takes.as_ref())
+                .and_then(|node| node.name())
+                .unwrap_or("-");
+            let gives = shape
+                .and_then(|row| row.gives.as_ref())
+                .and_then(|node| node.name())
+                .unwrap_or("-");
+            vec![
+                verb.as_str().to_string(),
+                (*pattern).to_string(),
+                format!("pages::{handler}"),
+                takes.to_string(),
+                gives.to_string(),
+            ]
+        })
+        .collect();
+    (vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows)
 }
 ===== src/pages/about.rsx =====
 // The parameters are this page's contract with its handler. Rename one and
@@ -2783,7 +2950,11 @@ pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
 //! through no other route. An application that stores nothing pays nothing for
 //! it: not a crate in the lock file, not a section in the config, not a byte.
 //!
-//! The entity modules go under `src/models/`, from `brocanth generate model`.
+//! The entity modules go under `src/models/`, and you write them by hand: a
+//! struct deriving `DeriveEntityModel` with `#[brocanth_model::validates(..)]`
+//! above it, as `brocanth_model`'s own documentation sets out. There is no
+//! `brocanth generate model` -- the CLI scaffolds a project and adds a module
+//! to one, and a generator for a single entity is not written yet.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
@@ -2842,11 +3013,13 @@ impl Plugin for Model {
         // The pool opens here, at the last hook before the server is handed the
         // application, and drains on the matching shutdown hook.
         //
-        // The registry below is what makes the generators and an admin UI
+        // The registry below is what would make a generator and an admin UI
         // tractable: every entity compiled into this binary can be enumerated,
-        // with its columns, nullability and keys. It is empty until the first
-        // `brocanth generate model`, and the line is here so it is not a
-        // surprise when it fills.
+        // with its columns, nullability and keys. It reads an inventory that
+        // `DeriveEntityModel` fills, so it counts every model linked in,
+        // whoever wrote it. The count is zero until the first entity module
+        // exists under `src/models/`, and the line is here so that it is not
+        // a surprise when it fills.
         let registry = ModelRegistry::new();
         eprintln!("[model] {} entities registered", registry.names().len());
         Ok(())
@@ -3994,6 +4167,7 @@ request.
 - `input`  a form or a JSON body, read into a struct, with every fault at once
 - `client`  a subcommand that calls this application's own API, built from its routes
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
+- `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
@@ -4203,7 +4377,26 @@ Do not add validation to it. The server checks the body and answers
 422 with every fault; a client that checked as well would be a second
 opinion, and the two would disagree the first time a rule changed.
 
-<!-- brocanth-digest: 1332d0ae1a90d094 -->
+## CSRF
+
+**This project does not check CSRF tokens yet.** `src/app.rs` holds a
+commented registration for `brocanth_middleware::Csrf` and, beside
+it, the two things in the generated code that are in the way: the
+`plugins::Hooks` alias, and a `dispatch` that never enters the hook
+pipeline. Read that block before you tell anybody this is covered.
+
+What it will do once it runs: it is a double-submit cookie. The hook
+mints a token, sets it as its own cookie, and refuses any verb that
+is not GET, HEAD, OPTIONS or TRACE unless the request sends the same
+value back -- in the `_csrf_token` field, or in the `X-CSRF-Token`
+header. So a form needs the hidden field: read `CsrfToken` off the
+request state and write `token.hidden_field()`.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
+<!-- brocanth-digest: e9de574403a79c0c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -4215,7 +4408,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "openapi", "validation", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx"]
+enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "openapi", "validation", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx"]
 
 [modules.logging]
 files = ["src/plugins/logging/"]
@@ -4277,6 +4470,11 @@ files = []
 config = []
 crates = ["brocanth-middleware"]
 
+[modules.middleware-csrf]
+files = []
+config = []
+crates = []
+
 [modules.openapi]
 files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
@@ -4317,4 +4515,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 7cb1a1637c28f900
+# brocanth-digest: 72fb11cbc3d1c565

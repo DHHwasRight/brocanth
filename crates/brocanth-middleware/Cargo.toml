@@ -3,14 +3,24 @@ name = "brocanth-middleware"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types and CORS."
+description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types, CORS and CSRF."
 
-# Two dependencies, both already in the core's own tree. This crate is a
-# set of hooks and nothing else, so anything it linked would be a cost
-# every application that wants a canonical-host redirect also pays.
+# Three dependencies, and the first two are already in the core's own
+# tree. This crate is a set of hooks and nothing else, so anything it
+# links is a cost every application that wants a canonical-host redirect
+# also pays.
 [dependencies]
 brocanth.workspace = true
 http = "1"
+
+# The OS CSPRNG, and the reason the count above went from two to three: a
+# CSRF token a visitor can predict is not a CSRF token, and std has no
+# randomness to mint one from. `brocanth-auth` and `brocanth-storage`
+# already take the same version, so an application that links two of the
+# three links one copy. The constant-time comparison is written here
+# rather than taken from `subtle`, because the one this needs folds the
+# lengths in as well and does not return early on them.
+getrandom = "0.4"
 
 [features]
 default = []

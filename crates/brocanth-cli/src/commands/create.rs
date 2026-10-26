@@ -1625,7 +1625,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          use std::sync::Arc;\n\
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
-         use brocanth::plugin_context::Context;\n\
+
          use brocanth::routing::{{Dispatch, MiddlewareStack, Router}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
@@ -1645,23 +1645,21 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20   pub router: Router<Handler>,\n\
         \x20   pub stack: MiddlewareStack<Ctx, Response>,\n\
         \x20   pub plugins: Vec<String>,\n\
-        \x20   /// Makes this request's context. `pub` because a test that\n\
-        \x20   /// drives a handler by hand needs one, which is the same\n\
-        \x20   /// reason `router` and `stack` are.\n\
-        \x20   pub context: ContextFor,\n\
+        \x20   /// The application the plugins built.\n\
+        \x20   ///\n\
+        \x20   /// Held rather than dropped, because three things need it\n\
+        \x20   /// after `build` returns: a per-request context, the routes a\n\
+        \x20   /// plugin contributed, and an HTTP test client. It used to be\n\
+        \x20   /// a boxed closure over `context()` alone, which cost an\n\
+        \x20   /// indirect call per request and reached none of the rest.\n\
+        \x20   ///\n\
+        \x20   /// Nameable at last: `plugins::Installed` and `plugins::Hooks`\n\
+        \x20   /// are the two type parameters, and the generator writes both.\n\
+        \x20   pub core: Core,\n\
          }}\n\
          \n\
-         /// Makes one request's context, from the plugins that provide one.\n\
-         ///\n\
-         /// A boxed closure, because the type the builder ends on is one\n\
-         /// nested associated type per plugin and `App` is a written struct.\n\
-         /// The closure holds the built application, which is the only thing\n\
-         /// that knows which providers to call.\n\
-         ///\n\
-         /// Called per request and not once, because that is what\n\
-         /// `App::context` is for: a provider that reads the clock or counts\n\
-         /// gets a fresh answer each time.\n\
-         type ContextFor = Box<dyn Fn() -> Context<plugins::Installed> + Send + Sync>;\n\
+         /// The built application, with its provider list and hook record.\n\
+         type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;\n\
          \n\
          /// Builds it. The only place that decides what this binary is.\n\
          pub fn build() -> Result<App, String> {{\n\
@@ -1722,10 +1720,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20       router,\n\
         \x20       stack,\n\
         \x20       plugins,\n\
-        \x20       // The application moves in here. Nothing else needs it, and\n\
-        \x20       // this is what keeps the providers reachable once `build`\n\
-        \x20       // has returned a struct that cannot name their type.\n\
-        \x20       context: Box::new(move || app.context()),\n\
+        \x20       core: app,\n\
         \x20   })\n\
          }\n\
          \n",
@@ -1844,13 +1839,13 @@ fn app_rs(a: &Answers, built: &Built) -> String {
             format!(
                 "Ctx::new(verb, path, matched.params())\n\
                  \x20               .holding(holding(request))\n\
-                 \x20               .with_plugins((app.context)())\n\
+                 \x20               .with_plugins(app.core.context())\n\
                  \x20               .sent(\n{deeper}\x20               )"
             )
         } else {
             format!(
                 "Ctx::new(verb, path, matched.params())\n\
-                 \x20               .with_plugins((app.context)())\n\
+                 \x20               .with_plugins(app.core.context())\n\
                  \x20               .sent(\n{deeper}\x20               )"
             )
         },
@@ -2551,6 +2546,26 @@ fn registers(line: &str) -> bool {
     !line.starts_with("//") && line.starts_with("let builder")
 }
 
+/// The header and body of the generated `Hooks` alias.
+///
+/// `NoHooks`, and it is not a placeholder. The record widens only through
+/// `AppBuilder::plugin_hooking`, and no module in this CLI registers a
+/// hooking plugin: `brocanth-middleware` writes five, all commented out,
+/// at the place somebody uncomments one. The day a module registers one
+/// for real, this becomes `Hooked<ThatPlugin, NoHooks>` and is built the
+/// way `Installed` is, one alias per hooking plugin.
+///
+/// It is written down rather than inferred for the reason `Installed` is:
+/// `App` is a struct and a struct field needs a type to name.
+const HOOK_RECORD_DOC: &str = "\
+/// Which hook families this binary installed, as a type.
+///
+/// `NoHooks` while nothing registers with `plugin_hooking`. A hook nobody
+/// registers costs nothing, and this type is how the compiler knows:
+/// every hook entry point opens with a constant `if` on this record.
+pub type Hooks = ::brocanth::plugin_hooks::NoHooks;
+";
+
 /// `my-store` -> `MyStore`, for a type name built from a module key.
 fn upper_camel(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
@@ -3044,6 +3059,7 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         held = name;
     }
     out.push_str(&format!("pub type Installed = {held};\n\n"));
+    out.push_str(HOOK_RECORD_DOC);
 
     // -- announce -----------------------------------------------------
     out.push_str(
@@ -4274,7 +4290,7 @@ mod context {
     #[test]
     fn a_handler_reads_what_a_plugin_published() {
         let app = crate::app::build().expect("the application builds");
-        let ctx = bare().with_plugins((app.context)());
+        let ctx = bare().with_plugins(app.core.context());
         let session = ctx
             .provided::<Session, _>()
             .expect("a dispatched request has a context");
