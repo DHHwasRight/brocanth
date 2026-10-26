@@ -143,6 +143,11 @@ const ROUTES_RS: &str = r##"//! Every route this application answers.
 //! An argument keeps the rows that contain it, in any column, so
 //! `routes signup` is the one page and `routes POST` is every route that
 //! writes.
+//!
+//! These are the pages. A plugin that mounts its own routes through a
+//! `RouteSource` would not be in the list, and nothing this project has
+//! mounts one -- so today the two are the same table. Say so here if that
+//! stops being true.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
