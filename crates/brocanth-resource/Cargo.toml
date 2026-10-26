@@ -66,9 +66,15 @@ sqlx = { version = "0.9", default-features = false, features = [
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
-default = ["plugin"]
+default = ["plugin", "pages"]
 # The route bundle: `RouteSource`, the status codes and the JSON envelope.
 plugin = ["dep:brocanth", "dep:http"]
+
+# The page-shaped surface: one `mount` into the router a generated project
+# already has. It needs the core's `RouterBuilder` and nothing else -- a page
+# response is the project's own struct, not an `http::Response` -- so it takes
+# `brocanth` and not `http`.
+pages = ["dep:brocanth"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above. It writes no code and reads nothing from this crate,

@@ -53,9 +53,13 @@
 //!   return an outcome or a [`Failure`], and know nothing about requests,
 //!   responses or status codes. Every authorisation test in `tests/` drives
 //!   these.
-//! * [`routes`] turns those outcomes into responses and is where the status
-//!   table lives. It needs the core, so it is behind the default `plugin`
-//!   feature.
+//! * [`render`] turns those outcomes into bytes and reads the status table.
+//!   It names no server's types, so both surfaces below render through it and
+//!   neither can drift from the other.
+//! * [`routes`] offers the five operations to a host that mounts a
+//!   `RouteSource`, and [`pages`] offers them — and two more a browser form
+//!   can reach — to a generated project's own router. Both need the core, so
+//!   both are behind default features.
 //!
 //! The split is not tidiness. The status codes of
 //! `docs/pocketbase-surface.md` §3 are information-hiding decisions, and
@@ -99,6 +103,7 @@ pub mod error;
 pub mod flow;
 pub mod json;
 pub mod page;
+pub mod render;
 pub mod resource;
 pub mod rt;
 pub mod sql;
@@ -106,6 +111,16 @@ pub mod status;
 
 #[cfg(feature = "plugin")]
 pub mod routes;
+
+/// The page-shaped surface: one `mount` for a generated project's one router.
+///
+/// [`routes`] offers the same five operations to a host that mounts a
+/// `RouteSource`. This offers them, and two more a browser form can reach, to
+/// a project whose handlers take its own `Ctx`. Both drive [`flow`] and both
+/// render through [`render`], so there is one authorisation path and one
+/// status table.
+#[cfg(feature = "pages")]
+pub mod pages;
 
 /// Why this crate is listed on the `brocanth create` menu and not available.
 ///
@@ -117,12 +132,16 @@ pub mod scaffold;
 pub use data::{DataError, FetchQuery, ListQuery, ResourceData};
 pub use error::Failure;
 pub use page::{Listing, PageRequest, Totals};
+pub use render::Answer;
 pub use resource::{ColumnOf, CreateCheck, Direction, Resource, RowOf, Sort};
 pub use sql::Statement;
 pub use status::{Action, Outcome};
 
 #[cfg(feature = "plugin")]
 pub use routes::{ResourceRoutes, SubjectSource};
+
+#[cfg(feature = "pages")]
+pub use pages::{PageCtx, PageError, PageHandler, PageResponse, PageSubject};
 
 // Re-exported so that an application, and the compile-fail cases under
 // `tests/ui`, name one crate rather than three. A resource is written against

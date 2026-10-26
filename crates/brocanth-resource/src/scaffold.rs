@@ -1,30 +1,26 @@
 //! `resource` -- listed on the `brocanth create` menu, and not available.
 //!
-//! This crate is the records API: five typed routes over one table, with the
+//! This crate is the records API: typed routes over one table, with the
 //! policy in the `WHERE` clause rather than in a filter that runs after the
 //! page has been read. It is written, it is tested against a real engine, and
-//! a generated project cannot reach it. This module says so on the menu,
-//! where the question is asked, rather than leaving the crate off it and
+//! a generated project can now mount it -- see [`crate::pages`]. What it still
+//! has no answer for is which table, which is why this module says so on the
+//! menu, where the question is asked, rather than leaving the crate off it and
 //! letting somebody ask again next month. `brocanth-realtime`'s two
 //! transports are listed the same way, for the same reason.
 //!
 //! # Why it is blocked
 //!
-//! Two reasons, and only the first is about the framework rather than about
-//! the project.
+//! One reason now, and it is about the project rather than about the
+//! framework. The first reason is answered.
 //!
-//! **1. A generated application dispatches `src/pages` and nothing else.**
-//! `ResourceRoutes` is a
-//! `RouteSource`, which is the core's
-//! bundle seam: the application writes
-//! `app.mount_routes::<ResourceRoutes<Posts>>("/api/collections/posts/records")?`
-//! and the five routes appear under that prefix. Nothing a module may write
-//! can put that line in a generated project, and nothing in a generated
-//! project reads `App::route_plan` afterwards: `src/app.rs` builds its table
-//! from `pages::router()` and `dispatch` consults that table alone. A module
-//! that wrote the plugin anyway would produce five routes that answer
-//! nothing, which is worse than the row you are reading. The fix is in the
-//! generator and in the application template, not here.
+//! **1. The routes reach a generated project. Answered.**
+//! [`pages::mount`](crate::pages::mount) writes the seven routes straight into
+//! the `RouterBuilder` a generated `src/pages/mod.rs` builds its table from,
+//! so they are in the one table `dispatch` consults and a path two sources
+//! both claim is a build error. `ResourceRoutes` stays beside it for a host
+//! that mounts a `RouteSource`; both drive [`flow`](crate::flow) and render
+//! through [`render`](crate::render), so there is one authorisation path.
 //!
 //! **2. A resource is one entity, and a new project has none.**
 //! [`Resource`](crate::Resource) names an
@@ -53,17 +49,21 @@
 //!
 //! # What would unblock it
 //!
-//! Two lines in the generated `src/app.rs`, and then this module can be
-//! written in an afternoon:
+//! Something for `contribute` to write. Reason 2 is the whole of what is
+//! left, so the question is no longer "can these routes be reached" but "over
+//! which table", and a module answers it one of two ways:
 //!
-//! 1. `build()` mounts the bundles the application chose, after the plugins
-//!    are registered and before the stack is assembled.
-//! 2. `dispatch` consults `app.route_plan()` when `pages::router()` has no
-//!    answer -- or `pages::router()` is seeded from it, which keeps one
-//!    table and one `Dispatch`.
+//! 1. It asks. A module that takes a table name, a primary key and a column
+//!    list can write the entity, the policy, the data source and the four
+//!    lines that call [`pages::mount`](crate::pages::mount) -- and a
+//!    migration, which is `model`'s business and not this crate's.
+//! 2. It reads. An adapter from a SeaORM entity to
+//!    [`Entity`](brocanth_policy::Entity) would make `model` the source of
+//!    the answer. `brocanth-policy`'s own dependency comment calls that
+//!    adapter "a later crate", and it does not exist yet.
 //!
-//! Neither is this crate's to write. Both are in `brocanth-cli`'s
-//! `app_rs`, which is the file a developer owns.
+//! Until one of those is settled, a module here would scaffold an invented
+//! `Post`, and deleting it is the first thing anybody would do.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -87,10 +87,10 @@ impl Module for Records {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "resource",
-            "five typed CRUD routes over one table, with the policy in the WHERE clause",
+            "typed CRUD routes over one table, with the policy in the WHERE clause",
         )
         .asked_in("doors", "")
-        .blocked("a generated app dispatches src/pages; these routes arrive as a RouteSource")
+        .blocked("a resource is one entity, and a new project has none to name")
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
@@ -98,11 +98,10 @@ impl Module for Records {
         // that a CLI which does not stops rather than writing a project whose
         // routes answer nothing.
         s.refuse(
-            "resource cannot be scaffolded: its five routes are a RouteSource, which an \
-             application mounts with `App::mount_routes` and dispatches from \
-             `App::route_plan`, and a generated `src/app.rs` builds its table from \
-             `pages::router()` and consults that alone. A resource also needs an entity, a \
-             policy and a data source, and a new project has no entities",
+            "resource cannot be scaffolded: it needs an entity, a policy and a data source, \
+             and a new project has none of the three. The routes themselves reach a \
+             generated project through `brocanth_resource::pages::mount`, which writes them \
+             into the table `src/pages/mod.rs` builds",
         );
     }
 }

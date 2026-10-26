@@ -25,11 +25,10 @@
 //! # The query string
 //!
 //! `page`, `perPage`, `skipTotal` and `sort`, spelled as
-//! `docs/pocketbase-surface.md` §2 spells them. Values are read literally:
-//! they are numbers, a flag and a column name, none of which needs
-//! percent-decoding, and a decoder here would be a parser this crate does not
-//! need. `filter`, `expand` and `fields` are not accepted — §9 is the argument
-//! against the first and §12 declines the shape the other two serve.
+//! `docs/pocketbase-surface.md` §2 spells them. [`crate::render`] reads them,
+//! because the page surface reads the same four. `filter`, `expand` and
+//! `fields` are not accepted — §9 is the argument against the first and §12
+//! declines the shape the other two serve.
 //!
 //! A `sort` name this resource does not map is a `400`. Ignoring it would
 //! silently serve a different order than the one that was asked for, and an
@@ -51,14 +50,16 @@ use brocanth::plugin_body::Body;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HandlerError, Response};
 use brocanth::plugin_routes::{Handler, RouteBundle, RouteCx, RouteSource};
-use brocanth_policy::Value;
 
 use crate::error::Failure;
 use crate::flow;
-use crate::json;
-use crate::page::{Listing, PageRequest};
-use crate::resource::{ColumnOf, Direction, Resource, RowOf, Sort};
-use crate::status::{generic_message, outcome, Action};
+use crate::render::{self, Answer};
+use crate::resource::Resource;
+use crate::status::Action;
+
+// One place writes the envelope and reads the status table, for both of this
+// crate's surfaces -- see [`crate::render`].
+pub use crate::render::page_request;
 
 /// How a resource reads the subject out of a request.
 ///
@@ -161,20 +162,24 @@ impl<E: 'static, R: SubjectSource<E>> RouteSource<E> for ResourceRoutes<R> {
 // ---------------------------------------------------------------------------
 // The five handlers
 // ---------------------------------------------------------------------------
+//
+// Each one reads the request, drives `flow`, and hands what came back to
+// `render`. The status table is read in one place and this module only
+// translates what it said into the core's types.
 
 fn list_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<E> {
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
             let query = cx.request().uri().query();
-            let request = page_request(query)?;
-            let sort = sort_from(&*resource, query)?;
+            let request = render::page_request(query)?;
+            let sort = render::sort_from(&*resource, query)?;
             flow::list(&*resource, &subject, &request, sort)
         })();
-        match answer {
-            Ok(listing) => envelope(&*resource, &listing),
-            Err(failure) => refuse(Action::List, failure),
-        }
+        sent(match answer {
+            Ok(listing) => render::envelope(&*resource, &listing),
+            Err(failure) => render::refuse(Action::List, failure),
+        })
     })
 }
 
@@ -188,10 +193,10 @@ fn view_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<E>
                 .map_err(|error| Failure::bad_request(error.to_string()))?;
             flow::view(&*resource, &subject, id)
         })();
-        match answer {
-            Ok(row) => one_row(&*resource, &row, 200, None),
-            Err(failure) => refuse(Action::View, failure),
-        }
+        sent(match answer {
+            Ok(row) => render::one_row(&*resource, &row, 200, None),
+            Err(failure) => render::refuse(Action::View, failure),
+        })
     })
 }
 
@@ -201,15 +206,19 @@ fn create_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>, prefix: Str
             let subject = resource.subject(cx)?;
             flow::create(&*resource, &subject, cx.request().body())
         })();
-        match answer {
+        sent(match answer {
             // 201 and a `Location`, because a success code carries no
             // information to hide and HTTP already has an answer for this one.
             Ok(created) => {
-                let location = format!("{}/{}", prefix.trim_end_matches('/'), display(&created.id));
-                one_row(&*resource, &created.row, 201, Some(location))
+                let location = format!(
+                    "{}/{}",
+                    prefix.trim_end_matches('/'),
+                    render::display(&created.id)
+                );
+                render::one_row(&*resource, &created.row, 201, Some(location))
             }
-            Err(failure) => refuse(Action::Create, failure),
-        }
+            Err(failure) => render::refuse(Action::Create, failure),
+        })
     })
 }
 
@@ -224,14 +233,14 @@ fn update_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<
                 .to_owned();
             flow::update(&*resource, &subject, &id, cx.request().body())
         })();
-        match answer {
+        sent(match answer {
             Ok(updated) => match &updated.row {
-                Some(row) => one_row(&*resource, row, 200, None),
+                Some(row) => render::one_row(&*resource, row, 200, None),
                 // The write stood; the row is no longer this subject's to see.
-                None => Ok(empty(204)),
+                None => render::empty(204),
             },
-            Err(failure) => refuse(Action::Update, failure),
-        }
+            Err(failure) => render::refuse(Action::Update, failure),
+        })
     })
 }
 
@@ -245,154 +254,33 @@ fn delete_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<
                 .map_err(|error| Failure::bad_request(error.to_string()))?;
             flow::delete(&*resource, &subject, id)
         })();
-        match answer {
-            Ok(()) => Ok(empty(204)),
-            Err(failure) => refuse(Action::Delete, failure),
-        }
+        sent(match answer {
+            Ok(()) => render::empty(204),
+            Err(failure) => render::refuse(Action::Delete, failure),
+        })
     })
 }
 
 // ---------------------------------------------------------------------------
-// The query string
+// An answer, in the core's types
 // ---------------------------------------------------------------------------
 
-/// `page`, `perPage` and `skipTotal`.
+/// An [`Answer`] as the core sends it.
 ///
-/// A number that is not a number is a `400`. Clamping it to a default would
-/// serve page one to somebody who asked for page `two`, which is the kind of
-/// quiet repair that makes a paginator untrustworthy.
-pub fn page_request(query: Option<&str>) -> Result<PageRequest, Failure> {
-    let mut request = PageRequest::new();
-    if let Some(raw) = param(query, "page") {
-        request.page = raw
-            .parse()
-            .map_err(|_| Failure::bad_request(format!("`page` is not a number: `{raw}`")))?;
-    }
-    if let Some(raw) = param(query, "perPage") {
-        request.per_page =
-            Some(raw.parse().map_err(|_| {
-                Failure::bad_request(format!("`perPage` is not a number: `{raw}`"))
-            })?);
-    }
-    if let Some(raw) = param(query, "skipTotal") {
-        request.skip_total = matches!(raw, "" | "1" | "true");
-    }
-    Ok(request)
-}
-
-/// `sort=-created_at`, mapped through [`Resource::sort_column`].
-fn sort_from<R: Resource>(
-    resource: &R,
-    query: Option<&str>,
-) -> Result<Option<Sort<ColumnOf<R>>>, Failure> {
-    let Some(raw) = param(query, "sort") else {
-        return Ok(None);
-    };
-    let (direction, name) = match raw.strip_prefix('-') {
-        Some(rest) => (Direction::Descending, rest),
-        None => (Direction::Ascending, raw.trim_start_matches('+')),
-    };
-    match resource.sort_column(name) {
-        Some(column) => Ok(Some(Sort { column, direction })),
-        None => Err(Failure::bad_request(format!(
-            "`{name}` is not a sortable column of this resource"
-        ))),
-    }
-}
-
-fn param<'a>(query: Option<&'a str>, name: &str) -> Option<&'a str> {
-    query?
-        .split('&')
-        .find_map(|pair| match pair.split_once('=') {
-            Some((key, value)) if key == name => Some(value),
-            None if pair == name => Some(""),
-            _ => None,
-        })
-}
-
-// ---------------------------------------------------------------------------
-// Bodies
-// ---------------------------------------------------------------------------
-
-/// `{"page":1,"perPage":30,"totalItems":2,"totalPages":1,"items":[…]}`.
-///
-/// `totalItems` and `totalPages` are **absent** when the client passed
-/// `skipTotal`, rather than present and wrong. See [`crate::page`].
-fn envelope<R: Resource>(
-    resource: &R,
-    listing: &Listing<RowOf<R>>,
-) -> Result<Response, HandlerError> {
-    let mut body = Vec::with_capacity(64 + listing.items.len() * 64);
-    body.push(b'{');
-    json::push_key(&mut body, "page");
-    json::push_u64(&mut body, listing.page);
-    body.push(b',');
-    json::push_key(&mut body, "perPage");
-    json::push_u64(&mut body, listing.per_page);
-    if let Some(total) = listing.total.count() {
-        body.push(b',');
-        json::push_key(&mut body, "totalItems");
-        json::push_u64(&mut body, total);
-        if let Some(pages) = listing.total.pages(listing.per_page) {
-            body.push(b',');
-            json::push_key(&mut body, "totalPages");
-            json::push_u64(&mut body, pages);
-        }
-    }
-    body.push(b',');
-    json::push_key(&mut body, "items");
-    body.push(b'[');
-    for (index, row) in listing.items.iter().enumerate() {
-        if index > 0 {
-            body.push(b',');
-        }
-        if let Err(failure) = resource.encode_row(row, &mut body) {
-            return refuse(Action::List, failure);
-        }
-    }
-    body.extend_from_slice(b"]}");
-    Ok(json_response(200, body, None))
-}
-
-fn one_row<R: Resource>(
-    resource: &R,
-    row: &RowOf<R>,
-    status: u16,
-    location: Option<String>,
-) -> Result<Response, HandlerError> {
-    let mut body = Vec::with_capacity(128);
-    if let Err(failure) = resource.encode_row(row, &mut body) {
-        return refuse(Action::View, failure);
-    }
-    Ok(json_response(status, body, location))
-}
-
-/// A refusal, rendered; or an internal failure, handed to the core.
-fn refuse(action: Action, failure: Failure) -> Result<Response, HandlerError> {
-    let answer = outcome(action, &failure);
-    if answer.internal {
+/// The one place this module decides anything: an internal failure leaves as a
+/// `HandlerError`, so the application's error hooks see it, and everything
+/// else is a response.
+fn sent(answer: Answer) -> Result<Response, HandlerError> {
+    match answer {
+        Answer::Json {
+            status,
+            body,
+            location,
+        } => Ok(json_response(status, body, location)),
+        Answer::Empty { status } => Ok(empty(status)),
         // Out through the other door, so the application's error hooks see it.
-        return Err(HandlerError::new(failure));
+        Answer::Internal(failure) => Err(HandlerError::new(failure)),
     }
-    // A list that nothing matches is an empty page, not an error body: an
-    // error body here would be the oracle the 200 exists to avoid.
-    if action == Action::List && answer.status == 200 {
-        return Ok(json_response(
-            200,
-            b"{\"page\":1,\"perPage\":0,\"totalItems\":0,\"totalPages\":0,\"items\":[]}".to_vec(),
-            None,
-        ));
-    }
-    let message = if answer.explain {
-        failure.to_string()
-    } else {
-        generic_message(answer.status).to_owned()
-    };
-    Ok(json_response(
-        answer.status,
-        json::error_body(answer.status, &message),
-        None,
-    ))
 }
 
 fn json_response(status: u16, body: Vec<u8>, location: Option<String>) -> Response {
@@ -416,12 +304,4 @@ fn empty(status: u16) -> Response {
     *response.status_mut() =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     response
-}
-
-/// A key, as a `Location` header spells it.
-fn display(id: &Value) -> String {
-    match id {
-        Value::Text(text) => text.clone(),
-        other => other.to_string(),
-    }
 }
