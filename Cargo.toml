@@ -25,6 +25,7 @@ members = [
     "crates/brocanth-storage",
     "crates/brocanth-test",
     "crates/brocanth-pages",
+    "crates/brocanth-routes",
     "crates/brocanth-scaffold",
     "crates/brocanth-command",
     "crates/brocanth-command-macros",

@@ -1,0 +1,23 @@
+[package]
+name = "brocanth-routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "routes!: the whole route table written in one file, Rails-shaped, checked while the crate compiles."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+# The grammar is Rust tokens -- a handler is a path, a controller is a path --
+# so the parser that reads it is the one the compiler uses. Scanning the text
+# would accept a handler that is not an item and report it as a 500.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "clone-impls", "proc-macro"] }
+# The template rules and the route helpers are the core's. `RouteTemplate`
+# validates every path this macro builds, so a declared route and a file-based
+# one are rejected by the same code; `generate_helpers` emits the `path()`
+# functions, so both halves of the router answer "what is this route's URL"
+# the same way. A second spelling of either would drift on the first change.
+brocanth = { path = "../brocanth", version = "0.1.0" }
