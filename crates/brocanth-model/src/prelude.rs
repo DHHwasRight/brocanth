@@ -3,8 +3,9 @@
 pub use crate::bulk::{self, HooksBypassed};
 pub use crate::{
     enforce, validates, Change, Deferred, Eager, EagerExt, EagerStrategy, Error, Errors, NotLoaded,
-    Probe, Tracked, Validate, Validated, WithRelated, Write,
+    Pending, Probe, Publish, Tracked, Validate, Validated, WithRelated, Write, Writing,
 };
+pub use brocanth_events::{ChangeKind, ChangeSink, RowChange, RowId};
 pub use sea_orm::entity::prelude::*;
 pub use sea_orm::{
     ActiveValue::{self, NotSet, Set, Unchanged},

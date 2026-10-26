@@ -21,6 +21,11 @@
 //! 5. **Dirty tracking** — [`Tracked`], with `changed()`, `was()`, `changes()`.
 //! 6. **A transactional test harness** — [`testing::Harness`]: begin, run,
 //!    never commit.
+//! 7. **Publishing** — [`changes`]. A write reports one
+//!    [`RowChange`](brocanth_events::RowChange) to a
+//!    [`ChangeSink`](brocanth_events::ChangeSink), so a row written through
+//!    the ORM reaches realtime, an audit log or a plugin hook. PLAN.md §10's
+//!    publisher half.
 //!
 //! Plus [`registry`], which enumerates the models in a binary, and
 //! [`schema_sync`], which is the single adapter standing between brocanth and
@@ -83,9 +88,12 @@ compile_error!(
 );
 
 pub mod bulk;
+pub mod changes;
 pub mod deferred;
 pub mod eager;
 pub mod errors;
+#[cfg(feature = "plugin")]
+pub mod plugin;
 pub mod prelude;
 pub mod probe;
 pub mod registry;
@@ -96,6 +104,7 @@ pub mod validators;
 
 mod dirty;
 
+pub use changes::{Pending, Publish, Writing};
 pub use dirty::{Change, Tracked};
 
 pub use deferred::{Deferred, NotLoaded};
@@ -141,6 +150,10 @@ pub use brocanth_model_derive::validates;
 
 #[doc(hidden)]
 pub use async_trait::async_trait;
+
+/// Re-exported so an application can hold a sink, and name the one type the
+/// write path publishes, without a second dependency line.
+pub use brocanth_events;
 
 /// Re-exported so a model file needs one dependency, and so the version this
 /// crate was built against is the version a model compiles against.
