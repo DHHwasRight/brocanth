@@ -1,0 +1,87 @@
+[package]
+name = "brocanth-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Mail for brocanth: one trait, an in-memory backend that records what was sent, an SMTP backend behind a feature that is off, and headers that cannot carry a newline."
+
+[dependencies]
+# The arrow points plugin -> core, always. `brocanth-storage` depends on
+# nothing in the workspace because nothing in it is a plugin; this crate ships
+# `MailPlugin` and a `Services` entry, so it needs the contract those two
+# words name. The core costs three crates (`wayfind`, `http`, `thiserror`) and
+# has never heard of this one.
+brocanth.workspace = true
+
+# The trait is async and object-safe. `async fn` in a trait is still not
+# object-safe, and `Arc<dyn Mailer>` is the normal way to hold one -- the same
+# choice `brocanth-storage` made for `Storage` and `brocanth-auth` for
+# `AuthStore`. Async is also what keeps the queue possible: a mailer that
+# hands a message to `brocanth-jobs` enqueues, and enqueuing is async.
+async-trait = "0.1"
+
+# RFC 2047 encoded-words and the base64 body transfer encoding. Same crate and
+# same major version `brocanth-auth` and `brocanth-storage` already resolve to,
+# so an application that links all three links one copy.
+base64 = "0.23"
+
+# The OS CSPRNG, for the multipart boundary. One use, and the argument for it
+# is in `message.rs`.
+getrandom = "0.4"
+
+thiserror = "2"
+
+# `Message` on the wire, so a message can be a `brocanth-jobs` payload. Off by
+# default and this crate never names the queue: §8 says a plugin that needs
+# another depends on it in the open, and a mailer does not need a queue. What
+# it must not do is make the queue impossible, and a payload that cannot be
+# serialised is exactly that. The derives re-run every validator on the way in
+# -- see `serde_wire.rs` for why a plain `#[derive(Deserialize)]` on a
+# validated newtype hands the attacker back the constructor we took away.
+serde = { version = "1", features = ["derive"], optional = true }
+
+# The SMTP wire, behind a feature that is off. §8.2 asks that a feature which
+# is off means the code is absent, and this is the clearest case in the crate:
+# `lettre` with a TLS stack, a connection pool and a Tokio reactor is three
+# orders of magnitude more tree than the rest of this crate put together, and
+# the application that wants a `Memory` mailer in its test suite must not pay
+# for it. `cargo tree -p brocanth-mail -e normal --depth 1` lists six crates
+# with the feature off.
+#
+# `default-features = false` drops `native-tls` (the system OpenSSL, which is
+# the other half of every link failure nobody can fix from their own
+# `Cargo.toml`) and `builder` (lettre's own message type, which this crate
+# does not use: we render the message ourselves and hand lettre the bytes --
+# see `smtp.rs`).
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "tokio1-rustls-tls",
+    "pool",
+], optional = true }
+
+[dev-dependencies]
+# One, and it is a format rather than a runtime. The tests drive the async
+# trait through the twenty-line executor in `src/rt.rs`, because a runtime that
+# exists only to make a test compile is still a runtime in the tree (PLAN §8.2,
+# and `brocanth-storage` set the precedent). There is no `tokio` here.
+#
+# `serde_json` is here because the `serde` feature makes a claim -- a message
+# read back out of a queue row goes through every validator again -- and a
+# security claim that nothing tests is a comment. Proving it needs some format,
+# and JSON is the one a queue payload is actually written in. It reaches no
+# consumer's binary; the tests that use it only build with `--features serde`.
+serde_json = "1"
+
+[features]
+# Empty, and that is the rule rather than an oversight. The backend that
+# matters today is `Memory`, and it needs nothing.
+default = []
+
+# The SMTP backend. See the dependency line above.
+smtp = ["dep:lettre"]
+
+# `Message`, `Address` and `Subject` on the wire.
+serde = ["dep:serde"]
+
+[lints.rust]
+missing_docs = "warn"
