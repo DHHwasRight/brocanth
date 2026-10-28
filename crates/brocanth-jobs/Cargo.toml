@@ -75,6 +75,12 @@ tempfile = "3"
 # thing that keeps it true.
 brocanth-queue-memory.workspace = true
 
+# And the Postgres one, for the History screen: it is the only backend in
+# the workspace that keeps an archive, so it is the only one that can prove
+# the chart draws. Skipped with the rest of `tests/postgres.rs` when no
+# server is named.
+brocanth-queue-postgres.workspace = true
+
 # No backend feature here on purpose. It is the same `sqlx` the library
 # depends on, so whichever driver the build already has is the driver the
 # tests get. `tests/postgres.rs` uses it to build the throwaway schema the

@@ -396,3 +396,164 @@ async fn the_same_screens_render_over_another_queue_entirely() {
     // The job the first worker still holds must not be movable from here.
     let _ = held;
 }
+
+/// A queue that keeps nothing has no History tab, and no History screen.
+///
+/// Drawing a chart of zeroes would read as an outage. The tab is left off,
+/// and a pasted URL is refused rather than rendered, because the second is
+/// how somebody gets to the first screen they were not meant to see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_that_keeps_no_history_offers_no_chart() {
+    use brocanth_queue_memory::Memory;
+
+    let store = Arc::new(Memory::new());
+    assert!(!brocanth_queue::Inspect::has_history(&*store));
+
+    let a = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(JobsPanel::new(store))
+            .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
+    );
+
+    let dash = get(&a, "/admin/jobs");
+    assert!(!dash.contains(">History<"), "the tab should not be there");
+
+    let who = Operator;
+    let response = block_on(a.dispatch(
+        Principal::new(&who),
+        "GET",
+        "/admin/jobs/history",
+        "",
+        &Submission::new(),
+    ))
+    .expect("dispatch");
+    assert_eq!(response.status(), 404, "a pasted URL drew the chart anyway");
+}
+
+/// The chart, over the one backend that keeps an archive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_history_screen_plots_what_the_archive_kept() {
+    use brocanth_queue::{Backend, ClaimRequest, NewJob, Settle, UniquenessKind};
+    use brocanth_queue_postgres::{migrate, PgQueue};
+    use sqlx::postgres::PgPoolOptions;
+
+    let Ok(url) = std::env::var("BROCANTH_TEST_DATABASE_URL") else {
+        eprintln!("!! SKIPPED the_history_screen_plots_what_the_archive_kept: no Postgres server");
+        return;
+    };
+    // A schema of its own, and not a queue name of its own. The chart is
+    // about the queue as a whole -- an operator asks "how much ran", not
+    // "how much ran on `mail`" -- so every row in the archive is a bar
+    // here, including rows another suite left in the same database. The
+    // archive is append only as well, so a second run would plot the
+    // first's jobs. Both problems go away with somewhere private to put
+    // the tables.
+    let schema = format!("panel_history_{}", std::process::id());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    for sql in [
+        format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
+        format!("CREATE SCHEMA {schema}"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(&admin_pool)
+            .await
+            .expect("schema");
+    }
+    let search_path = format!("SET search_path TO {schema}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(move |conn, _| {
+            let sql = search_path.clone();
+            Box::pin(async move {
+                sqlx::query(sqlx::AssertSqlSafe(sql)).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect(&url)
+        .await
+        .expect("connect");
+    migrate(&pool).await.expect("migrate");
+
+    let store = Arc::new(PgQueue::bulk(pool.clone()));
+    assert!(
+        brocanth_queue::Inspect::has_history(&*store),
+        "the archive is on by default"
+    );
+
+    // Three jobs through to the archive, two of one kind and one of another.
+    for (kind, n) in [("render_invoice", 2), ("send_digest", 1)] {
+        for _ in 0..n {
+            store
+                .push(vec![NewJob {
+                    kind: kind.into(),
+                    queue: "panel.history".into(),
+                    payload: b"{}".to_vec(),
+                    run_at: None,
+                    max_attempts: 3,
+                    unique_key: None,
+                    uniqueness: UniquenessKind::None,
+                }])
+                .await
+                .expect("pushed");
+            let c = store
+                .claim(&ClaimRequest {
+                    queue: "panel.history".into(),
+                    max: 1,
+                    lease: Duration::from_secs(30),
+                    kinds: None,
+                    worker: "w".into(),
+                })
+                .await
+                .expect("claimed")
+                .pop()
+                .expect("one");
+            store.settle(&c.lease, Settle::Done).await.expect("settled");
+        }
+    }
+
+    let a = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(JobsPanel::new(store))
+            .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
+    );
+
+    let dash = get(&a, "/admin/jobs");
+    assert!(dash.contains(">History<"), "the tab is missing: {dash}");
+
+    let html = get(&a, "/admin/jobs/history");
+    assert!(html.contains("render_invoice"), "{html}");
+    assert!(html.contains("send_digest"), "{html}");
+    // Twenty-four hourly bars plus the one in progress, every empty hour
+    // present. A chart that omits them reads as a quieter day than it was.
+    // Matching the whole attribute, because `height:` on its own also
+    // appears a few dozen times in the inlined stylesheet.
+    assert_eq!(
+        html.matches(r#"style="height:"#).count(),
+        25,
+        "wrong number of bars"
+    );
+    // One of them is this hour, holding all three, and it is the tallest.
+    assert_eq!(html.matches(r#"style="height:100%""#).count(), 1, "{html}");
+    assert!(
+        html.contains(r#""3 at "#),
+        "the bar should say what is in it"
+    );
+    // The caveat is on the screen, not only in a doc comment.
+    assert!(html.contains("lower bound"), "{html}");
+
+    pool.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&admin_pool)
+    .await
+    .expect("drop");
+}

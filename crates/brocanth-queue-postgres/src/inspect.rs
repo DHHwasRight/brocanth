@@ -578,14 +578,22 @@ impl Inspect for PgQueue {
             .as_secs_f64();
         // `finished_at` is the partition key, so the range prunes to the
         // days it touches and the rest of the archive is never opened.
+        //
+        // The bucket is epoch arithmetic and not `date_trunc`. `date_trunc`
+        // truncates in the session's time zone, so the same query against
+        // the same rows returns different buckets depending on a setting
+        // the caller cannot see, and the axis the caller drew will not line
+        // up with them. Seconds since the epoch is the same number in every
+        // session.
         let rows = sqlx::query(
-            "SELECT date_trunc($1, finished_at) AS at, kind, queue, count(*) AS n \
+            "SELECT to_timestamp(floor(extract(epoch FROM finished_at) / $1) * $1) AS at, \
+                    kind, queue, count(*) AS n \
                FROM queue_archive \
               WHERE finished_at >= now() - make_interval(secs => $2) \
               GROUP BY 1, 2, 3 \
               ORDER BY 1",
         )
-        .bind(bucket.as_str())
+        .bind(bucket.seconds() as f64)
         .bind(back)
         .fetch_all(&self.pool)
         .await

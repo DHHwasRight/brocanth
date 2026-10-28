@@ -302,12 +302,42 @@ pub enum Bucket {
 }
 
 impl Bucket {
-    /// The name Postgres `date_trunc` takes.
+    /// How many seconds wide this bucket is.
+    ///
+    /// A width and not a `date_trunc` keyword, because `date_trunc`
+    /// truncates in the session's time zone. A caller has to put the
+    /// buckets it got back on an axis it generated itself, and the two
+    /// only line up if both floor the same number. Seconds since the epoch
+    /// is a number both ends agree on; "the start of the hour" is not, in
+    /// a session set to a zone offset by half an hour.
+    pub fn seconds(self) -> u64 {
+        match self {
+            Bucket::Hour => 3_600,
+            Bucket::Day => 86_400,
+        }
+    }
+
+    /// The lowercase name, for a URL segment or a label.
     pub fn as_str(self) -> &'static str {
         match self {
             Bucket::Hour => "hour",
             Bucket::Day => "day",
         }
+    }
+
+    /// Floor an instant to the start of the bucket that contains it.
+    ///
+    /// The same arithmetic an adapter does in SQL, so a caller can build
+    /// the axis for a window that has no rows in it. A chart whose empty
+    /// hours are missing rather than zero reads as a quieter day than it
+    /// was.
+    pub fn floor(self, t: SystemTime) -> SystemTime {
+        let secs = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        let w = self.seconds();
+        std::time::UNIX_EPOCH + Duration::from_secs(secs / w * w)
     }
 }
 

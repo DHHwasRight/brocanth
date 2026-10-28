@@ -14,11 +14,19 @@
 //!
 //! # What is not here
 //!
-//! **No graph.** Sidekiq's dashboard plots processed and failed over time.
-//! A queue that deletes the row when the job succeeds does not have the
-//! history that graph needs. `brocanth-queue` keeps a seven day archive and
-//! answers [`Inspect::finished`], so the chart is possible there; this
-//! panel does not draw one yet, and `has_history` is what it would ask.
+//! **The graph is conditional.** Sidekiq's dashboard plots throughput over
+//! time, and a queue that deletes the row when the job succeeds has no
+//! history to plot. So the History tab appears only when the queue behind
+//! the panel answers
+//! [`has_history`](brocanth_queue::Inspect::has_history) — a seven day
+//! archive, in `brocanth-queue`'s case. A queue that keeps nothing shows
+//! no tab, rather than a chart of zeroes that reads like an outage.
+//!
+//! What it plots is **settles, not executions**. Delivery is at least
+//! once, so a job that ran, had its effect, then lost its lease and was
+//! retried leaves one row. It is a lower bound on what ran, and the screen
+//! says so, because the wrong reading is the one somebody reaches for
+//! during the incident the history exists for.
 //!
 //! **No pause.** Sidekiq can stop a queue being drained. Here that would
 //! mean a predicate on the claim -- the hottest statement there is -- and a
@@ -57,7 +65,7 @@ use brocanth_admin::view::render;
 // `DynInspect` and not `Inspect`: both carry the same method names, every
 // implementor has both through the blanket impl, and a panel chooses its
 // queue at run time. Importing the pair makes every call ambiguous.
-use brocanth_queue::{DeadId, DynInspect, JobId, JobRow, Page, View};
+use brocanth_queue::{Bucket, DeadId, DynInspect, JobId, JobRow, Page, View};
 
 /// The panel's stylesheet, built from `style/panel.css`. Inlined by the
 /// tab strip, which every screen draws. See `style/README.md`.
@@ -77,6 +85,14 @@ const LIMIT: u32 = 100;
 /// genuinely taking too long, which no queue can tell apart from a slow
 /// one — only the person reading can.
 const LONG_RUNNING: Duration = Duration::from_secs(5 * 60);
+
+/// How far back the History screen looks, and how wide its bars are.
+///
+/// A day in hours. Wider than the archive's retention would draw bars for
+/// days that were dropped, and the chart would say the queue went quiet
+/// when all that happened was a partition being deleted.
+const HISTORY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+const HISTORY_BUCKET: Bucket = Bucket::Hour;
 
 /// The queue as a tab.
 ///
@@ -153,6 +169,10 @@ impl Panel for JobsPanel {
             "retries" => self.waiting(&r, Waiting::Retries).await.map(Some),
             "scheduled" => self.waiting(&r, Waiting::Scheduled).await.map(Some),
             "dead" => self.dead(&r).await.map(Some),
+            // Not reachable from the tab strip when the queue keeps no
+            // history, and refused here too: a pasted URL must not render
+            // a chart of nothing.
+            "history" if self.inspect.has_history() => self.history(&r).await.map(Some),
             _ => Ok(None),
         }
     }
@@ -275,6 +295,87 @@ impl JobsPanel {
         })
     }
 
+    async fn history(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
+        let now = SystemTime::now();
+        let since = now - HISTORY_WINDOW;
+        let rows = self
+            .inspect
+            .finished(since, HISTORY_BUCKET)
+            .await
+            .map_err(failed)?;
+
+        let width = HISTORY_BUCKET.seconds();
+        let slots = (HISTORY_WINDOW.as_secs() / width) as usize;
+
+        // The axis is generated and then filled, rather than drawn from
+        // what came back. An hour with no finished job has no row, and a
+        // chart that simply omits it is a chart that reads as a quieter
+        // day than it was. Both ends floor the same epoch arithmetic, so
+        // the two line up whatever the database's time zone is.
+        let first = HISTORY_BUCKET.floor(since);
+        let mut counts = vec![0u64; slots + 1];
+        let mut by_kind: std::collections::BTreeMap<String, u64> = Default::default();
+        for f in &rows {
+            by_kind
+                .entry(f.kind.clone())
+                .and_modify(|n| *n += f.count)
+                .or_insert(f.count);
+            if let Ok(offset) = f.at.duration_since(first) {
+                let slot = (offset.as_secs() / width) as usize;
+                if let Some(c) = counts.get_mut(slot) {
+                    *c += f.count;
+                }
+            }
+        }
+
+        let tallest = counts.iter().copied().max().unwrap_or(0);
+        let total: u64 = counts.iter().sum();
+        let bars = counts
+            .iter()
+            .enumerate()
+            .map(|(i, &count)| {
+                let at = first + Duration::from_secs(i as u64 * width);
+                let label = clock_label(at);
+                Bar {
+                    // Zero stays zero rather than becoming a sliver. An
+                    // hour with nothing in it should look like nothing.
+                    height: if tallest == 0 || count == 0 {
+                        0
+                    } else {
+                        ((count * 100) / tallest).max(2) as u8
+                    },
+                    title: format!("{count} at {label}"),
+                    // One label every six bars. Twenty-four of them do not
+                    // fit, and dropping every other one still does not.
+                    label: if i % 6 == 0 { label } else { String::new() },
+                    count,
+                }
+            })
+            .collect();
+
+        let mut kinds: Vec<KindRow> = by_kind
+            .into_iter()
+            .map(|(kind, count)| KindRow {
+                share: (count * 100).checked_div(total).unwrap_or(0) as u8,
+                kind,
+                count,
+            })
+            .collect();
+        kinds.sort_by(|a, b| b.count.cmp(&a.count).then(a.kind.cmp(&b.kind)));
+
+        let ctx = HistoryCtx {
+            tabs: self.tabs(r, "history"),
+            bars,
+            kinds,
+            total,
+            window: format!("the last {}", ago(HISTORY_WINDOW)),
+        };
+        self.page("History", &ctx, |ctx, w| {
+            use rsx::Template as _;
+            crate::admin_templates::history::History { ctx }.render(w)
+        })
+    }
+
     // ------------------------------------------------------------ buttons
 
     /// Every POST. The admin has already asked the policy whether this
@@ -341,13 +442,17 @@ impl JobsPanel {
     }
 
     fn tabs(&self, r: &PanelRequest<'_>, current: &str) -> TabBar {
-        let tabs = [
+        let mut tabs = vec![
             ("", "Dashboard"),
             ("busy", "Busy"),
             ("retries", "Retries"),
             ("scheduled", "Scheduled"),
             ("dead", "Dead"),
         ];
+        // Last, and only when there is something to plot.
+        if self.inspect.has_history() {
+            tabs.push(("history", "History"));
+        }
         TabBar {
             tabs: tabs
                 .iter()
@@ -455,6 +560,19 @@ fn in_(t: SystemTime) -> String {
     }
 }
 
+/// "14:00", in UTC.
+///
+/// UTC and not the server's local zone, because the buckets are epoch
+/// arithmetic and a label in another zone would disagree with the bar it
+/// sits under.
+fn clock_label(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
+}
+
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -510,6 +628,42 @@ pub struct QueueRow {
     pub scheduled: u64,
     /// How long the oldest runnable job has waited.
     pub latency: String,
+}
+
+/// One bar on the History chart.
+pub struct Bar {
+    /// The hour it covers, or empty when the axis does not label it.
+    pub label: String,
+    /// How many finished in it.
+    pub count: u64,
+    /// Its height as a percentage of the tallest bar, 0 to 100.
+    pub height: u8,
+    /// The whole fact, for a tooltip.
+    pub title: String,
+}
+
+/// One job kind's share of the window.
+pub struct KindRow {
+    /// Its registered kind.
+    pub kind: String,
+    /// How many finished.
+    pub count: u64,
+    /// Its share of the total, as a percentage.
+    pub share: u8,
+}
+
+/// The History screen.
+pub struct HistoryCtx {
+    /// The tab strip.
+    pub tabs: TabBar,
+    /// One bar per bucket, oldest first, with the empty ones present.
+    pub bars: Vec<Bar>,
+    /// What finished, by kind, most first.
+    pub kinds: Vec<KindRow>,
+    /// How many finished in the whole window.
+    pub total: u64,
+    /// How far back the screen looked, as a phrase.
+    pub window: String,
 }
 
 /// The dashboard.

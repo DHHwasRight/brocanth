@@ -851,6 +851,7 @@ dependencies = [
  "brocanth-jobs",
  "brocanth-queue",
  "brocanth-queue-memory",
+ "brocanth-queue-postgres",
  "brocanth-scaffold",
  "chrono",
  "rsx",

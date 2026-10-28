@@ -276,16 +276,31 @@ must not happen when the insert does not. A unique key the live table still
 holds makes the insert do nothing, and the corpse stays, because it is the
 only record of why that one died.
 
-### 3.5 The graph is now possible
+### 3.5 The graph, which §2.3 made possible
 
-`brocanth-jobs`' panel says "no graph: this queue deletes the row when the
-job succeeds, so the history that graph needs does not exist". With §2.3's
+The panel used to say "no graph: this queue deletes the row when the job
+succeeds, so the history that graph needs does not exist". With §2.3's
 seven-day archive partitioned on `finished_at` it is one aggregate per
-partition, and the range prunes to the days it touches. `Inspect::finished`
-reads it, and `has_history` is false on a backend that keeps nothing, so a
-panel hides the chart rather than drawing zero.
+partition, and the range prunes to the days it touches.
 
-It counts **settles, not executions**, for the reason §2.3 records.
+`Inspect::finished` reads it and the History tab draws it: twenty-four
+hourly bars, a per-kind table under them. The tab is absent when
+`has_history` is false, and the route is refused as well — a pasted URL is
+how somebody reaches a screen the tab was hiding. A chart of zeroes reads
+like an outage, so a queue that keeps nothing shows no chart.
+
+The bucket is **epoch arithmetic, not `date_trunc`**. `date_trunc`
+truncates in the session's time zone, so the same query over the same rows
+returns different buckets depending on a setting the caller cannot see, and
+the axis the caller drew will not line up with them. Both ends floor
+`epoch / width * width` instead, which is the same number in every session.
+
+The axis is generated and then filled. An hour with nothing finished has no
+row, and a chart that simply omits it reads as a quieter day than it was.
+
+It counts **settles, not executions**, for the reason §2.3 records — and the
+screen says so in a line under the chart, because the wrong reading is the
+one somebody reaches for during the incident the history exists for.
 
 ---
 

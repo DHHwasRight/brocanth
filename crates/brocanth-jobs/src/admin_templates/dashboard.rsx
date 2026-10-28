@@ -4,11 +4,10 @@ use crate::admin_templates::tabs::Tabs;
 
 // What is in the queue, and how far behind it is.
 //
-// Sidekiq's dashboard also plots processed and failed over time. There is no
-// graph here, and that is not an omission: this queue deletes the row when
-// the job succeeds, on purpose, so the history the graph needs does not
-// exist. Drawing one means a counters table, which is a decision to take on
-// its own rather than smuggle in behind a chart.
+// Sidekiq's dashboard also plots processed and failed over time. That is the
+// History tab, and it is only there when the queue behind the panel keeps an
+// archive -- a queue that deletes the row when the job succeeds has no
+// history to plot, and a chart of zeroes reads like an outage.
 
 pub fn Dashboard(ctx: &DashboardCtx) -> Element {
     <Tabs tabs={&ctx.tabs} />
