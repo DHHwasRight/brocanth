@@ -1,0 +1,17 @@
+[package]
+name = "brocanth-queue-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+description = "An in-process queue backend: the reference implementation the conformance suite is checked against, and a backend for a test."
+
+[dependencies]
+brocanth-queue.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+serde = { version = "1", features = ["derive"] }
+
+[lints.rust]
+missing_docs = "warn"

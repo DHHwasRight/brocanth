@@ -1,0 +1,37 @@
+[package]
+name = "brocanth-queue-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+description = "The Postgres backend: a lease built on FOR UPDATE SKIP LOCKED, a promoter for delayed work, an outbox relay, and a partitioned archive."
+
+# `sqlx` 0.9 is the version brocanth's model layer already resolves, so an
+# application that runs both links one driver and one pool.
+#
+# Every statement is a runtime `sqlx::query`, never `query!`. The macro needs
+# a live database or a checked-in `.sqlx` directory at compile time, and a
+# queue crate that cannot be built without a server is a queue crate nobody
+# can vendor.
+[dependencies]
+brocanth-queue.workspace = true
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "chrono",
+    "uuid",
+    "tls-rustls-ring",
+] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+brocanth-queue-conformance.workspace = true
+brocanth-queue-memory.workspace = true
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "chrono"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints.rust]
+missing_docs = "warn"

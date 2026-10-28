@@ -25,6 +25,10 @@ members = [
     "crates/brocanth-storage",
     "crates/brocanth-test",
     "crates/brocanth-pages",
+    "crates/brocanth-queue",
+    "crates/brocanth-queue-memory",
+    "crates/brocanth-queue-conformance",
+    "crates/brocanth-queue-postgres",
     "crates/brocanth-routes",
     "crates/brocanth-scaffold",
     "crates/brocanth-command",
@@ -53,6 +57,15 @@ brocanth-model = { path = "crates/brocanth-model", version = "0.1.0" }
 brocanth-admin-model = { path = "crates/brocanth-admin-model", version = "0.1.0" }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
+
+# The job contract and its backends. Four crates rather than one because
+# the contract names no driver: `brocanth-queue` depends on serde and
+# tokio and nothing else, which is why `brocanth-jobs` can take it for the
+# admin screens without gaining a single transitive dependency.
+brocanth-queue = { path = "crates/brocanth-queue", version = "0.1.0" }
+brocanth-queue-memory = { path = "crates/brocanth-queue-memory", version = "0.1.0" }
+brocanth-queue-postgres = { path = "crates/brocanth-queue-postgres", version = "0.1.0" }
+brocanth-queue-conformance = { path = "crates/brocanth-queue-conformance", version = "0.1.0" }
 brocanth-storage = { path = "crates/brocanth-storage", version = "0.1.0" }
 brocanth-resource = { path = "crates/brocanth-resource", version = "0.1.0", default-features = false }
 brocanth-realtime = { path = "crates/brocanth-realtime", version = "0.1.0" }
