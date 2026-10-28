@@ -17,6 +17,13 @@ description = "Background jobs for brocanth: a database-backed queue with retrie
 [dependencies]
 brocanth.workspace = true
 
+# The job contract, for its read side only. `Inspect` is what the admin
+# screens are written against, so implementing it here is what lets one
+# panel serve this queue and `brocanth-queue` without knowing which it has.
+# It costs nothing in the tree: the contract names serde, serde_json,
+# thiserror and tokio, which is the set below already.
+brocanth-queue.workspace = true
+
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -61,6 +68,12 @@ async-trait = { version = "0.1", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tempfile = "3"
+
+# The other queue, so `tests/panel.rs` can render the same six screens over
+# a backend this crate knows nothing about. That is the claim the panel
+# makes — it does not know which queue it has — and a test is the only
+# thing that keeps it true.
+brocanth-queue-memory.workspace = true
 
 # No backend feature here on purpose. It is the same `sqlx` the library
 # depends on, so whichever driver the build already has is the driver the

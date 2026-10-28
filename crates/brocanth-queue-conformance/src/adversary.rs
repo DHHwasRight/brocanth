@@ -83,7 +83,7 @@ impl DynBackend for Adversary {
             };
             let mut out = self.inner.claim(&trimmed).await?;
             // Nothing promises order.
-            if self.claims.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+            if self.claims.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
                 out.reverse();
             }
             Ok(out)

@@ -302,6 +302,32 @@ impl Queue {
         self.store.busy(i64::from(limit), i64::from(offset)).await
     }
 
+    /// Jobs that could run right now, oldest first.
+    ///
+    /// The count was always on the dashboard and the list was not. A ready
+    /// job that stays ready is the one number that separates a busy queue
+    /// from a stopped one, and this is how you find out which jobs they
+    /// are.
+    pub async fn ready(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
+        let now = to_millis(self.clock.now());
+        self.store
+            .ready(now, i64::from(limit), i64::from(offset))
+            .await
+    }
+
+    /// One waiting job, whole.
+    ///
+    /// [`job_state`](Queue::job_state) answers three columns, which is
+    /// enough for a test and not enough for a screen.
+    pub async fn waiting_job(&self, id: JobId) -> Result<Option<WaitingJob>> {
+        self.store.one_waiting(id.0).await
+    }
+
+    /// One running job, whole.
+    pub async fn running_job(&self, id: JobId) -> Result<Option<RunningJob>> {
+        self.store.one_running(id.0).await
+    }
+
     /// Makes a waiting job runnable now, whatever its `run_at` said.
     ///
     /// The operator's override: a retry whose backoff is an hour away, or a

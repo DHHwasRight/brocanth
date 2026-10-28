@@ -849,6 +849,8 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-jobs",
+ "brocanth-queue",
+ "brocanth-queue-memory",
  "brocanth-scaffold",
  "chrono",
  "rsx",

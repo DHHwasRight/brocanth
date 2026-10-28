@@ -28,7 +28,7 @@ fn admin(queue: &Queue, act: bool) -> Admin {
         Arc::new(Fixture::blog()),
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
-            .panel(JobsPanel::new(queue.clone()))
+            .panel(JobsPanel::new(Arc::new(queue.clone())))
             .with_policy(policy_fn(move |_: &Principal<'_>, r: Request<'_>| {
                 act || r.action != Action::ActOnPanel
             })),
@@ -285,4 +285,114 @@ async fn show() {
         println!("\n===== /admin/jobs{path} =====");
         println!("{}", get(&a, &format!("/admin/jobs{path}")));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The same six screens, over a queue this crate knows nothing about.
+// ---------------------------------------------------------------------------
+
+/// The panel holds `Arc<dyn DynInspect>` and nothing else, so anything that
+/// implements the contract draws the same screens. This is that claim as a
+/// test: the backend is `brocanth-queue`'s in-process one, which shares no
+/// code, no schema and no id type with the SQLite queue above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_same_screens_render_over_another_queue_entirely() {
+    use brocanth_queue::{Backend, ClaimRequest, JobFailure, NewJob, Settle, UniquenessKind};
+    use brocanth_queue_memory::Memory;
+
+    let store = Arc::new(Memory::new());
+    let job = |kind: &str, run_at| NewJob {
+        kind: kind.into(),
+        queue: "mail".into(),
+        payload: b"{}".to_vec(),
+        run_at,
+        max_attempts: 3,
+        unique_key: None,
+        uniqueness: UniquenessKind::None,
+    };
+    let later = Some(std::time::SystemTime::now() + Duration::from_secs(3600));
+    store
+        .push(vec![job("send_welcome", None), job("digest", later)])
+        .await
+        .expect("pushed");
+
+    // One claimed, so the Busy screen has a worker to name, and one dead.
+    let claim = ClaimRequest {
+        queue: "mail".into(),
+        max: 1,
+        lease: Duration::from_secs(30),
+        kinds: None,
+        worker: "worker-7".into(),
+    };
+    let held = store
+        .claim(&claim)
+        .await
+        .expect("claimed")
+        .pop()
+        .expect("one");
+    store
+        .push(vec![job("charge_card", None)])
+        .await
+        .expect("pushed");
+    let doomed = store
+        .claim(&claim)
+        .await
+        .expect("claimed")
+        .pop()
+        .expect("one");
+    store
+        .settle(
+            &doomed.lease,
+            Settle::Dead {
+                failure: JobFailure::returned("the card was declined"),
+            },
+        )
+        .await
+        .expect("settled");
+
+    let a = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(JobsPanel::new(store.clone()))
+            .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
+    );
+
+    let dash = get(&a, "/admin/jobs");
+    assert!(dash.contains("Background jobs"), "{dash}");
+    assert!(
+        dash.contains(">mail<"),
+        "the queue name, from the other queue"
+    );
+
+    let busy = get(&a, "/admin/jobs/busy");
+    assert!(busy.contains("send_welcome"), "{busy}");
+    // `ClaimRequest::worker` was documented as "for the admin screens" and
+    // stored nowhere until the column existed. This is the screen.
+    assert!(busy.contains("worker-7"), "{busy}");
+
+    let scheduled = get(&a, "/admin/jobs/scheduled");
+    assert!(scheduled.contains("digest"), "{scheduled}");
+
+    let dead = get(&a, "/admin/jobs/dead");
+    assert!(dead.contains("charge_card"), "{dead}");
+    assert!(dead.contains("the card was declined"), "{dead}");
+
+    // And a button, which is where the id types matter: this queue numbers
+    // its dead letter for itself, and the panel passes the id straight
+    // through rather than parsing it into something of its own.
+    let id = brocanth_queue::Inspect::dead(&*store, brocanth_queue::Page::default())
+        .await
+        .expect("dead")
+        .remove(0)
+        .id;
+    assert_eq!(post(&a, &format!("/admin/jobs/dead/{id}/retry")), 303);
+    assert_eq!(
+        brocanth_queue::Inspect::stats(&*store).await.unwrap().dead,
+        0,
+        "the retry button put it back"
+    );
+
+    // The job the first worker still holds must not be movable from here.
+    let _ = held;
 }

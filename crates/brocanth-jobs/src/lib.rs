@@ -186,6 +186,9 @@ pub mod scaffold;
 pub mod worker;
 
 mod error;
+/// This queue, as `brocanth_queue::Inspect`, so the admin screens can
+/// read it without knowing which queue they have.
+mod inspect;
 mod panic_hook;
 mod store;
 

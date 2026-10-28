@@ -497,6 +497,47 @@ pub(crate) const SCHEDULED_SQLITE: &str =
      FROM brocanth_jobs WHERE state = 'pending' AND attempts = 0 AND run_at > ? \
      ORDER BY run_at, id LIMIT ? OFFSET ?";
 
+/// Jobs that could run right now, oldest first.
+///
+/// The screen the queue had no query for. A job that is ready and stays
+/// ready is the only count on a dashboard that means something is wrong:
+/// work is waiting and no worker took it. Listing them is how you find out
+/// which ones.
+#[cfg(feature = "postgres")]
+pub(crate) const READY_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND run_at <= $1 \
+     ORDER BY run_at, id LIMIT $2 OFFSET $3";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const READY_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE state = 'pending' AND run_at <= ? \
+     ORDER BY run_at, id LIMIT ? OFFSET ?";
+
+/// One waiting job, whole. `job_state` answers three columns, which is
+/// enough for a test and not enough for a screen.
+#[cfg(feature = "postgres")]
+pub(crate) const ONE_WAITING_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE id = $1 AND state = 'pending'";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const ONE_WAITING_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, run_at, created_at, last_error \
+     FROM brocanth_jobs WHERE id = ? AND state = 'pending'";
+
+/// One running job, whole.
+#[cfg(feature = "postgres")]
+pub(crate) const ONE_RUNNING_PG: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, locked_by, locked_at, \
+     heartbeat_at FROM brocanth_jobs WHERE id = $1 AND state = 'running'";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const ONE_RUNNING_SQLITE: &str =
+    "SELECT id, queue, job_name, payload, attempts, max_attempts, locked_by, locked_at, \
+     heartbeat_at FROM brocanth_jobs WHERE id = ? AND state = 'running'";
+
 /// What every worker is holding right now, oldest claim first.
 ///
 /// `locked_by` and not a worker table: a worker is only ever known by the
@@ -612,7 +653,8 @@ RETURNING id"#
 pub(crate) const STATS_PG: &str = r#"
 SELECT queue,
        COALESCE(SUM(CASE WHEN state = 'pending' AND run_at <= $1 THEN 1 ELSE 0 END), 0) AS ready,
-       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  $1 THEN 1 ELSE 0 END), 0) AS scheduled,
+       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  $1 AND attempts >  0 THEN 1 ELSE 0 END), 0) AS retrying,
+       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  $1 AND attempts =  0 THEN 1 ELSE 0 END), 0) AS scheduled,
        COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0) AS running,
        MIN(CASE WHEN state = 'pending' AND run_at <= $1 THEN run_at ELSE NULL END) AS oldest_ready
 FROM brocanth_jobs
@@ -623,7 +665,8 @@ ORDER BY queue"#;
 pub(crate) const STATS_SQLITE: &str = r#"
 SELECT queue,
        COALESCE(SUM(CASE WHEN state = 'pending' AND run_at <= ? THEN 1 ELSE 0 END), 0) AS ready,
-       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  ? THEN 1 ELSE 0 END), 0) AS scheduled,
+       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  ? AND attempts >  0 THEN 1 ELSE 0 END), 0) AS retrying,
+       COALESCE(SUM(CASE WHEN state = 'pending' AND run_at >  ? AND attempts =  0 THEN 1 ELSE 0 END), 0) AS scheduled,
        COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0) AS running,
        MIN(CASE WHEN state = 'pending' AND run_at <= ? THEN run_at ELSE NULL END) AS oldest_ready
 FROM brocanth_jobs

@@ -5,8 +5,8 @@ use crate::admin_templates::tabs::Tabs;
 // What every worker is holding right now.
 //
 // A worker with nothing in flight does not appear. There is no worker
-// table: a worker is known here only by the jobs it holds, so one holding
-// none has nothing to show and nothing to do to it.
+// table on either queue: a worker is known here only by the jobs it holds,
+// so one holding none has nothing to show and nothing to do to it.
 
 pub fn Busy(ctx: &BusyCtx) -> Element {
     <Tabs tabs={&ctx.tabs} />
@@ -33,13 +33,14 @@ pub fn Busy(ctx: &BusyCtx) -> Element {
                             <td class={parts::td()}>{&row.queue}</td>
                             <td class={parts::td()}>
                                 <span class="font-mono text-xs">{&row.worker}</span>
-                                // A worker that stopped saying it is alive
-                                // still holds its jobs until somebody
-                                // reclaims them, and looks exactly like a
-                                // busy one until this says otherwise.
+                                // A lease is the proof a worker is alive,
+                                // and one that runs out puts the job back
+                                // by itself. So this is not "stopped
+                                // answering": it is a job that has been
+                                // held longer than anyone expected.
                                 if row.stale {
                                     <span class="ml-1.5 text-xs font-semibold text-danger">
-                                        · not responding
+                                        · running long
                                     </span>
                                 }
                             </td>

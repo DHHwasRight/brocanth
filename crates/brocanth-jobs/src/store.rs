@@ -168,6 +168,20 @@ macro_rules! query_all {
     }};
 }
 
+/// The same, for a statement that returns at most one row.
+macro_rules! query_opt {
+    ($backend:expr, $row:ty, $pg:expr, $lite:expr $(, $arg:expr)* $(,)?) => {{
+        match $backend {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => sqlx::query_as::<_, $row>($pg)$(.bind($arg))*
+                .fetch_optional(pool).await?,
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(pool) => sqlx::query_as::<_, $row>($lite)$(.bind($arg))*
+                .fetch_optional(pool).await?,
+        }
+    }};
+}
+
 /// Multi-statement work, in a transaction that is `IMMEDIATE` on SQLite.
 macro_rules! transaction {
     ($backend:expr, |$tx:ident, $dialect:ident| $body:block) => {{
@@ -371,7 +385,9 @@ pub struct QueueDepth {
     pub queue: String,
     /// Jobs that could run right now.
     pub ready: u64,
-    /// Jobs waiting for their `run_at`.
+    /// Jobs that failed and are waiting out a backoff.
+    pub retrying: u64,
+    /// Jobs that have never run and are waiting for their `run_at`.
     pub scheduled: u64,
     /// Jobs a worker is holding.
     pub running: u64,
@@ -390,7 +406,14 @@ pub struct QueueDepth {
 pub struct Stats {
     /// Jobs that could run right now, across every queue.
     pub ready: u64,
-    /// Jobs waiting for their `run_at`.
+    /// Jobs that failed and are waiting out a backoff.
+    ///
+    /// Counted apart from `scheduled`, which it used to be folded into. A
+    /// queue with a thousand retries and nothing scheduled is in trouble,
+    /// and a queue with a thousand scheduled and no retries is working;
+    /// one number could not tell them apart.
+    pub retrying: u64,
+    /// Jobs that have never run and are waiting for their `run_at`.
     pub scheduled: u64,
     /// Jobs a worker is holding.
     pub running: u64,
@@ -847,6 +870,41 @@ impl Store {
         ))
     }
 
+    /// Jobs that could run right now.
+    pub(crate) async fn ready(&self, now: i64, limit: i64, offset: i64) -> Result<Vec<WaitingJob>> {
+        Ok(query_all!(
+            &self.backend,
+            WaitingJob,
+            sql::READY_PG,
+            sql::READY_SQLITE,
+            now,
+            limit,
+            offset
+        ))
+    }
+
+    /// One waiting job, whole.
+    pub(crate) async fn one_waiting(&self, id: i64) -> Result<Option<WaitingJob>> {
+        Ok(query_opt!(
+            &self.backend,
+            WaitingJob,
+            sql::ONE_WAITING_PG,
+            sql::ONE_WAITING_SQLITE,
+            id
+        ))
+    }
+
+    /// One running job, whole.
+    pub(crate) async fn one_running(&self, id: i64) -> Result<Option<RunningJob>> {
+        Ok(query_opt!(
+            &self.backend,
+            RunningJob,
+            sql::ONE_RUNNING_PG,
+            sql::ONE_RUNNING_SQLITE,
+            id
+        ))
+    }
+
     /// What every worker is holding right now.
     pub(crate) async fn busy(&self, limit: i64, offset: i64) -> Result<Vec<RunningJob>> {
         Ok(query_all!(
@@ -973,7 +1031,7 @@ impl Store {
         // Both arms reduce to the same tuple here rather than handing back a
         // row: a `PgRow` and a `SqliteRow` are different types, so a `match`
         // that yields rows does not compile once both drivers are enabled.
-        type StatTuple = (String, i64, i64, i64, Option<i64>);
+        type StatTuple = (String, i64, i64, i64, i64, Option<i64>);
         let rows: Vec<StatTuple> = match &self.backend {
             #[cfg(feature = "postgres")]
             Backend::Postgres(pool) => sqlx::query(sql::STATS_PG)
@@ -985,6 +1043,7 @@ impl Store {
                     Ok::<StatTuple, Error>((
                         r.try_get("queue")?,
                         r.try_get("ready")?,
+                        r.try_get("retrying")?,
                         r.try_get("scheduled")?,
                         r.try_get("running")?,
                         r.try_get("oldest_ready")?,
@@ -996,6 +1055,8 @@ impl Store {
                 .bind(now)
                 .bind(now)
                 .bind(now)
+                .bind(now)
+                .bind(now)
                 .fetch_all(pool)
                 .await?
                 .into_iter()
@@ -1003,6 +1064,7 @@ impl Store {
                     Ok::<StatTuple, Error>((
                         r.try_get("queue")?,
                         r.try_get("ready")?,
+                        r.try_get("retrying")?,
                         r.try_get("scheduled")?,
                         r.try_get("running")?,
                         r.try_get("oldest_ready")?,
@@ -1013,15 +1075,17 @@ impl Store {
 
         let mut stats = Stats {
             ready: 0,
+            retrying: 0,
             scheduled: 0,
             running: 0,
             dead: 0,
             oldest_ready_age: None,
             queues: Vec::with_capacity(rows.len()),
         };
-        for (queue, ready, scheduled, running, oldest) in rows {
+        for (queue, ready, retrying, scheduled, running, oldest) in rows {
             let age = oldest.map(|at| Duration::from_millis(now.saturating_sub(at).max(0) as u64));
             stats.ready += ready.max(0) as u64;
+            stats.retrying += retrying.max(0) as u64;
             stats.scheduled += scheduled.max(0) as u64;
             stats.running += running.max(0) as u64;
             stats.oldest_ready_age = match (stats.oldest_ready_age, age) {
@@ -1031,6 +1095,7 @@ impl Store {
             stats.queues.push(QueueDepth {
                 queue,
                 ready: ready.max(0) as u64,
+                retrying: retrying.max(0) as u64,
                 scheduled: scheduled.max(0) as u64,
                 running: running.max(0) as u64,
                 oldest_ready_age: age,
