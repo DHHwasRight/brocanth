@@ -1,0 +1,13 @@
+[package]
+name = "brocanth-bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Build-time JS and CSS bundles for assets/: rolldown and lightningcss, called from build.rs."
+
+[dependencies]
+rolldown = "1.2.15"
+rolldown_common = "1.2.15"
+lightningcss = "1.0.0-alpha.72"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }

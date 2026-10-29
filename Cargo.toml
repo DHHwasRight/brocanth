@@ -5,6 +5,7 @@ members = [
     "crates/brocanth-admin",
     "crates/brocanth-admin-model",
     "crates/brocanth-assets",
+    "crates/brocanth-bundle",
     "crates/brocanth-auth",
     "crates/brocanth-cache",
     "crates/brocanth-cli",

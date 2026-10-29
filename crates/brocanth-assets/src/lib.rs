@@ -40,7 +40,9 @@
 //!
 //! depoth's mark for a file that is bundled into another and must never be
 //! published on its own -- `_tailwind.css` is the input of the CSS build,
-//! not a stylesheet. Skipped in both directories.
+//! not a stylesheet. Skipped in both directories, and so is a directory whose
+//! name begins with `_`: `_src/` holds the modules a bundle imports.
+//! `brocanth-bundle` builds the `_` files into published ones.
 
 use std::path::{Path, PathBuf};
 
@@ -126,11 +128,15 @@ fn collect(base: &Path, dir: &Path, fingerprint: bool, out: &mut Vec<File>) -> R
     paths.sort();
 
     for path in paths {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         if path.is_dir() {
-            collect(base, &path, fingerprint, out)?;
+            // A directory of inputs (`_src/`) holds the modules a bundle
+            // imports; like an `_` file, nothing in it is published.
+            if !name.starts_with('_') {
+                collect(base, &path, fingerprint, out)?;
+            }
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
         // depoth's mark for an input: bundled into something else, never
         // published on its own.
         if name.starts_with('_') || name.starts_with('.') {
