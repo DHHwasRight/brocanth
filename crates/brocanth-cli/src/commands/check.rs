@@ -25,7 +25,7 @@
 //! | `deploy/database` | error | a database URL is in memory or under a temporary directory |
 //! | `deploy/csrf-off` | error | the project has cookies and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
-//! | `deploy/hsts` | warning | nothing in `src/` sets `Strict-Transport-Security` |
+//! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
 //! | `deploy/admin-unscoped` | error | `unscoped_rows_unsafe_for_development()` is called |
 //!
 //! `--allow <ID>` silences one finding, as Django's
@@ -494,15 +494,8 @@ pub fn deploy(
         );
     }
 
-    if sources.find("Strict-Transport-Security").is_empty() {
-        out.push(
-            Diagnostic::warning(
-                "deploy/hsts",
-                "nothing in src/ sets `Strict-Transport-Security`",
-            )
-            .note("brocanth has no security-headers hook yet")
-            .help("set HSTS at the TLS terminator and pass --allow deploy/hsts, or add the header in a ResponseHook"),
-        );
+    if let Some(d) = hsts(project, config, sources) {
+        out.push(d);
     }
 
     for at in sources.find("unscoped_rows_unsafe_for_development") {
@@ -517,6 +510,66 @@ pub fn deploy(
         );
     }
     out
+}
+
+/// `deploy/hsts`: whether a response over HTTPS carries
+/// `Strict-Transport-Security`.
+///
+/// The `SecurityHeaders` hook sends it only on a request it knows is
+/// HTTPS, so a registration is not enough. It also needs `behind_tls`, or
+/// a `ProxyHeaders` hook that passes on a trusted proxy's `proto=https`.
+fn hsts(project: &Project, config: &Config, sources: &Sources) -> Option<Diagnostic> {
+    let named = sources.find("brocanth_middleware::SecurityHeaders");
+    let registered = named.iter().any(|at| {
+        sources
+            .find("plugin_hooking")
+            .iter()
+            .any(|h| same_file(h, at))
+    }) || !sources.find("SecurityHeaders::new").is_empty()
+        || !sources.find("SecurityHeaders>::new").is_empty();
+
+    if !registered {
+        if !sources.find("Strict-Transport-Security").is_empty() {
+            return None;
+        }
+        return Some(
+            Diagnostic::warning(
+                "deploy/hsts",
+                "nothing in src/ sets `Strict-Transport-Security`",
+            )
+            .help("register `brocanth_middleware::SecurityHeaders` with `plugin_hooking`, or set HSTS at the TLS terminator and pass --allow deploy/hsts"),
+        );
+    }
+
+    let hsts_off = !sources.find("without_hsts").is_empty()
+        || get(config, "security_headers.hsts.enabled").and_then(Value::as_bool) == Some(false);
+    if hsts_off {
+        let mut d = Diagnostic::warning(
+            "deploy/hsts",
+            "`SecurityHeaders` is registered with HSTS turned off",
+        )
+        .help("turn HSTS on, or set it at the TLS terminator and pass --allow deploy/hsts");
+        if let Some(v) = get(config, "security_headers.hsts.enabled") {
+            d = d.at(place(project, v));
+        }
+        return Some(d);
+    }
+
+    let told = get(config, "security_headers.behind_tls").and_then(Value::as_bool) == Some(true)
+        || !sources.find(".behind_tls()").is_empty();
+    let proxied = !sources.find("ProxyHeaders::new").is_empty()
+        || !sources.find("ProxyHeaders>::new").is_empty();
+    if told || proxied {
+        return None;
+    }
+    Some(
+        Diagnostic::warning(
+            "deploy/hsts",
+            "`SecurityHeaders` is registered, and nothing tells it a request came over TLS",
+        )
+        .note("it sends HSTS only on a request it knows is HTTPS, and brocanth-server does not terminate TLS")
+        .help("set `behind_tls = true` in `[security_headers]`, or register `ProxyHeaders` so a trusted proxy's `proto=https` reaches it"),
+    )
 }
 
 fn same_file(a: &str, b: &str) -> bool {
@@ -651,6 +704,52 @@ dialect = "postgres"
         let mut found = always(&p, &config);
         found.extend(deploy(&p, &config, &src, &|_| Some(key.clone())));
         assert!(found.is_empty(), "{:#?}", ids(&found));
+    }
+
+    #[test]
+    fn the_security_headers_hook_answers_hsts_only_when_it_can_see_tls() {
+        let hsts = |config: &str, files: &[(&str, &str)]| {
+            let config = Config::from_toml("shop", "production", config).unwrap();
+            let found = deploy(&project(&[]), &config, &Sources::of(files), &|_| None);
+            found
+                .into_iter()
+                .find(|d| d.code.as_deref() == Some("deploy/hsts"))
+                .map(|d| d.render())
+        };
+        let registered = "let builder = builder.plugin_hooking(\n    \
+             <brocanth_middleware::SecurityHeaders as Plugin>::new(c),\n);";
+
+        // Commented out, as the scaffold writes it, is not registered.
+        let commented =
+            "// let b = b.plugin_hooking(\n//   brocanth_middleware::SecurityHeaders::new(c));";
+        let d = hsts("", &[("src/app.rs", commented)]).expect("a finding");
+        assert!(d.contains("SecurityHeaders"), "{d}");
+
+        // Registered, and nothing says the request was HTTPS.
+        let d = hsts("", &[("src/app.rs", registered)]).expect("a finding");
+        assert!(d.contains("over TLS") && d.contains("behind_tls"), "{d}");
+
+        // Told by the configuration, by the builder, or by a proxy hook.
+        assert_eq!(
+            hsts(
+                "[security_headers]\nbehind_tls = true\n",
+                &[("src/app.rs", registered)]
+            ),
+            None
+        );
+        let built = "builder.plugin_hooking(SecurityHeaders::new(\
+                     SecurityHeadersConfig::default().behind_tls()))";
+        assert_eq!(hsts("", &[("src/app.rs", built)]), None);
+        let proxied = format!("{registered}\nbuilder.plugin_hooking(ProxyHeaders::new(p));");
+        assert_eq!(hsts("", &[("src/app.rs", proxied.as_str())]), None);
+
+        // Registered with HSTS off is still a finding, at the line.
+        let d = hsts(
+            "[security_headers]\nbehind_tls = true\n[security_headers.hsts]\nenabled = false\n",
+            &[("src/app.rs", registered)],
+        )
+        .expect("a finding");
+        assert!(d.contains("HSTS turned off"), "{d}");
     }
 
     #[test]
