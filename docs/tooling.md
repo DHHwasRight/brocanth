@@ -224,3 +224,51 @@ Limits:
   `ResponseHook`.
 - **It does not stop the application.** A plugin's `configure` can already
   refuse to start. This command is the earlier, offline half.
+
+## 4. `dp-prefetch` (Astro A22)
+
+`crates/brocanth-middleware/assets/dpprefetch.js`, published as
+`brocanth_middleware::dp::PREFETCH`. Put it inline in a `<script>` or serve
+it beside dp-swap. It needs neither dp-swap nor a server half.
+
+```html
+<a href="/posts/7" dp-prefetch>                 <!-- hover, the default -->
+<a href="/posts/7" dp-prefetch="tap">           <!-- on the press -->
+<nav dp-prefetch="viewport">...</nav>           <!-- when a link scrolls into view -->
+<a href="/pricing" dp-prefetch="load">          <!-- when the page has loaded -->
+<html dp-prefetch="hover">                      <!-- every link on the page -->
+<a href="/logout" dp-prefetch="false">          <!-- never this one -->
+```
+
+| Astro | brocanth |
+|---|---|
+| `data-astro-prefetch` | `dp-prefetch`, inherited from the nearest ancestor, like `dp-target` |
+| `prefetchAll` + `defaultStrategy` | `dp-prefetch="<strategy>"` on `<html>` |
+| `hover`, `tap`, `viewport`, `load` | the same four. Hover waits 80 ms and includes keyboard focus. A hover link also prefetches on the press, because a touch screen has no hover |
+| `prefetch(url)` | `dpprefetch.prefetch(url)` |
+
+The rules:
+
+- **GET links on this origin only.** An `<a href>` over http or https, on
+  `location.origin`, with no `download` and no `dp-post`, `dp-put`,
+  `dp-patch` or `dp-delete`. A link to this page with another `#hash` is
+  skipped.
+- **Save-Data is respected.** Nothing is prefetched when
+  `navigator.connection.saveData` is on (that is where the `Save-Data`
+  request header comes from) or the connection reports 2g.
+- **One request per URL per page.** It is `<link rel="prefetch">` where the
+  browser supports it, else a low-priority `fetch` with the page's cookies.
+- **Links that dp-swap brings in are seen.** Viewport and load links are
+  scanned again on `dp:afterSettle`.
+- **It loads once.** A second copy on the page returns at once, through the
+  same `window.__dp…` guard that `dpmutate.js` uses.
+
+What it does not do: dp-swap sends `DP-Request`, and the server answers with
+`Vary`. So a prefetched whole page does not answer a dp-swap partial
+request. Prefetch helps a plain navigation, and a boosted link that falls
+back to one.
+
+Tests: JavaScript has no test harness here. `tests/prefetch.rs` checks the
+script as text, runs `node --check` on it, and runs it in `node` over a stub
+document for the link rules. Without `node`, the last two say SKIPPED on
+stderr.

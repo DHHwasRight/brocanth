@@ -36,6 +36,16 @@ use brocanth::plugin_hooks::{
 /// `</script>`, so it can go inline as it is.
 pub const SCRIPT: &str = include_str!("../assets/dpmutate.js");
 
+/// The prefetch script: `dp-prefetch` on a link fetches the page before
+/// the click, on `hover`, `tap`, `viewport` or `load`, as Astro's prefetch
+/// does.
+///
+/// Same-origin GET links only, and nothing when the browser asks to save
+/// data. It needs no dp-swap and no server half: the request is a plain
+/// `<link rel="prefetch">`. It holds no `</script>`, so it can go inline,
+/// and it guards against a second copy on the page as [`SCRIPT`] does.
+pub const PREFETCH: &str = include_str!("../assets/dpprefetch.js");
+
 /// The request header dp-swap sends on every request it makes.
 pub const REQUEST: &str = "dp-request";
 /// How many layout layers the client already holds.
