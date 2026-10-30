@@ -59,34 +59,36 @@ A flag may not do that, so `--with` refuses instead and names the fix.
 What it writes:
 
 ```
-  blog/Cargo.toml                  1455 bytes
-  blog/.gitignore                     8 bytes
-  blog/rust-toolchain.toml           29 bytes
-  blog/mise.toml                    492 bytes
-  blog/src/main.rs                  756 bytes
-  blog/src/app.rs                  6595 bytes
-  blog/src/pages/mod.rs            8838 bytes
-  blog/src/pages/index.rs           802 bytes
-  blog/src/pages/about.rs          1040 bytes
-  blog/src/pages/users/[id].rs     1656 bytes
-  blog/src/plugins/mod.rs          3197 bytes
-  blog/config/development.toml      560 bytes
-  blog/src/commands/mod.rs          582 bytes
-  blog/src/commands/serve.rs        592 bytes
-  blog/src/plugins/logging/mod.rs  2388 bytes
-  blog/AGENTS.md                   3351 bytes
-  blog/brocanth.toml                609 bytes
+  blog/Cargo.toml                   3219 bytes
+  blog/.gitignore                      8 bytes
+  blog/rust-toolchain.toml            29 bytes
+  blog/mise.toml                     492 bytes
+  blog/src/main.rs                   756 bytes
+  blog/src/app.rs                  16401 bytes
+  blog/src/pages/mod.rs            16366 bytes
+  blog/src/pages/index.rs            802 bytes
+  blog/src/pages/about.rs           1040 bytes
+  blog/src/pages/users/[id].rs      1656 bytes
+  blog/Dockerfile                   2146 bytes
+  blog/.dockerignore                  52 bytes
+  blog/deploy/kubernetes.yaml       1679 bytes
+  blog/src/plugins/mod.rs           7641 bytes
+  blog/config/development.toml      1071 bytes
+  blog/src/commands/mod.rs           598 bytes
+  blog/src/commands/serve.rs         604 bytes
+  blog/src/commands/routes.rs       3730 bytes
+  blog/src/plugins/observe/mod.rs   4430 bytes
+  blog/AGENTS.md                    3519 bytes
+  blog/brocanth.toml                 653 bytes
 
-    core          a router handing a request and a context to a handler
-    logging       a line per request; the core assumes no log layer
-    config        config/<env>.toml, merged; without it nothing links a TOML parser
-    commands      this project's own command line, `serve` plus whatever you add
-    sessions      not asked for: absent from the source, the binary and the lock file
-    model         not asked for: absent from the source, the binary and the lock file
-    cache         not asked for: absent from the source, the binary and the lock file
-    jobs          not asked for: absent from the source, the binary and the lock file
-    realtime      not asked for: absent from the source, the binary and the lock file
-    rsx           not asked for: absent from the source, the binary and the lock file
+    core             a router handing a request and a context to a handler
+    observe          JSON logs on stdout, /up and /readyz, Prometheus /metrics; the core assumes none
+    config           config/<env>.toml, merged; without it nothing links a TOML parser
+    commands         this project's own command line, `serve` plus whatever you add
+    logging          not asked for: absent from the source, the binary and the lock file
+    sessions         not asked for: absent from the source, the binary and the lock file
+    model            not asked for: absent from the source, the binary and the lock file
+    ...
 ```
 
 Those last lines are the point of the whole design, not a progress
@@ -118,19 +120,20 @@ needs a test, and a map of the crates.
 ### Choosing what goes in
 
 ```
-brocanth create blog --with logging,config,commands,sessions,model,rsx
+brocanth create blog --with observe,config,commands,sessions,model,rsx
 brocanth create blog --core-only
 ```
 
-The default is `logging,config,commands`. `--core-only` gives a router, a context
+The default is `observe,config,commands`. `--core-only` gives a router, a context
 and nothing else.
 
 | `--with` | What it adds |
 |---|---|
-| `logging` | A request logger. The core assumes no log layer at all. |
+| `observe` | A log line per request on stdout (JSON in production), a request id, `/up`, `/readyz` and Prometheus `/metrics`. The core assumes no log layer at all. |
+| `logging` | A plain request logger on stderr. The older choice; `create` refuses it beside `observe`. |
 | `config` | `config/<env>.toml`, four sources merged, typed per section. |
 | `sessions` | Cookie sessions, and a `Session` on the context. |
-| `model` | The model layer: SeaORM, validations and migrations. **Postgres by default** — see the warning at the end. |
+| `model` | The model layer: SeaORM, validations and migrations. SQLite in development, Postgres in production. |
 | `commands` | A `manage` binary whose subcommands are your own structs. |
 | `rsx` | HTML from `.rsx` templates beside the pages, with layouts. See below. |
 | `rsx-tailwind` | A CSS build over the class names in your templates. Needs node. |
@@ -157,7 +160,7 @@ name = "blog"
 title = "Blog"
 
 [modules]
-enabled = ["logging", "config", "jobs", "commands"]
+enabled = ["observe", "config", "jobs", "commands"]
 
 [modules.jobs]
 files = ["src/plugins/jobs/"]
@@ -204,19 +207,20 @@ later `remove` deletes what was written rather than what a rule guesses.
 
 ```
 cd blog
-cargo run
+brocanth serve
 ```
 
 ```
-[logging] level debug
-blog: plugins: [config, logging]
-GET / -> 200
-GET    /           200 <!doctype html><title>Blog</title><h1>Blog</h1><
-GET /users/7 -> 200
-GET    /users/7    200 <!doctype html><title>User 7</title><h1>User 7</
-DELETE /about      405 Allow: GET, HEAD
-GET    /nowhere    404 Not Found
+blog: plugins: [config, observe]
+blog: listening on http://127.0.0.1:3000
+2026-10-30T18:56:36.637Z  INFO GET / -> 200 request_id=7adc3a51… method=GET path=/ route=/ status=200 duration_ms=0.06
+2026-10-30T18:56:36.650Z  INFO GET /users/7 -> 200 request_id=30a8f7b2… method=GET path=/users/7 route=/users/{id} status=200 duration_ms=0.037
+2026-10-30T18:56:36.677Z  INFO DELETE /about -> 405 request_id=61988… method=DELETE path=/about route=/about status=405 duration_ms=0.034
 ```
+
+The request lines are text in development and JSON when `$BLOG_ENV` is
+`production`. `/up` answers `{"status":"ok"}`, and `/readyz` runs each
+plugin's readiness check.
 
 **That is a real socket.** Open `http://127.0.0.1:3000` in a browser, or:
 
@@ -237,17 +241,24 @@ brocanth --help
 
 ```
 Commands:
-  create  Scaffold an application
-  serve   Serve the application over HTTP
-  help    Print this message or the help of the given subcommand(s)
+  create    Scaffold an application
+  add       Put a module into a project that already exists
+  migrate   Write migrations from the models, and the ids that make renames visible
+  dbshell   Open psql or sqlite3 on this project's database
+  check     Find what is wrong with the configuration and the source, before a deploy
+  routes    Every route this application answers
+  serve     Serve the application over HTTP
+  help      Print this message or the help of the given subcommand(s)
 ```
 
-`create` is `brocanth`'s own and the only one it has. Everything below it is
-**your project's**, read out of the built binary — so a command you add appears
-here once it has been compiled. Nothing is listed that this project cannot run.
+The first five are `brocanth`'s own. Everything below them is **your
+project's**, read out of the built binary, so a command you add appears here
+once it has been compiled. `brocanth <command>` builds the project and runs
+it: `brocanth fixtures load blog` (see `docs/tooling.md`) is a project
+command too.
 
-Outside a project the same help shows `create` alone, because there is no
-project to ask.
+Outside a project the same help shows the built-in commands alone, because
+there is no project to ask.
 
 `-D` has exactly one job, and it belongs to `create`. Run with no name, the
 chooser opens; `-D` then prints the command line that would have given the
@@ -255,7 +266,7 @@ same answers with nothing to ask:
 
 ```
 $ brocanth -D create
-debug: brocanth create blog --title Blog --with logging,config,commands --git
+debug: brocanth create blog --title Blog --with observe,config,commands --git
 ```
 
 Copy that into a script and the same project comes out. It is written in

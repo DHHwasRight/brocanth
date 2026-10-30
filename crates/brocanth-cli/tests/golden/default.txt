@@ -114,6 +114,12 @@ use crate::plugins;
 /// name arrived in.
 pub const APP: &str = "my-blog";
 
+/// Where `serve` listens when nothing says else: `$MY_BLOG_ADDR`, or
+/// `127.0.0.1:3000`. The container image sets `0.0.0.0:3000`.
+pub fn default_addr() -> String {
+    std::env::var("MY_BLOG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string())
+}
+
 /// What a request needs, built once and shared by every connection.
 pub struct App {
     pub router: Router<Handler>,
@@ -1054,6 +1060,138 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
+===== Dockerfile =====
+# syntax=docker/dockerfile:1
+#
+# The image of My Blog.
+#
+#   docker build -t my-blog .
+#   docker run --rm -p 3000:3000 my-blog
+#
+# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
+# the dependencies from the recipe, in a layer that stays cached until
+# Cargo.toml or Cargo.lock changes, and then builds the application. The
+# runtime holds the binary, the config directory and nothing else.
+#
+# Dependencies on a path outside this directory (`brocanth create
+# --brocanth-path`) are not in the build context, and the build fails. Build
+# from git dependencies, or add the checkout to the context.
+
+ARG RUST_VERSION=1.98
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin my-blog \
+ && mkdir -p config
+
+FROM debian:bookworm-slim AS runtime
+# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
+WORKDIR /app
+COPY --from=builder /app/target/release/my-blog /app/my-blog
+COPY --from=builder /app/config /app/config
+USER 10001
+
+# Every interface, inside the container. `$MY_BLOG_ENV` picks
+# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
+# overrides one key of it.
+ENV MY_BLOG_ADDR=0.0.0.0:3000 \
+    MY_BLOG_ENV=production
+EXPOSE 3000
+
+# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
+# project without `observe` passes with a 404: the process answers.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
+
+# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
+# default). Give `docker stop` more than that: `docker stop -t 30`.
+STOPSIGNAL SIGTERM
+CMD ["/app/my-blog", "serve"]
+===== .dockerignore =====
+/target
+/.git
+/db
+*.sqlite
+*.sqlite-*
+/node_modules
+===== deploy/kubernetes.yaml =====
+# A minimal deployment of this image. Change the image, the replica count
+# and the secrets; keep the probes and the timings in step.
+#
+# The stop, in order:
+#   1. SIGTERM. `/readyz` answers 503 at once, so the Service stops routing
+#      here. The listener stays open for `drain_delay_secs` (5 below), while
+#      the endpoint change reaches every node.
+#   2. The listener closes. Open requests have what is left of
+#      `shutdown_grace_secs` (25) to finish, then the plugins stop.
+#   3. terminationGracePeriodSeconds (30) is the hard limit: SIGKILL. It is
+#      above the 25, so a clean drain never meets it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-blog
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: my-blog
+  template:
+    metadata:
+      labels:
+        app: my-blog
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: my-blog
+          image: my-blog:latest
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS
+              value: "25"
+            - name: MY_BLOG_OBSERVE__DRAIN_DELAY_SECS
+              value: "5"
+          livenessProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-blog
+spec:
+  selector:
+    app: my-blog
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
 ===== src/plugins/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
@@ -1309,7 +1447,7 @@ use brocanth_command::{anyhow, clap, cmd, Command, Context};
 #[derive(clap::Args)]
 pub struct Serve {
     /// Address to bind.
-    #[arg(long, default_value = "127.0.0.1:3000")]
+    #[arg(long, default_value_t = crate::app::default_addr())]
     pub addr: String,
 }
 
@@ -1651,7 +1789,7 @@ title = "My Blog"
 enabled = ["observe", "config", "commands"]
 
 [modules.observe]
-files = ["src/plugins/observe/"]
+files = ["deploy/kubernetes.yaml", "src/plugins/observe/"]
 config = ["observe"]
 crates = ["brocanth-observe"]
 
@@ -1665,4 +1803,4 @@ files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
 
-# brocanth-digest: dd15870742d549ba
+# brocanth-digest: a7c3e9bc57385331

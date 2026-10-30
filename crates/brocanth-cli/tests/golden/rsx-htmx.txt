@@ -77,7 +77,7 @@ mod plugins;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match app::serve("127.0.0.1:3000") {
+    match app::serve(&app::default_addr()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
@@ -86,7 +86,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 09dc37c83105c4d9
+// brocanth-digest: d496d5793d0b79ec
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -116,6 +116,12 @@ use crate::plugins;
 /// `MY_BLOG_<SUFFIX>`: one convention, derived once, whatever spelling the
 /// name arrived in.
 pub const APP: &str = "my-blog";
+
+/// Where `serve` listens when nothing says else: `$MY_BLOG_ADDR`, or
+/// `127.0.0.1:3000`. The container image sets `0.0.0.0:3000`.
+pub fn default_addr() -> String {
+    std::env::var("MY_BLOG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string())
+}
 
 /// What a request needs, built once and shared by every connection.
 pub struct App {
@@ -1253,6 +1259,74 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
+===== Dockerfile =====
+# syntax=docker/dockerfile:1
+#
+# The image of My Blog.
+#
+#   docker build -t my-blog .
+#   docker run --rm -p 3000:3000 my-blog
+#
+# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
+# the dependencies from the recipe, in a layer that stays cached until
+# Cargo.toml or Cargo.lock changes, and then builds the application. The
+# runtime holds the binary, the config directory and nothing else.
+#
+# Dependencies on a path outside this directory (`brocanth create
+# --brocanth-path`) are not in the build context, and the build fails. Build
+# from git dependencies, or add the checkout to the context.
+
+ARG RUST_VERSION=1.98
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin my-blog \
+ && mkdir -p config
+
+FROM debian:bookworm-slim AS runtime
+# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
+WORKDIR /app
+COPY --from=builder /app/target/release/my-blog /app/my-blog
+COPY --from=builder /app/config /app/config
+USER 10001
+
+# Every interface, inside the container. `$MY_BLOG_ENV` picks
+# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
+# overrides one key of it.
+ENV MY_BLOG_ADDR=0.0.0.0:3000 \
+    MY_BLOG_ENV=production
+EXPOSE 3000
+
+# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
+# project without `observe` passes with a 404: the process answers.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
+
+# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
+# default). Give `docker stop` more than that: `docker stop -t 30`.
+STOPSIGNAL SIGTERM
+CMD ["/app/my-blog", "serve"]
+===== .dockerignore =====
+/target
+/.git
+/db
+*.sqlite
+*.sqlite-*
+/node_modules
 ===== src/plugins/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.

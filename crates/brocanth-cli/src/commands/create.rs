@@ -866,6 +866,18 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         ("src/pages/about.rs".to_string(), about_rs(a)),
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
+    // The container image, for every project. Its text depends on the name
+    // alone, so `brocanth add` never has to change a file the developer
+    // tunes: a serve-only binary ignores the `serve` argument, the config
+    // directory is made empty when there is none, and the health check
+    // accepts any HTTP answer, so a project without `observe` passes it
+    // with a 404 from `/up`.
+    files.push(("Dockerfile".to_string(), dockerfile(a)));
+    files.push((".dockerignore".to_string(), DOCKERIGNORE.to_string()));
+    if a.has("observe") {
+        // Probes need `/up` and `/readyz`, which only `observe` serves.
+        files.push(("deploy/kubernetes.yaml".to_string(), kubernetes_yaml(a)));
+    }
     // For every project, including one with no plugins. `src/app.rs` asks
     // this file the same four questions whatever the module list is, which
     // is what lets `brocanth add` leave `src/app.rs` alone.
@@ -909,6 +921,159 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     ));
     Ok(files)
 }
+
+/// `Dockerfile`: cargo-chef for the dependency layer, a slim Debian runtime,
+/// a user that is not root, and a health check on `/up`.
+fn dockerfile(a: &Answers) -> String {
+    DOCKERFILE
+        .replace("@NAME@", &a.name)
+        .replace("@TITLE@", &a.title)
+        .replace("@UPPER@", &a.ident().to_uppercase())
+}
+
+const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1
+#
+# The image of @TITLE@.
+#
+#   docker build -t @NAME@ .
+#   docker run --rm -p 3000:3000 @NAME@
+#
+# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
+# the dependencies from the recipe, in a layer that stays cached until
+# Cargo.toml or Cargo.lock changes, and then builds the application. The
+# runtime holds the binary, the config directory and nothing else.
+#
+# Dependencies on a path outside this directory (`brocanth create
+# --brocanth-path`) are not in the build context, and the build fails. Build
+# from git dependencies, or add the checkout to the context.
+
+ARG RUST_VERSION=1.98
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin @NAME@ \
+ && mkdir -p config
+
+FROM debian:bookworm-slim AS runtime
+# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
+WORKDIR /app
+COPY --from=builder /app/target/release/@NAME@ /app/@NAME@
+COPY --from=builder /app/config /app/config
+USER 10001
+
+# Every interface, inside the container. `$@UPPER@_ENV` picks
+# config/production.toml, and a variable such as `$@UPPER@_MODEL__URL`
+# overrides one key of it.
+ENV @UPPER@_ADDR=0.0.0.0:3000 \
+    @UPPER@_ENV=production
+EXPOSE 3000
+
+# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
+# project without `observe` passes with a 404: the process answers.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
+
+# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
+# default). Give `docker stop` more than that: `docker stop -t 30`.
+STOPSIGNAL SIGTERM
+CMD ["/app/@NAME@", "serve"]
+"#;
+
+/// `.dockerignore`: what the build context does not need.
+const DOCKERIGNORE: &str = "/target
+/.git
+/db
+*.sqlite
+*.sqlite-*
+/node_modules
+";
+
+/// `deploy/kubernetes.yaml`: a Deployment and a Service, with the probes
+/// `observe` serves and a grace period that covers the drain.
+fn kubernetes_yaml(a: &Answers) -> String {
+    KUBERNETES_YAML
+        .replace("@NAME@", &a.name)
+        .replace("@UPPER@", &a.ident().to_uppercase())
+}
+
+const KUBERNETES_YAML: &str = r#"# A minimal deployment of this image. Change the image, the replica count
+# and the secrets; keep the probes and the timings in step.
+#
+# The stop, in order:
+#   1. SIGTERM. `/readyz` answers 503 at once, so the Service stops routing
+#      here. The listener stays open for `drain_delay_secs` (5 below), while
+#      the endpoint change reaches every node.
+#   2. The listener closes. Open requests have what is left of
+#      `shutdown_grace_secs` (25) to finish, then the plugins stop.
+#   3. terminationGracePeriodSeconds (30) is the hard limit: SIGKILL. It is
+#      above the 25, so a clean drain never meets it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: @NAME@
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: @NAME@
+  template:
+    metadata:
+      labels:
+        app: @NAME@
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: @NAME@
+          image: @NAME@:latest
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: @UPPER@_SERVER__SHUTDOWN_GRACE_SECS
+              value: "25"
+            - name: @UPPER@_OBSERVE__DRAIN_DELAY_SECS
+              value: "5"
+          livenessProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: @NAME@
+spec:
+  selector:
+    app: @NAME@
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+"#;
 
 /// `brocanth.toml`: the marker, the module list, and what each module put
 /// in the project.
@@ -1683,6 +1848,12 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// name arrived in.\n\
          pub const APP: &str = {name:?};\n\
          \n\
+         /// Where `serve` listens when nothing says else: `${upper}_ADDR`, or\n\
+         /// `127.0.0.1:3000`. The container image sets `0.0.0.0:3000`.\n\
+         pub fn default_addr() -> String {{\n\
+        \x20   std::env::var({addr_var:?}).unwrap_or_else(|_| \"127.0.0.1:3000\".to_string())\n\
+         }}\n\
+         \n\
          /// What a request needs, built once and shared by every connection.\n\
          pub struct App {{\n\
         \x20   pub router: Router<Handler>,\n\
@@ -1717,7 +1888,8 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20           // pattern is a decision, and the decision is the application's --\n\
         \x20           // which is why these lines are here, in the file you own.\n",
         upper = a.ident().to_uppercase(),
-        name = a.name
+        name = a.name,
+        addr_var = format!("{}_ADDR", a.ident().to_uppercase()),
     ));
     for line in built.slot(Slot::AppSetup) {
         out.push_str(line);
@@ -2150,7 +2322,7 @@ mod pages;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {{
-    match app::serve("127.0.0.1:3000") {{
+    match app::serve(&app::default_addr()) {{
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {{
             eprintln!("error: {{message}}");
@@ -2224,7 +2396,7 @@ use brocanth_command::{anyhow, clap, cmd, Command, Context};
 #[derive(clap::Args)]
 pub struct Serve {
     /// Address to bind.
-    #[arg(long, default_value = "127.0.0.1:3000")]
+    #[arg(long, default_value_t = crate::app::default_addr())]
     pub addr: String,
 }
 
