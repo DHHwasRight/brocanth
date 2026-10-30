@@ -410,7 +410,7 @@ means it is not yet a feature.
 | Islands / client components (A3, A4, N8) | **no, and unreachable** | no client-side component runtime exists; constraint 2 |
 | Server islands, deferred fragments (A5) | **no** | needs a mutating fetch; constraint 1 |
 | View transitions / client router (A21) | **partial** | dp-swap boosts links and swaps by layout depth |
-| Prefetch (A22) | **no** | dp-swap has no prefetch strategy |
+| Prefetch (A22) | **yes** | `dp-prefetch` with `hover`, `tap`, `viewport` and `load`, in `brocanth_middleware::dp::PREFETCH`. See `docs/tooling.md` §4 |
 | Actions / typed RPC from a form (A16, N12) | **no** | the gap dp-swap's missing `dp-post` names |
 | Middleware (A18, N6, D16) | **yes** | `MiddlewareStack`, mounted at a pattern the application picks |
 | Endpoints returning a Response (A19) | **yes** | `pages!` handlers |
@@ -434,11 +434,11 @@ means it is not yet a feature.
 | Signals (D20) | **partial** | `brocanth-events` is tested and `brocanth-realtime` subscribes; `brocanth-model` publishes nothing |
 | Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
 | Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
-| Deployment checks that refuse to start (D23) | **partial** | a plugin's `configure` can refuse; no `check --deploy` |
+| Deployment checks that refuse to start (D23) | **yes** | a plugin's `configure` can refuse at startup, and `brocanth check --deploy` is the offline half: fifteen findings, each with an id and a `help:`. See `docs/tooling.md` §3 |
 | i18n (D24) | **no** | nothing in the tree |
 | Test client with transactional tests (D25) | **partial** | `Harness` wraps a database; no HTTP test client |
-| Shell / dbshell (D26) | **no** | |
-| Fixtures (D27) | **no** | |
+| Shell / dbshell (D26) | **partial** | `brocanth dbshell` opens psql or sqlite3 on `[model] url`. No Rust console, on purpose: a project command runs application code. See `docs/tooling.md` §2 |
+| Fixtures (D27) | **partial** | `brocanth_model::Fixtures`: JSON, checked against the entities, loaded through their hooks, in the test harness's transaction. No `dumpdata`. See `docs/tooling.md` §1 |
 | Background jobs with retries and a dead letter | **yes, and further** | `brocanth-jobs`; Rails and Django both need a second product for this |
 | Single binary, embedded database (PocketBase) | **branch** | `brocanth-pgserver`, unmerged |
 | Realtime subscriptions (PocketBase) | **broker only** | no transport; blocked on the buffered `Response` |
@@ -466,7 +466,7 @@ because the argument is still why each one matters.
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | **done**: `brocanth migrate make` diffs the models against `migrations/schema.json` by stable field id and writes a SeaORM migration, renames included. It applies nothing. See `docs/migrations.md` |
 | G8 | the cache is key/value only | **done**: tags on `Cache` (`set_tagged`, `invalidate_tag`), `route::RouteCache`, `CacheExt::fragment`, and `TagInvalidator` from model changes. See `docs/cache.md` |
-| G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
+| G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open. Fixtures, `brocanth dbshell`, `dp-prefetch` and `brocanth check --deploy` are done; see `docs/tooling.md` |
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
@@ -653,6 +653,13 @@ do.
 
 i18n (D24), fixtures (D27), a shell (D26), prefetch (A22), `check --deploy`
 (D23). None blocks anything else.
+
+**Status, 2026-10-30: four of the five are done.** Fixtures are
+`brocanth_model::Fixtures`. The shell is `brocanth dbshell`, a data shell and
+not a Rust console, because Rust has no interpreter that can see the types of
+a project. Prefetch is `dp-prefetch`. `brocanth check --deploy` reads the
+configuration and `src/` and reports each finding with an id and a `help:`.
+`docs/tooling.md` has all four, and what each one does not do.
 
 ### Out of scope, already decided
 

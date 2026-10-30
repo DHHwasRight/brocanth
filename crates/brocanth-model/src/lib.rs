@@ -27,6 +27,9 @@
 //!    the ORM reaches realtime, an audit log or a plugin hook. PLAN.md §10's
 //!    publisher half.
 //!
+//! 8. **Fixtures** — [`fixtures`]. A known dataset from a JSON file, checked
+//!    against the entities and written through their hooks (Django D27).
+//!
 //! Plus [`registry`], which enumerates the models in a binary, and
 //! [`schema_sync`], which is the single adapter standing between brocanth and
 //! SeaORM's semver-exempt `schema-sync`.
@@ -92,6 +95,7 @@ pub mod changes;
 pub mod deferred;
 pub mod eager;
 pub mod errors;
+pub mod fixtures;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod prelude;
@@ -110,6 +114,7 @@ pub use dirty::{Change, Tracked};
 pub use deferred::{Deferred, NotLoaded};
 pub use eager::{Eager, EagerExt, EagerStrategy, WithRelated};
 pub use errors::{Entry, Error, Errors};
+pub use fixtures::{FixtureError, Fixtures};
 pub use probe::{Probe, ProbeConfig, Report, Suspect, UnitOfWork};
 pub use registry::{ModelInfo, ModelRegistry};
 pub use validation::{enforce, Validate, Validated, Write};
