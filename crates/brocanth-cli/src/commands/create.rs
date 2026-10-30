@@ -1484,7 +1484,18 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // `expect` and not `?`: `ask` already refused a pick whose module is
     // not in this build, and two sources for one name is a mistake in this
     // repository's own registry rather than anything a user typed.
-    for dep in merged(&a.picks).expect("the registry does not disagree with itself") {
+    for mut dep in merged(&a.picks).expect("the registry does not disagree with itself") {
+        // Accounts go to Postgres when the project already has a Postgres
+        // database. A manifest is static, so this one feature depends on
+        // the other picks here; `brocanth_auth::scaffold::POSTGRES_WITH` is
+        // the rule, and the plugin file it writes follows the same rule.
+        if dep.name == "brocanth-auth"
+            && brocanth_auth::scaffold::POSTGRES_WITH
+                .iter()
+                .any(|key| a.has(key))
+        {
+            dep = dep.feature("postgres");
+        }
         deps.push(source_of(a, &dep));
     }
     // The macros that read `src/pages`: the route table always, and the

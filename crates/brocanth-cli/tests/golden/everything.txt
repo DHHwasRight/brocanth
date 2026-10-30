@@ -18,7 +18,7 @@ brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["sqlite"] }  # Postgres by default; SQLite for config/development.toml
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1894,6 +1894,9 @@ queues = ["default"]
 concurrency = 5
 
 [auth]
+# The Postgres database for accounts and sessions. The tables are
+# created at startup, named brocanth_auth_*.
+url = "postgres://localhost/development"
 # The *name* of the variable that holds the session signing key, not the
 # key. 32 bytes, base64url. `brocanth` will not invent one: a key minted at
 # startup logs every session out on each restart and differs between the
@@ -2911,18 +2914,13 @@ mod tests {
 //! They are type aliases so that changing one changes one line and nothing
 //! else in the project changes type.
 //!
-//! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
-//!    sessions last exactly as long as the process, so a restart is a logout
-//!    for everybody and a deploy loses every account. That is the one thing
-//!    in this file to replace before anybody else uses this application: write
-//!    an `AuthStore` over your database -- fourteen methods, of which the two
-//!    that carry a requirement are a unique email and a `consume_token` that
-//!    deletes and returns under one lock -- and change the line below.
-//!
-//!    When you do, the build moves: a pool is opened asynchronously and
-//!    `Plugin::new` is not, so `configure` becomes `before_start` and reaches
-//!    for the current runtime handle. `brocanth-cache` does it in about ten
-//!    lines and they are worth copying rather than inventing.
+//! 1. **`Store = PgStore`.** Accounts and sessions are rows in the
+//!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and
+//!    a deploy. The pool opens in `before_start`, because opening it is async
+//!    and `Plugin::new` is not, and `migrate` creates the tables there (it is
+//!    idempotent and takes an advisory lock). To review the schema in a
+//!    migration file instead, copy `PgStore::schema_sql()` into one and
+//!    delete the `migrate` call.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -2984,15 +2982,16 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_auth::http_client::StubHttp;
 use brocanth_auth::plugin::AuthConfig;
 use brocanth_auth::session::{SameSite, SessionConfig, SigningKey};
-use brocanth_auth::{MemoryStore, Passwords, SystemClock};
+use brocanth_auth::{Clock as _, Passwords, PgStore, SystemClock};
 
 /// Where identities, sessions and single-use tokens live.
 ///
-/// In memory, for now. See the file header: this is the line to change first.
-pub type Store = MemoryStore;
+/// Postgres, at `[auth] url`. See the file header.
+pub type Store = PgStore;
 
 /// How this application reaches a provider.
 ///
@@ -3022,6 +3021,8 @@ pub type Services = brocanth_auth::Auth<Store, Http, Clock>;
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    /// The Postgres database the accounts and sessions live in.
+    pub url: String,
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
@@ -3042,6 +3043,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            url: "postgres://localhost/development".to_string(),
             signing_key_env: "MY_BLOG_SESSION_KEY".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
@@ -3053,9 +3055,13 @@ impl Default for Settings {
 
 pub struct Auth {
     settings: Settings,
-    /// Built at `configure`, so this is an `Option` for exactly the length of
-    /// the build.
+    /// Built at `before_start`, so this is an `Option` for exactly the length
+    /// of the build.
     services: Option<Services>,
+    /// The store, kept for the sweep.
+    store: Option<Arc<Store>>,
+    /// The sweep, stopped at shutdown.
+    sweeper: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Plugin for Auth {
@@ -3067,10 +3073,21 @@ impl Plugin for Auth {
         Self {
             settings: config,
             services: None,
+            store: None,
+            sweeper: None,
         }
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.settings.url.is_empty() {
+            return Err(PluginError::new(
+                "[auth] url is required; accounts live in a Postgres database",
+            ));
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {
             return Err(PluginError::new("[auth] cookie_name must not be empty"));
         }
@@ -3119,15 +3136,35 @@ impl Plugin for Auth {
             ..SessionConfig::default()
         };
 
-        // Nothing here opens anything, so there is no `before_start`:
-        // `MemoryStore` is a `HashMap` and `Auth::build` is synchronous. A
-        // store over a database is a pool, a pool is opened asynchronously,
-        // and `Plugin::new` is not async -- so that swap moves this block
-        // into `before_start`, where it takes the current runtime handle and
-        // blocks on a scoped thread. `brocanth-cache` does exactly that.
+        // The hooks are synchronous and opening a pool is not. A server
+        // process has a runtime, `block_in_place` is wrong on a current-thread
+        // one, so take the handle and block the build on a scoped thread, as
+        // the generated cache and jobs plugins do. This is startup.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            PluginError::new(format!(
+                "[auth] needs a Tokio runtime at startup to open its pool ({e})"
+            ))
+        })?;
+        let url = self.settings.url.clone();
+        let store = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime.block_on(async move {
+                        let store = PgStore::connect(&url).await?;
+                        store.migrate().await?;
+                        Ok::<_, brocanth_auth::StoreError>(store)
+                    })
+                })
+                .join()
+                .map_err(|_| PluginError::new("the auth connection thread panicked"))?
+                .map_err(|e| PluginError::new(format!("[auth] connecting: {e}")))
+        })?;
+        let store = Arc::new(store);
+        self.store = Some(Arc::clone(&store));
+
         self.services = Some(
             brocanth_auth::Auth::build(AuthConfig {
-                store: Arc::new(Store::new()),
+                store,
                 http: Arc::new(Http::new()),
                 clock: Arc::new(SystemClock),
                 signing_key,
@@ -3141,8 +3178,36 @@ impl Plugin for Auth {
         Ok(())
     }
 
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Dead sessions, spent tokens and expired one-time codes, every
+        // fifteen minutes. Every read checks expiry already, so this only
+        // keeps the tables small. Each instance runs it, and the deletes do
+        // not mind.
+        let Some(store) = self.store.clone() else {
+            return Ok(());
+        };
+        let idle_timeout = self.settings.idle_timeout;
+        self.sweeper = Some(tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            loop {
+                every.tick().await;
+                if let Err(e) = store.sweep(SystemClock.now(), idle_timeout).await {
+                    eprintln!("[auth] sweep: {e}");
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.abort();
+        }
+        Ok(())
+    }
+
     fn provide(&self, cx: &mut ContextBuilder) {
-        // `configure` runs before the server is handed the application, so
+        // `before_start` runs before the server is handed the application, so
         // the services are here by the time any request builds a context.
         if let Some(services) = &self.services {
             cx.insert(services.clone());
