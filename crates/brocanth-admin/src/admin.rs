@@ -8,7 +8,9 @@
 //! time.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use brocanth_policy::{CompileError, MaskViolation};
 use thiserror::Error;
 
 use crate::config::{AdminConfig, ModelAdmin};
@@ -20,6 +22,7 @@ use crate::paging::Page;
 use crate::panel::{Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
+use crate::rows::{Gate, RowAction, RowRules, Rules};
 use crate::view::{
     self, Cell, Chrome, ColumnHeader, DeleteCtx, DetailCtx, DetailRow, ErrorCtx, FormCtx, IndexCtx,
     IndexEntry, LayoutCtx, ListCtx, ModelHeading, NavItem, PageLink, RowView, Views,
@@ -41,6 +44,14 @@ pub enum AdminError {
     /// A template failed to render.
     #[error("admin failed to render: {0}")]
     Render(#[from] rsx::Error),
+    /// A row policy did not compile. A programming error, never a request
+    /// error.
+    #[error("admin row policy did not compile: {0}")]
+    Policy(#[from] CompileError),
+    /// A row policy's field mask does not know a column of its model: the
+    /// resource and the model describe different tables.
+    #[error("admin row policy does not match its model: {0}")]
+    Mask(MaskViolation),
 }
 
 /// What a screen produced.
@@ -92,6 +103,8 @@ impl Response {
 struct Entry {
     descriptor: ModelDescriptor,
     admin: ModelAdmin,
+    /// The row policy, when a resource was registered for this model.
+    rules: Option<Arc<dyn RowRules>>,
 }
 
 /// A mounted admin.
@@ -103,6 +116,7 @@ pub struct Admin {
     views: Views,
     entries: Vec<Entry>,
     panels: Vec<std::sync::Arc<dyn Panel>>,
+    unscoped_rows: bool,
 }
 
 impl std::fmt::Debug for Admin {
@@ -125,13 +139,47 @@ impl Admin {
     pub fn new(data: SharedData, mut config: AdminConfig) -> Admin {
         let descriptors = discover(data.registry(), &config.discovery);
         let mut configured = config.take_models();
+        let resources = config.take_resources();
+        let unscoped_rows = config.rows_unscoped();
+        // Checked now rather than discovered by a request. A resource for a
+        // model the admin does not show governs nothing, and a resource whose
+        // table is not the model's table would compile its conditions against
+        // the wrong table.
+        for (index, resource) in resources.iter().enumerate() {
+            let model = resource.model();
+            let Some(descriptor) = descriptors.iter().find(|d| d.key == model) else {
+                panic!(
+                    "the admin has a row policy for `{model}`, but the data source holds no \
+                     model with that key, or discovery left it out"
+                );
+            };
+            if descriptor.table != resource.table() {
+                panic!(
+                    "the admin's row policy for `{model}` is written for table `{}`, but the \
+                     model's table is `{}`",
+                    resource.table(),
+                    descriptor.table
+                );
+            }
+            if resources[..index].iter().any(|r| r.model() == model) {
+                panic!("the admin has two row policies for `{model}`");
+            }
+        }
         let entries: Vec<Entry> = descriptors
             .into_iter()
             .map(|descriptor| {
                 let admin = configured
                     .remove(&descriptor.key)
                     .unwrap_or_else(|| ModelAdmin::new(descriptor.key.clone()));
-                Entry { descriptor, admin }
+                let rules = resources
+                    .iter()
+                    .find(|r| r.model() == descriptor.key)
+                    .cloned();
+                Entry {
+                    descriptor,
+                    admin,
+                    rules,
+                }
             })
             .filter(|entry| entry.admin.is_visible())
             .collect();
@@ -147,6 +195,7 @@ impl Admin {
             );
         }
         Admin {
+            unscoped_rows,
             data,
             title: config.title,
             base_path: config.base_path,
@@ -190,10 +239,11 @@ impl Admin {
         let models = self
             .entries
             .iter()
-            .filter(|e| self.allows(principal, Request::new(Action::ViewList, &e.descriptor.key)))
+            .filter(|e| self.lists(principal, e))
             .map(|e| {
                 let can_create = e.admin.allows_create()
-                    && self.allows(principal, Request::new(Action::Create, &e.descriptor.key));
+                    && self.allows(principal, Request::new(Action::Create, &e.descriptor.key))
+                    && self.creates(principal, e);
                 IndexEntry {
                     label: e.admin.plural(&e.descriptor),
                     href: self.list_url(&e.descriptor.key),
@@ -226,6 +276,13 @@ impl Admin {
         if !self.allows(principal, Request::new(Action::ViewList, model)) {
             return self.refuse(principal, Action::ViewList);
         }
+        // The list rule goes into the query, for the count and for the page
+        // alike. Nothing below filters a row it has read, so the total and
+        // the pages describe one set (PLAN.md §9).
+        let gate = self.gate(principal, entry, RowAction::List)?;
+        let Some(scope) = gate.scope() else {
+            return self.refuse(principal, Action::ViewList);
+        };
         let descriptor = &entry.descriptor;
         let admin = &entry.admin;
         let sortable = admin.sort_for(descriptor);
@@ -235,7 +292,7 @@ impl Admin {
             term: &query.search,
             columns: &search_columns,
         };
-        let total = self.data.count(descriptor, search).await?;
+        let total = self.data.count(descriptor, search, scope).await?;
         let page = Page::new(
             query.page,
             query.per_page.unwrap_or_else(|| admin.page_size()),
@@ -249,19 +306,29 @@ impl Admin {
                 limit: page.limit(),
                 search,
                 sort: query.sort.as_ref(),
+                scope,
             })
             .await?;
 
         let columns = admin.list_for(descriptor);
-        let labels = self.foreign_labels(admin, &columns, &rows).await?;
+        let labels = self
+            .foreign_labels(principal, admin, &columns, &rows)
+            .await?;
 
         let headers = columns
             .iter()
             .map(|column| self.header(&query, &sortable, model, column))
             .collect();
+        // Once per page, not per row: a rule is per subject. A row that the
+        // update rule refuses still gets the link, and its edit form answers
+        // 404, which is the same answer a missing row gets.
+        let writes = (
+            self.opens(principal, entry, RowAction::Update),
+            self.opens(principal, entry, RowAction::Delete),
+        );
         let row_views = rows
             .iter()
-            .map(|row| self.row_view(principal, entry, &columns, row, &labels))
+            .map(|row| self.row_view(principal, entry, &columns, row, &labels, writes))
             .collect();
 
         let pages = page
@@ -286,7 +353,8 @@ impl Admin {
             page,
             searchable: !search_columns.is_empty(),
             can_create: admin.allows_create()
-                && self.allows(principal, Request::new(Action::Create, model)),
+                && self.allows(principal, Request::new(Action::Create, model))
+                && self.creates(principal, entry),
             create_href: self.new_url(model),
             query,
         };
@@ -311,13 +379,19 @@ impl Admin {
         if !self.allows(principal, Request::on(Action::ViewDetail, model, &record)) {
             return self.refuse(principal, Action::ViewDetail);
         }
-        let Some(row) = self.data.fetch(&entry.descriptor, &record).await? else {
+        // One guarded select: `WHERE pk = ? AND <view condition>`. A row that
+        // is not there and a row the rule refuses are one answer, 404.
+        let gate = self.gate(principal, entry, RowAction::View)?;
+        let Some(scope) = gate.scope() else {
+            return self.refuse(principal, Action::ViewDetail);
+        };
+        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
             return self.missing(principal);
         };
         let admin = &entry.admin;
         let columns = admin.detail_for(&entry.descriptor);
         let labels = self
-            .foreign_labels(admin, &columns, std::slice::from_ref(&row))
+            .foreign_labels(principal, admin, &columns, std::slice::from_ref(&row))
             .await?;
         let rows = columns
             .iter()
@@ -337,10 +411,12 @@ impl Admin {
             model: self.heading(entry),
             key: record.to_segment(),
             edit_href: (admin.allows_update()
-                && self.allows(principal, Request::on(Action::Update, model, &record)))
+                && self.allows(principal, Request::on(Action::Update, model, &record))
+                && self.opens(principal, entry, RowAction::Update))
             .then(|| self.edit_url(model, &record)),
             delete_href: (admin.allows_delete()
-                && self.allows(principal, Request::on(Action::Delete, model, &record)))
+                && self.allows(principal, Request::on(Action::Delete, model, &record))
+                && self.opens(principal, entry, RowAction::Delete))
             .then(|| self.delete_url(model, &record)),
             rows,
             label: label.clone(),
@@ -363,8 +439,14 @@ impl Admin {
         {
             return self.refuse(principal, Action::Create);
         }
-        let choices = self.choices(&entry.admin, &entry.descriptor).await?;
-        let form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
+        if let Some(refused) = self.refuse_create(principal, entry)? {
+            return Ok(refused);
+        }
+        let choices = self
+            .choices(principal, &entry.admin, &entry.descriptor)
+            .await?;
+        let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
+        self.lock(principal, entry, &mut form);
         self.render_form(principal, entry, form, None).await
     }
 
@@ -386,8 +468,17 @@ impl Admin {
         {
             return self.refuse(principal, Action::Create);
         }
-        let choices = self.choices(&entry.admin, &entry.descriptor).await?;
+        if let Some(refused) = self.refuse_create(principal, entry)? {
+            return Ok(refused);
+        }
+        if let Some(refused) = self.refuse_fields(principal, entry, submission)? {
+            return Ok(refused);
+        }
+        let choices = self
+            .choices(principal, &entry.admin, &entry.descriptor)
+            .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
+        self.lock(principal, entry, &mut form);
         form.accept(submission);
         if !form.validate() {
             return self.render_rejected(principal, entry, form, None).await;
@@ -423,11 +514,20 @@ impl Admin {
         {
             return self.refuse(principal, Action::Update);
         }
-        let Some(row) = self.data.fetch(&entry.descriptor, &record).await? else {
+        // Read under the update rule: a row this person may not change has
+        // no edit form, and the answer is the one a missing row gets.
+        let gate = self.gate(principal, entry, RowAction::Update)?;
+        let Some(scope) = gate.scope() else {
+            return self.refuse(principal, Action::Update);
+        };
+        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
             return self.missing(principal);
         };
-        let choices = self.choices(&entry.admin, &entry.descriptor).await?;
-        let form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
+        let choices = self
+            .choices(principal, &entry.admin, &entry.descriptor)
+            .await?;
+        let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
+        self.lock(principal, entry, &mut form);
         self.render_form(principal, entry, form, Some(&record))
             .await
     }
@@ -451,26 +551,52 @@ impl Admin {
         {
             return self.refuse(principal, Action::Update);
         }
-        let Some(row) = self.data.fetch(&entry.descriptor, &record).await? else {
+        // The order is `brocanth-resource`'s and it is load-bearing:
+        // 1. a Never rule is 403, and no row is read;
+        // 2. the field mask is 403, and still no row is read, so the answer
+        //    says nothing about whether the row exists;
+        // 3. the admission: one guarded select, 404 when it finds nothing;
+        // 4. the write, guarded by the same condition; zero rows is 409.
+        let Some(pending) = self
+            .rules(entry)
+            .admission(&principal, RowAction::Update, &record)?
+        else {
+            return self.refuse(principal, Action::Update);
+        };
+        if let Some(refused) = self.refuse_fields(principal, entry, submission)? {
+            return Ok(refused);
+        }
+        let found = self
+            .data
+            .fetch(&entry.descriptor, &record, pending.scope())
+            .await?;
+        let Some(row) = found else {
             return self.missing(principal);
         };
-        let choices = self.choices(&entry.admin, &entry.descriptor).await?;
+        let Ok(guard) = pending.resolve(1) else {
+            return self.missing(principal);
+        };
+        let choices = self
+            .choices(principal, &entry.admin, &entry.descriptor)
+            .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
+        self.lock(principal, entry, &mut form);
         form.accept(submission);
         if !form.validate() {
             return self
                 .render_rejected(principal, entry, form, Some(&record))
                 .await;
         }
-        match self
+        let written = self
             .data
-            .update(&entry.descriptor, &record, &form.values())
-            .await
-        {
-            Ok(()) => Ok(Response::Redirect {
+            .update(&entry.descriptor, &record, &form.values(), guard.scope())
+            .await;
+        match written.map(|rows| guard.applied(rows)) {
+            Ok(Ok(_)) => Ok(Response::Redirect {
                 status: 303,
                 location: self.detail_url(model, &record),
             }),
+            Ok(Err(_lost)) => self.conflict(principal),
             Err(DataError::Invalid(errors)) => {
                 form.reject(&errors);
                 self.render_rejected(principal, entry, form, Some(&record))
@@ -498,7 +624,11 @@ impl Admin {
         {
             return self.refuse(principal, Action::Delete);
         }
-        let Some(row) = self.data.fetch(&entry.descriptor, &record).await? else {
+        let gate = self.gate(principal, entry, RowAction::Delete)?;
+        let Some(scope) = gate.scope() else {
+            return self.refuse(principal, Action::Delete);
+        };
+        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
             return self.missing(principal);
         };
         let label = entry.admin.label_for(&entry.descriptor, &row);
@@ -532,7 +662,26 @@ impl Admin {
         {
             return self.refuse(principal, Action::Delete);
         }
-        self.data.delete(&entry.descriptor, &record).await?;
+        let Some(pending) = self
+            .rules(entry)
+            .admission(&principal, RowAction::Delete, &record)?
+        else {
+            return self.refuse(principal, Action::Delete);
+        };
+        let found = self
+            .data
+            .fetch(&entry.descriptor, &record, pending.scope())
+            .await?;
+        let Ok(guard) = pending.resolve(usize::from(found.is_some())) else {
+            return self.missing(principal);
+        };
+        let removed = self
+            .data
+            .delete(&entry.descriptor, &record, guard.scope())
+            .await?;
+        if guard.applied(removed).is_err() {
+            return self.conflict(principal);
+        }
         Ok(Response::Redirect {
             status: 303,
             location: self.list_url(model),
@@ -640,6 +789,130 @@ impl Admin {
         self.policy.allows(&principal, request)
     }
 
+    /// What governs one model's rows.
+    fn rules<'a>(&self, entry: &'a Entry) -> Rules<'a> {
+        match &entry.rules {
+            Some(rules) => Rules::Resource(rules.as_ref()),
+            None if self.unscoped_rows => Rules::Unscoped,
+            None => Rules::Missing,
+        }
+    }
+
+    /// One rule, compiled for this principal.
+    fn gate(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+        action: RowAction,
+    ) -> Result<Gate, AdminError> {
+        Ok(self.rules(entry).gate(&principal, action)?)
+    }
+
+    /// Whether a rule is anything but shut. For a link, never for a write:
+    /// a policy that does not compile hides the link here and answers 500 on
+    /// the screen itself.
+    fn opens(&self, principal: Principal<'_>, entry: &Entry, action: RowAction) -> bool {
+        self.rules(entry)
+            .gate(&principal, action)
+            .is_ok_and(|gate| !gate.is_shut())
+    }
+
+    /// Whether the index and the navigation show a model to this person.
+    fn lists(&self, principal: Principal<'_>, entry: &Entry) -> bool {
+        self.allows(
+            principal,
+            Request::new(Action::ViewList, &entry.descriptor.key),
+        ) && self.opens(principal, entry, RowAction::List)
+    }
+
+    /// Whether the create rule admits every row. See [`crate::rows`] for why
+    /// a conditional create rule is refused.
+    fn creates(&self, principal: Principal<'_>, entry: &Entry) -> bool {
+        self.rules(entry)
+            .gate(&principal, RowAction::Create)
+            .is_ok_and(|gate| gate.admits_everything())
+    }
+
+    /// The create rule, as a refusal page when it does not admit every row.
+    fn refuse_create(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+    ) -> Result<Option<Response>, AdminError> {
+        match self.gate(principal, entry, RowAction::Create)? {
+            gate if gate.admits_everything() => Ok(None),
+            Gate::Shut => self.refuse(principal, Action::Create).map(Some),
+            _ => self
+                .error_page(
+                    principal,
+                    403,
+                    "Not allowed",
+                    "This record's create rule depends on the record, and the admin \
+                     cannot decide such a rule yet."
+                        .to_string(),
+                )
+                .map(Some),
+        }
+    }
+
+    /// Draws every field the row policy's mask refuses as read-only.
+    fn lock(&self, principal: Principal<'_>, entry: &Entry, form: &mut Form) {
+        let rules = self.rules(entry);
+        form.lock(|column| rules.writable(&principal, column));
+    }
+
+    /// `Policy::writable`, checked against every column a request sent.
+    ///
+    /// The columns *sent*, as `brocanth-resource` checks them, and before
+    /// any row is read, so the 403 says nothing about whether the row
+    /// exists. The admin's own form never sends a locked field — it draws one
+    /// as read-only text with no `name` — so a request that sends one was not
+    /// made with the form. A name that is not a column of the model is not
+    /// checked: [`Form::accept`] ignores it.
+    fn refuse_fields(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+        submission: &Submission,
+    ) -> Result<Option<Response>, AdminError> {
+        let mut sent: Vec<&str> = Vec::new();
+        for (name, _) in submission.pairs() {
+            if entry.descriptor.column(name).is_some() && !sent.contains(&name.as_str()) {
+                sent.push(name);
+            }
+        }
+        if sent.is_empty() {
+            return Ok(None);
+        }
+        match self.rules(entry).check(&principal, &sent) {
+            Ok(()) => Ok(None),
+            Err(MaskViolation::Forbidden { fields }) => self
+                .error_page(
+                    principal,
+                    403,
+                    "Not allowed",
+                    format!("You may not change: {}.", fields.join(", ")),
+                )
+                .map(Some),
+            Err(unknown) => Err(AdminError::Mask(unknown)),
+        }
+    }
+
+    /// A guarded write changed nothing: the row stopped matching its rule
+    /// between the check and the write. 409, because the next move is to
+    /// read the row again, and a 404 would be wrong while the row is still
+    /// there.
+    fn conflict(&self, principal: Principal<'_>) -> Result<Response, AdminError> {
+        self.error_page(
+            principal,
+            409,
+            "Changed meanwhile",
+            "This record changed while you were working on it, and you may no longer \
+             change it. Reload it and try again."
+                .to_string(),
+        )
+    }
+
     fn heading(&self, entry: &Entry) -> ModelHeading {
         ModelHeading {
             key: entry.descriptor.key.clone(),
@@ -656,9 +929,7 @@ impl Admin {
             nav: self
                 .entries
                 .iter()
-                .filter(|e| {
-                    self.allows(principal, Request::new(Action::ViewList, &e.descriptor.key))
-                })
+                .filter(|e| self.lists(principal, e))
                 .map(|e| NavItem {
                     label: e.admin.plural(&e.descriptor),
                     href: self.list_url(&e.descriptor.key),
@@ -813,8 +1084,12 @@ impl Admin {
     /// The labels come from the *target* model's configuration, which is why
     /// the admin fetches them rather than the data source: naming a record is
     /// a configuration decision, and the data layer has no idea.
+    ///
+    /// The options are read under the **target** model's list rule, so a
+    /// picker never offers a record this person may not list.
     async fn choices(
         &self,
+        principal: Principal<'_>,
         admin: &ModelAdmin,
         descriptor: &ModelDescriptor,
     ) -> Result<Vec<(String, Vec<Choice>)>, AdminError> {
@@ -824,6 +1099,10 @@ impl Admin {
                 continue;
             };
             let Some(target) = self.entry(&relation.target) else {
+                continue;
+            };
+            let gate = self.gate(principal, target, RowAction::List)?;
+            let Some(scope) = gate.scope() else {
                 continue;
             };
             let limit = target.admin.choices_shown();
@@ -838,6 +1117,7 @@ impl Admin {
                         columns: &[],
                     },
                     sort: None,
+                    scope,
                 })
                 .await?;
             let choices = rows
@@ -859,8 +1139,13 @@ impl Admin {
     ///
     /// Keyed by `(model key, value)`, so two columns pointing at the same
     /// table share the lookups.
+    ///
+    /// Read under the **target** model's view rule. A record this person may
+    /// not view keeps its stored value as the cell text, which is what a
+    /// deleted target shows too, so the two cannot be told apart.
     async fn foreign_labels(
         &self,
+        principal: Principal<'_>,
         admin: &ModelAdmin,
         columns: &[&ColumnDescriptor],
         rows: &[Row],
@@ -871,6 +1156,10 @@ impl Admin {
                 continue;
             };
             let Some(target) = self.entry(&relation.target) else {
+                continue;
+            };
+            let gate = self.gate(principal, target, RowAction::View)?;
+            let Some(scope) = gate.scope() else {
                 continue;
             };
             for row in rows {
@@ -886,7 +1175,7 @@ impl Admin {
                     continue;
                 }
                 let key = PrimaryKey::single(&relation.target_column, &text);
-                if let Some(found) = self.data.fetch(&target.descriptor, &key).await? {
+                if let Some(found) = self.data.fetch(&target.descriptor, &key, scope).await? {
                     out.insert(slot, target.admin.label_for(&target.descriptor, &found));
                 }
             }
@@ -939,6 +1228,7 @@ impl Admin {
         columns: &[&ColumnDescriptor],
         row: &Row,
         labels: &BTreeMap<(String, String), String>,
+        (can_update, can_delete): (bool, bool),
     ) -> RowView {
         let model = &entry.descriptor.key;
         let key = PrimaryKey::from_row(&entry.descriptor, row);
@@ -951,11 +1241,13 @@ impl Admin {
             .map(|k| self.detail_url(model, k))
             .unwrap_or_default();
         let edit_href = key.as_ref().filter(|k| {
-            entry.admin.allows_update()
+            can_update
+                && entry.admin.allows_update()
                 && self.allows(principal, Request::on(Action::Update, model, k))
         });
         let delete_href = key.as_ref().filter(|k| {
-            entry.admin.allows_delete()
+            can_delete
+                && entry.admin.allows_delete()
                 && self.allows(principal, Request::on(Action::Delete, model, k))
         });
         RowView {

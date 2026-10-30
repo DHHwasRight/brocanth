@@ -97,14 +97,18 @@
 //! ```
 //!
 //! The six write and read methods are then SeaORM calls against
-//! `self.db`, with two rules that come straight out of PLAN §7:
+//! `self.db`, with three rules. The first is PLAN §9's; the other two come
+//! straight out of PLAN §7:
 //!
+//! * **`AND` every [`crate::data::Scope`] into the statement**, on reads and
+//!   on writes, and report zero rows for a write the scope refuses.
+//!   `brocanth-admin-model` is the worked example.
 //! * **Never `update_many` / `delete_many` / `insert_many`** (trap 2): they
 //!   bypass the hooks, and the hooks are where validations run. Go through
 //!   `ActiveModel::insert` / `::update` / `::delete` one record at a time, or
 //!   through `brocanth_model::bulk`, which fans out by default.
-//! * **Map a validation failure to [`DataError::Invalid`]**, not to
-//!   [`DataError::Backend`]. `brocanth_model::Error::errors()` returns the
+//! * **Map a validation failure to [`DataError::Invalid`](crate::data::DataError::Invalid)**, not to
+//!   [`DataError::Backend`](crate::data::DataError::Backend). `brocanth_model::Error::errors()` returns the
 //!   per-field entries; copying them into [`crate::data::FieldErrors`] is what
 //!   puts each message beside its own input instead of in a banner.
 

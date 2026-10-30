@@ -5,9 +5,11 @@ install, which module here owns each part, and what is missing.
 
 The seam is `brocanth_admin::panel::Panel`: a tab that renders its own body
 and is handed the admin's chrome. It lives in the crate that owns the data,
-behind an `admin` feature that is off, because `brocanth-admin` has four
-dependencies and intends to keep them. `brocanth-jobs` is the worked
+behind an `admin` feature that is off, because `brocanth-admin` keeps its
+dependencies few and intends to keep them so. `brocanth-jobs` is the worked
 example.
+
+The four model screens go through the entity's row policy. §2a says how.
 
 Measured by reading each crate's public surface at `54ff827`. Where this
 says a tab cannot be built, somebody read the trait.
@@ -55,6 +57,61 @@ One binary, `./pocketbase serve`, superuser dashboard at `/_/`.
 
 ---
 
+## 2a. Row-level rules on the model screens
+
+PLAN.md §12 item 9. Two policies answer two questions, and both must say
+yes:
+
+* `brocanth_admin::Policy` (`with_policy`) answers *may this person open
+  this screen*. It is `DenyAll` until the application installs one.
+* `brocanth_policy::Policy`, registered per model with
+  `AdminConfig::resource(..)`, answers *which rows*. A model with no resource
+  is `403` on every screen and is not in the navigation.
+
+```rust
+struct Posts;
+
+impl AdminResource for Posts {
+    type Entity = Post;            // a brocanth_policy::Entity
+    type Subject = Staff;          // what the principal hook attached
+    type Policy = PostRules;       // no default: omit it and this does not compile
+    const MODEL: &'static str = "post";
+    const DIALECT: Dialect = Dialect::Postgres;
+    fn policy(&self) -> &PostRules { &PostRules }
+}
+
+AdminConfig::new().with_policy(staff_only).resource(Posts)
+```
+
+| Screen | Rule | Where it is applied | Refused |
+|---|---|---|---|
+| list, and its total | `list` | `AND <condition>` in the page query **and** the count query | `403` when the rule is `Never`; otherwise the rows simply are not there |
+| detail | `view` | `WHERE pk = ? AND <condition>` | `404`, the same answer as a missing row |
+| edit form, delete confirmation | `update`, `delete` | the same guarded select | `404` |
+| update, delete | `update`, `delete` | an admission, then a `Verified` whose condition guards the write | `404` before the write; `409` when the write changes zero rows |
+| form fields | `writable` | a field the mask refuses is drawn read-only; a POST that sends one is refused before any row is read | `403` |
+| foreign-key labels and pickers | the target model's `view` and `list` | the same scopes | the stored value is shown; the picker leaves the record out |
+| create | `create` | only `Always` and `Never` are decided | `403` for anything else |
+
+The data source receives a `Scope` on `count`, `list`, `fetch`, `update` and
+`delete`, and must `AND` its condition into the statement. `update` and
+`delete` report rows changed, and zero is a failure, never success.
+`brocanth-admin-model` does this over SeaORM: reads splice the condition
+with `Expr::cust_with_values`, and writes read the row with the condition
+and `FOR UPDATE` in a transaction, then write it through the `ActiveModel`
+so the hooks still run.
+
+The in-memory `Fixture` cannot run SQL, so it refuses a condition rather
+than ignore it. A test or a development build over it calls
+`AdminConfig::unscoped_rows_unsafe_for_development()`, which lets a model
+with no resource show every row.
+
+**Open.** A conditional create rule needs the proposed row as a one-row CTE
+(`brocanth_resource::sql::create_admission`) and typed values the admin's
+string form does not have yet. The edit and delete links on a list row are
+decided per subject, not per row, so a row the update rule refuses still
+shows the link and its form answers `404`.
+
 ## 3. Who owns what here
 
 | Feature | Module | Tab | State |
@@ -64,7 +121,7 @@ One binary, `./pocketbase serve`, superuser dashboard at `/_/`.
 | J5 inlines | `admin` | the form screen | **missing** |
 | J7 history / audit | `events` | **Changes** | **blocked** — see below |
 | J8 users | `auth` | **Accounts** | **blocked** — see below |
-| J9, J10, P4 rules | `policy` | **Rules** | buildable, read-only |
+| J9, J10, P4 rules | `policy` | **Rules** | buildable, read-only. The rules already *apply* on every model screen: §2a |
 | J11 login | `auth` | not a tab; a route | **missing** |
 | J12 date hierarchy | `admin` | the list screen | missing, small |
 | P1 schema editor | — | — | **out of scope.** A collection here is a Rust type checked at compile time. §4.8: if scaffolding produces code you would not write by hand, the framework below it is wrong — and a schema editor writing Rust at run time is that, twice over |

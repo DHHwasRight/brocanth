@@ -39,13 +39,12 @@
 //! property, so asking for thirty rows, getting thirty and filtering to eleven
 //! gives a page two that overlaps page one and a total that is a lie.
 //!
-//! A row-level rule therefore belongs in the `WHERE` clause, which means it
-//! belongs to the data source rather than here. When §9's `brocanth-policy`
-//! lands, its `condition()` is what [`crate::data::ListRequest`] would carry
-//! and what [`crate::data::AdminData::count`] would count — one field added to
-//! a struct this crate already passes whole. Until then the admin's honest
-//! position is that it authorises screens, and the data source authorises
-//! rows.
+//! A row-level rule therefore belongs in the `WHERE` clause, and that is
+//! where [`crate::rows`] puts it: `brocanth-policy`'s `condition()` travels
+//! in a [`crate::data::Scope`] on the page **and** on the count, and a write
+//! is guarded by the condition it was checked against. This module decides
+//! which screens a person may open; [`crate::rows`] decides which rows those
+//! screens touch. Both must say yes.
 
 use std::any::Any;
 use std::fmt;

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use brocanth_admin::data::{AdminData, DataError, ListRequest, Search};
+use brocanth_admin::data::{AdminData, DataError, ListRequest, Scope, Search};
 use brocanth_admin::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Value};
 use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Principal, Submission};
@@ -157,7 +157,10 @@ async fn a_write_goes_through_the_active_model_so_validations_run() {
     assert!(bad.is_err(), "a bad email must not be written: {bad:?}");
 
     assert_eq!(
-        models.count(&model, no_search()).await.expect("count"),
+        models
+            .count(&model, no_search(), Scope::Unscoped)
+            .await
+            .expect("count"),
         0,
         "and nothing was written"
     );
@@ -180,7 +183,7 @@ async fn the_six_operations_round_trip() {
         .expect("insert");
 
     let row = models
-        .fetch(&model, &key)
+        .fetch(&model, &key, Scope::Unscoped)
         .await
         .expect("fetch")
         .expect("a row");
@@ -194,11 +197,12 @@ async fn the_six_operations_round_trip() {
             &model,
             &key,
             &[("name".into(), Value::Text("Augusta Ada King".into()))],
+            Scope::Unscoped,
         )
         .await
         .expect("update");
     let row = models
-        .fetch(&model, &key)
+        .fetch(&model, &key, Scope::Unscoped)
         .await
         .expect("fetch")
         .expect("a row");
@@ -212,8 +216,15 @@ async fn the_six_operations_round_trip() {
         "a column the form did not send keeps its value"
     );
 
-    models.delete(&model, &key).await.expect("delete");
-    assert!(models.fetch(&model, &key).await.expect("fetch").is_none());
+    models
+        .delete(&model, &key, Scope::Unscoped)
+        .await
+        .expect("delete");
+    assert!(models
+        .fetch(&model, &key, Scope::Unscoped)
+        .await
+        .expect("fetch")
+        .is_none());
 }
 
 #[tokio::test]
@@ -250,6 +261,7 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
                 columns: &columns,
             },
             sort: None,
+            scope: Scope::Unscoped,
         })
         .await
         .expect("list");
@@ -267,6 +279,7 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
             limit: 10,
             search: no_search(),
             sort: Some(&sort),
+            scope: Scope::Unscoped,
         })
         .await;
     assert!(
@@ -274,7 +287,10 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
         "a name that is not a column never becomes one: {refused:?}"
     );
     assert_eq!(
-        models.count(&model, no_search()).await.expect("count"),
+        models
+            .count(&model, no_search(), Scope::Unscoped)
+            .await
+            .expect("count"),
         2,
         "and the table is still there"
     );
@@ -299,6 +315,7 @@ async fn the_admin_renders_real_rows_through_it() {
         Arc::new(models),
         AdminConfig::new()
             .discovering(Discovery::new().under("blog"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),
     );
     struct Anyone;
@@ -326,7 +343,9 @@ async fn a_module_path_the_macro_was_not_given_is_named() {
     let (models, _h) = source().await;
     let mut model = user_model();
     model.module_path = "blog::comment".into();
-    let out = models.fetch(&model, &PrimaryKey::single("id", 1)).await;
+    let out = models
+        .fetch(&model, &PrimaryKey::single("id", 1), Scope::Unscoped)
+        .await;
     let named = matches!(&out, Err(DataError::UnknownModel(m)) if m == "blog::comment");
     assert!(named, "{out:?}");
 }
@@ -347,6 +366,6 @@ async fn a_source_with_no_entities_is_a_source() {
     // panicking on a match with no arms.
     let mut model = user_model();
     model.module_path = "anything".into();
-    let out = models.count(&model, no_search()).await;
+    let out = models.count(&model, no_search(), Scope::Unscoped).await;
     assert!(matches!(out, Err(DataError::UnknownModel(_))), "{out:?}");
 }

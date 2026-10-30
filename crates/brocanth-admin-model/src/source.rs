@@ -3,15 +3,64 @@
 //! Every function here is generic over one entity, so the macro's arms are
 //! one line each and the logic is written once rather than per model.
 
-use brocanth_admin::data::{DataError, Search};
+use brocanth_admin::data::{DataError, Scope, Search};
 use brocanth_admin::model::Row;
 use brocanth_admin::query::{Direction, Sort};
+use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
 use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition};
 use brocanth_model::sea_orm::{
-    ColumnTrait, Condition, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Select,
+    ColumnTrait, Condition, DbBackend, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Select, TransactionTrait,
 };
 use std::str::FromStr;
+
+/// `WHERE` for the admin's row policy.
+///
+/// The condition is `brocanth-policy`'s SQL text and bind list, spliced in
+/// with `Expr::cust_with_values`. sea-query reads the placeholders the
+/// dialect uses — `?` for SQLite, `$n` for PostgreSQL — and numbers them
+/// into the statement it builds, so the condition's own numbering survives
+/// whatever binds come before it. Every value stays a bind: nothing from the
+/// condition's values reaches the text.
+///
+/// A condition compiled for another dialect is refused rather than run,
+/// because `IS NOT DISTINCT FROM` on SQLite and `?` on PostgreSQL are both
+/// syntax errors at best.
+pub fn scope_of(scope: Scope<'_>, backend: DbBackend) -> Result<Condition, DataError> {
+    let Some(condition) = scope.condition() else {
+        return Ok(Condition::all());
+    };
+    let matches = matches!(
+        (condition.dialect(), backend),
+        (Dialect::Postgres, DbBackend::Postgres) | (Dialect::Sqlite, DbBackend::Sqlite)
+    );
+    if !matches {
+        return Err(DataError::backend(format!(
+            "the row policy was compiled for {:?}, but this database is {backend:?}; set \
+             `AdminResource::DIALECT` to match",
+            condition.dialect()
+        )));
+    }
+    let binds: Vec<brocanth_model::sea_orm::Value> =
+        condition.binds().iter().map(bind_of).collect();
+    Ok(Condition::all().add(Expr::cust_with_values(condition.sql().to_owned(), binds)))
+}
+
+/// One policy value as a SeaORM bind.
+///
+/// A null binds as a text null. It is rare here: `brocanth-policy` compiles
+/// an absent subject value to `FALSE` or `TRUE` through `Bound::or_deny` and
+/// `or_allow`, not to a `NULL` bind.
+fn bind_of(value: &PolicyValue) -> brocanth_model::sea_orm::Value {
+    match value {
+        PolicyValue::Null => Option::<String>::None.into(),
+        PolicyValue::Bool(b) => (*b).into(),
+        PolicyValue::Int(n) => (*n).into(),
+        PolicyValue::Float(f) => (*f).into(),
+        PolicyValue::Text(s) => s.clone().into(),
+        PolicyValue::Bytes(b) => b.clone().into(),
+    }
+}
 
 /// A column of `E` by name, or a refusal.
 ///
@@ -76,7 +125,9 @@ pub async fn rows_of<E: EntityTrait>(
     db: &brocanth_model::sea_orm::DatabaseConnection,
     request: &brocanth_admin::data::ListRequest<'_>,
 ) -> Result<Vec<Row>, DataError> {
-    let select = E::find().filter(search_of::<E>(request.search)?);
+    let select = E::find()
+        .filter(search_of::<E>(request.search)?)
+        .filter(scope_of(request.scope, db.get_database_backend())?);
     let select = order_of::<E>(select, request.sort)?;
     let found = select
         .limit(request.limit as u64)
@@ -88,14 +139,17 @@ pub async fn rows_of<E: EntityTrait>(
     Ok(found.iter().map(crate::row_from_json).collect())
 }
 
-/// One row by its single-column key.
+/// One row by its single-column key, guarded by the scope:
+/// `WHERE pk = ? AND <condition>`.
 pub async fn row_of<E: EntityTrait>(
     db: &brocanth_model::sea_orm::DatabaseConnection,
     key: &brocanth_admin::model::PrimaryKey,
     table: &str,
+    scope: Scope<'_>,
 ) -> Result<Option<Row>, DataError> {
     let found = E::find()
         .filter(single_key::<E>(key, table)?)
+        .filter(scope_of(scope, db.get_database_backend())?)
         .into_json()
         .one(db)
         .await
@@ -103,16 +157,19 @@ pub async fn row_of<E: EntityTrait>(
     Ok(found.as_ref().map(crate::row_from_json))
 }
 
-/// How many rows match.
+/// How many rows match the search and the scope. The scope is the one the
+/// page gets, so the total and the pages describe one set.
 pub async fn count_of<E: EntityTrait>(
     db: &brocanth_model::sea_orm::DatabaseConnection,
     search: Search<'_>,
+    scope: Scope<'_>,
 ) -> Result<usize, DataError>
 where
     E::Model: Send + Sync,
 {
     E::find()
         .filter(search_of::<E>(search)?)
+        .filter(scope_of(scope, db.get_database_backend())?)
         .count(db)
         .await
         .map(|n| n as usize)
@@ -209,7 +266,21 @@ where
     key_of::<E>(model, &written)
 }
 
-/// Writes over an existing row.
+/// Writes over an existing row, guarded by the scope, and reports the rows
+/// it changed: one, or zero when the row is gone or no longer matches.
+///
+/// # The guard, and why it is a lock and not a `WHERE`
+///
+/// PLAN.md §9 obligation 2 wants `UPDATE … WHERE id = ? AND <condition>`.
+/// `ActiveModel::update` writes `WHERE id = ?` and offers no way to add to
+/// it, and `update_many` would skip the hooks. So the guard is a
+/// transaction: the row is read with `WHERE id = ? AND <condition>` and
+/// `FOR UPDATE`, and the `ActiveModel` writes it before the transaction
+/// ends. On PostgreSQL the lock holds the row until the commit, so no other
+/// transaction can make it stop matching in between. SQLite has no row
+/// lock (sea-query drops the clause) and serialises writers instead; a
+/// writer that commits between the read and the write fails this
+/// transaction, it does not slip past it.
 ///
 /// Loaded first, so the `ActiveModel` carries its primary key and SeaORM
 /// issues an `UPDATE` rather than an `INSERT`.
@@ -227,7 +298,8 @@ pub async fn update_of<E>(
     model: &brocanth_admin::model::ModelDescriptor,
     key: &brocanth_admin::model::PrimaryKey,
     values: &[(String, brocanth_admin::model::Value)],
-) -> Result<(), DataError>
+    scope: Scope<'_>,
+) -> Result<u64, DataError>
 where
     E: EntityTrait,
     E::Model: Send + Sync + IntoActiveModel<E::ActiveModel> + serde::Serialize,
@@ -237,16 +309,19 @@ where
         + Sync
         + brocanth_model::sea_orm::TryIntoModel<E::Model>,
 {
+    let guard = scope_of(scope, db.get_database_backend())?;
+    let txn = db.begin().await.map_err(backend)?;
     let found = E::find()
         .filter(single_key::<E>(key, &model.table)?)
-        .one(db)
+        .filter(guard)
+        .lock_exclusive()
+        .one(&txn)
         .await
-        .map_err(|e| DataError::backend(e.to_string()))?;
+        .map_err(backend)?;
     let Some(found) = found else {
-        return Err(DataError::backend(format!(
-            "no `{}` with that key; it may have been deleted while the form was open",
-            model.key
-        )));
+        // Gone, or no longer matching. Zero rows, which the admin answers
+        // as a lost race; the transaction rolls back when it drops.
+        return Ok(0);
     };
     // The row as it stands, with the submitted fields written over it.
     let mut merged = serde_json::to_value(&found).map_err(|e| DataError::backend(e.to_string()))?;
@@ -259,39 +334,48 @@ where
 
     let mut active = found.into_active_model();
     active.set_from_json(merged).map_err(invalid)?;
-    active.update(db).await.map_err(invalid)?;
-    Ok(())
+    active.update(&txn).await.map_err(invalid)?;
+    txn.commit().await.map_err(backend)?;
+    Ok(1)
 }
 
-/// Removes a row.
+/// Removes a row, guarded by the scope, and reports the rows it removed.
 ///
 /// Through the loaded model and not `delete_many`, for the reason above: a
-/// `before_delete` hook is a hook.
+/// `before_delete` hook is a hook. Guarded the way [`update_of`] is, in one
+/// transaction with the row locked.
 pub async fn delete_of<E>(
     db: &brocanth_model::sea_orm::DatabaseConnection,
     model: &brocanth_admin::model::ModelDescriptor,
     key: &brocanth_admin::model::PrimaryKey,
-) -> Result<(), DataError>
+    scope: Scope<'_>,
+) -> Result<u64, DataError>
 where
     E: EntityTrait,
     E::Model: Send + Sync + ModelTrait<Entity = E> + IntoActiveModel<E::ActiveModel>,
     E::ActiveModel:
         ActiveModelTrait<Entity = E> + brocanth_model::sea_orm::ActiveModelBehavior + Send,
 {
+    let guard = scope_of(scope, db.get_database_backend())?;
+    let txn = db.begin().await.map_err(backend)?;
     let found = E::find()
         .filter(single_key::<E>(key, &model.table)?)
-        .one(db)
+        .filter(guard)
+        .lock_exclusive()
+        .one(&txn)
         .await
-        .map_err(|e| DataError::backend(e.to_string()))?;
+        .map_err(backend)?;
     let Some(found) = found else {
-        // Already gone, which is what was asked for.
-        return Ok(());
+        // Gone, or no longer matching: zero rows, never success.
+        return Ok(0);
     };
-    found
-        .delete(db)
-        .await
-        .map_err(|e| DataError::backend(e.to_string()))?;
-    Ok(())
+    let removed = found.delete(&txn).await.map_err(backend)?;
+    txn.commit().await.map_err(backend)?;
+    Ok(removed.rows_affected)
+}
+
+fn backend(error: brocanth_model::sea_orm::DbErr) -> DataError {
+    DataError::backend(error.to_string())
 }
 
 /// The key of a model that was just written.

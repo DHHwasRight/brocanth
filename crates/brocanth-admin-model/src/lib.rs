@@ -1,6 +1,6 @@
 //! The admin's data source over SeaORM.
 //!
-//! [`AdminData`] is dynamic: a table name and a column name arrive as
+//! [`AdminData`](brocanth_admin::data::AdminData) is dynamic: a table name and a column name arrive as
 //! runtime strings, because the admin is one screen serving every model.
 //! SeaORM is static: an entity is a type, a column is a variant, and there
 //! is no reflection to turn `"post"` into `post::Entity`. Django gets this
@@ -42,7 +42,7 @@
 //! let data = std::sync::Arc::new(Models::new(db));
 //! ```
 //!
-//! and `Models` implements [`AdminData`]. Adding an entity is a line; a
+//! and `Models` implements [`AdminData`](brocanth_admin::data::AdminData). Adding an entity is a line; a
 //! model that is not listed is not in the admin, which is the right default
 //! for a screen that can delete things.
 //!
@@ -72,7 +72,7 @@ mod source;
 pub use async_trait::async_trait;
 pub use source::{
     columns_of, count_of, delete_of, entry_of, insert_of, json_of, order_of, row_of, rows_of,
-    search_of, single_key, update_of,
+    scope_of, search_of, single_key, update_of,
 };
 
 /// A module path the source was not given an entity for.
@@ -252,9 +252,10 @@ macro_rules! admin_source {
                 &self,
                 model: &$crate::brocanth_admin::model::ModelDescriptor,
                 search: $crate::brocanth_admin::data::Search<'_>,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<usize, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
-                    $($module => $crate::count_of::<$entity>(&self.db, search).await,)*
+                    $($module => $crate::count_of::<$entity>(&self.db, search, scope).await,)*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
@@ -276,13 +277,14 @@ macro_rules! admin_source {
                 &self,
                 model: &$crate::brocanth_admin::model::ModelDescriptor,
                 key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<
                 ::std::option::Option<$crate::brocanth_admin::model::Row>,
                 $crate::brocanth_admin::data::DataError,
             > {
                 match model.module_path.as_str() {
                     $($module => {
-                        $crate::row_of::<$entity>(&self.db, key, &model.table).await
+                        $crate::row_of::<$entity>(&self.db, key, &model.table, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
@@ -309,10 +311,11 @@ macro_rules! admin_source {
                 model: &$crate::brocanth_admin::model::ModelDescriptor,
                 key: &$crate::brocanth_admin::model::PrimaryKey,
                 values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
-            ) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
                     $($module => {
-                        $crate::update_of::<$entity>(&self.db, model, key, values).await
+                        $crate::update_of::<$entity>(&self.db, model, key, values, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
@@ -322,9 +325,12 @@ macro_rules! admin_source {
                 &self,
                 model: &$crate::brocanth_admin::model::ModelDescriptor,
                 key: &$crate::brocanth_admin::model::PrimaryKey,
-            ) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
-                    $($module => $crate::delete_of::<$entity>(&self.db, model, key).await,)*
+                    $($module => {
+                        $crate::delete_of::<$entity>(&self.db, model, key, scope).await
+                    })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }

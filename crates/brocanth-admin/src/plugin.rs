@@ -44,9 +44,9 @@
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_body::Body;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::HandlerError;
-use brocanth::plugin_body::Body;
 use brocanth::plugin_hooks::{Request, RequestState};
 use brocanth::plugin_routes::{async_handler, AsyncHandler, RouteBundle, RouteCx, RouteSource};
 use brocanth::routing_verb::Verb;

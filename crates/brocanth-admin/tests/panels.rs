@@ -63,6 +63,7 @@ fn admin_with_panel(policy_allows: bool) -> Admin {
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
             .panel(Queue { key: "jobs" })
+            .unscoped_rows_unsafe_for_development()
             .with_policy(policy_fn(move |_: &Principal<'_>, _| policy_allows)),
     )
 }
@@ -203,6 +204,7 @@ fn reading_a_panel_and_pressing_its_buttons_are_two_questions() {
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
             .panel(Queue { key: "jobs" })
+            .unscoped_rows_unsafe_for_development()
             .with_policy(policy_fn(|_: &Principal<'_>, r: Request<'_>| {
                 r.action != Action::ActOnPanel
             })),
@@ -240,6 +242,7 @@ fn a_tab_nobody_may_open_is_not_a_tab_anybody_is_shown() {
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
             .panel(Queue { key: "jobs" })
+            .unscoped_rows_unsafe_for_development()
             .with_policy(policy_fn(|_: &Principal<'_>, r: Request<'_>| {
                 r.action != Action::ViewPanel
             })),

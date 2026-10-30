@@ -12,10 +12,31 @@
 //! not be generic over it — a generic would reach the `Views` struct, then
 //! every context type, then every template, and the override seam would stop
 //! being a plain `Box<dyn View<_>>`.
+//!
+//! # Every read and write of an existing row carries a [`Scope`]
+//!
+//! PLAN.md §9: list authorisation is a set comprehension, so the row policy
+//! goes into the `WHERE` clause and nowhere else. Every method that touches
+//! an existing row takes a [`Scope`], and a source **must** `AND` a
+//! [`Scope::Where`] condition into its statement:
+//!
+//! | method | statement |
+//! |---|---|
+//! | [`AdminData::count`] | `SELECT count(*) … WHERE <search> AND <scope>` |
+//! | [`AdminData::list`] | `SELECT … WHERE <search> AND <scope> ORDER BY … LIMIT … OFFSET …` |
+//! | [`AdminData::fetch`] | `SELECT … WHERE <pk> = ? AND <scope>` |
+//! | [`AdminData::update`] | the write, guarded by `<pk> = ? AND <scope>`; report rows changed |
+//! | [`AdminData::delete`] | the same, for a delete |
+//!
+//! The count and the page get the same scope, so the total and the pages
+//! describe one set. A write that reports zero rows is an authorisation
+//! failure, and the admin answers `409`: the row stopped matching between the
+//! check and the write. So a source must not report a missing row as success.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use brocanth_policy::Condition;
 use thiserror::Error;
 
 use crate::discovery::RegistryEntry;
@@ -123,6 +144,37 @@ impl Search<'_> {
     }
 }
 
+/// Which rows a request may touch.
+///
+/// Built only by the admin, from the model's row policy. There is no
+/// `Default`: a source is never handed a scope that nobody decided.
+#[derive(Clone, Copy, Debug)]
+pub enum Scope<'a> {
+    /// No row rule applies.
+    ///
+    /// Reached only when the configuration called
+    /// [`AdminConfig::unscoped_rows_unsafe_for_development`](crate::AdminConfig::unscoped_rows_unsafe_for_development)
+    /// and the model has no [`AdminResource`](crate::rows::AdminResource).
+    Unscoped,
+    /// `AND` this condition into the `WHERE` clause.
+    ///
+    /// SQL text and an ordered bind list from `brocanth-policy`. Columns are
+    /// qualified with the table name, so the table must appear under its own
+    /// name: do not alias it. [`Condition::dialect`] says which SQL it is; a
+    /// source for another dialect must refuse it, not run it.
+    Where(&'a Condition),
+}
+
+impl<'a> Scope<'a> {
+    /// The condition, when there is one.
+    pub fn condition(&self) -> Option<&'a Condition> {
+        match self {
+            Scope::Unscoped => None,
+            Scope::Where(condition) => Some(condition),
+        }
+    }
+}
+
 /// One page of a listing, as the data source is asked for it.
 ///
 /// `offset` and `limit` are already clamped by [`crate::paging::Page`], so an
@@ -139,6 +191,9 @@ pub struct ListRequest<'a> {
     pub search: Search<'a>,
     /// The sort to apply, already checked against the schema.
     pub sort: Option<&'a Sort>,
+    /// The row policy. `AND` it into the `WHERE` clause. The matching
+    /// [`AdminData::count`] call gets the same one.
+    pub scope: Scope<'a>,
 }
 
 /// Everything the admin needs from the layer that stores rows.
@@ -151,17 +206,25 @@ pub trait AdminData: Send + Sync + 'static {
     /// [`crate::discovery`]'s job to drop it, not this one's.
     fn registry(&self) -> Vec<RegistryEntry>;
 
-    /// How many rows match the search.
-    async fn count(&self, model: &ModelDescriptor, search: Search<'_>) -> Result<usize, DataError>;
+    /// How many rows match the search **and** the scope.
+    async fn count(
+        &self,
+        model: &ModelDescriptor,
+        search: Search<'_>,
+        scope: Scope<'_>,
+    ) -> Result<usize, DataError>;
 
-    /// One page of rows.
+    /// One page of rows, filtered by [`ListRequest::scope`] in the query.
     async fn list(&self, request: ListRequest<'_>) -> Result<Vec<Row>, DataError>;
 
-    /// One row, or `None` when the key matches nothing.
+    /// One row, or `None` when the key matches nothing **or** the scope
+    /// refuses it. The two are one case on purpose: to tell them apart
+    /// discloses that a forbidden row exists.
     async fn fetch(
         &self,
         model: &ModelDescriptor,
         key: &PrimaryKey,
+        scope: Scope<'_>,
     ) -> Result<Option<Row>, DataError>;
 
     /// Writes a new row and returns its key.
@@ -175,16 +238,30 @@ pub trait AdminData: Send + Sync + 'static {
         values: &[(String, Value)],
     ) -> Result<PrimaryKey, DataError>;
 
-    /// Writes over an existing row.
+    /// Writes over an existing row, guarded by the scope, and reports how
+    /// many rows it changed.
+    ///
+    /// **Do not report zero as success, and do not report a missing row as
+    /// one.** The scope is the condition the admin checked a moment ago.
+    /// Applying it again inside the write closes the window between the
+    /// check and the write (PLAN.md §9 obligation 2). Zero rows is how the
+    /// admin learns it lost that race.
     async fn update(
         &self,
         model: &ModelDescriptor,
         key: &PrimaryKey,
         values: &[(String, Value)],
-    ) -> Result<(), DataError>;
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError>;
 
-    /// Removes a row.
-    async fn delete(&self, model: &ModelDescriptor, key: &PrimaryKey) -> Result<(), DataError>;
+    /// Removes a row, guarded by the scope, and reports how many rows it
+    /// removed. Zero means what it means for [`AdminData::update`].
+    async fn delete(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError>;
 }
 
 /// A shared data source, which is how the admin holds one.

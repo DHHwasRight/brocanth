@@ -21,16 +21,25 @@
 //! 403 to its own index. Shipping open and asking people to remember to lock
 //! it is a security incident waiting for someone's first deploy.
 //!
+//! **Rows go through the entity's policy.** The [`Policy`] above decides
+//! which screens a person may open. Which *rows* those screens show and
+//! change is `brocanth-policy`'s typed predicate, registered per model with
+//! [`AdminConfig::resource`]: the list and its count filter in the query,
+//! a record is read with a guarded select, a write is guarded by the
+//! condition it was checked against, and a form accepts only the columns the
+//! field mask allows. A model with no resource answers 403. See [`rows`].
+//!
 //! **A tab can come from another crate.** Four screens about a table is not
 //! a whole backoffice: a queue has a dashboard and a kill button, a feature
 //! flag has a switch, and neither is a row. [`Panel`](panel::Panel) is a tab
 //! that renders its own body and is given this chrome for free. It lives in
-//! the crate that owns the data, because this one has four dependencies and
-//! intends to keep them.
+//! the crate that owns the data, because this one keeps its dependencies few
+//! and intends to keep them so.
 //!
 //! # Modularity
 //!
-//! Four dependencies: `brocanth`, `rsx`, `async-trait`, `thiserror`. No SQL
+//! Five dependencies: `brocanth`, `rsx`, `async-trait`, `thiserror`, and
+//! `brocanth-policy`, whose own only dependency is `thiserror`. No SQL
 //! driver, no ORM, no serde, no async runtime, no TOML. The admin takes an
 //! [`AdminData`] the application supplies and never learns what is behind it;
 //! PLAN §8.4 says the ORM is recommended and absent, and that applies to a
@@ -59,6 +68,10 @@
 //!         .with_policy(policy_fn(|principal: &Principal<'_>, request| {
 //!             principal.downcast::<Staff>().is_some() && request.action != Action::Delete
 //!         }))
+//!         // The in-memory fixture cannot run SQL, so it cannot take a row
+//!         // policy. A real application registers one per model with
+//!         // `.resource(..)` instead; see the `rows` module.
+//!         .unscoped_rows_unsafe_for_development()
 //!         .model("post", |m| {
 //!             m.list_columns(["id", "title", "author_id", "published"])
 //!                 .searchable(["title", "body"])
@@ -144,6 +157,7 @@ pub mod panel;
 pub mod plugin;
 pub mod policy;
 pub mod query;
+pub mod rows;
 pub mod rt;
 pub mod view;
 
@@ -158,7 +172,11 @@ mod templates {
 
 pub use admin::{Admin, AdminError, Response, Route};
 pub use config::{AdminConfig, ModelAdmin};
-pub use data::{AdminData, DataError, FieldErrors, ListRequest, Search, SharedData};
+pub use data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search, SharedData};
+pub use rows::{AdminResource, RowAction};
+
+/// Re-exported so an [`AdminResource`] and its policy name one crate.
+pub use brocanth_policy as row_policy;
 pub use discovery::{discover, Discovery, RegistryEntry};
 pub use fixture::Fixture;
 pub use form::{widget_for, Choice, Field, Form, Submission, Widget};
