@@ -5,6 +5,12 @@
 //! beside every embedded asset. Any static host serves the result: GitHub
 //! Pages, an S3 bucket, nginx. `serve` stays, as the preview.
 //!
+//! The work is in the `brocanth-static` crate, and the generated command
+//! is a thin caller of it: a fix to the export reaches every project
+//! through `cargo update`, not through a file each project owns. The same
+//! crate exports applications that were not generated, such as the d3set
+//! chart gallery. See `docs/static-export.md`.
+//!
 //! # Only what does not need a server
 //!
 //! A static site has no process behind it, so a module that works at
@@ -18,7 +24,7 @@
 //! runtime is one builder call on each manifest, so the list can change
 //! without a change here.
 
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
 pub struct StaticSite;
 
@@ -30,6 +36,7 @@ impl Module for StaticSite {
         )
         .asked_in("pages", "Compile the pages to files any static host serves")
         .needs("commands", "`export` is a subcommand of this binary")
+        .krate(Dep::brocanth("brocanth-static"))
         .static_output()
         .outside_runtime()
     }
@@ -66,32 +73,45 @@ const AGENTS: &str = "\n\
     is the preview, not the deployment.\n\
     \n\
     - A page must answer the same bytes whatever the request says. It must\n\
-    \x20 not read a cookie, a header or the query: the export sends none.\n\
+    \x20 not read a cookie or the query: the export sends none. The one\n\
+    \x20 header it sends is `DP-Partial`, for the partials (`PARTIALS`).\n\
     - A route with a parameter (`users/[id].rs`) is written only for the\n\
     \x20 paths listed in `PATHS` in `src/commands/export.rs`. Add each one.\n\
+    - Served under a path (a GitHub Pages project site)? Export with\n\
+    \x20 `cargo run -- export --base /<repo>`. Write links from the root\n\
+    \x20 (`/about`); the export prefixes them.\n\
     - Do not add a module that runs in a server (a session, a database, a\n\
     \x20 queue, the observability probes). `brocanth add` refuses it.\n";
 
 const EXPORT_RS: &str = r##"//! `export` -- the site, as files.
 //!
-//! Every route that answers GET is requested once, through the same
-//! `handle` that `serve` uses, and its answer is written under `--out`. A
-//! page at `/about` becomes `about/index.html`, so `/about` works on any
-//! static host. A route whose last segment has a dot (`/feed.xml`) is
-//! written under its own name. Every embedded asset is written at the path
-//! it is published at, and the 404 page is `404.html`.
+//! `brocanth-static` does the work. Every route that answers GET is
+//! requested once, through the same `handle` that `serve` uses, and its
+//! answer is written under `--out`. A page at `/about` becomes
+//! `about/index.html`, so `/about` works on any static host. A route whose
+//! last segment has a dot (`/feed.xml`) is written under its own name.
+//! Every embedded asset is written at the path it is published at, and the
+//! 404 page is `404.html`.
+//!
+//! `--base /my-site` prefixes every root-relative URL in the pages, for a
+//! site served under a path, such as a GitHub Pages project site.
 //!
 //! This file is yours. Add the paths of routes with parameters to `PATHS`.
+//! Set `PARTIALS` to the most layout layers a page has to write the
+//! partials dp-swap's `partialDir` reads.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use brocanth::routing::Verb;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
 /// The concrete paths of routes with a parameter. The export cannot guess
 /// which ids exist, so a route like `/users/{id}` is written only for the
 /// paths listed here.
 const PATHS: &[&str] = &["/users/7"];
+
+/// One partial per layout depth, `1..=PARTIALS`, under `partials/<depth>/`.
+/// `0` writes documents only.
+const PARTIALS: u32 = 0;
 
 /// Write the site to a directory any static host can serve.
 #[cmd]
@@ -100,6 +120,10 @@ pub struct Export {
     /// Directory to write. Emptied first.
     #[arg(long, default_value = "dist")]
     pub out: PathBuf,
+    /// The path the site is served under, such as `/my-site`. Empty for
+    /// the root of a domain.
+    #[arg(long, default_value = "")]
+    pub base: String,
 }
 
 impl Command for Export {
@@ -112,102 +136,31 @@ impl Command for Export {
             crate::app::build().map_err(anyhow::Error::msg)?
         };
 
-        let mut paths: Vec<String> = Vec::new();
-        let mut skipped: Vec<&str> = Vec::new();
-        for (template, allow) in app.router.routes() {
-            if !allow.iter().any(|verb| verb == Verb::Get) {
-                continue;
-            }
-            if template.params().is_empty() {
-                paths.push(template.pattern().to_string());
-            } else {
-                skipped.push(template.pattern());
-            }
-        }
-        paths.extend(PATHS.iter().map(|path| path.to_string()));
+        let site = brocanth_static::Export::new(&self.out)
+            .base(&self.base)
+            .partials(PARTIALS)
+            .routes(&app.router)
+            .paths(PATHS.iter().copied())@ASSETS@;
+        let report = runtime.block_on(site.run(|request| crate::app::handle(&app, request)))?;
 
-        if self.out.exists() {
-            std::fs::remove_dir_all(&self.out)?;
-        }
-        std::fs::create_dir_all(&self.out)?;
-
-        for path in &paths {
-            let (status, body) = runtime.block_on(get(&app, path))?;
-            if status != 200 {
-                anyhow::bail!(
-                    "GET {path} answered {status}\n\
-                     help: a page in a static site must answer 200 to a bare GET"
-                );
-            }
-            write(&self.out.join(file_for(path)), &body)?;
-        }
-        // Whatever a missing path answers, for the hosts that read 404.html.
-        let (status, body) = runtime.block_on(get(&app, "/__export_missing__"))?;
-        let mut files = paths.len();
-        if status == 404 {
-            write(&self.out.join("404.html"), &body)?;
-            files += 1;
-        }
-        for asset in assets() {
-            write(&self.out.join(asset.0.trim_start_matches('/')), asset.1)?;
-            files += 1;
-        }
-
-        eprintln!("export: {files} file(s) in {}", self.out.display());
-        for pattern in skipped {
+        eprintln!("export: {report} in {}", self.out.display());
+        for pattern in &report.skipped {
             eprintln!(
-                "export: skipped {pattern}: it has a parameter; add its paths to PATHS in src/commands/export.rs"
+                "export: {pattern} has a parameter: only the paths in PATHS in src/commands/export.rs are written"
             );
         }
         Ok(())
     }
 }
-
-/// One GET, through the hooks, as a static host would see it: no cookie,
-/// no header, no query.
-async fn get(app: &crate::app::App, path: &str) -> anyhow::Result<(u16, Vec<u8>)> {
-    let request = brocanth_server::Request::new(Verb::Get, path);
-    let response = crate::app::handle(app, request).await;
-    match response.body {
-        brocanth_server::Body::Bytes(bytes) => Ok((response.status, bytes.to_vec())),
-        brocanth_server::Body::Stream(_) => anyhow::bail!(
-            "GET {path} answered a stream\n\
-             help: a static page has an end; return the whole body"
-        ),
-    }
-}
-
-/// Where a path's answer goes: `about/index.html`, or the name itself when
-/// the last segment has an extension.
-fn file_for(path: &str) -> PathBuf {
-    let path = path.trim_matches('/');
-    let last = path.rsplit('/').next().unwrap_or("");
-    if last.contains('.') {
-        return PathBuf::from(path);
-    }
-    Path::new(path).join("index.html")
-}
-
-@ASSETS@
-
-fn write(at: &Path, body: &[u8]) -> anyhow::Result<()> {
-    if let Some(dir) = at.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(at, body)?;
-    Ok(())
-}
 "##;
 
-const ASSETS_EMBEDDED: &str = r#"/// Every embedded asset, at the path it is published at.
-fn assets() -> impl Iterator<Item = (&'static str, &'static [u8])> {
-    crate::assets::ASSETS
-        .iter()
-        .map(|asset| (asset.published, asset.body))
-}"#;
+const ASSETS_EMBEDDED: &str = "
+            .assets(
+                crate::assets::ASSETS
+                    .iter()
+                    .map(|asset| (asset.published, asset.body)),
+            )";
 
-const ASSETS_NONE: &str = r#"/// No embedded assets: nothing in this project writes `assets/` or
-/// `public/`.
-fn assets() -> impl Iterator<Item = (&'static str, &'static [u8])> {
-    std::iter::empty()
-}"#;
+// No embedded assets: nothing in this project writes `assets/` or
+// `public/`, and `crate::assets` does not exist.
+const ASSETS_NONE: &str = "";

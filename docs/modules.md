@@ -620,6 +620,11 @@ server uses. Today that is `config`, `commands`, `rsx`, `rsx-tailwind`,
 rule for the flags and for `brocanth add`; the chooser takes the other
 side off and says so.
 
+The module writes a thin `export` command and depends on
+`brocanth-static`, which does the work. The rule lives in the module, not
+in the crate: an application that calls the crate directly decides for
+itself. See `docs/static-export.md`.
+
 ---
 
 ## 8. What to do, in order

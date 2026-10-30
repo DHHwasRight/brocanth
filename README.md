@@ -106,7 +106,7 @@ The workspace has 36 crates under `crates/` and two examples under
 | Partial navigation (dp-swap, a vendored script from [htmx](https://github.com/DHHwasRight/htmx)) | (generated code) | `rsx-htmx` |
 | Tailwind CSS build over template class names | (generated code) | `rsx-tailwind` |
 | Fingerprinted static assets, embedded at compile time | `brocanth-assets` | with `rsx` |
-| The pages compiled to `dist/` for a static host (`cargo run -- export`) | (generated code) | `static` |
+| The pages compiled to `dist/` for a static host (`cargo run -- export`), with partials per layout depth and a base path | `brocanth-static` | `static` |
 | JS and CSS bundles from `build.rs` (rolldown, lightningcss) | `brocanth-bundle` | |
 | Django-shaped backoffice at `/admin` | `brocanth-admin`, `brocanth-admin-model` | `admin` |
 
@@ -126,6 +126,11 @@ They are blocked, and each row says why.
 `cargo run -- export` requests every GET route once and writes the
 answers and the assets to `dist/`, ready for any static host. A route with
 a parameter is written for the paths listed in `src/commands/export.rs`.
+The work is in `brocanth-static`: it also writes one partial tree per
+layout depth for dp-swap's `partialDir`, and prefixes every root-relative
+URL with `--base` for a GitHub Pages project site. The
+[d3set gallery](https://github.com/DHHwasRight/d3set) is published that
+way. See `docs/static-export.md`.
 `static` refuses every module that needs a running server, so it goes
 only with `config`, `commands`, the template engines, `rsx-tailwind`,
 `rsx-htmx` and CI. The chooser has a shape for it.
