@@ -125,3 +125,195 @@ Both were found by generating a project, serving it and posting to it, not
 by reading. The dp-swap gap G2 is closed: `dp::SCRIPT` sends the token in
 the `x-csrf-token` header this hook reads, from `CsrfToken::meta_tag`. See
 `src/dp.rs`.
+
+## 6. Security headers
+
+`brocanth_middleware::SecurityHeaders` is a `ResponseHook`. It sets six
+headers on every response, a stream included. A header the handler set
+is kept.
+
+| Header | Default |
+|---|---|
+| `Strict-Transport-Security` | `max-age=31536000`, on a request known to be HTTPS |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-Frame-Options` | `DENY`, with `frame-ancestors 'none'` to match |
+| `Content-Security-Policy` | `'self'` for everything, `object-src 'none'`, dp-swap's scripts by hash |
+| `Permissions-Policy` | camera, microphone, geolocation, payment and USB off |
+
+```rust
+let builder = builder.plugin_hooking(SecurityHeaders::new(
+    SecurityHeadersConfig::default()
+        .behind_tls()
+        .hsts(Hsts::max_age(ONE_YEAR).include_subdomains())
+        .csp(Csp::default().directive("img-src", ["'self'", "https://img.example.com"])),
+));
+```
+
+**HSTS goes out only on HTTPS.** A browser ignores HSTS over plain HTTP,
+and HSTS from a development server pins `localhost` for a year. The hook
+sends it when the request URI is `https`, when `ProxyHeaders` read
+`proto=https` from a trusted proxy, or when `behind_tls` is set.
+brocanth-server does not terminate TLS, so a production deployment
+needs one of the last two. `preload` is refused at startup unless
+`includeSubDomains` is on and `max-age` is at least a year, which are
+the preload list's own rules.
+
+**The CSP uses hashes, not a nonce.** dp-swap's scripts reach a page as
+constants a template inlines: `<script>{! brocanth_middleware::dp::SCRIPT }</script>`.
+A nonce must be on the header and on each tag, so every template that
+inlines a script needs the request's nonce. The admin layout and the
+jobs tab inline from a constant and have no request in reach. A nonce
+also makes every page unique, which a shared cache must not store. A
+hash of a constant is a constant: no template changes, and a cached page
+stays valid. So `script-src` is `'self'` and the SHA-256 of `dp::SCRIPT`
+and `dp::PREFETCH`. A script the application inlines itself goes in with
+`Csp::inline_script(text)`, which hashes the exact text. The admin's own
+`SCRIPT` is one such script. The cost: an inline script whose text
+depends on the request has no fixed hash. Put that value in a `data-`
+attribute or a `<meta>` tag, as `CsrfToken::meta_tag` does.
+
+`style-src` keeps `'unsafe-inline'` by default. The backoffice screens
+carry `<style>` blocks and `style=` attributes, and a policy that breaks
+them gets turned off rather than tuned. `Csp::strict_styles()` drops it.
+
+**Configuration.** With the `config` feature, every config type
+deserialises, and the plugin's instance name is its section:
+
+```toml
+[security_headers]
+behind_tls = true
+frames = "same_origin"           # "deny", "same_origin" or { allow = [...] }
+
+[security_headers.hsts]
+include_subdomains = true
+
+[security_headers.csp.directives]
+img-src = ["'self'", "https://img.example.com"]   # one directive, the rest stay
+```
+
+```rust
+let headers = config.section::<SecurityHeadersConfig>("security_headers")?;
+let builder = builder.plugin_hooking(SecurityHeaders::new(headers));
+```
+
+`plugin_with_defaults` cannot register it: that path calls `plugin`,
+and a plugin that installs hooks must go through `plugin_hooking`.
+Registering it by its default name claims the section all the same.
+
+**`brocanth check --deploy`.** `deploy/hsts` now looks for this hook.
+It warns when no hook and no `Strict-Transport-Security` literal is in
+`src/`, when the hook is registered with HSTS off, and when nothing tells
+the hook a request came over TLS: no `behind_tls` and no `ProxyHeaders`.
+
+## 7. Rate limiting
+
+A fixed window per key, per rule. A rule is a group of routes (path
+prefixes by segment, and optional verbs), a limit, a window in seconds,
+and a list of keys. A request counts against every rule that matches.
+Over the limit, it gets a 429 and the handler does not run:
+
+```text
+HTTP/1.1 429 Too Many Requests
+retry-after: 42
+ratelimit-limit: 5
+ratelimit-remaining: 0
+ratelimit-reset: 42
+ratelimit-policy: 5;w=60
+```
+
+A response that went through carries the same `RateLimit-*` headers for
+the rule nearest its limit.
+
+```rust
+let builder = builder.plugin_hooking(RateLimit::new(
+    RateLimitConfig::rules([
+        Rule::new("login", 5, 60).paths(["/login"]).methods(["POST"]),
+        Rule::new("api", 600, 60).paths(["/api"]).key([Key::User, Key::Ip]),
+    ])
+    .ip_header("fly-client-ip"),
+));
+```
+
+**Fixed window, not token bucket.** A fixed window is one row and one
+statement. A token bucket needs the last refill time, so a read before
+the write or a longer statement, for a smoother curve. The fixed
+window's cost is the edge: a caller can spend a limit at the end of one
+window and another at the start of the next. For a password guesser or
+a scraper that is acceptable.
+
+**The key.** The first key in a rule's list that the request has:
+
+- `ip`: the `ip_header` if set, then `ClientInfo` from `ProxyHeaders`,
+  then the socket's `PeerAddress`. Name an `ip_header` only when the
+  edge sets it and strips the client's copy.
+- `session`: the SHA-256 of the cookie named by `session_cookie`. The
+  session id never reaches the store.
+- `user`: a `rate_limit::Subject` the application's auth hook puts on
+  the request state. Order the limiter after that hook with `after`.
+
+A request with none of a rule's keys is not counted by that rule. One
+shared "unknown" bucket would let one caller lock out every other
+caller without a key.
+
+**Two plugins.** `RateLimit` counts in a `MemoryStore` with a
+synchronous hook. It works with `App::run`, `Bridge` and
+`TestClient::send`, and each process counts alone. `SharedRateLimit`
+takes any `rate_limit::Store`. A store that waits on the network needs
+an `AsyncRequestHook`, and an application with one must serve through
+`App::begin_async`. The core makes `App::run` a compile error for it.
+`brocanth_server::Bridge` calls `App::run` and `App::begin` today, never
+`begin_async`, so `SharedRateLimit` is served by a project that drives
+`begin_async` itself.
+
+**The Postgres store.** `rate_limit::PgStore`, behind the `postgres`
+feature. One `UNLOGGED` table, because a counter is not worth a WAL
+entry and a crash that empties it starts every caller on a fresh
+window. One statement per count:
+
+```sql
+INSERT INTO brocanth_rate_limits AS r (key, window_end, hits)
+VALUES ($1, (floor(extract(epoch FROM now()))::bigint / $2 + 1) * $2, 1)
+ON CONFLICT (key) DO UPDATE SET
+    hits = CASE WHEN r.window_end = EXCLUDED.window_end THEN r.hits + 1 ELSE 1 END,
+    window_end = EXCLUDED.window_end
+RETURNING hits, window_end - floor(extract(epoch FROM now()))::bigint
+```
+
+The window comes from the database's clock, so processes with skewed
+clocks agree. The row lock of `ON CONFLICT DO UPDATE` serialises two
+counts of one key, and the test sends fifty at once to prove none is
+lost. `PgStore::create_table` creates the table, `create_sql` gives the
+statement for a migration, and `sweep` deletes ended windows. Run the
+sweep from a job.
+
+**When the store fails.** `fail_open` is true by default: the request
+goes through and a `StoreFailed` is on the request state. A limiter
+that is down should not take the site down. `fail_closed()` answers 503
+instead.
+
+**Configuration.** As for the headers, under the `config` feature:
+
+```toml
+[rate_limit]
+ip_header = "fly-client-ip"
+
+[[rate_limit.rules]]
+name = "login"
+paths = ["/login"]
+methods = ["POST"]
+limit = 5
+window_secs = 60
+key = ["ip"]                    # the default
+```
+
+**What is open.**
+
+- `ProxyHeaders` and the limiter read `PeerAddress`. brocanth-server's
+  bridge sets its own `brocanth_server::Peer`. Nothing converts one into
+  the other, so behind the bridge neither sees the socket address. The
+  limiter still works with `ip_header`.
+- `SharedRateLimit` cannot be served by `Bridge` until the bridge drives
+  `App::begin_async`.
+- The limits are per process with `RateLimit`. A deployment with more
+  than one process and a real limit wants `SharedRateLimit`.

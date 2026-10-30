@@ -3,10 +3,11 @@ name = "brocanth-middleware"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types, CORS and CSRF."
+description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types, CORS, CSRF, security headers and rate limiting."
 
-# Three dependencies, and the first two are already in the core's own
-# tree. This crate is a set of hooks and nothing else, so anything it
+# Five dependencies by default, and every one is already in the workspace
+# tree: `brocanth` and `http` in the core's own, `getrandom`, `sha2` and
+# `base64` in `brocanth-auth`'s. This crate is a set of hooks and nothing else, so anything it
 # links is a cost every application that wants a canonical-host redirect
 # also pays.
 [dependencies]
@@ -22,6 +23,28 @@ http = "1"
 # lengths in as well and does not return early on them.
 getrandom = "0.4"
 
+# The Content-Security-Policy hashes. dp-swap's two scripts are inlined
+# as compile-time constants, and a `'sha256-...'` source is what lets them
+# run without `'unsafe-inline'`. `brocanth-auth` and `brocanth-storage`
+# take the same two versions, so this adds no second copy. The rate
+# limiter uses the same digest to keep a session cookie out of its store.
+sha2 = "0.11"
+base64 = "0.23"
+
+# `config`: the configuration types deserialise, so a `[security_headers]`
+# or `[rate_limit]` section of a brocanth-config file builds one. Off, so
+# an application that builds its configuration in code links no serde.
+serde = { version = "1", features = ["derive"], optional = true }
+
+# `postgres`: the rate limiter's shared store, one UNLOGGED table. The same
+# `sqlx` 0.9 and the same features `brocanth-queue-postgres` takes, so an
+# application with the queue links one driver.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "tls-rustls-ring",
+], optional = true }
+
 [dev-dependencies]
 # `tests/dp.rs` drives the CSRF hook and the dp-swap hook through the real
 # pipeline, and re-renders a form with its faults the way an application
@@ -30,10 +53,23 @@ brocanth-test.workspace = true
 brocanth-input.workspace = true
 brocanth-server.workspace = true
 zod = { workspace = true, features = ["json"] }
+# `tests/config.rs` reads both sections out of a real TOML document.
+brocanth-config.workspace = true
+# `tests/rate_limit_postgres.rs`, skipped without a database.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+# This crate, with both optional features on, so `cargo test -p
+# brocanth-middleware` runs the configuration and Postgres tests rather
+# than compiling them out. The pattern `brocanth-config` uses for `admin`.
+brocanth-middleware = { path = ".", features = ["config", "postgres"] }
 
 [features]
 default = []
 scaffold = ["dep:brocanth-scaffold"]
+# The configuration types deserialise from a brocanth-config section.
+config = ["dep:serde"]
+# `rate_limit::PgStore`, the shared counter store.
+postgres = ["dep:sqlx"]
 
 [dependencies.brocanth-scaffold]
 workspace = true
