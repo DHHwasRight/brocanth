@@ -835,7 +835,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
     // For every project, including one with no plugins. `src/app.rs` asks
-    // this file the same three questions whatever the module list is, which
+    // this file the same four questions whatever the module list is, which
     // is what lets `brocanth add` leave `src/app.rs` alone.
     files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a, &built)));
     if a.has("config") {
@@ -1468,7 +1468,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
         // Every project serves, so every project gets a socket and a reactor.
         deps.push(source_of(a, &core("brocanth-server")));
         deps.push(
-            "tokio = { version = \"1\", features = [\"rt-multi-thread\"] }  # the reactor `serve` runs on"
+            "tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"signal\", \"sync\", \"time\"] }  # the reactor `serve` runs on, and the signals that stop it"
                 .to_string(),
         );
     }
@@ -1611,7 +1611,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          //!\n\
          //! This file is yours. `brocanth add` does not rewrite it: what it would\n\
          //! have to say is in `src/plugins/mod.rs`, which is generated, and this one\n\
-         //! only asks that file three questions.\n\
+         //! only asks that file four questions.\n\
          //!\n\
          //! A plugin that is not named in `plugins::register!` is not registered, and\n\
          //! one that is not in `Cargo.toml` is not compiled at all. \"The framework\n\
@@ -1622,8 +1622,10 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          //! this application is.\n\
          \n\
          use std::sync::Arc;\n\
+         use std::time::{{Duration, Instant}};\n\
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
+         use brocanth::plugin_shutdown::ShutdownReason;\n\
          use brocanth::routing::{{Dispatch, MiddlewareStack, Router}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
@@ -1732,60 +1734,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         out.push_str(HOLDING_FN);
     }
 
+    out.push_str(&serve_fns(a));
     out.push_str(
-        "/// Serves until the process is stopped.\n\
-         ///\n\
-         /// Synchronous on the outside because the command that calls it is, and\n\
-         /// the runtime is built here rather than wrapped around `main`: a command\n\
-         /// that never serves should not start a reactor to run.\n\
-         pub fn serve(addr: &str) -> Result<(), String> {\n\
-        \x20   let runtime = tokio::runtime::Builder::new_multi_thread()\n\
-        \x20       .enable_all()\n\
-        \x20       .build()\n\
-        \x20       .map_err(|e| e.to_string())?;\n\
-         \n\
-        \x20   // The runtime first, and the application inside it. A plugin\n\
-        \x20   // that opens a connection pool does it in `before_start`,\n\
-        \x20   // where the hook is synchronous and connecting is not, so it\n\
-        \x20   // reaches for the current runtime handle and blocks on a\n\
-        \x20   // scoped thread. Building the application first would leave\n\
-        \x20   // it with no handle to reach for.\n\
-        \x20   let app = {\n\
-        \x20       let _guard = runtime.enter();\n\
-        \x20       Arc::new(build()?)\n\
-        \x20   };\n\
-        \x20   eprintln!(\"{APP}: plugins: [{}]\", app.plugins.join(\", \"));\n\
-         \n\
-        \x20   runtime.block_on(async move {\n\
-        \x20       let server = brocanth_server::Server::bind(addr)\n\
-        \x20           .await\n\
-        \x20           .map_err(|e| e.to_string())?;\n\
-        \x20       let bound = server.local_addr().map_err(|e| e.to_string())?;\n\
-        \x20       eprintln!(\"{APP}: listening on http://{bound}\");\n\
-         \n\
-        \x20       server\n\
-        \x20           .run(move |request| {\n\
-        \x20               // Dispatch is synchronous and runs here, outside the\n\
-        \x20               // future, so what crosses the await is a finished\n\
-        \x20               // response and nothing borrowed.\n\
-        \x20               let out = ",
-    );
-    out.push_str(if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        // Static files never reach a page. They are bytes with a content
-        // type, and the page contract carries a `String` body on purpose.
-        "serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));\n"
-    } else {
-        "sent(dispatch(&app, &request));\n"
-    });
-    out.push_str(
-        "\x20               async move { out }\n\
-        \x20           })\n\
-        \x20           .await\n\
-        \x20           .map_err(|e| e.to_string())\n\
-        \x20   })\n\
-         }\n\
-         \n\
-         /// One request: the table, then the chain, then the handler.\n\
+        "/// One request: the table, then the chain, then the handler.\n\
          ///\n\
          /// The chain runs only for a route that matched. A 404 has no route and\n\
          /// therefore no context, which is also why the request hooks the plan\n\
@@ -1849,6 +1800,285 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         },
     )
 }
+
+/// The grace period, `serve`, and the stop that follows it, in `src/app.rs`.
+///
+/// The same text whatever the module list is: `src/app.rs` is the
+/// developer's, and `brocanth add` does not rewrite it. Where the grace
+/// period comes from does vary -- `[server] shutdown_grace_secs` with the
+/// config plugin, the constant without -- so that question goes to
+/// `plugins::shutdown_grace`, which the generator owns.
+fn serve_fns(a: &Answers) -> String {
+    let dispatch = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
+        // Static files never reach a page. They are bytes with a content
+        // type, and the page contract carries a `String` body on purpose.
+        "serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));"
+    } else {
+        "sent(dispatch(&app, &request));"
+    };
+    SERVE_FN.replace("@DISPATCH@", dispatch) + "\n"
+}
+
+/// `serve`, the drain, and the signals. ADR 2 in the generated project.
+const SERVE_FN: &str = r#"/// How long a stop waits for open requests and then for the plugins.
+///
+/// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
+/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
+/// `plugins::shutdown_grace`.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
+
+/// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
+///
+/// 1. The listener closes. Each open request has the grace period to
+///    finish, and each open response stream is told to end.
+/// 2. Each plugin stops, in reverse registration order, inside what is left
+///    of the grace period.
+///
+/// An error is a non-zero exit, and an orchestrator reads it: the drain ran
+/// out of time, the listener failed, or a plugin did not stop cleanly.
+///
+/// Synchronous on the outside because the command that calls it is, and
+/// the runtime is built here rather than wrapped around `main`: a command
+/// that never serves should not start a reactor to run.
+pub fn serve(addr: &str) -> Result<(), String> {
+    let grace = plugins::shutdown_grace()?;
+    // Before the socket, so a signal during startup stops the server
+    // through the drain and does not kill the process.
+    let stop = watch(grace).map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // The runtime first, and the application inside it. A plugin
+    // that opens a connection pool does it in `before_start`,
+    // where the hook is synchronous and connecting is not, so it
+    // reaches for the current runtime handle and blocks on a
+    // scoped thread. Building the application first would leave
+    // it with no handle to reach for.
+    let app = {
+        let _guard = runtime.enter();
+        build()?
+    };
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+
+    let result = runtime.block_on(run(addr, app, stop, grace));
+    // A request that outlived the drain can still be on a worker. Waiting
+    // for it here would undo the grace period, so it is dropped.
+    runtime.shutdown_background();
+    result
+}
+
+/// The async half of [`serve`].
+async fn run(
+    addr: &str,
+    mut app: App,
+    mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
+    grace: Duration,
+) -> Result<(), String> {
+    // One gate: a stop at the listener and a stop at `App::shutdown`
+    // close the same set of response streams.
+    let server = brocanth_server::Server::bind(addr)
+        .await
+        .map_err(|e| e.to_string())?
+        .with_streams(app.core.streams().clone());
+    let bound = server.local_addr().map_err(|e| e.to_string())?;
+    let stopper = server.stopper();
+
+    // After the bind, so a plugin does not start work for a port that
+    // turned out to be taken.
+    if let Err(e) = app.core.start() {
+        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        return Err(e.to_string());
+    }
+
+    let app = Arc::new(app);
+    let mut serving = tokio::spawn(server.run({
+        let app = Arc::clone(&app);
+        move |request| {
+            // Dispatch is synchronous and runs here, outside the
+            // future, so what crosses the await is a finished
+            // response and nothing borrowed.
+            let out = @DISPATCH@
+            async move { out }
+        }
+    }));
+    eprintln!("{APP}: listening on http://{bound}");
+
+    // Phase 1: stop accepting, and give the open requests the grace period.
+    let mut failed = tokio::select! {
+        event = stop.recv() => {
+            let signal = match event {
+                Some(Stop::Signal(signal)) => signal,
+                _ => "stop",
+            };
+            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            None
+        }
+        // The listener stopped by itself. That is a failure, and the
+        // plugins still stop.
+        served = &mut serving => Some(stopped(served)),
+    };
+    let reason = match failed {
+        None => ShutdownReason::Signal,
+        Some(_) => ShutdownReason::Failed,
+    };
+    let started = Instant::now();
+    if failed.is_none() {
+        stopper.stop();
+        failed = tokio::select! {
+            served = &mut serving => match served {
+                Ok(Ok(())) => None,
+                other => Some(stopped(other)),
+            },
+            event = stop.recv() => Some(match event {
+                // A second Ctrl-C means "now".
+                Some(Stop::Signal(signal)) => {
+                    format!("a second {signal} arrived, so open requests were cut off")
+                }
+                _ => format!("open requests did not finish in {grace:?} and were cut off"),
+            }),
+        };
+    }
+    // Nothing when the drain finished. After a timeout, this drops the
+    // connections that are still open.
+    serving.abort();
+
+    // Phase 2: the plugins, inside what is left of the grace period.
+    let remaining = grace.saturating_sub(started.elapsed());
+    match owned(app).await {
+        Some(mut app) => {
+            let report = app.core.shutdown(reason, Some(remaining));
+            eprintln!("{APP}: {report}");
+            if failed.is_none() && (!report.is_clean() || report.overran()) {
+                failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
+            }
+        }
+        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+    }
+    match failed {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
+}
+
+/// Why the listener task ended before a clean drain.
+fn stopped(
+    served: Result<Result<(), brocanth_server::ServeError>, tokio::task::JoinError>,
+) -> String {
+    match served {
+        Ok(Ok(())) => "the listener stopped with no signal".to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// The application back from the connections that shared it, or `None` when
+/// one of them still runs.
+///
+/// `App::shutdown` needs `&mut`. A finished connection task can be a few
+/// instructions from dropping its clone, so this yields a few times first.
+async fn owned(mut app: Arc<App>) -> Option<App> {
+    for _ in 0..64 {
+        match Arc::try_unwrap(app) {
+            Ok(app) => return Some(app),
+            Err(shared) => {
+                app = shared;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    None
+}
+
+/// What the stop thread reports to [`run`].
+enum Stop {
+    /// SIGTERM or SIGINT, by name.
+    Signal(&'static str),
+    /// The grace period since the first signal is over.
+    Deadline,
+}
+
+/// Watches for SIGTERM and SIGINT on a thread of its own. It reports each
+/// signal, and the end of the grace period after the first one.
+///
+/// Not on the serving runtime. A handler is synchronous and holds its
+/// worker, and while it runs that runtime can leave its signal and timer
+/// drivers unpolled: a stop would wait for the slowest request, and the
+/// grace period would not run out. This thread has a runtime of its own,
+/// and the channel wakes `run` directly.
+fn watch(grace: Duration) -> std::io::Result<tokio::sync::mpsc::UnboundedReceiver<Stop>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut signals = {
+        let _guard = runtime.enter();
+        Signals::listen()?
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::Builder::new()
+        .name("stop".to_string())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let first = signals.next().await;
+                if tx.send(Stop::Signal(first)).is_err() {
+                    return;
+                }
+                let next = tokio::select! {
+                    () = tokio::time::sleep(grace) => Stop::Deadline,
+                    second = signals.next() => Stop::Signal(second),
+                };
+                let _ = tx.send(next);
+            });
+        })?;
+    Ok(rx)
+}
+
+/// SIGTERM and SIGINT as one stream. An orchestrator sends SIGTERM, and
+/// Ctrl-C is SIGINT.
+#[cfg(unix)]
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
+        }
+    }
+}
+
+/// Ctrl-C alone, where there is no SIGTERM.
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
+}
+"#;
 
 /// `mise.toml`. The sections are `[tasks.*]`, which is mise's spelling and not
 /// brocanth's -- a rename of brocanth's own vocabulary once turned these into
@@ -2969,17 +3199,17 @@ fn deeper(text: &str) -> String {
         .collect()
 }
 
-/// `src/plugins/mod.rs`: the `mod` lines, and the three things `src/app.rs`
+/// `src/plugins/mod.rs`: the `mod` lines, and the four things `src/app.rs`
 /// asks this file for.
 ///
 /// Written for every project, including one with no plugins at all. That is
-/// the point of it: `src/app.rs` says the same three sentences whatever the
+/// the point of it: `src/app.rs` says the same four sentences whatever the
 /// module list is, so `brocanth add` never has to edit the one file the
-/// developer owns. Three empty functions cost a project nothing, and the
+/// developer owns. Four small functions cost a project nothing, and the
 /// alternative costs it the ability to add a plugin later.
 fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     let mut out = String::from(
-        "//! The plugins this application contains, and the three things `src/app.rs`\n\
+        "//! The plugins this application contains, and the four things `src/app.rs`\n\
          //! asks this file for.\n\
          //!\n\
          //! Each plugin is also named in `register!`: being here makes it compile,\n\
@@ -3183,8 +3413,57 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         out.push_str("        _ => None,\n    }\n");
     }
     out.push_str("}\n");
+
+    // -- the grace period ---------------------------------------------
+    //
+    // Here and not in `src/app.rs`, because where it comes from varies with
+    // the module list: a file with the config plugin, the constant without.
+    out.push('\n');
+    if a.has("config") {
+        out.push_str(&GRACE_FROM_CONFIG.replace("@UPPER@", &a.ident().to_uppercase()));
+    } else {
+        out.push_str(GRACE_CONST);
+    }
     out
 }
+
+/// `plugins::shutdown_grace` with the config plugin.
+const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs`, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
+pub fn shutdown_grace() -> Result<std::time::Duration, String> {
+    let config = brocanth_config::Loader::new(crate::app::APP)
+        .load()
+        .map_err(|e| e.to_string())?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("shutdown_grace_secs"))
+    else {
+        return Ok(crate::app::SHUTDOWN_GRACE);
+    };
+    // An integer in a file, and a string in `$@UPPER@_SERVER__SHUTDOWN_GRACE_SECS`.
+    value
+        .as_integer()
+        .and_then(|secs| u64::try_from(secs).ok())
+        .or_else(|| value.as_str().and_then(|secs| secs.trim().parse().ok()))
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(|| {
+            format!(
+                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds",
+                value.display()
+            )
+        })
+}
+"#;
+
+/// `plugins::shutdown_grace` without it.
+const GRACE_CONST: &str = r#"/// How long a stop waits: [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE).
+///
+/// This project has no configuration file, so the constant is the answer.
+/// `brocanth add config` makes it `[server] shutdown_grace_secs`.
+pub fn shutdown_grace() -> Result<std::time::Duration, String> {
+    Ok(crate::app::SHUTDOWN_GRACE)
+}
+"#;
 
 fn config_toml(a: &Answers, built: &Built) -> String {
     let mut out = format!(
@@ -3200,7 +3479,12 @@ fn config_toml(a: &Answers, built: &Built) -> String {
          # environment; without it, {env}.\n\
          \n\
          [app]\n\
-         name = {title:?}\n",
+         name = {title:?}\n\
+         \n\
+         [server]\n\
+         # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the\n\
+         # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.\n\
+         shutdown_grace_secs = 25\n",
         upper = a.ident().to_uppercase(),
         ident = a.ident(),
         env = brocanth_config::DEFAULT_ENV,
@@ -4371,7 +4655,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Appended to the generated `about.rs` by the test above.
+    /// SIGTERM in the middle of a request, sent to a generated server.
+    ///
+    /// Two runs of one binary. With the default grace period the request
+    /// finishes, the client reads all of it, and the process exits 0. With
+    /// `[server] shutdown_grace_secs` at 1 (through the environment) the
+    /// same request outlives the grace period, and the exit is not 0: that
+    /// is how an orchestrator sees a drain that cut somebody off.
+    ///
+    /// `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    #[cfg(unix)]
+    fn sigterm_drains_the_open_request_and_exits_zero() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-drain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            name: "drain-test".into(),
+            title: "Drain Test".into(),
+            picks: vec!["config", "commands"],
+            local: Some(brocanth.display().to_string()),
+            git: false,
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        // A page that takes three seconds. The handler is synchronous and
+        // holds its worker, which is the case the stop thread is for.
+        std::fs::write(root.join("src/pages/slow.rs"), SLOW_PAGE).unwrap();
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("build")
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the scaffold did not build:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let binary = root.join("target/debug/drain-test");
+
+        let (status, response, log) = slow_request_then_sigterm(&binary, None);
+        assert!(
+            response.starts_with("HTTP/1.1 200") && response.ends_with("slept"),
+            "the request in flight did not finish:\n{response}\n{log}"
+        );
+        assert_eq!(status.code(), Some(0), "{log}");
+        assert!(log.contains("SIGTERM: stopping"), "{log}");
+        assert!(log.contains("shutdown (signal) finished"), "{log}");
+
+        let (status, response, log) = slow_request_then_sigterm(&binary, Some("1"));
+        assert_ne!(status.code(), Some(0), "{log}");
+        assert!(!response.ends_with("slept"), "{response}\n{log}");
+        assert!(log.contains("did not finish in 1s"), "{log}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Starts `binary serve` on a free port, sends one slow request, sends
+    /// SIGTERM while it runs, and returns the exit status, the response
+    /// and the server's stderr.
+    #[cfg(unix)]
+    fn slow_request_then_sigterm(
+        binary: &Path,
+        grace: Option<&str>,
+    ) -> (std::process::ExitStatus, String, String) {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let mut command = Command::new(binary);
+        command
+            .args(["serve", "--addr", "127.0.0.1:0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(secs) = grace {
+            command.env("DRAIN_TEST_SERVER__SHUTDOWN_GRACE_SECS", secs);
+        }
+        let mut child = command.spawn().expect("start the server");
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut log = String::new();
+        let addr = loop {
+            let mut line = String::new();
+            if stderr.read_line(&mut line).unwrap() == 0 {
+                panic!("the server stopped before it listened:\n{log}");
+            }
+            log.push_str(&line);
+            if let Some(at) = line.trim().split("listening on http://").nth(1) {
+                break at.to_string();
+            }
+        };
+        let rest = std::thread::spawn(move || {
+            let mut tail = String::new();
+            let _ = stderr.read_to_string(&mut tail);
+            tail
+        });
+
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+            stream
+                .write_all(b"GET /slow HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            let _ = stream.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+        // The request is in the handler by now: it sleeps for three seconds.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let killed = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .expect("run kill");
+        assert!(killed.success());
+
+        let status = child.wait().expect("wait for the server");
+        let response = client.join().unwrap();
+        log.push_str(&rest.join().unwrap());
+        (status, response, log)
+    }
+
+    /// The page `sigterm_drains_the_open_request_and_exits_zero` requests.
+    const SLOW_PAGE: &str = r#"//! `/slow` -- a request that is still running when SIGTERM arrives.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    Ok("slept")
+}
+"#;
+
+    /// Appended to the generated `about.rs` by `the_scaffold_compiles`.
     ///
     /// Not written into every project: it names `sessions::Session`, which
     /// exists only when that module was chosen, and a scaffold that writes

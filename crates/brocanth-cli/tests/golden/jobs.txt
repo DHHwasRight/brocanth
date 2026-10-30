@@ -34,7 +34,7 @@ brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git" }
-tokio = { version = "1", features = ["rt-multi-thread"] }  # the reactor `serve` runs on
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
 ===== .gitignore =====
 /target
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
 //!
 //! This file is yours. `brocanth add` does not rewrite it: what it would
 //! have to say is in `src/plugins/mod.rs`, which is generated, and this one
-//! only asks that file three questions.
+//! only asks that file four questions.
 //!
 //! A plugin that is not named in `plugins::register!` is not registered, and
 //! one that is not in `Cargo.toml` is not compiled at all. "The framework
@@ -100,8 +100,10 @@ fn main() -> ExitCode {
 //! this application is.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_shutdown::ShutdownReason;
 use brocanth::routing::{Dispatch, MiddlewareStack, Router};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
@@ -208,12 +210,32 @@ fn sent(answered: Response) -> brocanth_server::Response {
     out
 }
 
-/// Serves until the process is stopped.
+/// How long a stop waits for open requests and then for the plugins.
+///
+/// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
+/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
+/// `plugins::shutdown_grace`.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
+
+/// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
+///
+/// 1. The listener closes. Each open request has the grace period to
+///    finish, and each open response stream is told to end.
+/// 2. Each plugin stops, in reverse registration order, inside what is left
+///    of the grace period.
+///
+/// An error is a non-zero exit, and an orchestrator reads it: the drain ran
+/// out of time, the listener failed, or a plugin did not stop cleanly.
 ///
 /// Synchronous on the outside because the command that calls it is, and
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
+    let grace = plugins::shutdown_grace()?;
+    // Before the socket, so a signal during startup stops the server
+    // through the drain and does not kill the process.
+    let stop = watch(grace).map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -227,28 +249,224 @@ pub fn serve(addr: &str) -> Result<(), String> {
     // it with no handle to reach for.
     let app = {
         let _guard = runtime.enter();
-        Arc::new(build()?)
+        build()?
     };
     eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
 
-    runtime.block_on(async move {
-        let server = brocanth_server::Server::bind(addr)
-            .await
-            .map_err(|e| e.to_string())?;
-        let bound = server.local_addr().map_err(|e| e.to_string())?;
-        eprintln!("{APP}: listening on http://{bound}");
+    let result = runtime.block_on(run(addr, app, stop, grace));
+    // A request that outlived the drain can still be on a worker. Waiting
+    // for it here would undo the grace period, so it is dropped.
+    runtime.shutdown_background();
+    result
+}
 
-        server
-            .run(move |request| {
-                // Dispatch is synchronous and runs here, outside the
-                // future, so what crosses the await is a finished
-                // response and nothing borrowed.
-                let out = sent(dispatch(&app, &request));
-                async move { out }
-            })
-            .await
-            .map_err(|e| e.to_string())
-    })
+/// The async half of [`serve`].
+async fn run(
+    addr: &str,
+    mut app: App,
+    mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
+    grace: Duration,
+) -> Result<(), String> {
+    // One gate: a stop at the listener and a stop at `App::shutdown`
+    // close the same set of response streams.
+    let server = brocanth_server::Server::bind(addr)
+        .await
+        .map_err(|e| e.to_string())?
+        .with_streams(app.core.streams().clone());
+    let bound = server.local_addr().map_err(|e| e.to_string())?;
+    let stopper = server.stopper();
+
+    // After the bind, so a plugin does not start work for a port that
+    // turned out to be taken.
+    if let Err(e) = app.core.start() {
+        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        return Err(e.to_string());
+    }
+
+    let app = Arc::new(app);
+    let mut serving = tokio::spawn(server.run({
+        let app = Arc::clone(&app);
+        move |request| {
+            // Dispatch is synchronous and runs here, outside the
+            // future, so what crosses the await is a finished
+            // response and nothing borrowed.
+            let out = sent(dispatch(&app, &request));
+            async move { out }
+        }
+    }));
+    eprintln!("{APP}: listening on http://{bound}");
+
+    // Phase 1: stop accepting, and give the open requests the grace period.
+    let mut failed = tokio::select! {
+        event = stop.recv() => {
+            let signal = match event {
+                Some(Stop::Signal(signal)) => signal,
+                _ => "stop",
+            };
+            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            None
+        }
+        // The listener stopped by itself. That is a failure, and the
+        // plugins still stop.
+        served = &mut serving => Some(stopped(served)),
+    };
+    let reason = match failed {
+        None => ShutdownReason::Signal,
+        Some(_) => ShutdownReason::Failed,
+    };
+    let started = Instant::now();
+    if failed.is_none() {
+        stopper.stop();
+        failed = tokio::select! {
+            served = &mut serving => match served {
+                Ok(Ok(())) => None,
+                other => Some(stopped(other)),
+            },
+            event = stop.recv() => Some(match event {
+                // A second Ctrl-C means "now".
+                Some(Stop::Signal(signal)) => {
+                    format!("a second {signal} arrived, so open requests were cut off")
+                }
+                _ => format!("open requests did not finish in {grace:?} and were cut off"),
+            }),
+        };
+    }
+    // Nothing when the drain finished. After a timeout, this drops the
+    // connections that are still open.
+    serving.abort();
+
+    // Phase 2: the plugins, inside what is left of the grace period.
+    let remaining = grace.saturating_sub(started.elapsed());
+    match owned(app).await {
+        Some(mut app) => {
+            let report = app.core.shutdown(reason, Some(remaining));
+            eprintln!("{APP}: {report}");
+            if failed.is_none() && (!report.is_clean() || report.overran()) {
+                failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
+            }
+        }
+        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+    }
+    match failed {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
+}
+
+/// Why the listener task ended before a clean drain.
+fn stopped(
+    served: Result<Result<(), brocanth_server::ServeError>, tokio::task::JoinError>,
+) -> String {
+    match served {
+        Ok(Ok(())) => "the listener stopped with no signal".to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// The application back from the connections that shared it, or `None` when
+/// one of them still runs.
+///
+/// `App::shutdown` needs `&mut`. A finished connection task can be a few
+/// instructions from dropping its clone, so this yields a few times first.
+async fn owned(mut app: Arc<App>) -> Option<App> {
+    for _ in 0..64 {
+        match Arc::try_unwrap(app) {
+            Ok(app) => return Some(app),
+            Err(shared) => {
+                app = shared;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    None
+}
+
+/// What the stop thread reports to [`run`].
+enum Stop {
+    /// SIGTERM or SIGINT, by name.
+    Signal(&'static str),
+    /// The grace period since the first signal is over.
+    Deadline,
+}
+
+/// Watches for SIGTERM and SIGINT on a thread of its own. It reports each
+/// signal, and the end of the grace period after the first one.
+///
+/// Not on the serving runtime. A handler is synchronous and holds its
+/// worker, and while it runs that runtime can leave its signal and timer
+/// drivers unpolled: a stop would wait for the slowest request, and the
+/// grace period would not run out. This thread has a runtime of its own,
+/// and the channel wakes `run` directly.
+fn watch(grace: Duration) -> std::io::Result<tokio::sync::mpsc::UnboundedReceiver<Stop>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut signals = {
+        let _guard = runtime.enter();
+        Signals::listen()?
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::Builder::new()
+        .name("stop".to_string())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let first = signals.next().await;
+                if tx.send(Stop::Signal(first)).is_err() {
+                    return;
+                }
+                let next = tokio::select! {
+                    () = tokio::time::sleep(grace) => Stop::Deadline,
+                    second = signals.next() => Stop::Signal(second),
+                };
+                let _ = tx.send(next);
+            });
+        })?;
+    Ok(rx)
+}
+
+/// SIGTERM and SIGINT as one stream. An orchestrator sends SIGTERM, and
+/// Ctrl-C is SIGINT.
+#[cfg(unix)]
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
+        }
+    }
+}
+
+/// Ctrl-C alone, where there is no SIGTERM.
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
 }
 
 /// One request: the table, then the chain, then the handler.
@@ -832,7 +1050,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
-//! The plugins this application contains, and the three things `src/app.rs`
+//! The plugins this application contains, and the four things `src/app.rs`
 //! asks this file for.
 //!
 //! Each plugin is also named in `register!`: being here makes it compile,
@@ -940,7 +1158,33 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
-// brocanth-digest: 22377cbc4b0a0b70
+/// `[server] shutdown_grace_secs`, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
+pub fn shutdown_grace() -> Result<std::time::Duration, String> {
+    let config = brocanth_config::Loader::new(crate::app::APP)
+        .load()
+        .map_err(|e| e.to_string())?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("shutdown_grace_secs"))
+    else {
+        return Ok(crate::app::SHUTDOWN_GRACE);
+    };
+    // An integer in a file, and a string in `$MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS`.
+    value
+        .as_integer()
+        .and_then(|secs| u64::try_from(secs).ok())
+        .or_else(|| value.as_str().and_then(|secs| secs.trim().parse().ok()))
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(|| {
+            format!(
+                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds",
+                value.display()
+            )
+        })
+}
+
+// brocanth-digest: 317a7b294cf810ce
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -955,6 +1199,11 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 [app]
 name = "My Blog"
+
+[server]
+# Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the
+# plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
+shutdown_grace_secs = 25
 
 [jobs]
 url = "postgres://localhost/development"
