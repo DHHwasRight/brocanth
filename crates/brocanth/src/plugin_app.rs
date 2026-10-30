@@ -44,6 +44,7 @@ use crate::plugin_api::{
 };
 use crate::plugin_body::StreamGate;
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
+use crate::plugin_health::Readiness;
 use crate::plugin_hooks::{
     Begin, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline,
     Request, RequestState, RequestStep, Response, ResponseHook,
@@ -208,6 +209,7 @@ impl RouterPlan {
 pub struct Setup<'a> {
     services: &'a mut Services,
     router: &'a mut RouterPlan,
+    readiness: &'a Readiness,
 }
 
 impl Setup<'_> {
@@ -224,6 +226,12 @@ impl Setup<'_> {
     /// plugin's.
     pub fn router(&mut self) -> &mut RouterPlan {
         self.router
+    }
+
+    /// The readiness list, for a check the application owns rather than a
+    /// plugin: `setup.readiness().add("upstream", || async { .. })`.
+    pub fn readiness(&self) -> &Readiness {
+        self.readiness
     }
 }
 
@@ -273,6 +281,7 @@ fn install_hooks_of<P: HookSource>(
 pub struct AppBuilder<E = Base, H = NoHooks> {
     instances: Vec<Registered>,
     services: Services,
+    readiness: Readiness,
     setup: Option<SetupBlock>,
     _providers: PhantomData<fn() -> E>,
     _families: PhantomData<fn() -> H>,
@@ -299,6 +308,7 @@ impl AppBuilder<Base, NoHooks> {
         Self {
             instances: Vec::new(),
             services: Services::new(),
+            readiness: Readiness::new(),
             setup: None,
             _providers: PhantomData,
             _families: PhantomData,
@@ -458,6 +468,7 @@ impl<E, H> AppBuilder<E, H> {
         AppBuilder {
             instances: self.instances,
             services: self.services,
+            readiness: self.readiness,
             setup: self.setup,
             _providers: PhantomData,
             _families: PhantomData,
@@ -488,6 +499,7 @@ impl<E, H> AppBuilder<E, H> {
             &mut self.instances,
             &names,
             &mut self.services,
+            &self.readiness,
             |inst, lc| inst.configure(lc),
         )?;
         run_stage(
@@ -495,6 +507,7 @@ impl<E, H> AppBuilder<E, H> {
             &mut self.instances,
             &names,
             &mut self.services,
+            &self.readiness,
             |inst, lc| inst.register(lc),
         )?;
         run_stage(
@@ -502,6 +515,7 @@ impl<E, H> AppBuilder<E, H> {
             &mut self.instances,
             &names,
             &mut self.services,
+            &self.readiness,
             |inst, lc| inst.after_config(lc),
         )?;
 
@@ -509,6 +523,7 @@ impl<E, H> AppBuilder<E, H> {
             let mut cx = Setup {
                 services: &mut self.services,
                 router: &mut router,
+                readiness: &self.readiness,
             };
             setup(&mut cx).map_err(BuildError::Setup)?;
         }
@@ -537,12 +552,14 @@ impl<E, H> AppBuilder<E, H> {
             &mut self.instances,
             &names,
             &mut self.services,
+            &self.readiness,
             |inst, lc| inst.before_start(lc),
         )?;
 
         Ok(App {
             instances: self.instances,
             services: self.services,
+            readiness: self.readiness,
             router,
             pipeline,
             model: Arc::new(model),
@@ -657,6 +674,7 @@ fn run_stage<F>(
     instances: &mut [Registered],
     names: &[String],
     services: &mut Services,
+    readiness: &Readiness,
     mut hook: F,
 ) -> Result<(), BuildError>
 where
@@ -664,7 +682,7 @@ where
 {
     for reg in instances.iter_mut() {
         let name = reg.inner.name().to_string();
-        let mut lc = Lifecycle::new(stage, &name, reg.primary, names, services);
+        let mut lc = Lifecycle::new(stage, &name, reg.primary, names, services, readiness);
         hook(reg.inner.as_mut(), &mut lc).map_err(|source| BuildError::Hook {
             instance: name,
             stage,
@@ -686,6 +704,7 @@ where
 pub struct App<E = Base, H = NoHooks> {
     instances: Vec<Registered>,
     services: Services,
+    readiness: Readiness,
     router: RouterPlan,
     pipeline: Pipeline,
     model: Arc<ModelHooks>,
@@ -709,6 +728,7 @@ impl<E, H> std::fmt::Debug for App<E, H> {
             .field("hooks", &self.pipeline)
             .field("routes", &self.routes)
             .field("streams", &self.streams)
+            .field("readiness", &self.readiness)
             .finish()
     }
 }
@@ -796,6 +816,16 @@ impl<E, H> App<E, H> {
     /// awaits it under a budget it chooses.
     pub fn streams(&self) -> &StreamGate {
         &self.streams
+    }
+
+    /// The readiness checks the plugins registered, and the bit shutdown
+    /// flips.
+    ///
+    /// Cloneable, so the probe can hold it. The core never runs a check: it
+    /// has no runtime. Whatever serves `/readyz` awaits them. See
+    /// [`crate::plugin_health`].
+    pub fn readiness(&self) -> &Readiness {
+        &self.readiness
     }
 
     /// Registers a streaming body with this application's gate.
@@ -1037,6 +1067,7 @@ impl<E, H: HookFamilies> App<E, H> {
             &mut self.instances,
             &names,
             &mut self.services,
+            &self.readiness,
             |inst, lc| inst.start(lc),
         )
     }
@@ -1053,6 +1084,13 @@ impl<E, H: HookFamilies> App<E, H> {
     pub fn shutdown(&mut self, reason: ShutdownReason, grace: Option<Duration>) -> ShutdownReport {
         let started = Instant::now();
         let mut report = ShutdownReport::new(reason, grace);
+
+        // Not ready, before anything else. A load balancer keeps routing to
+        // a process until its readiness probe fails, so the probe must fail
+        // before a plugin closes its gate (ADR 2). A transport that wants a
+        // delay between the two calls `drain` earlier and waits; calling it
+        // twice is harmless.
+        self.readiness.drain();
 
         // Phase `Begin` for a response body, before any plugin is asked:
         // every open stream is told to end at its next chunk, and a parked

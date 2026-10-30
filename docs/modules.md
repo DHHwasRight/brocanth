@@ -120,6 +120,7 @@ neither has a crate in this workspace to host one.
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
 | `brocanth-test` | tooling | dev-dependency only | — |
+| `brocanth-observe` | edge + service | `ConfigSections`, `PluginsMod`, `AppPlugins`; **not in the CLI registry yet**, and `serve` needs lines no slot reaches | `Plugin`, `Services`, reads `Readiness` |
 | `jt` | renderer | `PagesRenderers`, `PagesRoutes`, two files | — |
 
 Three rows say "written by hand". `rsx::Rsx::contribute()`, `Tailwind::contribute()`
@@ -602,6 +603,7 @@ silence. That has already happened once, with a `.gitignore` line.
 | `ModelEvent` / `ModelHook` | works |
 | `plugin_order`, declared `after`/`before` | works |
 | `ShutdownPhase::Begin` / `Drain` | works |
+| `Lifecycle::ready_when`, `Readiness` | works; `App::shutdown` fails it before `begin_shutdown`. See `docs/observability.md` |
 | `ProvidesContext<T>` | works, and reaches a handler through `Ctx::provided` (§6) |
 | `Plugin::provide` seeing the request | **missing** — a provider cannot read a cookie (§6) |
 | `RouteSource` + `mount_routes` | works; not generated, by decision: a generated project mounts page-shaped routes through `Slot::RouterMounts` (§4.6) |

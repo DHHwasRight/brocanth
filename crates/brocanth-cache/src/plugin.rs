@@ -160,6 +160,18 @@ impl Plugin for CachePlugin {
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         lc.services_mut()
             .insert(CacheHandle::new(self.cache.clone()));
+        // Ready when one read of the table succeeds. A miss is a success: the
+        // question is whether the store answers, not what it holds.
+        let cache = self.cache.clone();
+        lc.ready_when(move || {
+            let cache = cache.clone();
+            async move {
+                let key = crate::key::Namespace::new("brocanth.readyz")
+                    .and_then(|ns| crate::key::Key::new(ns, "probe"))
+                    .map_err(|e| e.to_string())?;
+                cache.get(&key).await.map(drop).map_err(|e| e.to_string())
+            }
+        });
         Ok(())
     }
 

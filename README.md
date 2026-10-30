@@ -235,15 +235,13 @@ The d2s concerns, against what the code does today.
   streams drain through `StreamGate`.
 - [x] **Tests without a server.** `brocanth-test` drives a built `App` in
   process. Postgres tests make their own schema.
+- [x] **Structured logs on stdout.** `brocanth-observe` writes one JSON or text line per request and per `tracing` event, with a request id (JSON by default in production).
+- [x] **Health probes.** `/up` asks nothing; `/readyz` runs each plugin's `ready_when` check and fails before shutdown drains.
+- [x] **Metrics.** `/metrics` serves Prometheus text: requests by route template and status class, in-flight, and job queue depth and runs.
+- [x] **Tracing.** The `otel` feature exports a span per request and per job run over OTLP, with W3C `traceparent` in and out.
 - [ ] **Graceful shutdown on SIGTERM in a generated project.** The generated
   `serve` does not listen for signals and does not call `App::shutdown`.
   You must wire it yourself.
-- [ ] **Structured logs on stdout.** The `logging` module writes one plain
-  line per request to stderr. There is no JSON format.
-- [ ] **Health probes.** There is no `/up`, `/healthz` or `/readyz` route.
-- [ ] **Metrics.** There is no `/metrics` endpoint and no Prometheus export.
-- [ ] **Tracing.** There is no OpenTelemetry. `brocanth-jobs` gives events
-  for you to bridge, but it does not link `tracing`.
 - [ ] **Container image.** There is no Dockerfile and no generated one.
 - [ ] **Apply migrations from the CLI.** There is no `migrate up`. You call
   SeaORM's migrator from your own code or a project command.
@@ -271,6 +269,7 @@ The d2s concerns, against what the code does today.
 | [`docs/policy.md`](docs/policy.md) | Predicates, `condition()`, `Verified`, `policy!`. |
 | [`docs/input.md`](docs/input.md) | Reading a request body into a struct. |
 | [`docs/middleware.md`](docs/middleware.md) | The middleware hooks. |
+| [`docs/observability.md`](docs/observability.md) | Logs, probes, metrics and traces: `brocanth-observe`. |
 | [`docs/cache.md`](docs/cache.md) | Tags, route cache, fragments, invalidation. |
 | [`docs/auth-store.md`](docs/auth-store.md) | Where accounts live: `MemoryStore`, `PgStore`, the conformance suite. |
 | [`docs/async-handlers.md`](docs/async-handlers.md) | How a route gets to `.await`, and the cost. |

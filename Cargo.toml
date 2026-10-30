@@ -19,6 +19,7 @@ members = [
     "crates/brocanth-middleware",
     "crates/brocanth-migrate",
     "crates/brocanth-model",
+    "crates/brocanth-observe",
     "crates/brocanth-openapi",
     "crates/brocanth-policy",
     "crates/brocanth-policy-macros",
@@ -59,6 +60,7 @@ brocanth-config = { path = "crates/brocanth-config", version = "0.1.0" }
 brocanth-openapi = { path = "crates/brocanth-openapi", version = "0.1.0" }
 brocanth-schema = { path = "crates/brocanth-schema", version = "0.1.0", default-features = false }
 brocanth-model = { path = "crates/brocanth-model", version = "0.1.0" }
+brocanth-observe = { path = "crates/brocanth-observe", version = "0.1.0", default-features = false }
 brocanth-admin-model = { path = "crates/brocanth-admin-model", version = "0.1.0" }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }

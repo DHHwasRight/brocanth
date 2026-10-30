@@ -38,7 +38,7 @@
 //! # The seams this crate publishes
 //!
 //! The core cannot know what plugins exist, so it publishes seams rather than
-//! features. There are six levels, and together they are the whole contract.
+//! features. There are seven levels, and together they are the whole contract.
 //! Anything a plugin cannot do through them is a gap in the core, to be fixed
 //! by widening the seam rather than by special-casing the plugin.
 //!
@@ -121,6 +121,16 @@
 //! [`HandlerError::downcast_ref`] and answers, so a validation failure renders
 //! a form and an auth failure redirects, with the core knowing neither
 //! concept. First hook to answer wins; an error nobody claims is a bare 500.
+//!
+//! ## 7. Readiness — whether the application can take traffic
+//!
+//! A plugin registers one check with [`Lifecycle::ready_when`]: the pool
+//! pings, the queue reads its table. The core keeps the list and one bit,
+//! and never runs a check, because it has no runtime. Whatever serves the
+//! probe awaits them. [`App::shutdown`] flips the bit **before**
+//! `begin_shutdown`, so a load balancer stops routing before any plugin
+//! closes its gate (ADR 2). Liveness is not a seam: a process that answers
+//! is alive. See [`plugin_health`].
 //!
 //! ## And the two that were already here
 //!
@@ -216,11 +226,13 @@
 //! [`RouteSource`]: plugin_routes::RouteSource
 //! [`Services`]: plugin_api::Services
 //! [`ShutdownCx::remaining`]: plugin_shutdown::ShutdownCx::remaining
+//! [`Lifecycle::ready_when`]: plugin_api::Lifecycle::ready_when
 
 pub mod plugin_api;
 pub mod plugin_app;
 pub mod plugin_body;
 pub mod plugin_context;
+pub mod plugin_health;
 pub mod plugin_hooks;
 pub mod plugin_model;
 pub mod plugin_order;

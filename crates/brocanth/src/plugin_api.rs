@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::plugin_context::{ContextBuilder, Provided};
+use crate::plugin_health::{Readiness, ReadinessCheck};
 use crate::plugin_shutdown::ShutdownCx;
 
 /// Anything a hook can go wrong with.
@@ -155,6 +156,7 @@ pub struct Lifecycle<'a> {
     primary: bool,
     instances: &'a [String],
     services: &'a mut Services,
+    readiness: &'a Readiness,
 }
 
 impl<'a> Lifecycle<'a> {
@@ -164,6 +166,7 @@ impl<'a> Lifecycle<'a> {
         primary: bool,
         instances: &'a [String],
         services: &'a mut Services,
+        readiness: &'a Readiness,
     ) -> Self {
         Self {
             stage,
@@ -171,6 +174,7 @@ impl<'a> Lifecycle<'a> {
             primary,
             instances,
             services,
+            readiness,
         }
     }
 
@@ -204,6 +208,24 @@ impl<'a> Lifecycle<'a> {
 
     pub fn services_mut(&mut self) -> &mut Services {
         self.services
+    }
+
+    /// Registers this instance's readiness check, under the instance name.
+    ///
+    /// The probe that serves `/readyz` runs it and reports it by that name.
+    /// Call it from any build stage; [`Plugin::register`] is the usual one.
+    /// See [`crate::plugin_health`] for what a good check is, and for why
+    /// liveness has no seam.
+    pub fn ready_when(&mut self, check: impl ReadinessCheck) {
+        self.readiness.add(self.instance, check);
+    }
+
+    /// The application's readiness list, shared.
+    ///
+    /// A plugin keeps a clone to read [`Readiness::is_draining`] later, for
+    /// example to refuse new work once shutdown began.
+    pub fn readiness(&self) -> &Readiness {
+        self.readiness
     }
 
     /// A service another plugin must have published, or an error that names

@@ -131,6 +131,40 @@ pub struct Request {
 }
 
 impl Request {
+    /// A request built in process, with no body, no query and no headers.
+    ///
+    /// The wire never needs it: [`Server::run`] parses what arrives. A
+    /// wrapper around a handler, and a test of one, do: they make a request
+    /// without a socket. `path` is the path alone; put a query string in
+    /// [`Request::query`].
+    pub fn new(verb: Verb, path: impl Into<String>) -> Self {
+        Self {
+            verb,
+            path: path.into(),
+            query: String::new(),
+            body: Bytes::new(),
+            peer: None,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Adds a header. Repeat for a header that may appear more than once.
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Sets a header, and drops every other header of that name first.
+    ///
+    /// A wrapper uses it to hand the handler a value it decided on, such as
+    /// the request id it generated, without a second copy that disagrees.
+    pub fn set_header(&mut self, name: &str, value: &str) {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self.headers.push((name.to_string(), value.to_string()));
+    }
+
     /// A header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
