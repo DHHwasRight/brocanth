@@ -1,0 +1,13 @@
+error: `authr_id` is not a column of entity `Post`
+       help: did you mean `author_id`?
+  --> tests/ui/fail_unknown_column.rs:13:40
+   |
+13 |         list: status == "published" || authr_id == who.id,
+   |                                        ^^^^^^^^
+
+error: `owner` is not a column of entity `Post`
+       help: use one of: id, author_id, status
+  --> tests/ui/fail_unknown_column.rs:14:17
+   |
+14 |         update: owner == who.id,
+   |                 ^^^^^

@@ -1,41 +1,7 @@
 //! One entity, one policy, shared by the test binaries.
 #![allow(dead_code)]
 
-use brocanth_policy::{Bound, Column, Entity, EntityPred, Ident, Policy, Pred};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PostColumn {
-    Id,
-    AuthorId,
-    TeamId,
-    Status,
-}
-
-impl Column for PostColumn {
-    const ALL: &'static [Self] = &[
-        PostColumn::Id,
-        PostColumn::AuthorId,
-        PostColumn::TeamId,
-        PostColumn::Status,
-    ];
-
-    fn name(&self) -> &'static str {
-        match self {
-            PostColumn::Id => "id",
-            PostColumn::AuthorId => "author_id",
-            PostColumn::TeamId => "team_id",
-            PostColumn::Status => "status",
-        }
-    }
-}
-
-pub struct Post;
-
-impl Entity for Post {
-    type Column = PostColumn;
-    const TABLE: Ident = Ident::must("posts");
-    const PRIMARY_KEY: Self::Column = PostColumn::Id;
-}
+use brocanth_policy::Pred;
 
 /// Whoever is watching. Anonymous is `None` everywhere.
 #[derive(Clone, Copy, Debug, Default)]
@@ -64,31 +30,27 @@ impl Visitor {
     }
 }
 
-/// A policy whose list rule inverts and whose view rule inverts differently,
-/// so a test can tell which one a topic was gated on.
-pub struct PostPolicy;
-
-impl Policy for PostPolicy {
-    type Entity = Post;
-    type Subject = Visitor;
-
-    /// Published posts, or your own.
-    fn list(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            return Pred::Always;
-        }
-        Pred::any([
-            Pred::eq(PostColumn::Status, "published"),
-            Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id)),
-        ])
+brocanth_policy::policy! {
+    pub entity Post in "posts" {
+        #[key] id: i64,
+        author_id: Option<i64>,
+        team_id: Option<i64>,
+        status: String,
     }
 
-    /// Only your own, whatever its status.
-    fn view(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            return Pred::Always;
+    /// A policy whose list rule inverts and whose view rule inverts
+    /// differently, so a test can tell which one a topic was gated on.
+    pub policy PostPolicy(who: &Visitor) for Post {
+        /// Published posts, or your own.
+        list {
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
         }
-        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id))
+        /// Only your own, whatever its status.
+        view {
+            who.admin => always,
+            author_id == who.user_id else deny,
+        }
     }
 }
 

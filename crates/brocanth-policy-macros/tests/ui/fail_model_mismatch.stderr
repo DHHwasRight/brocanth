@@ -1,0 +1,23 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail_model_mismatch.rs:14:9
+   |
+14 |         author_id: i64,
+   |         ^^^^^^^^^-----
+   |         |
+   |         expected `&i64`, found `&i32`
+   |         expected due to this
+   |
+   = note: expected reference `&i64`
+              found reference `&i32`
+
+error[E0609]: no field `titel` on type `&PostModel`
+  --> tests/ui/fail_model_mismatch.rs:15:9
+   |
+15 |         titel: String,
+   |         ^^^^^ unknown field
+   |
+help: a field with a similar name exists
+   |
+15 -         titel: String,
+15 +         title: String,
+   |

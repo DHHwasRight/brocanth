@@ -676,6 +676,7 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-model",
+ "brocanth-policy",
  "brocanth-test",
  "sea-orm",
  "serde",
@@ -971,11 +972,26 @@ dependencies = [
 name = "brocanth-policy"
 version = "0.1.0"
 dependencies = [
+ "brocanth-policy-macros",
  "brocanth-scaffold",
  "proptest",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "brocanth-policy-macros"
+version = "0.1.0"
+dependencies = [
+ "brocanth-policy",
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "sqlx",
+ "syn 3.0.8",
+ "tokio",
+ "trybuild",
 ]
 
 [[package]]

@@ -7,19 +7,14 @@
 //! >    generates a proptest asserting `eval(row) == (row ∈ query(condition))`.
 //! >    **The obligation moves from review to CI.**
 //!
-//! # What tier one could not do, stated plainly
+//! # Who runs it
 //!
-//! **Nothing here is generated.** PLAN.md §12 puts the `policy!` macro at item
-//! 10, deliberately after a real application has used the algebra, and this is
-//! item 2. There is no macro, so calling [`crate::Pred::eval`] does not cause
-//! a property test to exist.
-//!
-//! What ships instead is the harness an application calls with its own policy,
-//! its own rows and its own database. So the obligation moved from review to
-//! CI **only for the applications that call it**, and for everyone else it is
-//! still a review problem. That is a real gap and it closes when item 10
-//! lands: the macro's job will be to emit the `#[test]` that calls [`check`],
-//! so the harness is what it will emit rather than something it replaces.
+//! Two callers. An application with a hand-written policy calls [`check`]
+//! with its own predicates, rows and database. A policy written with the
+//! `policy!` macro (PLAN.md §12 item 10) and an `eval { … }` clause gets a
+//! generated `#[test]` that calls [`policy_agrees`]: every rule, for every
+//! subject the author lists, over generated rows. So for a macro policy the
+//! obligation is in CI the moment the author opts into `eval()`.
 //!
 //! This crate's own `tests/agreement.rs` drives [`check`] against a real
 //! SQLite database over a table of hand-written predicates, and
@@ -174,6 +169,12 @@ where
 
     Ok(())
 }
+
+#[cfg(feature = "agreement-proptest")]
+pub use policy_test::policy_agrees;
+
+#[cfg(feature = "agreement-proptest")]
+mod policy_test;
 
 /// Strategies for generating predicates and rows, for an application that
 /// wants the property test rather than the table.

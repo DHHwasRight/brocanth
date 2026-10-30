@@ -73,6 +73,9 @@ serde = { version = "1", features = ["derive"] }
 # one.
 brocanth.workspace = true
 brocanth-test.workspace = true
+# The row policy in `tests/policy.rs` is written with `policy!` and checked
+# against the SeaORM model with `#[model(…)]`.
+brocanth-policy = { workspace = true, features = ["macro"] }
 
 [lints.rust]
 missing_docs = "warn"

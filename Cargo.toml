@@ -20,6 +20,7 @@ members = [
     "crates/brocanth-model",
     "crates/brocanth-openapi",
     "crates/brocanth-policy",
+    "crates/brocanth-policy-macros",
     "crates/brocanth-realtime",
     "crates/brocanth-resource",
     "crates/brocanth-schema",
@@ -59,6 +60,7 @@ brocanth-model = { path = "crates/brocanth-model", version = "0.1.0" }
 brocanth-admin-model = { path = "crates/brocanth-admin-model", version = "0.1.0" }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
+brocanth-policy-macros = { path = "crates/brocanth-policy-macros", version = "0.1.0" }
 
 # The job contract and its backends. Four crates rather than one because
 # the contract names no driver: `brocanth-queue` depends on serde and

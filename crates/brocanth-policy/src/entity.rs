@@ -18,8 +18,9 @@
 //!
 //! # Implementing it
 //!
-//! By hand, for now. PLAN.md §12 puts the `policy!` macro at item 10, after a
-//! real application has used the algebra.
+//! By hand, as below, or with the `policy!` macro (the `macro` feature),
+//! which writes exactly this from a list of typed columns and also checks the
+//! type of every value a rule compares.
 //!
 //! ```
 //! use brocanth_policy::{Column, Entity, Ident};

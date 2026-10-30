@@ -1,0 +1,6 @@
+error: entity `Post` has no key column
+       help: put `#[key]` on the primary key column
+ --> tests/ui/fail_no_key.rs:2:16
+  |
+2 |     pub entity Post in "posts" {
+  |                ^^^^

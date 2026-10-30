@@ -1,0 +1,18 @@
+error[E0277]: `SystemTime` is not a column type that `policy!` can bind
+ --> tests/ui/fail_unsupported_column_type.rs:4:21
+  |
+4 |         created_at: std::time::SystemTime,
+  |                     ^^^^^^^^^^^^^^^^^^^^^ unsupported column type
+  |
+  = help: the trait `ColumnType` is not implemented for `SystemTime`
+  = note: Use i8, i16, i32, i64, u8, u16, u32, f32, f64, bool, String or Vec<u8>, or an `Option` of one of them.
+  = help: the following other types implement trait `ColumnType`:
+            Option<T>
+            String
+            Vec<u8>
+            bool
+            f32
+            f64
+            i16
+            i32
+          and $N others

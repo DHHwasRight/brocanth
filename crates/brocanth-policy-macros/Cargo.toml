@@ -1,0 +1,37 @@
+[package]
+name = "brocanth-policy-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The policy! macro. Not used directly; brocanth-policy re-exports it behind its `macro` feature."
+
+[lib]
+proc-macro = true
+
+# A proc-macro and not `macro_rules!`, for three things the syntax needs:
+#
+# * a column is written `author_id` and its enum variant is `AuthorId`. A
+#   `macro_rules!` macro cannot change the case of an identifier.
+# * an unknown column is an error that names the entity, lists its columns
+#   and suggests the nearest one, on the span of the typo. `macro_rules!` can
+#   only fail to match, and its error points at the macro.
+# * a rule is a small expression language (`a == x || b in xs`). Parsing
+#   operator precedence with a token muncher is possible and unreadable.
+[dependencies]
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"
+
+[dev-dependencies]
+# The tests use the macro the way an application does: through
+# `brocanth_policy::policy!`, with the agreement harness on.
+brocanth-policy = { workspace = true, features = ["macro", "agreement-proptest"] }
+trybuild = "1"
+# The agreement test needs a real SQL engine. Same pin and the same reason as
+# `brocanth-policy`'s own dev-dependency: `libsqlite3-sys` allows one copy.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite-bundled",
+] }
+tokio = { version = "1", features = ["rt"] }

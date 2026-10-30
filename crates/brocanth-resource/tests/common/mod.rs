@@ -11,9 +11,7 @@
 use std::sync::Mutex;
 
 use brocanth_events::{ChangeSink, RowChange};
-use brocanth_policy::{
-    Bound, Column, Dialect, Entity, EntityPred, FieldMask, Ident, Policy, Pred, Value,
-};
+use brocanth_policy::{Column, Dialect, Value};
 use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData};
 use brocanth_resource::sql::Statement;
 use brocanth_resource::{ColumnOf, Failure, Resource};
@@ -24,34 +22,8 @@ use sqlx::{AssertSqlSafe, Row as _};
 // The entity
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PostColumn {
-    Id,
-    AuthorId,
-    Status,
-    Title,
-}
-
-impl Column for PostColumn {
-    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status, Self::Title];
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::AuthorId => "author_id",
-            Self::Status => "status",
-            Self::Title => "title",
-        }
-    }
-}
-
-pub struct Post;
-
-impl Entity for Post {
-    type Column = PostColumn;
-    const TABLE: Ident = Ident::must("posts");
-    const PRIMARY_KEY: Self::Column = PostColumn::Id;
-}
+// `Post` and `PostColumn` are declared with the policy, below: `policy!`
+// reads the column types from the entity in the same block.
 
 pub const SCHEMA: &str = "
     CREATE TABLE posts (
@@ -113,58 +85,42 @@ impl Visitor {
     }
 }
 
-pub struct PostPolicy;
-
-impl Policy for PostPolicy {
-    type Entity = Post;
-    type Subject = Visitor;
-
-    /// Published posts, or your own.
-    fn list(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.banned {
-            return Pred::Never;
-        }
-        if who.admin {
-            return Pred::Always;
-        }
-        Pred::any([
-            Pred::eq(PostColumn::Status, "published"),
-            Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id)),
-        ])
+brocanth_policy::policy! {
+    pub entity Post in "posts" {
+        #[key] id: i64,
+        author_id: Option<i64>,
+        status: String,
+        title: String,
     }
 
-    /// Anonymous visitors create nothing, which is `Pred::Never` and a 403.
-    fn create(&self, who: &Visitor) -> EntityPred<Post> {
-        match who.user_id {
-            Some(id) => Pred::eq(PostColumn::AuthorId, id),
-            None => Pred::Never,
+    pub policy PostPolicy(who: &Visitor) for Post {
+        /// Published posts, or your own.
+        list {
+            who.banned => never,
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
         }
-    }
 
-    fn update(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            return Pred::Always;
+        /// Anonymous visitors create nothing, which is `Pred::Never` and a 403.
+        create: author_id == who.user_id else deny,
+
+        update {
+            who.admin => always,
+            author_id == who.user_id else deny,
         }
-        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id))
-    }
 
-    /// Only an administrator deletes. For everyone else the door is shut
-    /// without reading a row.
-    fn delete(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            Pred::Always
-        } else {
-            Pred::Never
+        /// Only an administrator deletes. For everyone else the door is shut
+        /// without reading a row.
+        delete {
+            who.admin => always,
         }
-    }
 
-    /// An author writes the title and the author column. Never the status:
-    /// PocketBase's `status:changed = false || role = "admin"`, as a value.
-    fn writable(&self, who: &Visitor) -> FieldMask<PostColumn> {
-        if who.admin {
-            FieldMask::except([PostColumn::Id])
-        } else {
-            FieldMask::only([PostColumn::Title, PostColumn::AuthorId])
+        /// An author writes the title and the author column. Never the
+        /// status: PocketBase's `status:changed = false || role = "admin"`, as
+        /// a value.
+        writable {
+            who.admin => except [id],
+            only [title, author_id],
         }
     }
 }

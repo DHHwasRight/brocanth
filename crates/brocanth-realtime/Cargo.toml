@@ -98,6 +98,10 @@ async-trait = { version = "0.1", optional = true }
 # real `Admin` directly, because this crate mounts no routes.
 brocanth-test.workspace = true
 
+# The test policy is written with `policy!` (PLAN.md §12 item 10), so the
+# audience inversion is tested on what the macro emits.
+brocanth-policy = { workspace = true, features = ["macro"] }
+
 [features]
 default = []
 # Multi-process realtime over Postgres `LISTEN/NOTIFY` (§10). Off by default
