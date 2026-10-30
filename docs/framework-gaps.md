@@ -450,7 +450,7 @@ means it is not yet a feature.
 
 Ranked by what unblocks the most, not by size.
 
-**Status, 2026-10-22.** Four of the nine have moved since this was written,
+**Status, 2026-10-30.** Most of the nine have moved since this was written,
 and one row in the original is now wrong about our own code. The table is
 the current reading; the sections below are the original argument, kept
 because the argument is still why each one matters.
@@ -460,7 +460,7 @@ because the argument is still why each one matters.
 | G1 | the response body cannot stream | **done**: `Body::{Buffered,Streaming}`, `ResponseHook` split into `on_headers` and `on_body`, `StreamGate` in the shutdown |
 | G2 | dp-swap has no mutating verb | **done**: `dp-post`/`put`/`patch`/`delete` in `brocanth_middleware::dp::SCRIPT`, typed `DP-*` response headers, `Oob`, `DpSwap` (`Vary`), `CsrfToken::meta_tag`, `brocanth_input::rerender` for the 422. The jobs panel's buttons use it |
 | G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
-| G4 | the model layer publishes to nobody | open |
+| G4 | the model layer publishes to nobody | **done** (`c58f688`): an insert, update or delete through the ORM publishes a `RowChange`, and it reaches a realtime subscriber. `brocanth-cache`'s `TagInvalidator` can take the same changes |
 | G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. `MiseTasks` is read now too, so three remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`. `Ctx` carries the request **and the plugin context** now, read with `Ctx::provided`; `mount_routes` is still untouched. See `docs/modules.md` §6 and §7 |
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
