@@ -135,6 +135,10 @@ Status: all four are built. See G2 in `docs/framework-gaps.md`: the
 client is `brocanth_middleware::dp::SCRIPT`, the headers `dp::Directive`,
 the fragments `dp::Oob`, the 422 `brocanth_input::rerender`.
 
+Item 4 also works with no server. `brocanth-static` sends `DP-Partial` for
+each depth at export time and writes one tree per depth, which dp-swap reads
+with `partialDir`. See ADR 4 and `docs/static-export.md`.
+
 **Not** a LiveView-style stateful process per connection: process memory times
 concurrent users, sticky sessions, and a round trip per keystroke at 150 ms
 RTT. We are not buying it.
@@ -674,3 +678,30 @@ suggestion; and a subset is still one line, through `mount_routes_where`, with
 no cooperation needed from the plugin. Two plugins claiming one path and verb
 is an error naming both — never last-one-wins, which is registration order
 deciding behaviour, which is the thing all of this is against.
+
+### ADR 4 — The static export is a library, and it writes every depth.
+
+**Status:** accepted. **Touches:** §5 item 4, the `static` module.
+
+The first export was a string template: `brocanth create --with static`
+wrote 150 lines into `src/commands/export.rs`, and the project owned them.
+Two needs broke that. A fix (partials, a base path) reached no project that
+existed already, because each held its own copy. And the d3set chart gallery
+(github.com/DHHwasRight/d3set, `rust/gallery`) is a brocanth application that
+was not generated, so it had no copy to fix at all. So the work moved to
+`brocanth-static`, and the generated file is a thin caller that a project
+still owns: it keeps `PATHS` and `PARTIALS`, and gets fixes through
+`cargo update`. The crate takes the handler as a closure, because `handle` is
+generated per project and the crate cannot name it.
+
+The export writes a partial for every depth up to the most layers a page has,
+including the depths a page answers like a shallower one. The alternative was
+to skip a depth whose answer equals the depth below. It saves disk and breaks
+navigation: dp-swap asks for the depth the page it leaves holds, so a page with
+one layer is asked for depth 2 by a visitor coming from a page with two. A
+static host has no fallback, so the missing file is a failed navigation.
+
+The base path is rewritten in the HTML and CSS and never in data. A JSON
+payload names URLs in fields only the application understands, so the
+application prefixes them itself. `tests/d3set.rs` mirrors the gallery, so a
+change to any of this fails in brocanth before it fails there.

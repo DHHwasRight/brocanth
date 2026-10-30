@@ -1,0 +1,17 @@
+[package]
+name = "brocanth-static"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Writes a brocanth application to files: every GET page, its partials per layout depth for dp-swap, the assets, under a base path."
+
+# Two dependencies, both brocanth: the router lists the routes, the server
+# crate has the request and response the export sends through the
+# application's own handler. No runtime: `Export::run` is a future, and
+# the caller decides what drives it.
+[dependencies]
+brocanth.workspace = true
+brocanth-server.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

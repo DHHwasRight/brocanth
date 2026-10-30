@@ -1165,6 +1165,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-static"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-server",
+ "tokio",
+]
+
+[[package]]
 name = "brocanth-storage"
 version = "0.1.0"
 dependencies = [

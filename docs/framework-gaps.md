@@ -368,6 +368,7 @@ what was read.
 | `brocanth-policy` | 3,290 | 64 | 2 | **no** |
 | `brocanth-resource` | 2,167 | 61 | **0** | **no** |
 | `brocanth-events` | 846 | 14 | 2 | **no** |
+| `brocanth-static` | ~600 | 25 | generated projects, the d3set gallery | `static` |
 
 > **Corrected.** The first version of this table counted *files under
 > `tests/`* and reported two crates as having no tests at all. That measured
@@ -434,6 +435,7 @@ means it is not yet a feature.
 | Signals (D20) | **partial** | `brocanth-events` is tested and `brocanth-realtime` subscribes; `brocanth-model` publishes nothing |
 | Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
 | Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
+| A whole site prerendered, dynamic routes listed by hand (A8, A10, N25) | **yes, all or nothing** | `brocanth-static`: every GET page, one partial tree per layout depth, a base path. No per-route choice and no regeneration: a site is static or it is served. See `docs/static-export.md` |
 | Deployment checks that refuse to start (D23) | **yes** | a plugin's `configure` can refuse at startup, and `brocanth check --deploy` is the offline half: fifteen findings, each with an id and a `help:`. See `docs/tooling.md` §3 |
 | i18n (D24) | **yes, unwired** | `brocanth-i18n`: catalogs checked at build time, negotiation, CLDR plurals, numbers and dates; not on the menu. See `docs/i18n.md` |
 | Test client with transactional tests (D25) | **partial** | `Harness` wraps a database; no HTTP test client |
