@@ -660,6 +660,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-middleware",
  "brocanth-policy",
  "http",
  "rsx",

@@ -38,6 +38,7 @@ thiserror = "2"
 # admin still links no SQL driver and no ORM: a policy compiles to SQL text
 # and a bind list, and the data source runs it.
 brocanth-policy = { workspace = true }
+brocanth-middleware = { workspace = true }
 
 [dev-dependencies]
 # For the compile-fail cases under tests/ui: an admin resource with no

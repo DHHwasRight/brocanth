@@ -52,6 +52,7 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
                 </main>
             </div>
             <script>{! SCRIPT }</script>
+            <script>{! brocanth_middleware::dp::SCRIPT }</script>
         </body>
     </html>
 }

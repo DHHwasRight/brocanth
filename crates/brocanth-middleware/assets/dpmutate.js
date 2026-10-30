@@ -28,6 +28,12 @@
 // form submits as a plain form, which is the reason every example above
 // keeps its `method` and `action`.
 (() => {
+  // A page can hold this script twice: the admin layout carries it, and so
+  // does a screen that also renders standalone. Listen once, or every write
+  // goes out twice.
+  if (window.__dpMutate) return;
+  window.__dpMutate = true;
+
   "use strict";
   const g = globalThis;
   const doc = g.document;
