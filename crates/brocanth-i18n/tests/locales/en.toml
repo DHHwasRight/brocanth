@@ -1,0 +1,16 @@
+# The default locale. Every key the application calls is here.
+
+title = "Your cart"
+greeting = "Hello, {name}!"
+total = "Total: {amount:number}"
+paid = "{name} paid on {day:date_long}"
+braces = "Write {{name}} for a placeholder"
+
+[cart_items]
+"=0" = "Your cart is empty"
+one = "{count} item"
+other = "{count} items"
+
+[nav]
+home = "Home"
+back = "Back to {page}"

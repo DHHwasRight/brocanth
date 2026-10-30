@@ -1,0 +1,14 @@
+title = "Votre panier"
+greeting = "Bonjour, {name} !"
+total = "Total : {amount:number}"
+paid = "{name} a payé le {day:date}"
+braces = "Écrivez {{name}} pour un paramètre"
+
+[cart_items]
+one = "{count} article"
+many = "{count} d’articles"
+other = "{count} articles"
+
+[nav]
+home = "Accueil"
+# `back` is missing on purpose: it falls back to English, and the build says so.
