@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/DHHwasRight/.github/main/profile/logo.png" width="128" alt="">
-</p>
-
 <h1 align="center">brocanth</h1>
 
 <p align="center">A Rust server framework for HTML-first apps and JSON APIs. Postgres first, day-2 ready.</p>
