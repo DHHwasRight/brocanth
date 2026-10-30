@@ -222,11 +222,16 @@ An empty path turns that endpoint off.
 
 ## Not done yet
 
-- **The CLI does not offer `observe` yet**, and the generated `serve` does
-  not wrap its handler, listen for SIGTERM or call `App::shutdown`. The lines
-  it needs are above, under "Where it attaches".
 - **The `logging` module is not retired.** It still writes plain lines to
-  stderr. `observe` replaces it; the two should not both be chosen.
+  stderr. `observe` is the default in `brocanth create`, and `create` and
+  `add` refuse the two together.
+- **The generated `serve` has one signal path, and it is not
+  `stop_on_signal`.** `serve` watches SIGTERM on a thread of its own (a
+  synchronous handler can stall the serving runtime's signal driver), then
+  calls `plugins::stop_accepting`, which is `Observer::drain_then_stop`.
+  `drain_delay_secs` counts against `[server] shutdown_grace_secs`.
+- **`serve`'s own lines** (listening, stopping, the shutdown report) go to
+  stderr with `eprintln!`, not through the subscriber.
 - **No database readiness check.** `brocanth-model`'s plugin opens no pool,
   so there is nothing to ping. The same gap blocks pool stats.
 - **The generated cache and jobs plugins** (`brocanth-cache`'s and

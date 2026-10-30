@@ -122,6 +122,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     create::unavailable(&after_picks)?;
     create::orphans(&after_picks)?;
     create::unmet(&after_picks)?;
+    create::exclusive(&after_picks)?;
 
     // Where this project's brocanth comes from. Read back out of its own
     // manifest rather than recorded in `brocanth.toml`, because the answer

@@ -114,7 +114,36 @@ pub fn offered() -> clap::builder::PossibleValuesParser {
 /// Stated rather than guessed at: the command prints the flag that overrides
 /// it. Three keys rather than three modules, because this list outlives any
 /// particular registry -- a CLI compiled without one of them says so.
-const DEFAULT: [&str; 3] = ["logging", "config", "commands"];
+///
+/// `observe` and not `logging`: a deployed application needs a request log
+/// a machine reads, and a probe that tells ready from alive.
+const DEFAULT: [&str; 3] = ["observe", "config", "commands"];
+
+/// Pairs of modules that do the same job, so a project has one of each
+/// pair at most. `logging` and `observe` both log every request.
+const EXCLUSIVE: &[(&str, &str, &str)] = &[(
+    "logging",
+    "observe",
+    "both write a line per request; `observe` also serves /up, /readyz and /metrics",
+)];
+
+/// Picks that hold both halves of an [`EXCLUSIVE`] pair.
+pub fn exclusive(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
+    let bad: Vec<Diagnostic> = EXCLUSIVE
+        .iter()
+        .filter(|(a, b, _)| picks.contains(a) && picks.contains(b))
+        .map(|(a, b, why)| {
+            Diagnostic::error(*b, format!("`{a}` and `{b}` cannot both be chosen"))
+                .note(*why)
+                .help(format!("keep `{b}` and drop `{a}` from --with"))
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
+}
 
 /// Everything the CLI was compiled with, in listing order.
 ///
@@ -308,6 +337,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
     unavailable(&picked(args))?;
     orphans(&picked(args))?;
     unmet(&picked(args))?;
+    exclusive(&picked(args))?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -327,7 +357,9 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
                  --core-only, --git/--no-git",
             )]);
         }
-        return chooser(ui, args, local);
+        let answers = chooser(ui, args, local)?;
+        exclusive(&answers.picks)?;
+        return Ok(answers);
     }
 
     let name = args.name.clone().expect("the None arm returned above");
@@ -1893,8 +1925,13 @@ async fn run(
         return Err(e.to_string());
     }
 
+    // The probes and `/metrics` on a port of their own, when the
+    // configuration names one.
+    plugins::side_listeners(&app).await?;
+
     let app = Arc::new(app);
-    let mut serving = tokio::spawn(server.run({
+    // `plugins::wrap` puts whatever observes a request around it.
+    let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
             // Dispatch is synchronous and runs here, outside the
@@ -1903,7 +1940,8 @@ async fn run(
             let out = @DISPATCH@
             async move { out }
         }
-    }));
+    });
+    let mut serving = tokio::spawn(server.run(handler));
     eprintln!("{APP}: listening on http://{bound}");
 
     // Phase 1: stop accepting, and give the open requests the grace period.
@@ -1926,7 +1964,9 @@ async fn run(
     };
     let started = Instant::now();
     if failed.is_none() {
-        stopper.stop();
+        // With `observe`, `/readyz` fails first, and the listener closes
+        // after `[observe] drain_delay_secs`. Inside the grace period.
+        plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
                 Ok(Ok(())) => None,
@@ -3431,8 +3471,108 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         out.push_str(GRACE_CONST);
     }
+
+    // -- serving ------------------------------------------------------
+    //
+    // What `serve` does around the handler: observe it, and stop. Here for
+    // the same reason: `observe` changes it, and `src/app.rs` is not
+    // rewritten.
+    out.push('\n');
+    out.push_str(if a.has("observe") {
+        SERVING_OBSERVED
+    } else {
+        SERVING_PLAIN
+    });
     out
 }
+
+/// `wrap`, `side_listeners` and `stop_accepting` with the `observe` plugin.
+const SERVING_OBSERVED: &str = r#"/// What the server is handed for one request.
+pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
+
+/// What `serve` answers a request with: `next`, observed. The `observe`
+/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
+/// counts every other request by its route template.
+pub fn wrap<F, Fut>(
+    app: &std::sync::Arc<crate::app::App>,
+    next: F,
+) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
+where
+    F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
+{
+    let routes = std::sync::Arc::clone(app);
+    observer(app).wrap_routed(next, move |request| {
+        routes
+            .router
+            .at(&request.path)
+            .map(|found| found.template().to_string())
+    })
+}
+
+/// The probes and `/metrics` on a second listener, when
+/// `[observe] metrics_bind` names one.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let observer = observer(app);
+    let Some(bind) = observer.config().metrics_bind.clone() else {
+        return Ok(());
+    };
+    let server = brocanth_server::Server::bind(&bind)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(async move {
+        let _ = observer.serve_admin(server).await;
+    });
+    Ok(())
+}
+
+/// The first half of a stop. `/readyz` fails at once, so a load balancer
+/// stops sending requests; the listener closes `[observe] drain_delay_secs`
+/// later.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    observer(app).drain_then_stop(stopper).await;
+}
+
+/// The `Observer` the `observe` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observe` is registered in `register!`")
+}
+"#;
+
+/// The same three, with nothing to observe.
+const SERVING_PLAIN: &str = r#"/// What the server is handed for one request.
+pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
+
+/// What `serve` answers a request with: `next`, as it is. `brocanth add
+/// observe` logs and counts each request here, and answers the probes.
+pub fn wrap<F, Fut>(
+    app: &std::sync::Arc<crate::app::App>,
+    next: F,
+) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
+where
+    F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
+{
+    let _ = app;
+    move |request| -> Answer { Box::pin(next(request)) }
+}
+
+/// No second listener: nothing here serves probes or metrics.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let _ = app;
+    Ok(())
+}
+
+/// The first half of a stop: the listener closes at once.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    let _ = app;
+    stopper.stop();
+}
+"#;
 
 /// `plugins::shutdown_grace` with the config plugin.
 const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs`, or
@@ -3530,7 +3670,15 @@ mod tests {
             // for as long as it was unsnapshotted it did not compile.
             ("plugin-no-config", vec!["logging"]),
             ("default", DEFAULT.to_vec()),
-            ("everything", available()),
+            // Everything that can stand together: `logging` is the one
+            // module `observe` replaces.
+            (
+                "everything",
+                available()
+                    .into_iter()
+                    .filter(|key| *key != "logging")
+                    .collect(),
+            ),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin
             // has to translate. No config file either, so the literal
@@ -4688,7 +4836,7 @@ mod tests {
         let a = Answers {
             name: "drain-test".into(),
             title: "Drain Test".into(),
-            picks: vec!["config", "commands"],
+            picks: vec!["observe", "config", "commands"],
             local: Some(brocanth.display().to_string()),
             git: false,
         };
@@ -4767,15 +4915,23 @@ mod tests {
             tail
         });
 
-        let client = std::thread::spawn(move || {
-            let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
-            stream
-                .write_all(b"GET /slow HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
-                .unwrap();
+        let get = |addr: &str, path: &str| {
+            let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
             let mut response = Vec::new();
             let _ = stream.read_to_end(&mut response);
             String::from_utf8_lossy(&response).into_owned()
-        });
+        };
+        // The `observe` probes, before anything stops.
+        for probe in ["/up", "/readyz"] {
+            let answer = get(&addr, probe);
+            assert!(answer.starts_with("HTTP/1.1 200"), "{probe}: {answer}");
+        }
+        let client = std::thread::spawn(move || get(&addr, "/slow"));
         // The request is in the handler by now: it sleeps for three seconds.
         std::thread::sleep(std::time::Duration::from_millis(500));
         let killed = Command::new("kill")

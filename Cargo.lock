@@ -769,6 +769,7 @@ dependencies = [
  "brocanth-jobs",
  "brocanth-middleware",
  "brocanth-migrate",
+ "brocanth-observe",
  "brocanth-openapi",
  "brocanth-policy",
  "brocanth-realtime",

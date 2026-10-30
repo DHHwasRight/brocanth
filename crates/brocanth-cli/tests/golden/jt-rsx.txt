@@ -12,6 +12,7 @@ edition = "2021"
 # field on the context, no bytes in the binary.
 #
 # Not here, because nothing asked for it:
+#   brocanth-observe     no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
 #   brocanth-config      no TOML parser; main builds each plugin from a literal
 #   brocanth-model       no ORM, no SQL driver, no sea-orm anywhere in the lock file
 #   brocanth-cache       no cache; every read does the work a hit would have skipped
@@ -283,8 +284,13 @@ async fn run(
         return Err(e.to_string());
     }
 
+    // The probes and `/metrics` on a port of their own, when the
+    // configuration names one.
+    plugins::side_listeners(&app).await?;
+
     let app = Arc::new(app);
-    let mut serving = tokio::spawn(server.run({
+    // `plugins::wrap` puts whatever observes a request around it.
+    let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
             // Dispatch is synchronous and runs here, outside the
@@ -293,7 +299,8 @@ async fn run(
             let out = sent(dispatch(&app, &request));
             async move { out }
         }
-    }));
+    });
+    let mut serving = tokio::spawn(server.run(handler));
     eprintln!("{APP}: listening on http://{bound}");
 
     // Phase 1: stop accepting, and give the open requests the grace period.
@@ -316,7 +323,9 @@ async fn run(
     };
     let started = Instant::now();
     if failed.is_none() {
-        stopper.stop();
+        // With `observe`, `/readyz` fails first, and the listener closes
+        // after `[observe] drain_delay_secs`. Inside the grace period.
+        plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
                 Ok(Ok(())) => None,
@@ -1330,7 +1339,36 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
     Ok(crate::app::SHUTDOWN_GRACE)
 }
 
-// brocanth-digest: 9c219ae98f9d98f6
+/// What the server is handed for one request.
+pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
+
+/// What `serve` answers a request with: `next`, as it is. `brocanth add
+/// observe` logs and counts each request here, and answers the probes.
+pub fn wrap<F, Fut>(
+    app: &std::sync::Arc<crate::app::App>,
+    next: F,
+) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
+where
+    F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
+{
+    let _ = app;
+    move |request| -> Answer { Box::pin(next(request)) }
+}
+
+/// No second listener: nothing here serves probes or metrics.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let _ = app;
+    Ok(())
+}
+
+/// The first half of a stop: the listener closes at once.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    let _ = app;
+    stopper.stop();
+}
+
+// brocanth-digest: 5fc180911ae0d2f1
 ===== src/pages/about.rsx =====
 // The parameters are this page's contract with its handler. Rename one and
 // src/pages/about.rs stops compiling, which is the point.
@@ -1512,7 +1550,7 @@ request.
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observe`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1623,7 +1661,7 @@ parse is a build failure on its own line rather than a 500.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: aacd1f1fed0025dd -->
+<!-- brocanth-digest: fbc705ba8c25489d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

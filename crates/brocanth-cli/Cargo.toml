@@ -50,6 +50,9 @@ brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", default-featur
     "scaffold",
 ] }
 brocanth-realtime = { workspace = true, features = ["scaffold"] }
+# Logs, probes and metrics. The default instead of `logging`, and never
+# beside it: `create` refuses the pair.
+brocanth-observe = { workspace = true, features = ["scaffold"] }
 
 # `string` so a command name discovered at run time -- a project's own, read
 # out of its built binary for `--help` -- can be an owned String.

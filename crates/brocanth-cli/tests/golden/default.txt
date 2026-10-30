@@ -32,6 +32,7 @@ default-run = "my-blog"
 #   jt                   no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -146,7 +147,8 @@ pub fn build() -> Result<App, String> {
             // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
             // pattern is a decision, and the decision is the application's --
             // which is why these lines are here, in the file you own.
-            setup.router().mount("/{*rest}", "request_log");
+            // Nothing in this binary offers middleware, so nothing is mounted.
+            let _ = setup.router();
             Ok(())
         })
         .build()
@@ -281,8 +283,13 @@ async fn run(
         return Err(e.to_string());
     }
 
+    // The probes and `/metrics` on a port of their own, when the
+    // configuration names one.
+    plugins::side_listeners(&app).await?;
+
     let app = Arc::new(app);
-    let mut serving = tokio::spawn(server.run({
+    // `plugins::wrap` puts whatever observes a request around it.
+    let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
             // Dispatch is synchronous and runs here, outside the
@@ -291,7 +298,8 @@ async fn run(
             let out = sent(dispatch(&app, &request));
             async move { out }
         }
-    }));
+    });
+    let mut serving = tokio::spawn(server.run(handler));
     eprintln!("{APP}: listening on http://{bound}");
 
     // Phase 1: stop accepting, and give the open requests the grace period.
@@ -314,7 +322,9 @@ async fn run(
     };
     let started = Instant::now();
     if failed.is_none() {
-        stopper.stop();
+        // With `observe`, `/readyz` fails first, and the listener closes
+        // after `[observe] drain_delay_secs`. Inside the grace period.
+        plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
                 Ok(Ok(())) => None,
@@ -1059,7 +1069,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
-pub mod logging;
+pub mod observe;
 
 use brocanth::plugin_context::{After, Base};
 use brocanth::routing::Next;
@@ -1089,7 +1099,7 @@ macro_rules! register {
             .map_err(|e| e.to_string())?;
         let builder = $builder.with_config(config);
         let builder = builder
-            .plugin_from_config::<crate::plugins::logging::Logging>("logging")
+            .plugin_from_config::<crate::plugins::observe::Observe>("observe")
             .map_err(|e| e.to_string())?;
         builder
     }};
@@ -1106,8 +1116,8 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-type WithLogging = After<crate::plugins::logging::Logging, Base>;
-pub type Installed = WithLogging;
+type WithObserve = After<crate::plugins::observe::Observe, Base>;
+pub type Installed = WithObserve;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1150,10 +1160,10 @@ pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
 /// to `"request_log"` is not a decision, so it is here, where adding a
 /// plugin can write it.
 pub fn layer(name: &str) -> Option<Layer> {
-    match name {
-        "request_log" => Some(logging::layer),
-        _ => None,
-    }
+    // Nothing in this binary offers middleware, so nothing can be
+    // mounted and nothing is ever looked up.
+    let _ = name;
+    None
 }
 
 /// `[server] shutdown_grace_secs`, or
@@ -1182,7 +1192,62 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
         })
 }
 
-// brocanth-digest: 67f2c121f85c570c
+/// What the server is handed for one request.
+pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
+
+/// What `serve` answers a request with: `next`, observed. The `observe`
+/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
+/// counts every other request by its route template.
+pub fn wrap<F, Fut>(
+    app: &std::sync::Arc<crate::app::App>,
+    next: F,
+) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
+where
+    F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
+{
+    let routes = std::sync::Arc::clone(app);
+    observer(app).wrap_routed(next, move |request| {
+        routes
+            .router
+            .at(&request.path)
+            .map(|found| found.template().to_string())
+    })
+}
+
+/// The probes and `/metrics` on a second listener, when
+/// `[observe] metrics_bind` names one.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let observer = observer(app);
+    let Some(bind) = observer.config().metrics_bind.clone() else {
+        return Ok(());
+    };
+    let server = brocanth_server::Server::bind(&bind)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(async move {
+        let _ = observer.serve_admin(server).await;
+    });
+    Ok(())
+}
+
+/// The first half of a stop. `/readyz` fails at once, so a load balancer
+/// stops sending requests; the listener closes `[observe] drain_delay_secs`
+/// later.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    observer(app).drain_then_stop(stopper).await;
+}
+
+/// The `Observer` the `observe` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observe` is registered in `register!`")
+}
+
+// brocanth-digest: 846b2721843b2213
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1203,8 +1268,17 @@ name = "My Blog"
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
 
-[logging]
-level = "debug"
+[observe]
+# "json" or "text". Unset: json when the environment is production.
+# format = "json"
+level = "info"
+live_path = "/up"
+ready_path = "/readyz"
+metrics_path = "/metrics"
+# metrics_token = "a long random string"
+# metrics_bind = "127.0.0.1:9100"
+# Seconds to answer "not ready" after SIGTERM, before the listener stops.
+drain_delay_secs = 0
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own is a file beside this one; nothing lists it.
@@ -1350,80 +1424,131 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
         .collect();
     (vec!["VERB", "PATTERN", "HANDLER"], rows)
 }
-===== src/plugins/logging/mod.rs =====
-//! Request logging.
+===== src/plugins/observe/mod.rs =====
+//! Logs, probes and metrics, as this application registers them.
 //!
-//! The core assumes no log layer at all -- not `log`, not `tracing`, not a
-//! trait with a no-op default. This file is the whole of logging in this
-//! binary: delete the registration in `main` and nothing logs, delete this file
-//! and nothing about logging is compiled.
+//! The core assumes no log layer. This file is where the application chose
+//! one: a JSON or text line per request on stdout, `/up` and `/readyz`, and
+//! Prometheus text on `/metrics`. Delete the registration and this file, and
+//! none of it is compiled.
+//!
+//! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
+//! its handler with it, and stops on SIGTERM through it.
 
-use brocanth::plugin_api::{Lifecycle, MiddlewareCatalog, Plugin, PluginError};
+use std::time::Duration;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
-use brocanth::routing::Next;
-
-use crate::pages::{Ctx, Response};
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_observe::{LogFormat, ObserveConfig, ObservePlugin, Observer};
 
 /// What this plugin is built from.
 ///
 /// It derives `Deserialize` because this application reads it from
-/// `[logging]` in a TOML file. Drop the config plugin and the derive goes
+/// `[observe]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `error`, `warn`, `info` or `debug`.
+    /// `json` or `text`. Empty: `json` in production, `text` elsewhere.
+    pub format: String,
+    /// A level (`info`) or per-target levels (`info,sqlx=warn`). `RUST_LOG`
+    /// wins when it is set.
     pub level: String,
+    /// Liveness. Empty turns it off.
+    pub live_path: String,
+    /// Readiness: every plugin's check. Empty turns it off.
+    pub ready_path: String,
+    /// Prometheus text. Empty turns it off.
+    pub metrics_path: String,
+    /// When set, `/metrics` needs `Authorization: Bearer <token>`.
+    pub metrics_token: String,
+    /// When set, `/metrics` is served on this address and not on the main
+    /// listener.
+    pub metrics_bind: String,
+    /// Seconds to answer "not ready" after SIGTERM before the listener
+    /// stops. A few seconds on Kubernetes; zero on a laptop.
+    pub drain_delay_secs: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            format: String::new(),
             level: "info".to_string(),
+            live_path: "/up".to_string(),
+            ready_path: "/readyz".to_string(),
+            metrics_path: "/metrics".to_string(),
+            metrics_token: String::new(),
+            metrics_bind: String::new(),
+            drain_delay_secs: 0,
         }
     }
 }
 
-pub struct Logging {
-    level: String,
+/// `MY_APP_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
 }
 
-impl Plugin for Logging {
+fn path(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn observer(settings: Settings) -> Result<Observer, String> {
+    let mut config = ObserveConfig::new(crate::app::APP);
+    config.log_format = LogFormat::resolve(Some(&settings.format), &environment())?;
+    config.log_level = settings.level;
+    config.live_path = path(settings.live_path);
+    config.ready_path = path(settings.ready_path);
+    config.metrics_path = path(settings.metrics_path);
+    config.metrics_token = path(settings.metrics_token);
+    config.metrics_bind = path(settings.metrics_bind);
+    config.drain_delay = Duration::from_secs(settings.drain_delay_secs);
+    Observer::new(config)
+}
+
+pub struct Observe {
+    inner: Result<ObservePlugin, String>,
+}
+
+impl Observe {
+    fn inner(&mut self) -> Result<&mut ObservePlugin, PluginError> {
+        self.inner
+            .as_mut()
+            .map_err(|e| PluginError::new(format!("[observe] {e}")))
+    }
+}
+
+impl Plugin for Observe {
     type Config = Settings;
-    /// Nothing on the context: a logger writes, it does not hand values out.
     type Provides = NoContext;
-    const NAME: &'static str = "logging";
+    const NAME: &'static str = "observe";
 
-    fn new(config: Settings) -> Self {
+    fn new(settings: Settings) -> Self {
+        // `Plugin::new` cannot fail. A bad `format` fails `register` instead,
+        // with the line to write.
         Self {
-            level: config.level,
+            inner: observer(settings).map(ObservePlugin::new),
         }
     }
 
-    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
-        // Offered, not mounted. Where it runs is the application's call, made
-        // in `main`, at a pattern this file never sees.
-        catalog.offer("request_log", "one line per request: verb, path, status");
-        Ok(())
+    fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        self.inner()?.register(lc)
+    }
+
+    fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        self.inner()?.after_config(lc)
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        eprintln!("[{}] level {}", lc.instance(), self.level);
-        Ok(())
+        self.inner()?.before_start(lc)
     }
-}
 
-/// The layer `request_log` mounts.
-///
-/// A plain function is a layer: `Layer` is implemented for anything callable
-/// with a context and the rest of the chain. Not calling `next.run` is how a
-/// layer short-circuits, and dropping it is all that takes.
-pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {
-    let verb = ctx.verb;
-    let path = ctx.path.clone();
-    let response = next.run(ctx);
-    eprintln!("{verb} {path} -> {}", response.status);
-    response
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        self.inner()?.shutdown(sd)
+    }
 }
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
@@ -1451,11 +1576,11 @@ request.
 ## What this binary contains
 
 - `core`  the router, the context, the plugin seams
-- `logging`  a line per request; the core assumes no log layer
+- `observe`  JSON logs on stdout, /up and /readyz, Prometheus /metrics; the core assumes none
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1511,7 +1636,7 @@ brocanth serve
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 20d82b17e4010b7c -->
+<!-- brocanth-digest: 3a9a72f135f3689d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -1523,12 +1648,12 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "commands"]
+enabled = ["observe", "config", "commands"]
 
-[modules.logging]
-files = ["src/plugins/logging/"]
-config = ["logging"]
-crates = []
+[modules.observe]
+files = ["src/plugins/observe/"]
+config = ["observe"]
+crates = ["brocanth-observe"]
 
 [modules.config]
 files = ["config/development.toml"]
@@ -1540,4 +1665,4 @@ files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
 
-# brocanth-digest: ed3ca6e54ab65a9e
+# brocanth-digest: dd15870742d549ba

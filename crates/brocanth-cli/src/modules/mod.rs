@@ -63,6 +63,9 @@ pub mod sessions;
 /// one slot never depend on this array.
 pub const ALL: &[&dyn Module] = &[
     &logging::Logging,
+    // JSON logs, /up, /readyz and /metrics, from the crate that serves
+    // them. It replaces `logging`: `create` refuses the two together.
+    &brocanth_observe::scaffold::Observe,
     &config::Config,
     &sessions::Sessions,
     &model::Model,
