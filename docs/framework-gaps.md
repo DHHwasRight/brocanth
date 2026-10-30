@@ -463,7 +463,7 @@ because the argument is still why each one matters.
 | G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. `MiseTasks` is read now too, so three remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`. `Ctx` carries the request **and the plugin context** now, read with `Ctx::provided`; `mount_routes` is still untouched. See `docs/modules.md` §6 and §7 |
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
-| G7 | no migration diffing | open |
+| G7 | no migration diffing | **done**: `brocanth migrate make` diffs the models against `migrations/schema.json` by stable field id and writes a SeaORM migration, renames included. It applies nothing. See `docs/migrations.md` |
 | G8 | the cache is key/value only | open; G1 no longer blocks the route-cache half |
 | G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
@@ -609,6 +609,10 @@ SeaORM migrations are hand-written. Django's `makemigrations` reads the model
 diff and writes the file. §4.3 says the generator proposes and the developer
 commits, which is an argument for *writing* the file rather than applying it,
 not an argument against diffing.
+
+**Done, 2026-10-30.** `brocanth migrate ids` writes a ULID on each model and
+field; `brocanth migrate make <name>` diffs by that id and writes the file.
+See `docs/migrations.md`.
 
 ### G8. The cache is key/value only
 

@@ -757,6 +757,7 @@ dependencies = [
  "brocanth-input",
  "brocanth-jobs",
  "brocanth-middleware",
+ "brocanth-migrate",
  "brocanth-openapi",
  "brocanth-policy",
  "brocanth-realtime",
@@ -885,6 +886,19 @@ dependencies = [
  "brocanth-scaffold",
  "getrandom 0.4.3",
  "http",
+]
+
+[[package]]
+name = "brocanth-migrate"
+version = "0.1.0"
+dependencies = [
+ "brocanth-model",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tokio",
 ]
 
 [[package]]

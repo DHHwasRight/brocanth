@@ -15,7 +15,11 @@ use syn::{parenthesized, parse_macro_input, Error, Ident, ItemStruct, Lit, Resul
 #[proc_macro_attribute]
 pub fn validates(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ValidatesArgs);
-    let item = parse_macro_input!(item as ItemStruct);
+    let mut item = parse_macro_input!(item as ItemStruct);
+    if let Err(e) = strip_ids(&mut item) {
+        let err = e.to_compile_error();
+        return quote! { #item #err }.into();
+    }
     match expand(&args, &item) {
         Ok(ts) => ts.into(),
         Err(e) => {
@@ -23,6 +27,78 @@ pub fn validates(attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! { #item #err }.into()
         }
     }
+}
+
+/// Remove the `#[brocanth(id = "..")]` attributes from a model and its fields,
+/// after a check of their shape. See `brocanth_model::ids`.
+#[proc_macro_attribute]
+pub fn ids(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut item = parse_macro_input!(item as ItemStruct);
+    if !attr.is_empty() {
+        let err = Error::new(
+            Span::call_site(),
+            "`#[brocanth_model::ids]` takes no arguments",
+        )
+        .to_compile_error();
+        return quote! { #item #err }.into();
+    }
+    match strip_ids(&mut item) {
+        Ok(()) => quote! { #item }.into(),
+        Err(e) => {
+            let err = e.to_compile_error();
+            quote! { #item #err }.into()
+        }
+    }
+}
+
+/// Take every `#[brocanth(..)]` off the struct and its fields. The ids are for
+/// `brocanth migrate`, which reads them from the source text; the compiler
+/// must not see them, because no derive declares `brocanth` as a helper.
+fn strip_ids(item: &mut ItemStruct) -> Result<()> {
+    let mut errors: Option<Error> = None;
+    let mut take = |attrs: &mut Vec<syn::Attribute>| {
+        attrs.retain(|a| {
+            if !a.path().is_ident("brocanth") {
+                return true;
+            }
+            if let Err(e) = check_id(a) {
+                match &mut errors {
+                    Some(all) => all.combine(e),
+                    None => errors = Some(e),
+                }
+            }
+            false
+        });
+    };
+    take(&mut item.attrs);
+    for field in item.fields.iter_mut() {
+        take(&mut field.attrs);
+    }
+    errors.map_or(Ok(()), Err)
+}
+
+/// `#[brocanth(id = "<26 Crockford base-32 characters>")]`, and nothing else.
+fn check_id(attr: &syn::Attribute) -> Result<()> {
+    attr.parse_nested_meta(|meta| {
+        if !meta.path.is_ident("id") {
+            return Err(meta.error("the only key in `#[brocanth(..)]` is `id`"));
+        }
+        let value: syn::LitStr = meta.value()?.parse()?;
+        if is_ulid(&value.value()) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                value.span(),
+                "the id is not a ULID: 26 characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`. \
+                 Run `brocanth migrate ids` to write one",
+            ))
+        }
+    })
+}
+
+fn is_ulid(text: &str) -> bool {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    text.len() == 26 && text.bytes().all(|b| ALPHABET.contains(&b)) && text.as_bytes()[0] <= b'7'
 }
 
 // ---------------------------------------------------------------------------
