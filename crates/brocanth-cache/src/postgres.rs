@@ -14,6 +14,7 @@ use crate::cache::{expires_at, Cache, DEFAULT_MAX_VALUE_BYTES};
 use crate::clock::{from_millis, to_millis, Clock, SystemClock};
 use crate::error::{CacheError, Result};
 use crate::key::{Key, Namespace};
+use crate::tag::Tag;
 
 pub(crate) mod sql;
 
@@ -289,6 +290,35 @@ impl Cache for PgCache {
         Ok(())
     }
 
+    async fn set_tagged(&self, key: &Key, value: &[u8], ttl: Duration, tags: &[Tag]) -> Result<()> {
+        self.check_size(key, value)?;
+        let now = to_millis(self.clock.now());
+        let until = expires_at(now, ttl)?;
+        let tags: Vec<&str> = tags.iter().map(Tag::as_str).collect();
+        sqlx::query(sql::SET_TAGGED)
+            .bind(key.namespace().as_str())
+            .bind(key.as_str())
+            .bind(value)
+            .bind(until)
+            .bind(now)
+            .bind(&tags)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn invalidate_tags(&self, tags: &[Tag]) -> Result<u64> {
+        if tags.is_empty() {
+            return Ok(0);
+        }
+        let tags: Vec<&str> = tags.iter().map(Tag::as_str).collect();
+        Ok(sqlx::query(sql::INVALIDATE_TAGS)
+            .bind(&tags)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     async fn add(&self, key: &Key, value: &[u8], ttl: Duration) -> Result<bool> {
         self.check_size(key, value)?;
         let now = to_millis(self.clock.now());
@@ -347,12 +377,21 @@ impl Cache for PgCache {
     async fn purge_expired(&self, limit: u64) -> Result<u64> {
         let now = to_millis(self.clock.now());
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        Ok(sqlx::query(sql::PURGE_EXPIRED)
+        let entries = sqlx::query(sql::PURGE_EXPIRED)
             .bind(now)
             .bind(limit)
             .execute(&self.pool)
             .await?
-            .rows_affected())
+            .rows_affected();
+        // The tags of what just went, and of anything deleted or invalidated
+        // earlier. Bounded by the same `limit`; a backlog drains over the
+        // following sweeps.
+        sqlx::query(sql::PURGE_ORPHAN_TAGS)
+            .bind(now)
+            .bind(limit)
+            .execute(&self.pool)
+            .await?;
+        Ok(entries)
     }
 }
 

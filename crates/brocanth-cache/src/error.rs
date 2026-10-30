@@ -73,6 +73,17 @@ pub enum CacheError {
         reason: &'static str,
     },
 
+    /// A tag is not usable.
+    ///
+    /// See [`Tag`](crate::Tag) for the rules.
+    #[error("`{tag}` is not a usable cache tag: {reason}")]
+    InvalidTag {
+        /// What was handed in.
+        tag: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
     /// A time to live of zero, or one so long it overflows an instant.
     ///
     /// A zero TTL is rejected rather than treated as "store it and expire it

@@ -123,6 +123,23 @@ pub(crate) const SCHEMA: &[&str] = &[
         autovacuum_analyze_scale_factor = 0.05,
         toast.autovacuum_vacuum_scale_factor = 0.02
     )"#,
+    // The tag index. A second table and not a `tags TEXT[]` column with a GIN
+    // index on `brocanth_cache`, for the reason the `fillfactor` argument
+    // above gives: an index on a column that a write changes ends HOT updates
+    // for every write. Here only a tagged write touches this table, and a
+    // plain `set` keeps its HOT path.
+    //
+    // Unlogged, like the entries: after a crash both are empty together, and
+    // a tag row is never left pointing at an entry that survived.
+    r#"CREATE UNLOGGED TABLE IF NOT EXISTS brocanth_cache_tags (
+        tag       TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        k         TEXT NOT NULL,
+        PRIMARY KEY (tag, namespace, k)
+    )"#,
+    // The other direction: a tagged write replaces the tags of one entry.
+    r#"CREATE INDEX IF NOT EXISTS brocanth_cache_tags_entry
+        ON brocanth_cache_tags (namespace, k)"#,
 ];
 
 // ---------------------------------------------------------------------------
@@ -169,6 +186,50 @@ pub(crate) const SET: &str = r#"
     SET value = EXCLUDED.value,
         expires_at = EXCLUDED.expires_at,
         written_at = EXCLUDED.written_at
+"#;
+
+/// Store, replacing whatever is there, and replace the entry's tags.
+///
+/// One statement, so the value and its tags are never seen apart. `$6` is the
+/// new tag set. The `stale` arm deletes only the tags that are **not** in it
+/// and the insert adds the ones that are missing, so the two arms never touch
+/// the same row: a delete and an insert of one row in one statement would
+/// lose the insert to the conflict check.
+///
+/// An empty `$6` deletes every tag of the entry.
+pub(crate) const SET_TAGGED: &str = r#"
+    WITH entry AS (
+        INSERT INTO brocanth_cache (namespace, k, value, expires_at, written_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (namespace, k) DO UPDATE
+        SET value = EXCLUDED.value,
+            expires_at = EXCLUDED.expires_at,
+            written_at = EXCLUDED.written_at
+    ),
+    stale AS (
+        DELETE FROM brocanth_cache_tags
+        WHERE namespace = $1 AND k = $2 AND NOT (tag = ANY($6::text[]))
+    )
+    INSERT INTO brocanth_cache_tags (tag, namespace, k)
+    SELECT DISTINCT t, $1::text, $2::text FROM unnest($6::text[]) AS t
+    ON CONFLICT DO NOTHING
+"#;
+
+/// Remove every entry carrying any of the tags in `$1`, and those tag rows.
+///
+/// The tag rows go first, in a CTE, and hand their entries to the outer
+/// delete. A primary-key range on `tag` finds them. The entries' other tag
+/// rows stay behind until [`PURGE_ORPHAN_TAGS`] finds them; they point at
+/// nothing, so they cost space and never a wrong answer.
+pub(crate) const INVALIDATE_TAGS: &str = r#"
+    WITH tagged AS (
+        DELETE FROM brocanth_cache_tags
+        WHERE tag = ANY($1::text[])
+        RETURNING namespace, k
+    )
+    DELETE FROM brocanth_cache c
+    USING (SELECT DISTINCT namespace, k FROM tagged) t
+    WHERE c.namespace = t.namespace AND c.k = t.k
 "#;
 
 /// Store only if nothing live is there. Returns a row when it stored.
@@ -243,6 +304,23 @@ pub(crate) const PURGE_EXPIRED: &str = r#"
     DELETE FROM brocanth_cache
     WHERE ctid IN (
         SELECT ctid FROM brocanth_cache WHERE expires_at <= $1 LIMIT $2
+    )
+"#;
+
+/// Remove up to `$2` tag rows whose entry is gone or expired.
+///
+/// The sweep's second half. Run after [`PURGE_EXPIRED`], so the entries it
+/// just removed leave their tags here. The anti-join is a primary-key lookup
+/// on `brocanth_cache` per tag row.
+pub(crate) const PURGE_ORPHAN_TAGS: &str = r#"
+    DELETE FROM brocanth_cache_tags
+    WHERE ctid IN (
+        SELECT t.ctid FROM brocanth_cache_tags t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM brocanth_cache c
+            WHERE c.namespace = t.namespace AND c.k = t.k AND c.expires_at > $1
+        )
+        LIMIT $2
     )
 "#;
 

@@ -29,7 +29,7 @@ use brocanth_admin::policy::{policy_fn, Action, Principal, Request};
 use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Submission};
 use brocanth_cache::admin::CachePanel;
-use brocanth_cache::{Cache, CacheError, Key, Namespace, Result};
+use brocanth_cache::{Cache, CacheError, Key, Namespace, Result, Tag};
 use brocanth_test::Html;
 
 struct Operator;
@@ -78,6 +78,20 @@ impl Cache for Recorder {
 
     async fn set(&self, _key: &Key, _value: &[u8], _ttl: Duration) -> Result<()> {
         unimplemented!("the panel writes no entry")
+    }
+
+    async fn set_tagged(
+        &self,
+        _key: &Key,
+        _value: &[u8],
+        _ttl: Duration,
+        _tags: &[Tag],
+    ) -> Result<()> {
+        unimplemented!("the panel writes no entry")
+    }
+
+    async fn invalidate_tags(&self, _tags: &[Tag]) -> Result<u64> {
+        unimplemented!("the panel invalidates no tag")
     }
 
     async fn add(&self, _key: &Key, _value: &[u8], _ttl: Duration) -> Result<bool> {
@@ -129,6 +143,20 @@ impl Cache for Broken {
     }
 
     async fn set(&self, _key: &Key, _value: &[u8], _ttl: Duration) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn set_tagged(
+        &self,
+        _key: &Key,
+        _value: &[u8],
+        _ttl: Duration,
+        _tags: &[Tag],
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn invalidate_tags(&self, _tags: &[Tag]) -> Result<u64> {
         unimplemented!()
     }
 
