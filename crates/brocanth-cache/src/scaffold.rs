@@ -131,7 +131,7 @@ impl Plugin for Cache {{
         Ok(())
     }}
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         // The lifecycle hooks are synchronous and opening a pool is not. This
         // is the manoeuvre `CachePlugin` makes, for the same reason: a server
         // process has a runtime, `block_in_place` is wrong on a current-thread
@@ -154,7 +154,20 @@ impl Plugin for Cache {{
         // it is off there for the reason it is absent here: the generator
         // proposes and the developer commits. `PgCache::schema_sql` hands out
         // the statements for a migration you can read.
-        self.handle = Some(CacheHandle::new(Arc::new(cache)));
+        let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
+        // Ready when one read of the table answers, as `CachePlugin` does. A
+        // miss is a pass: the question is whether the store answers.
+        let probe = Arc::clone(&cache);
+        lc.ready_when(move || {{
+            let probe = Arc::clone(&probe);
+            async move {{
+                let key = brocanth_cache::Namespace::new("brocanth.readyz")
+                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
+                    .map_err(|e| e.to_string())?;
+                probe.get(&key).await.map(drop).map_err(|e| e.to_string())
+            }}
+        }});
+        self.handle = Some(CacheHandle::new(cache));
         Ok(())
     }}
 

@@ -255,7 +255,7 @@ impl Plugin for Jobs {{
         Ok(())
     }}
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         // The lifecycle hooks are synchronous and opening a pool is not. A
         // server process has a runtime, `block_in_place` is wrong on a
         // current-thread one, so take the handle and block the builder on a
@@ -298,6 +298,21 @@ impl Plugin for Jobs {{
                     .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {{e}}")))?,
             );
         }}
+
+        // Ready when the jobs table answers, as `JobsPlugin` does: a lookup
+        // by primary key, so a probe costs one index read however long the
+        // queue is.
+        let probe = queue.clone();
+        lc.ready_when(move || {{
+            let probe = probe.clone();
+            async move {{
+                probe
+                    .inspect(brocanth_jobs::JobId(0))
+                    .await
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            }}
+        }});
 
         self.queue = Some(queue);
         Ok(())
