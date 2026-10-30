@@ -89,6 +89,9 @@ impl Panel for Queue {
 fn base_config() -> AdminConfig {
     AdminConfig::new()
         .discovering(Discovery::new().under("blog::models"))
+        // The fixture cannot run a row policy's SQL, and these tests are
+        // about panels beside the models, not about the models' rows.
+        .unscoped_rows_unsafe_for_development()
         .panel(Queue { key: "jobs" })
 }
 

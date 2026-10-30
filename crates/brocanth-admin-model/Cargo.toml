@@ -66,5 +66,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 brocanth-model = { workspace = true, features = ["sqlite"] }
 serde = { version = "1", features = ["derive"] }
 
+# `tests/policy.rs`: the admin's row policies against a real database,
+# driven through the router by the test client rather than by calling
+# `Admin::dispatch`. The row policy's claim is that the condition reaches
+# the SQL, so the test needs a SQL engine, and this is the crate that has
+# one.
+brocanth.workspace = true
+brocanth-test.workspace = true
+
 [lints.rust]
 missing_docs = "warn"

@@ -21,6 +21,7 @@ fn blog(config: AdminConfig) -> Admin {
             .titled("Blog admin")
             .at("/admin")
             .discovering(Discovery::new().under("blog::models"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment)
             .model("user", |m| {
                 m.display(|row| row.get("name").map(ToString::to_string).unwrap_or_default())
@@ -151,6 +152,7 @@ fn deleting_asks_first() {
         AdminConfig::new()
             .at("/admin")
             .discovering(Discovery::new().under("blog::models"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),
     );
     let who = Principal::anonymous();
@@ -373,6 +375,7 @@ fn a_value_cannot_write_markup() {
         AdminConfig::new()
             .at("/admin")
             .discovering(Discovery::new().under("blog::models"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),
     );
     let page =

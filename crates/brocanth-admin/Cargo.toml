@@ -31,5 +31,18 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version
 async-trait = "0.1"
 thiserror = "2"
 
+# Row-level authorisation, PLAN.md §9 and §12 item 9. The algebra and the
+# witness are that crate's; this one erases them per model, because the
+# admin is one screen serving every model and cannot be generic over an
+# entity. Its only dependency is `thiserror`, which is already here, so the
+# admin still links no SQL driver and no ORM: a policy compiles to SQL text
+# and a bind list, and the data source runs it.
+brocanth-policy = { workspace = true }
+
+[dev-dependencies]
+# For the compile-fail cases under tests/ui: an admin resource with no
+# policy must not compile. `brocanth-resource` set the precedent.
+trybuild = "1"
+
 [lints.rust]
 missing_docs = "warn"

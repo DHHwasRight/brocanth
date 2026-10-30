@@ -298,6 +298,22 @@ impl Form {
         }
     }
 
+    /// Draws every editable field that `writable` refuses as read-only.
+    ///
+    /// The row policy's field mask, applied to the form: a locked field is
+    /// shown and never rendered as an input, so the form does not send it,
+    /// [`Form::accept`] does not take it, and [`Form::values`] does not
+    /// write it. A request that sends one anyway was not made with this
+    /// form, and the admin refuses it before this is called.
+    pub fn lock(&mut self, writable: impl Fn(&str) -> bool) {
+        for field in &mut self.fields {
+            if field.widget.is_editable() && !writable(&field.name) {
+                field.widget = Widget::ReadOnly;
+                field.required = false;
+            }
+        }
+    }
+
     /// Puts a submission into the fields.
     ///
     /// Every editable field takes its value from the submission, including the

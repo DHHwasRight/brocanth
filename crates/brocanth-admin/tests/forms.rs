@@ -212,6 +212,7 @@ fn a_rejected_create_re_renders_the_form_with_what_was_typed() {
         Arc::new(Fixture::blog()),
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),
     );
 

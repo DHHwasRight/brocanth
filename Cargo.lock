@@ -660,9 +660,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-policy",
  "http",
  "rsx",
  "thiserror 2.0.21",
+ "trybuild",
 ]
 
 [[package]]
@@ -670,8 +672,10 @@ name = "brocanth-admin-model"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "brocanth",
  "brocanth-admin",
  "brocanth-model",
+ "brocanth-test",
  "sea-orm",
  "serde",
  "serde_json",

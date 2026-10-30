@@ -432,6 +432,8 @@ pub struct AdminConfig {
     /// worker.
     pub panels: Vec<std::sync::Arc<dyn crate::panel::Panel>>,
     models: BTreeMap<String, ModelAdmin>,
+    resources: Vec<std::sync::Arc<dyn crate::rows::RowRules>>,
+    unscoped_rows: bool,
 }
 
 impl std::fmt::Debug for AdminConfig {
@@ -441,6 +443,11 @@ impl std::fmt::Debug for AdminConfig {
             .field("base_path", &self.base_path)
             .field("discovery", &self.discovery)
             .field("models", &self.models.keys().collect::<Vec<_>>())
+            .field(
+                "resources",
+                &self.resources.iter().map(|r| r.model()).collect::<Vec<_>>(),
+            )
+            .field("unscoped_rows", &self.unscoped_rows)
             .field(
                 "panels",
                 &self.panels.iter().map(|p| p.key()).collect::<Vec<_>>(),
@@ -466,7 +473,50 @@ impl AdminConfig {
             views: Views::default(),
             panels: Vec::new(),
             models: BTreeMap::new(),
+            resources: Vec::new(),
+            unscoped_rows: false,
         }
+    }
+
+    /// Puts one model's rows under its entity's policy.
+    ///
+    /// Every screen of that model then goes through the policy: the list and
+    /// its count filter in the query, a record is read with a guarded select,
+    /// a write is guarded by the condition it was checked against, and a form
+    /// accepts only the columns `Policy::writable` allows. See
+    /// [`crate::rows`].
+    ///
+    /// A discovered model with no resource answers `403` to every screen,
+    /// unless [`AdminConfig::unscoped_rows_unsafe_for_development`] is on.
+    ///
+    /// [`Admin::new`](crate::Admin::new) panics when the resource names a
+    /// model the data source does not hold, when its entity's table is not
+    /// that model's table, or when two resources name one model.
+    pub fn resource<R: crate::rows::AdminResource>(mut self, resource: R) -> Self {
+        self.resources.push(crate::rows::erase(resource));
+        self
+    }
+
+    /// Lets a model with no [`AdminResource`](crate::rows::AdminResource)
+    /// show and change every row, limited only by the screen policy.
+    ///
+    /// For a development build or a test with an in-memory data source, and
+    /// for nothing else. Named so that it cannot appear in a diff without
+    /// being noticed, like [`AllowAllUnsafeForDevelopment`](crate::policy::AllowAllUnsafeForDevelopment).
+    pub fn unscoped_rows_unsafe_for_development(mut self) -> Self {
+        self.unscoped_rows = true;
+        self
+    }
+
+    /// Takes the registered resources out. [`Admin::new`](crate::Admin::new)
+    /// calls this once.
+    pub(crate) fn take_resources(&mut self) -> Vec<std::sync::Arc<dyn crate::rows::RowRules>> {
+        std::mem::take(&mut self.resources)
+    }
+
+    /// Whether a model with no resource is unscoped rather than denied.
+    pub(crate) fn rows_unscoped(&self) -> bool {
+        self.unscoped_rows
     }
 
     /// Adds a tab another crate contributed.

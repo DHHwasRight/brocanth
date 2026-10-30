@@ -422,6 +422,7 @@ means it is not yet a feature.
 | Model validation with a field map (D5) | **yes** | `#[validates]`, `Errors::entries()` |
 | ModelForm, re-rendered with errors (D6, D7) | **yes** | `brocanth-admin`'s `Form`, built from the schema |
 | Admin with list/filter/search/ordering (D8) | **yes** | `brocanth-admin`, plus `Panel` for tabs no model owns |
+| Per-collection rules applied in the admin (P7; PLAN.md §12 item 9) | **yes, except create** | `AdminConfig::resource`: the list and its count filter in the query, a record is a guarded select, a write is guarded by the condition it was checked against (zero rows is `409`), and forms take only `Policy::writable` columns. A model with no resource is `403`. A create rule other than `Always` or `Never` is refused, not decided |
 | Admin auto-discovery (D9) | **partial** | discovery reads the entity registry; entities are named once in `admin_source!` |
 | Auth: hashing, login, permissions (D10) | **yes, unwired** | `brocanth-auth`, 8,875 lines, not on the menu |
 | CSRF (D12) | **unknown** | not audited; `auth` is the likely home |

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::data::{AdminData, DataError, FieldErrors, ListRequest, Search};
+use crate::data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search};
 use crate::discovery::RegistryEntry;
 use crate::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::query::{Direction, Sort};
@@ -240,17 +240,38 @@ fn matches_key(model: &ModelDescriptor, row: &Row, key: &PrimaryKey) -> bool {
     )
 }
 
+/// The fixture holds rows in memory and has no SQL engine, so it cannot
+/// apply a row policy's condition. It refuses one loudly: answering as if the
+/// condition were `TRUE` would show every row to everybody, which is the bug
+/// row policies exist to prevent.
+fn unscoped(scope: Scope<'_>) -> Result<(), DataError> {
+    match scope {
+        Scope::Unscoped => Ok(()),
+        Scope::Where(_) => Err(DataError::backend(
+            "the in-memory Fixture cannot apply a row policy's SQL condition; \
+             test row policies against a real database",
+        )),
+    }
+}
+
 #[async_trait]
 impl AdminData for Fixture {
     fn registry(&self) -> Vec<RegistryEntry> {
         self.entries.clone()
     }
 
-    async fn count(&self, model: &ModelDescriptor, search: Search<'_>) -> Result<usize, DataError> {
+    async fn count(
+        &self,
+        model: &ModelDescriptor,
+        search: Search<'_>,
+        scope: Scope<'_>,
+    ) -> Result<usize, DataError> {
+        unscoped(scope)?;
         Ok(self.matching(model, search).len())
     }
 
     async fn list(&self, request: ListRequest<'_>) -> Result<Vec<Row>, DataError> {
+        unscoped(request.scope)?;
         let mut rows = self.matching(request.model, request.search);
         sorted(&mut rows, request.sort);
         Ok(rows
@@ -264,7 +285,9 @@ impl AdminData for Fixture {
         &self,
         model: &ModelDescriptor,
         key: &PrimaryKey,
+        scope: Scope<'_>,
     ) -> Result<Option<Row>, DataError> {
+        unscoped(scope)?;
         let tables = self.tables.lock().expect("fixture lock");
         Ok(tables
             .iter()
@@ -333,7 +356,9 @@ impl AdminData for Fixture {
         model: &ModelDescriptor,
         key: &PrimaryKey,
         values: &[(String, Value)],
-    ) -> Result<(), DataError> {
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError> {
+        unscoped(scope)?;
         let mut tables = self.tables.lock().expect("fixture lock");
         let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
             return Err(DataError::UnknownModel(model.key.clone()));
@@ -353,25 +378,30 @@ impl AdminData for Fixture {
         if !errors.is_empty() {
             return Err(DataError::Invalid(errors));
         }
+        // A missing row is zero rows changed, which the admin answers as a
+        // lost race rather than as success.
         let Some(row) = rows.iter_mut().find(|row| matches_key(model, row, key)) else {
-            return Err(DataError::backend("no such record"));
+            return Ok(0);
         };
         for (name, value) in values {
             row.set(name, value.clone());
         }
-        Ok(())
+        Ok(1)
     }
 
-    async fn delete(&self, model: &ModelDescriptor, key: &PrimaryKey) -> Result<(), DataError> {
+    async fn delete(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError> {
+        unscoped(scope)?;
         let mut tables = self.tables.lock().expect("fixture lock");
         let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
             return Err(DataError::UnknownModel(model.key.clone()));
         };
         let before = rows.len();
         rows.retain(|row| !matches_key(model, row, key));
-        match rows.len() == before {
-            true => Err(DataError::backend("no such record")),
-            false => Ok(()),
-        }
+        Ok((before - rows.len()) as u64)
     }
 }

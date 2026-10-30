@@ -58,6 +58,7 @@ fn app_with_admin(principal_set: bool) -> brocanth::plugin_app::App<impl Sized, 
         Arc::new(Fixture::blog()),
         AdminConfig::new()
             .discovering(Discovery::new().under("blog::models"))
+            .unscoped_rows_unsafe_for_development()
             .with_policy(policy_fn(|who: &Principal<'_>, _| {
                 who.downcast::<CurrentUser>().is_some_and(|u| u.staff)
             })),
