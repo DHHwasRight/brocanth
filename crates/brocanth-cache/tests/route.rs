@@ -386,3 +386,17 @@ async fn a_body_over_the_cap_is_served_and_not_stored() {
     settle().await;
     assert_eq!(map.len(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cache_plugin_registers_a_readiness_check_that_reads_the_store() {
+    let app = AppBuilder::new()
+        .plugin(brocanth_cache::CachePlugin::new(
+            brocanth_cache::CacheConfig::new(Arc::new(Map::default())),
+        ))
+        .build()
+        .expect("builds");
+    let checks = app.readiness().checks();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].name(), "cache");
+    assert_eq!(checks[0].probe().check().await, Ok(()));
+}

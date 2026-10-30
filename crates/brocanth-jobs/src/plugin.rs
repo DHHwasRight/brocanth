@@ -167,6 +167,20 @@ impl Plugin for JobsPlugin {
 
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         lc.services_mut().insert(self.queue.clone());
+        // Ready when the jobs table answers. A lookup by primary key, so the
+        // probe costs one index read however long the queue is; `stats` would
+        // count every row on every probe.
+        let queue = self.queue.clone();
+        lc.ready_when(move || {
+            let queue = queue.clone();
+            async move {
+                queue
+                    .inspect(crate::job::JobId(0))
+                    .await
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            }
+        });
         Ok(())
     }
 
