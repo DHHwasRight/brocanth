@@ -6,9 +6,8 @@
 // no preflight — the admin's own sheet already reset the document — only the
 // theme variables and the utilities these templates name.
 //
-// The notice is not decoration. `MemoryStore` is the only `AuthStore` in this
-// workspace, and a screen that looks like a user database while being a
-// `HashMap` behind a `Mutex` has to admit it, on the screen, where somebody
+// The notice is not decoration. A screen that looks like a user database
+// while being a `HashMap` behind a `Mutex` (`MemoryStore`) has to admit it, on the screen, where somebody
 // about to end a session can read it. The store answers
 // `AccountDirectory::is_durable`; the words are the panel's.
 
@@ -21,9 +20,8 @@ pub fn Chrome(volatile: bool) -> Element {
             <strong class="font-semibold text-ink">These accounts are held in memory.</strong>
             <span class="block mt-1">
                 They are gone when this process restarts, and no other process serving
-                the same application can see them. MemoryStore is the only AuthStore in
-                this workspace, so that is every account on this screen. An adapter over
-                a database implements the same reads and this notice goes away.
+                the same application can see them. PgStore, behind the postgres feature
+                of brocanth-auth, keeps them in Postgres, and this notice then goes away.
             </span>
         </div>
     }

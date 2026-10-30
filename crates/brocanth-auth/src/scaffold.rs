@@ -4,8 +4,8 @@
 //! a statement about this crate: that [`AuthConfig`](crate::AuthConfig) takes
 //! a store, a client, a clock and a key as *values* the application built,
 //! that [`SigningKey::parse`](crate::SigningKey::parse) refuses anything that
-//! is not 32 bytes, that [`MemoryStore`](crate::MemoryStore) is the only
-//! [`AuthStore`](crate::AuthStore) in the workspace today. Those move when
+//! is not 32 bytes, that a new project starts on
+//! [`MemoryStore`](crate::MemoryStore). Those move when
 //! this crate moves, and a generator living in another repository would learn
 //! about it from a bug report.
 //!

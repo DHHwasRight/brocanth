@@ -67,18 +67,29 @@
 //!
 //! # Nothing is assumed about storage
 //!
-//! There is no database here, no SQL, no ORM and no pool. [`AuthStore`] is the
-//! whole storage contract — find an identity, create one, link a provider,
-//! store and revoke a session, store and consume a single-use token — and
-//! [`MemoryStore`] implements it for tests. Second factors, one-time codes and
-//! login alerts each add a *separate* trait on top of it ([`MfaStore`],
-//! [`OtpStore`], [`SignInLocationStore`]), so a product that wants none of them
-//! implements none of them.
+//! [`AuthStore`] is the whole storage contract — find an identity, create one,
+//! link a provider, store and revoke a session, store and consume a single-use
+//! token. Second factors, one-time codes and login alerts each add a
+//! *separate* trait on top of it ([`MfaStore`], [`OtpStore`],
+//! [`SignInLocationStore`]), so a product that wants none of them implements
+//! none of them.
+//!
+//! Two stores ship:
+//!
+//! * [`MemoryStore`], a `Mutex<HashMap>`, for tests and a first run. Nothing
+//!   in it survives the process.
+//! * `PgStore`, behind the `postgres` feature, which is off. It implements
+//!   every trait over Postgres, so accounts, sessions, second factors,
+//!   one-time codes, impersonation markers and login-alert history survive a
+//!   restart. The `postgres` module says what each row holds and how each
+//!   single-use operation stays atomic.
+//!
+//! Both pass the same suite: the `conformance` feature turns it on, and an
+//! adapter of your own can run it too.
 //!
 //! [`MfaStore`]: storage::MfaStore
 //! [`OtpStore`]: storage::OtpStore
-//! [`SignInLocationStore`]: storage::SignInLocationStore An adapter over `brocanth-model`
-//! is a later, separate crate, and it changes nothing above this line.
+//! [`SignInLocationStore`]: storage::SignInLocationStore
 //!
 //! # Nothing is assumed about HTTP either
 //!
@@ -118,6 +129,14 @@ mod admin_templates {
 pub mod alerts;
 pub mod apple;
 pub mod clock;
+
+/// The storage contract as an executable suite, for `MemoryStore`, `PgStore`
+/// and any other adapter.
+///
+/// Behind the `conformance` feature, which only a test binary turns on.
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
 pub mod error;
 pub mod http_client;
 pub mod identity;
@@ -129,6 +148,14 @@ pub mod oauth;
 pub mod otp;
 pub mod password;
 pub mod plugin;
+
+/// [`PgStore`], every storage trait over Postgres.
+///
+/// Behind the `postgres` feature, which is off. With it off, neither this
+/// module nor `sqlx` is in the build.
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 pub mod providers;
 pub mod random;
 pub mod recovery;
@@ -165,6 +192,8 @@ pub use oauth::{
 pub use otp::{Otp, OtpChallengeId, OtpCode, OtpDelivery, OtpRequested};
 pub use password::{PasswordCost, Passwords};
 pub use plugin::{Auth, AuthConfig, AuthPlugin};
+#[cfg(feature = "postgres")]
+pub use postgres::{PgStore, Swept};
 pub use providers::{Provider, ProviderKind};
 pub use recovery::{RecoveryCode, RecoveryCodes};
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};

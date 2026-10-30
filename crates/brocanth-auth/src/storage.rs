@@ -7,8 +7,10 @@
 //! actually performs, and [`MemoryStore`] implements it so the tests never
 //! need a server.
 //!
-//! An adapter over `brocanth-model` is a later, separate crate. It implements
-//! this trait and changes nothing above it.
+//! Two implementations ship: [`MemoryStore`], and `PgStore` behind the
+//! `postgres` feature. Another adapter implements these traits and changes
+//! nothing above them. The `conformance` feature holds the suite that every
+//! implementation must pass.
 //!
 //! # Why there are five traits and not one
 //!

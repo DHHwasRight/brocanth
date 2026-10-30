@@ -193,7 +193,7 @@ else.
 | Cache | `PgCache` on unlogged tables | `Cache` (tags, `CacheExt`) | Another `Cache` impl. The route cache and `TagInvalidator` stay the same. |
 | Files | `Postgres` in `brocanth-storage` (`postgres` feature), bytes in `bytea` | `Storage` | `LocalDisk` exists. An object store would be another `Storage` impl. |
 | Realtime | `NotifySink` over `LISTEN/NOTIFY` (`listen-notify` feature) | `ChangeSink`, `Notifier` | Another `ChangeSink`. The broker and the subscribers stay the same. |
-| Accounts | not yet | `AuthStore` (+ `MfaStore`, `OtpStore`, ...) | Only `MemoryStore` ships. A Postgres store is on the roadmap. |
+| Accounts | `PgStore` in `brocanth-auth` (`postgres` feature) | `AuthStore` (+ `MfaStore`, `OtpStore`, ...) | Another `AuthStore` impl. `MemoryStore` is for tests. Both pass one conformance suite. |
 
 The queue shows the pattern best. A job has a lane. A `Transactional` job
 commits with the data that it refers to and stays in your database. A `Bulk`
@@ -235,22 +235,20 @@ The d2s concerns, against what the code does today.
   streams drain through `StreamGate`.
 - [x] **Tests without a server.** `brocanth-test` drives a built `App` in
   process. Postgres tests make their own schema.
+- [x] **Structured logs on stdout.** `brocanth-observe` writes one JSON or text line per request and per `tracing` event, with a request id (JSON by default in production).
+- [x] **Health probes.** `/up` asks nothing; `/readyz` runs each plugin's `ready_when` check and fails before shutdown drains.
+- [x] **Metrics.** `/metrics` serves Prometheus text: requests by route template and status class, in-flight, and job queue depth and runs.
+- [x] **Tracing.** The `otel` feature exports a span per request and per job run over OTLP, with W3C `traceparent` in and out.
 - [ ] **Graceful shutdown on SIGTERM in a generated project.** The generated
   `serve` does not listen for signals and does not call `App::shutdown`.
   You must wire it yourself.
-- [ ] **Structured logs on stdout.** The `logging` module writes one plain
-  line per request to stderr. There is no JSON format.
-- [ ] **Health probes.** There is no `/up`, `/healthz` or `/readyz` route.
-- [ ] **Metrics.** There is no `/metrics` endpoint and no Prometheus export.
-- [ ] **Tracing.** There is no OpenTelemetry. `brocanth-jobs` gives events
-  for you to bridge, but it does not link `tracing`.
 - [ ] **Container image.** There is no Dockerfile and no generated one.
 - [ ] **Apply migrations from the CLI.** There is no `migrate up`. You call
   SeaORM's migrator from your own code or a project command.
 - [ ] **Security headers.** There is no HSTS hook. `check --deploy` warns
   about it.
 - [ ] **Rate limiting.**
-- [ ] **A Postgres `AuthStore`**, so accounts survive a restart.
+- [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project still starts on `MemoryStore`.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).
 - [ ] **A realtime transport.** The broker works. The SSE and WebSocket
@@ -271,7 +269,9 @@ The d2s concerns, against what the code does today.
 | [`docs/policy.md`](docs/policy.md) | Predicates, `condition()`, `Verified`, `policy!`. |
 | [`docs/input.md`](docs/input.md) | Reading a request body into a struct. |
 | [`docs/middleware.md`](docs/middleware.md) | The middleware hooks. |
+| [`docs/observability.md`](docs/observability.md) | Logs, probes, metrics and traces: `brocanth-observe`. |
 | [`docs/cache.md`](docs/cache.md) | Tags, route cache, fragments, invalidation. |
+| [`docs/auth-store.md`](docs/auth-store.md) | Where accounts live: `MemoryStore`, `PgStore`, the conformance suite. |
 | [`docs/async-handlers.md`](docs/async-handlers.md) | How a route gets to `.await`, and the cost. |
 | [`docs/surface.md`](docs/surface.md) | How a handler's signature becomes the OpenAPI document and the client. |
 | [`docs/backoffice.md`](docs/backoffice.md) | The admin. |
