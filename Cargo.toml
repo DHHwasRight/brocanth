@@ -11,6 +11,7 @@ members = [
     "crates/brocanth-cli",
     "crates/brocanth-config",
     "crates/brocanth-events",
+    "crates/brocanth-i18n",
     "crates/brocanth-client",
     "crates/brocanth-input",
     "crates/brocanth-jobs",
@@ -49,6 +50,7 @@ brocanth-server = { path = "crates/brocanth-server", version = "0.1.0" }
 brocanth-command = { path = "crates/brocanth-command", version = "0.1.0" }
 brocanth-cache = { path = "crates/brocanth-cache", version = "0.1.0" }
 brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
+brocanth-i18n = { path = "crates/brocanth-i18n", version = "0.1.0", default-features = false }
 brocanth-admin = { path = "crates/brocanth-admin", version = "0.1.0" }
 brocanth-auth = { path = "crates/brocanth-auth", version = "0.1.0" }
 brocanth-config = { path = "crates/brocanth-config", version = "0.1.0" }

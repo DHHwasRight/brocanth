@@ -240,6 +240,7 @@ chain it already knows. A handler never reads the header.
 | `brocanth-server` | the HTTP server, and its bridge to the core |
 | `brocanth-pages` | `pages!` and `html!`: the route table and the layouts, read off `src/pages` |
 | `brocanth-assets` | `assets!`: static files embedded, fingerprinted or verbatim |
+| `brocanth-i18n` | translations: catalogs checked at build time, locale negotiation, CLDR plurals, numbers and dates |
 
 `rsx` is the one dependency in this list that is not a brocanth crate. It has
 its own repository, so `--brocanth-path` does not reach it and the generated

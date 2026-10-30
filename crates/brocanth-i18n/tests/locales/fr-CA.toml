@@ -1,0 +1,3 @@
+# Only what differs from `fr`. Everything else falls back to it.
+
+title = "Votre panier d’achats"

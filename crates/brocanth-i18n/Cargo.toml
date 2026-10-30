@@ -1,0 +1,54 @@
+[package]
+name = "brocanth-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Message catalogs checked at build time, locale negotiation, and CLDR plurals, numbers and dates."
+
+# An application takes this crate twice, and the two never share features:
+#
+#     [dependencies]
+#     brocanth-i18n = { workspace = true, features = ["plugin"] }
+#
+#     [build-dependencies]
+#     brocanth-i18n = { workspace = true, default-features = false, features = ["build"] }
+#
+# The build script links a TOML parser and no CLDR data. The binary links CLDR
+# data and no TOML parser. Resolver 2 keeps the two feature sets apart.
+[features]
+default = ["runtime"]
+# Plural rules and number formatting, from CLDR through ICU4X.
+runtime = ["dep:icu_plurals", "dep:icu_decimal", "dep:icu_locale_core", "dep:icu_provider"]
+# Date formatting. Separate, because the date data is the largest part of
+# ICU4X and a catalog with no `{x:date}` placeholder does not need it.
+dates = ["runtime", "dep:icu_datetime", "dep:icu_calendar"]
+# The two plugins: `I18n` on the context, `I18nHook` on the request.
+plugin = ["dep:brocanth", "dep:http"]
+# The catalog compiler, for a build script.
+build = ["dep:toml", "dep:serde_spanned"]
+
+[dependencies]
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+
+# ICU4X 2.x, compiled data. `icu_locale_core` and `icu_provider` are already
+# in the workspace's tree through `url`; the `sync` feature on the provider
+# is what makes a formatter `Sync`, so one can sit in a `static`.
+icu_plurals = { version = "2.1", optional = true }
+icu_decimal = { version = "2.1", optional = true }
+icu_locale_core = { version = "2.1", optional = true }
+icu_provider = { version = "2.1", features = ["sync"], optional = true }
+icu_datetime = { version = "2.1", optional = true }
+icu_calendar = { version = "2.1", optional = true }
+
+# The same TOML parser `brocanth-config` takes, with the same two features.
+# `DeTable` keeps a span on every key, so an error names a line.
+toml = { version = "1.1", default-features = false, features = ["std", "parse"], optional = true }
+serde_spanned = { version = "1.1", default-features = false, optional = true }
+
+[dev-dependencies]
+# Every feature, so `cargo test -p brocanth-i18n` runs every test rather than
+# skipping the ones behind a feature without saying so.
+brocanth-i18n = { path = ".", features = ["dates", "plugin", "build"] }
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
+jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }

@@ -434,7 +434,7 @@ means it is not yet a feature.
 | Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
 | Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
 | Deployment checks that refuse to start (D23) | **partial** | a plugin's `configure` can refuse; no `check --deploy` |
-| i18n (D24) | **no** | nothing in the tree |
+| i18n (D24) | **yes, unwired** | `brocanth-i18n`: catalogs checked at build time, negotiation, CLDR plurals, numbers and dates; not on the menu. See `docs/i18n.md` |
 | Test client with transactional tests (D25) | **partial** | `Harness` wraps a database; no HTTP test client |
 | Shell / dbshell (D26) | **no** | |
 | Fixtures (D27) | **no** | |
@@ -465,7 +465,7 @@ because the argument is still why each one matters.
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | open |
 | G8 | the cache is key/value only | open; G1 no longer blocks the route-cache half |
-| G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
+| G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | **i18n done**: `brocanth-i18n`, see `docs/i18n.md`; no `brocanth add i18n` module yet. Fixtures, a shell, prefetch and `check --deploy` are open |
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
@@ -620,6 +620,10 @@ is a `ResponseHook` away — once G1 settles what a hook sees.
 
 i18n (D24), fixtures (D27), a shell (D26), prefetch (A22), `check --deploy`
 (D23). None blocks anything else.
+
+**Status, 2026-10-30.** i18n is done: `brocanth-i18n`, described in
+`docs/i18n.md`. It is not on the `brocanth add` menu yet. The other four are
+open.
 
 ### Out of scope, already decided
 
