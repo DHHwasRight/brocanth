@@ -1,0 +1,26 @@
+[
+  { "model": "user", "fields": { "id": 1, "name": "Ada Lovelace", "email": "ada@example.com" } },
+  { "model": "user", "fields": { "id": 2, "name": "Grace Hopper", "email": "grace@example.com" } },
+  {
+    "model": "post",
+    "fields": {
+      "id": 1,
+      "user_id": 1,
+      "title": "Notes on the engine",
+      "slug": "notes-on-the-engine",
+      "status": "published",
+      "views": 12
+    }
+  },
+  {
+    "model": "post",
+    "fields": {
+      "id": 2,
+      "user_id": 2,
+      "title": "A bug in the relay",
+      "slug": "a-bug-in-the-relay",
+      "status": "draft",
+      "views": 0
+    }
+  }
+]
