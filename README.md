@@ -15,8 +15,8 @@
 
 ## Why
 
-The org name comes from RailsConf 2026. DHH made four claims about a web
-stack. brocanth takes them at their word, in Rust, to see how far they get:
+The org name comes from RailsConf 2026. brocanth takes four positions DHH
+argues for a web stack at their word, in Rust, to see how far they get:
 
 - **HTML over the wire.** The server renders. The client swaps fragments
   (dp-swap, an htmx-shaped script).
