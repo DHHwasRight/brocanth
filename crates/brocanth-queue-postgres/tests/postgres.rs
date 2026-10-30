@@ -235,6 +235,34 @@ async fn the_outbox_refuses_work_it_cannot_deliver() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_postgres_outbox_conforms() {
+    use brocanth_queue::TxEnqueue;
+
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    // The suite reads the whole outbox, not one queue, so it needs both
+    // tables to itself. The serial lock is what makes clearing them safe.
+    for sql in ["DELETE FROM queue_outbox", "DELETE FROM queue_outbox_dead"] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let store = Arc::new(PgOutbox::new(pool.clone()));
+    brocanth_queue_conformance::assert_outbox_conformant("postgres", store, |jobs| {
+        let pool = pool.clone();
+        async move {
+            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+            for j in jobs {
+                Tx::new(&mut tx)
+                    .enqueue_in_tx(Lane::Bulk, j)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_long_delay_waits_in_the_scheduled_table_and_is_promoted() {
     let _serial = SERIAL.lock().await;
     let pool = db!();

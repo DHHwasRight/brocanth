@@ -190,6 +190,40 @@ CREATE INDEX IF NOT EXISTS queue_outbox_ready
     ON queue_outbox (available_at)
     WITH (fillfactor = 70);
 
+-- The outbox's own dead letter. A row lands here when the backend rejects
+-- it for good, or when it fails `RelayConfig::max_attempts` times while the
+-- rows beside it go through. Without it, one row the backend will never
+-- accept holds back its batch and then the table.
+--
+-- It is not `queue_dead`. A row here never reached the backend, so a
+-- requeue puts it back in `queue_outbox` and the relay delivers it again.
+-- It keeps every column the relay needs to rebuild the job: `run_at` and
+-- `uniqueness` too, which `queue_dead` does not have.
+--
+-- `outbox_id` is the id the row had in `queue_outbox`, which is what a
+-- relay's log line names. The primary key is the dead letter's own.
+--
+-- Small and read by a person, so no storage parameters. A new table needs
+-- no line in section 8: `CREATE TABLE IF NOT EXISTS` reaches an existing
+-- database as well as a new one.
+CREATE TABLE IF NOT EXISTS queue_outbox_dead (
+    id            bigserial PRIMARY KEY,
+    outbox_id     bigint      NOT NULL,
+    kind          text        NOT NULL,
+    queue         text        NOT NULL,
+    payload       bytea       NOT NULL,
+    run_at        timestamptz,
+    max_attempts  integer     NOT NULL,
+    unique_key    text,
+    uniqueness    text        NOT NULL DEFAULT 'none',
+    attempts      integer     NOT NULL,
+    failure       text        NOT NULL,
+    enqueued_at   timestamptz NOT NULL,
+    died_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS queue_outbox_dead_recent ON queue_outbox_dead (died_at DESC);
+
 -- ---------------------------------------------------------------------------
 -- 5. Deduplication windows that outlive their row.
 -- ---------------------------------------------------------------------------

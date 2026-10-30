@@ -3,7 +3,8 @@
 `DESIGN.md` Part 3 left four decisions open. This file settles them, records
 what the argument was on each side, and lists the four defects the argument
 uncovered — which mattered more than the decisions did. Part 3 covers the
-read side, which `DESIGN.md` never described at all.
+read side, which `DESIGN.md` never described at all. Part 4 gives the
+outbox a dead letter, which Part 5 used to list as open.
 
 Everything here is implemented. The test named beside each item is the one
 that fails if it is undone.
@@ -304,14 +305,92 @@ one somebody reaches for during the incident the history exists for.
 
 ---
 
-## Part 4 — What is still open
+## Part 4 — The outbox dead letter
+
+`tick` deferred the whole batch on any error and never capped attempts. So
+one row the backend will never accept — a payload over an SQS limit — held
+back the 500 rows batched with it on every tick, and then the table. The
+outbox had no way out for a row and no budget for one.
+
+### 4.1 Each row has its own outcome
+
+A batch the backend refuses is split, and the relay pushes each row alone.
+`push` returns one error for the whole batch, and the error does not say
+which row caused it. A push per row finds out, and lets every other row
+through. Rows the batch already wrote are written again; at-least-once
+allows that. The split costs one round trip per row, once, on the tick
+that meets the bad row.
+
+| The backend answers | The relay |
+| --- | --- |
+| accepted, or a duplicate | deletes the row |
+| `Rejected` | buries the row at once |
+| `Other` | defers the row on its own backoff, buries it at `max_attempts` |
+| `Unavailable` | releases the row and every row after it |
+
+`BackendError::Rejected` already meant "retrying the same call cannot
+help", so the distinction needed no new variant. A row that gets it does
+not wait for the cap.
+
+### 4.2 An outage spends no attempt
+
+The fetch spends an attempt on each row, as the claim does for a job. A
+relay that dies holding a row has then still spent it, so a row that
+crashes the relay cannot loop for ever: the next tick finds it past the cap
+and buries it unpushed.
+
+`Unavailable` is not the row's fault. `Outbox::release` gives the attempt
+back, which is what `Settle::Release` does for a job. Without it an hour of
+downtime moves the whole outbox into its dead letter, and the cap would
+measure the outage instead of the row.
+
+Only an outage slows the relay. A row that fails on its own waits on its
+own backoff, so the next tick runs at once for everything else.
+
+`max_attempts` defaults to 25: about ten minutes on the default backoff.
+
+### 4.3 Its own table, not `queue_dead`
+
+`queue_outbox_dead` is a second dead letter, and `OutboxInspect` reads it
+with the four calls `Inspect` has for jobs — `dead`, `dead_one`, `requeue`,
+`forget` — over the same `DeadRow`.
+
+| Reuse `queue_dead` | Its own table |
+| --- | --- |
+| One screen, one table | A row here never reached the backend. A requeue must put it back in the outbox, not on a queue the backend may not even own |
+| | `queue_dead` cannot rebuild the job: it has no `run_at` and no `uniqueness` |
+| | `queue_dead` already mixes two lanes (Part 5); a third source makes it worse |
+
+**Its own table.** The requeue is one CTE, where the job requeue is two
+statements. The job requeue can meet a live unique key and must then keep
+the corpse; `queue_outbox` has no unique index, so its insert always
+writes.
+
+`OutboxInspect` is a separate trait from `Outbox` so a panel can hold
+`Arc<dyn DynOutboxInspect>`, as it holds `DynInspect`. Unlike `Inspect`,
+every outbox store can serve it, because the outbox is always a table the
+application owns.
+
+The memory crate now has `MemoryOutbox`, so the outbox suite in
+`brocanth-queue-conformance` runs against both stores.
+
+> `one poisoned row does not block its batch`,
+> `a row that keeps failing reaches the dead letter at the cap`,
+> `an outage spends no attempt`,
+> `a row that is never settled is not fetched for ever`,
+> `a dead row can be requeued` — the outbox suite, on memory and Postgres.
+
+---
+
+## Part 5 — What is still open
 
 - **Where the relay lives when no worker runs.** See §2.2.
-- **The outbox has no dead letter.** `tick` defers the whole batch on any
-  error and never caps attempts, so one permanently rejected row — a payload
-  over an SQS limit, say — blocks the 500 rows batched with it, and then the
-  table. The relay needs per-row attempt counting and somewhere to put a row
-  that will never be accepted.
+- **A backend cannot reject one row of a batch.** `Pushed` has no
+  per-row failure, so the relay splits a refused batch to find the bad row
+  (§4.1). SQS `SendMessageBatch` answers per entry. An SQS adapter wants
+  `Pushed::Rejected`, and then the split is only the fallback.
+- **The outbox dead letter has no screen.** `DynOutboxInspect` exists;
+  `brocanth-jobs` does not mount it yet.
 - **`max_claim_batch = 64` is still a guess**, now a defensible one. The
   measurement that would settle it is p99 claim latency and WAL bytes per
   claimed row against batch size and concurrent claimers. A pgbench script
@@ -361,3 +440,22 @@ conformance: postgres  — 19 passed, 0 failed, 2 skipped   (queue_tx)
 
 The two skips are the payload-limit and delay-ceiling cases. Postgres
 declares neither limit, so the cases gate off rather than passing silently.
+
+After Part 4:
+
+```
+cargo test -p brocanth-queue -p brocanth-queue-memory \
+           -p brocanth-queue-postgres -p brocanth-queue-conformance
+                                            60 passed, 0 failed
+cargo clippy --all-targets                  clean under -D warnings
+cargo fmt --check, the four queue crates    clean
+
+PostgreSQL 15, BROCANTH_QUEUE_REQUIRE_POSTGRES=1
+  cargo test -p brocanth-queue-postgres     16 passed, 0 failed
+
+outbox: memory    — 5 passed, 0 failed
+outbox: postgres  — 5 passed, 0 failed
+```
+
+A mutation check: with the refund taken out of `PgOutbox::release`, `an
+outage spends no attempt` fails on Postgres.

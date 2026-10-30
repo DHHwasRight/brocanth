@@ -11,6 +11,9 @@
 #![forbid(unsafe_code)]
 
 mod inspect;
+mod outbox;
+
+pub use outbox::MemoryOutbox;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;

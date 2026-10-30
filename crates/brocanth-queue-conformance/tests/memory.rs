@@ -24,6 +24,19 @@ async fn the_same_store_conforms_with_a_managed_queue_s_limits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_reference_outbox_conforms() {
+    let store = Arc::new(brocanth_queue_memory::MemoryOutbox::new());
+    let writer = Arc::clone(&store);
+    brocanth_queue_conformance::assert_outbox_conformant("memory", store, |jobs| {
+        for j in jobs {
+            writer.write(j);
+        }
+        async { Ok(()) }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn every_case_runs_under_one_capability_set_or_the_other() {
     // A gated case that no backend ever runs is a case that proves nothing.
     // Between an unbounded store and one declaring a managed queue's limits,
