@@ -8,6 +8,7 @@
 pub mod add;
 pub mod create;
 pub mod delegate;
+pub mod migrate;
 
 /// What every command returns.
 pub type Outcome = Result<std::process::ExitCode, Vec<crate::ui::Diagnostic>>;

@@ -148,6 +148,31 @@ pub use validation::{enforce, Validate, Validated, Write};
 /// [`enforce`] from it, or validation stops being enforced.
 pub use brocanth_model_derive::validates;
 
+/// Remove the stable ids from a model before SeaORM sees them.
+///
+/// `brocanth migrate` identifies a table and a column by an id written in the
+/// source text, so that a rename is a rename and not a drop plus an add
+/// (PLAN.md §11). The compiler must not see those attributes, so this one
+/// takes them off. Put it **above** `#[sea_orm::model]`. [`validates`] does
+/// the same, so a model with validations needs no second attribute.
+///
+/// ```ignore
+/// #[brocanth_model::ids]
+/// #[sea_orm::model]
+/// #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+/// #[sea_orm(table_name = "post")]
+/// #[brocanth(id = "01JBQ7R8V4K2M9X3T6N5P0WZ1A")]
+/// pub struct Model {
+///     #[brocanth(id = "01JBQ7R8V4K2M9X3T6N5P0WZ1B")]
+///     #[sea_orm(primary_key)]
+///     pub id: i32,
+/// }
+/// ```
+///
+/// `brocanth migrate ids` writes the ids and this attribute. Do not write an
+/// id by hand, and do not copy one: an id that occurs two times is refused.
+pub use brocanth_model_derive::ids;
+
 #[doc(hidden)]
 pub use async_trait::async_trait;
 

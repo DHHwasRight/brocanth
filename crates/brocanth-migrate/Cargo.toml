@@ -1,0 +1,28 @@
+[package]
+name = "brocanth-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Stable field ids, a schema snapshot and a rename-aware migration diff for brocanth models."
+
+# No SeaORM here. This crate reads model source as text, compares two
+# snapshots and writes Rust source for a migration. The CLI links it, and the
+# CLI must not link an ORM and a SQL driver to write a file.
+[dependencies]
+# `span-locations`, so a missing id is reported as `file:line:col` and so the
+# id stamper knows which line to write above.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "parsing", "printing"] }
+
+[dev-dependencies]
+# The generated migrations are compiled and run against an in-memory SQLite
+# database by `tests/migrations.rs`. A golden file that only compares text
+# can be wrong in the same way twice.
+brocanth-model = { path = "../brocanth-model", default-features = false, features = ["sqlite"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+missing_docs = "warn"

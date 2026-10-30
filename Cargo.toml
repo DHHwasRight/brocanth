@@ -16,6 +16,7 @@ members = [
     "crates/brocanth-jobs",
     "crates/brocanth-mail",
     "crates/brocanth-middleware",
+    "crates/brocanth-migrate",
     "crates/brocanth-model",
     "crates/brocanth-openapi",
     "crates/brocanth-policy",
@@ -76,6 +77,7 @@ brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
 brocanth-test = { path = "crates/brocanth-test", version = "0.1.0" }
 brocanth-mail = { path = "crates/brocanth-mail", version = "0.1.0" }
 brocanth-middleware = { path = "crates/brocanth-middleware", version = "0.1.0" }
+brocanth-migrate = { path = "crates/brocanth-migrate", version = "0.1.0" }
 brocanth-input = { path = "crates/brocanth-input", version = "0.1.0" }
 brocanth-client = { path = "crates/brocanth-client", version = "0.1.0" }
 
