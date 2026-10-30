@@ -166,3 +166,61 @@ A console has two uses, and each one has an honest tool:
   `src/commands/<name>.rs`, run as `brocanth <name>`. The compiler checks it
   against the project, and it is a file, so you can review it and run it
   again.
+
+## 3. `brocanth check --deploy` (Django D23)
+
+```text
+brocanth check                         # the checks for every environment
+brocanth check --deploy                # plus the production checks, on `production`
+brocanth check --deploy --env staging  # another environment
+brocanth check --deploy --allow deploy/hsts --strict
+```
+
+It reads `brocanth.toml`, loads the configuration of one environment through
+the application's own loader, and reads `src/` as text. It builds nothing and
+connects to nothing, so it runs in CI. Each finding has an id, a message, a
+location when there is one, and a `help:` line:
+
+```text
+error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also travels over plain HTTP
+ --> config/production.toml:4
+  = help: set `secure = true` under `[auth]` in config/production.toml, or $SHOP_AUTH__SECURE=true
+```
+
+| Id | Severity | When |
+|---|---|---|
+| `check/dialect` | error | `[policy] dialect` is not the database of `[model] url` (every environment) |
+| `deploy/env` | warning | `--deploy` reads `development` or `test` |
+| `deploy/no-config` | warning | no file and no variable configures the environment |
+| `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |
+| `deploy/cookie-prefix` | warning | `[auth] cookie_name` has no `__Host-` prefix |
+| `deploy/signing-key` | error | the variable that `[auth] signing_key_env` names is unset, or shorter than 32 bytes |
+| `deploy/default-secret` | error | `[storage] secret` is the scaffold's development string, or shorter than 32 characters |
+| `deploy/secret-in-file` | warning | a key named like a secret has its value in a file (the value is never printed) |
+| `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
+| `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
+| `deploy/database` | error | `[model]`, `[cache]` or `[jobs] url` is in memory or under a temporary directory |
+| `deploy/csrf-off` | error | the project has `sessions` or `auth`, and no `Csrf` hook is registered |
+| `deploy/hooks-not-run` | error | a hook is registered, and nothing in `src/` serves through `brocanth_server::serve` or `Bridge` |
+| `deploy/hsts` | warning | nothing in `src/` sets `Strict-Transport-Security` |
+| `deploy/admin-unscoped` | error | `src/` calls `unscoped_rows_unsafe_for_development()` |
+
+The exit code is 1 when an error remains. `--strict` makes a warning fail
+too. `--allow <ID>` silences one finding, like Django's
+`SILENCED_SYSTEM_CHECKS`. It is on the command line, where a reviewer sees
+it.
+
+Limits:
+
+- **The source checks read text, not types.** A line comment is not code.
+  Every other line that contains the name is. If this scan cannot see a
+  registration, it reports it as absent. Look at the code, then use
+  `--allow`.
+- **A scaffolded project fails `deploy/csrf-off` today.** That is correct:
+  the scaffold writes the CSRF registration as a comment, and that comment
+  says the two changes that make it live.
+- **brocanth has no security-headers hook.** `deploy/hsts` says so. Set the
+  header at the TLS terminator and allow the finding, or write a
+  `ResponseHook`.
+- **It does not stop the application.** A plugin's `configure` can already
+  refuse to start. This command is the earlier, offline half.

@@ -6,6 +6,7 @@
 //! layer.
 
 pub mod add;
+pub mod check;
 pub mod create;
 pub mod dbshell;
 pub mod delegate;

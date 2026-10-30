@@ -1,6 +1,6 @@
 //! `brocanth` -- the command line over the framework.
 //!
-//! Six commands, one output layer. The layer is the interesting part and lives
+//! Every command, one output layer. The layer is the interesting part and lives
 //! in [`ui`]: whether a person is watching is decided once, in
 //! [`ui::Face::decide`], and every byte any command writes goes through a
 //! [`ui::Ui`] carrying that answer. No command calls `println!`, checks
@@ -105,6 +105,13 @@ enum Command {
     /// no interpreter, so code runs as a project command instead.
     #[command(alias = "dbconsole")]
     Dbshell(commands::dbshell::DbshellArgs),
+    /// Find what is wrong with the configuration and the source, before a deploy
+    ///
+    /// Reads brocanth.toml, the configuration of one environment and src/
+    /// as text. Builds nothing and connects to nothing. --deploy adds the
+    /// production checks. Each finding has an id, a location and a help
+    /// line; the exit code is 1 when an error remains.
+    Check(commands::check::CheckArgs),
     /// A command defined in this project, run by the project's own binary
     ///
     /// Everything this tool does not recognise is one. `brocanth` is
@@ -208,6 +215,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::dbshell::DbshellArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("check", m)) => commands::check::run(
+            &ui,
+            dir,
+            commands::check::CheckArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         // Everything else belongs to the project: the ones listed in the help
         // and the ones added since it was last built take the same path.
