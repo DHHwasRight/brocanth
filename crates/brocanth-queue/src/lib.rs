@@ -74,7 +74,8 @@ pub use inspect::{
 };
 pub use job::{Backoff, FailureKind, Job, JobContext, JobExt, JobFailure, JobId, Lane, Uniqueness};
 pub use outbox::{
-    OnOutboxFull, Outbox, OutboxError, OutboxRow, Relay, RelayConfig, Tick, DEFAULT_MAX_PENDING,
+    DynOutboxInspect, OnOutboxFull, Outbox, OutboxError, OutboxInspect, OutboxRow, Relay,
+    RelayConfig, Tick, DEFAULT_MAX_PENDING,
 };
 pub use registry::{Demands, DuplicateKind, Registry, Unmet};
 pub use worker::{

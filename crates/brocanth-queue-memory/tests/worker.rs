@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use brocanth_queue::{
     Backend, BackendError, Backoff, Capabilities, ClaimRequest, Claimed, Client, DynBackend, Job,
-    JobContext, LeaseRef, LeaseState, NewJob, Outbox, OutboxError, OutboxRow, Pushed, Registry,
-    Relay, RelayConfig, Settle, UniquenessKind, Worker, WorkerConfig,
+    JobContext, LeaseRef, LeaseState, NewJob, Outbox, Pushed, Registry, Relay, RelayConfig, Settle,
+    UniquenessKind, Worker, WorkerConfig,
 };
-use brocanth_queue_memory::Memory;
+use brocanth_queue_memory::{Memory, MemoryOutbox};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -342,35 +342,6 @@ impl Job for Relayed {
     }
 }
 
-/// A list of undelivered rows, standing in for the outbox table.
-#[derive(Default)]
-struct TestOutbox {
-    rows: std::sync::Mutex<Vec<OutboxRow>>,
-}
-
-impl Outbox for TestOutbox {
-    async fn fetch(&self, limit: usize, _l: Duration) -> Result<Vec<OutboxRow>, OutboxError> {
-        Ok(self
-            .rows
-            .lock()
-            .unwrap()
-            .iter()
-            .take(limit)
-            .cloned()
-            .collect())
-    }
-    async fn delete(&self, ids: &[String]) -> Result<(), OutboxError> {
-        self.rows.lock().unwrap().retain(|r| !ids.contains(&r.id));
-        Ok(())
-    }
-    async fn defer(&self, _i: &[String], _n: Duration, _e: &str) -> Result<(), OutboxError> {
-        Ok(())
-    }
-    async fn pending(&self) -> Result<u64, OutboxError> {
-        Ok(self.rows.lock().unwrap().len() as u64)
-    }
-}
-
 /// The relay is what moves a bulk job out of the caller's database after the
 /// transaction that wrote it commits. It was reachable as a type and started
 /// by nothing, so a process that enqueued in a transaction wrote rows no
@@ -382,19 +353,15 @@ async fn a_worker_relay_delivers_what_a_transaction_left_behind() {
     let mut registry = Registry::new();
     registry.register::<Relayed>();
 
-    let outbox = Arc::new(TestOutbox::default());
-    outbox.rows.lock().unwrap().push(OutboxRow {
-        id: "r1".into(),
-        job: NewJob {
-            kind: Relayed::KIND.into(),
-            queue: "q".into(),
-            payload: b"null".to_vec(),
-            run_at: None,
-            max_attempts: 3,
-            unique_key: None,
-            uniqueness: UniquenessKind::None,
-        },
-        attempts: 0,
+    let outbox = Arc::new(MemoryOutbox::new());
+    outbox.write(NewJob {
+        kind: Relayed::KIND.into(),
+        queue: "q".into(),
+        payload: b"null".to_vec(),
+        run_at: None,
+        max_attempts: 3,
+        unique_key: None,
+        uniqueness: UniquenessKind::None,
     });
 
     let relay = Relay::new(outbox.clone(), backend.clone(), RelayConfig::default());
@@ -408,10 +375,15 @@ async fn a_worker_relay_delivers_what_a_transaction_left_behind() {
         RELAYED.load(Ordering::SeqCst) >= 1
     })
     .await;
-    until("the outbox emptied", || {
-        outbox.rows.lock().unwrap().is_empty()
-    })
-    .await;
+    let mut emptied = false;
+    for _ in 0..200 {
+        if outbox.pending().await.unwrap() == 0 {
+            emptied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(emptied, "the outbox did not empty");
 
     tx.send(true).unwrap();
     handle.await.unwrap();

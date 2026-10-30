@@ -17,11 +17,16 @@
 //! report.assert_ok();
 //! # }
 //! ```
+//!
+//! The outbox has its own suite, [`run_outbox`]. It holds an outbox store
+//! to the relay's contract: a row the backend will not take must not block
+//! the rows beside it, and must end in a dead letter a person can requeue.
 
 #![forbid(unsafe_code)]
 
 mod adversary;
 mod cases;
+mod outbox;
 
 use std::fmt;
 use std::sync::Arc;
@@ -30,6 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use brocanth_queue::{Capabilities, DynBackend};
 
 pub use adversary::Adversary;
+pub use outbox::{assert_outbox_conformant, run_outbox};
 
 /// How one case ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
