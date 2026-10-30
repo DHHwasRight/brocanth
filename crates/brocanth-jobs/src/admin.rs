@@ -54,6 +54,13 @@
 //! [`Action::ActOnPanel`](brocanth_admin::policy::Action::ActOnPanel)
 //! before this code runs, and a reader who may see the tab but not press
 //! its buttons gets the tables with the last column missing.
+//!
+//! Each form also carries `dp-post`, with `dp-target="closest tr"` and
+//! `dp-swap="delete"`. With dp-swap on the page, a button posts in the
+//! background and its row leaves the table; the page does not reload. The
+//! answer is still the 303 below, which the script does not follow for a
+//! `delete` swap. With no script, the form posts and the redirect reloads
+//! the screen, as before.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

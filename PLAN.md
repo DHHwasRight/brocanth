@@ -131,6 +131,10 @@ matters:
    falls straight out of the route table plus layout nesting and is the
    cleanest thing in the design.
 
+Status: all four are built. See G2 in `docs/framework-gaps.md`: the
+client is `brocanth_middleware::dp::SCRIPT`, the headers `dp::Directive`,
+the fragments `dp::Oob`, the 422 `brocanth_input::rerender`.
+
 **Not** a LiveView-style stateful process per connection: process memory times
 concurrent users, sticky sessions, and a round trip per keystroke at 150 ms
 RTT. We are not buying it.

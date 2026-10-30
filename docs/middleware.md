@@ -122,6 +122,6 @@ generator, and neither is in this crate:
    included. `brocanth_server::Bridge` is the piece that runs it.
 
 Both were found by generating a project, serving it and posting to it, not
-by reading. The dp-swap gap G2 is still real and still separate: it is
-about a client sending the token on a mutating request, and the server-side
-check does not wait on it.
+by reading. The dp-swap gap G2 is closed: `dp::SCRIPT` sends the token in
+the `x-csrf-token` header this hook reads, from `CsrfToken::meta_tag`. See
+`src/dp.rs`.

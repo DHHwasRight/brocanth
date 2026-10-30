@@ -47,11 +47,19 @@ pub fn Dead(ctx: &DeadCtx) -> Element {
                             <td class={parts::td_muted()}>{&row.failed}</td>
                             if ctx.can_act {
                                 <td class="text-right px-3.5 py-2.5 border-b border-line align-top whitespace-nowrap">
-                                    <form class="inline m-0" method="post" action={&row.retry_href}>
+                                    // `dp-post` with no value posts to the form's
+                                    // action, so the form still works with
+                                    // no script. The answer is a redirect,
+                                    // which dp-mutate does not follow for a
+                                    // `delete` swap: the row leaving the
+                                    // table is the whole answer.
+                                    <form class="inline m-0" method="post" action={&row.retry_href}
+                                          dp-post dp-target="closest tr" dp-swap="delete">
                                         <button class={parts::row_button()} type="submit">Retry</button>
                                     </form>
                                     <span class="text-ink-faint"> · </span>
-                                    <form class="inline m-0" method="post" action={&row.delete_href}>
+                                    <form class="inline m-0" method="post" action={&row.delete_href}
+                                          dp-post dp-target="closest tr" dp-swap="delete">
                                         <button class={parts::row_button_danger()} type="submit">Delete</button>
                                     </form>
                                 </td>

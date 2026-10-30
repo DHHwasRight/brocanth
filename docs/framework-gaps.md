@@ -457,7 +457,7 @@ because the argument is still why each one matters.
 | | Gap | State |
 |---|---|---|
 | G1 | the response body cannot stream | **done**: `Body::{Buffered,Streaming}`, `ResponseHook` split into `on_headers` and `on_body`, `StreamGate` in the shutdown |
-| G2 | dp-swap has no mutating verb | open, and now the single biggest blocker |
+| G2 | dp-swap has no mutating verb | **done**: `dp-post`/`put`/`patch`/`delete` in `brocanth_middleware::dp::SCRIPT`, typed `DP-*` response headers, `Oob`, `DpSwap` (`Vary`), `CsrfToken::meta_tag`, `brocanth_input::rerender` for the 422. The jobs panel's buttons use it |
 | G3 | capability crates are not reachable | **mostly done**: thirteen modules are on the menu. `admin` and `admin-model` are not, and are blocked on the same slot `resource` is |
 | G4 | the model layer publishes to nobody | open |
 | G4b | slots declared and never read; `Ctx` has no extractor | **partly**: `GitIgnore`, `AgentsSections`, `PagesItems` and the new `CommandsMod` are read now, and `Dep::feature` is finally written into the manifest. `MiseTasks` is read now too, so three remain: `CargoExtra`, `AppItems`, `AppBeforeRouter`. `Ctx` carries the request **and the plugin context** now, read with `Ctx::provided`; `mount_routes` is still untouched. See `docs/modules.md` §6 and §7 |
@@ -527,6 +527,28 @@ out of the route table and the layout chain and is described there as the
 cleanest thing in the design.
 
 **Depends on:** nothing, though out-of-band emission over SSE wants G1.
+
+**Status: done.** The client is `crates/brocanth-middleware/assets/dpmutate.js`,
+exported as `brocanth_middleware::dp::SCRIPT`. It runs beside dp-swap and
+uses dp-swap's own swap, out-of-band and settle functions. The server half:
+
+| §5 item | Where |
+|---|---|
+| 1. form serialisation, CSRF | the script sends the form urlencoded (multipart with a file) and the token in `x-csrf-token`, from `CsrfToken::meta_tag` or the cookie. `Csrf` already read that header |
+| 1. 422 re-render | `brocanth_input::rerender(&faults, form)` and `FieldErrors`. The script swaps a 422 like a 2xx |
+| 2. response headers | `dp::Directive`: `Redirect`, `Refresh`, or `Swap` with retarget, reswap and trigger. One enum, so a redirect cannot carry a retarget |
+| 3. out-of-band | `dp::Oob`, which dp-swap already applied by `dp-swap-oob` |
+| 4. `DP-Partial` | `html!` already rendered it; `DpSwap` adds `Vary: DP-Request, DP-Partial` and puts `DpRequest` on the request state |
+
+Tested through `TestClient` in `crates/brocanth-middleware/tests/dp.rs`.
+The jobs panel's row buttons are the first consumer.
+
+**Still open.** The admin's layout loads dp-swap and not the script, so
+the admin's own delete still reloads; the jobs panel inlines it in its tab
+strip. The script has no JS test harness: the repository has none, and it
+is checked by `node --check` and the HTML-level tests. The generated
+project's `holding()` still parses `DP-Partial` itself instead of calling
+`dp::partial_depth`.
 
 ### G3. Nine capability crates are not reachable
 

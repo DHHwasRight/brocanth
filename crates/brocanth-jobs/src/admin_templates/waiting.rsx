@@ -44,14 +44,17 @@ pub fn Waiting(ctx: &WaitingCtx) -> Element {
                                 <td class="text-right px-3.5 py-2.5 border-b border-line align-top whitespace-nowrap">
                                     // Forms and not links, because both of
                                     // these change something and a crawler
-                                    // must not be able to fire them. No
-                                    // `dp-` either: dp-swap leaves mutating
-                                    // verbs to the server.
-                                    <form class="inline m-0" method="post" action={&row.run_href}>
+                                    // must not be able to fire them. With
+                                    // `dp-post` the row goes and the page
+                                    // stays; with no script, the form
+                                    // posts and the page reloads.
+                                    <form class="inline m-0" method="post" action={&row.run_href}
+                                          dp-post dp-target="closest tr" dp-swap="delete">
                                         <button class={parts::row_button()} type="submit">Run now</button>
                                     </form>
                                     <span class="text-ink-faint"> · </span>
-                                    <form class="inline m-0" method="post" action={&row.delete_href}>
+                                    <form class="inline m-0" method="post" action={&row.delete_href}
+                                          dp-post dp-target="closest tr" dp-swap="delete">
                                         <button class={parts::row_button_danger()} type="submit">Delete</button>
                                     </form>
                                 </td>

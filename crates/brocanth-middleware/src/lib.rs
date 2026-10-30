@@ -15,6 +15,11 @@
 //! | [`Cors`] | `CORS` | a browser on another origin |
 //! | [`Csrf`] | `gorilla/csrf` | a form post this application handed out |
 //!
+//! And one that is not Gorilla's: [`DpSwap`], with the rest of [`dp`], is
+//! the server half of dp-swap's mutating verbs. It reads the `DP-*`
+//! request headers, sets `Vary`, and gives a handler typed response
+//! headers and out-of-band fragments.
+//!
 //! # The one that is on by default
 //!
 //! Five of the six encode a fact about somebody else's network: which
@@ -61,6 +66,7 @@ mod canonical_host;
 mod content_types;
 mod cors;
 mod csrf;
+pub mod dp;
 mod method_override;
 mod proxy_headers;
 
@@ -71,6 +77,7 @@ pub use canonical_host::{CanonicalHost, CanonicalHostConfig};
 pub use content_types::{ContentTypes, ContentTypesConfig};
 pub use cors::{Cors, CorsConfig, Origins};
 pub use csrf::{Csrf, CsrfConfig, CsrfToken};
+pub use dp::{Directive, DpRequest, DpSwap, Oob};
 pub use method_override::{MethodOverride, MethodOverrideConfig};
 pub use proxy_headers::{ClientInfo, ProxyHeaders, ProxyHeadersConfig};
 

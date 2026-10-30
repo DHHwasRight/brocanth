@@ -192,6 +192,40 @@ async fn a_button_changes_the_queue_and_redirects() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_button_is_a_dp_post_that_removes_its_row() {
+    let (queue, _dir) = sqlite_queue().await;
+    let t = token("panel-dp-post");
+    let id = queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_(Duration::from_secs(3600))
+        .await
+        .expect("scheduled")
+        .id();
+
+    let html = get(&admin(&queue, true), "/admin/jobs/scheduled");
+    // The form keeps its `action`, so it posts with no script; `dp-post`
+    // with no value posts to that same action.
+    let run = format!(r#"action="/admin/jobs/scheduled/{}/run""#, id.0);
+    let at = html.find(&run).unwrap_or_else(|| panic!("{run} in {html}"));
+    let form = &html[at..at + html[at..].find('>').expect("the tag closes")];
+    assert!(form.contains("dp-post"), "{form}");
+    assert!(form.contains(r#"dp-target="closest tr""#), "{form}");
+    assert!(form.contains(r#"dp-swap="delete""#), "{form}");
+    assert!(html.contains("dpmutate"), "the script is on the page");
+
+    // And a reader who may not act gets neither the forms nor a reason to
+    // fetch anything.
+    let readonly = get(&admin(&queue, false), "/admin/jobs/scheduled");
+    assert!(
+        !readonly.contains(r#"dp-target="closest tr""#),
+        "{readonly}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reader_who_may_not_act_is_not_shown_the_buttons() {
     // The whole reason reading and acting are two policy questions. An
     // on-call engineer who may look at the dead letter must not be one
@@ -377,6 +411,14 @@ async fn the_same_screens_render_over_another_queue_entirely() {
     let dead = get(&a, "/admin/jobs/dead");
     assert!(dead.contains("charge_card"), "{dead}");
     assert!(dead.contains("the card was declined"), "{dead}");
+    // The retry button posts in the background and takes its row away,
+    // and still posts as a plain form to the same place with no script.
+    assert!(
+        dead.contains(r#"dp-post dp-target="closest tr" dp-swap="delete""#),
+        "{dead}"
+    );
+    assert!(dead.contains("/admin/jobs/dead/"), "{dead}");
+    assert!(dead.contains("dpmutate"), "the script is on the page");
 
     // And a button, which is where the id types matter: this queue numbers
     // its dead letter for itself, and the panel passes the id straight
