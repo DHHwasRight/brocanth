@@ -2132,7 +2132,7 @@ fn main_with_commands_rs(a: &Answers) -> String {
 //! the router read the same thing.
 
 mod app;{assets}
-mod commands;
+mod commands;{migrations}
 mod pages;
 {plugins}
 fn main() -> brocanth_command::anyhow::Result<()> {{
@@ -2146,6 +2146,13 @@ fn main() -> brocanth_command::anyhow::Result<()> {{
             ""
         },
         plugins = "mod plugins;\n",
+        // Outside `src/`, where `brocanth migrate make` writes, so the path
+        // is spelled. Only with a command line: `migrate` is what reads it.
+        migrations = if a.has("model") {
+            "\n#[path = \"../migrations/mod.rs\"]\nmod migrations;"
+        } else {
+            ""
+        },
     )
 }
 

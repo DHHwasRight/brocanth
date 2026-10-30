@@ -48,12 +48,37 @@ pub struct Model {
 | Command | Reads | Writes |
 |---|---|---|
 | `brocanth migrate ids` | `src/models/**/*.rs` | the same files, one new line per missing id |
-| `brocanth migrate make <name>` | `src/models/**/*.rs`, `migrations/schema.json` | `migrations/m<UTC>_<name>.rs`, `migrations/schema.json` |
+| `brocanth migrate make <name>` | `src/models/**/*.rs`, `migrations/schema.json` | `migrations/m<UTC>_<name>.rs`, `migrations/schema.json`, `migrations/mod.rs` |
 | `brocanth migrate make <name> --snapshot-only` | the same | `migrations/schema.json` only |
+| `brocanth migrate up` | `migrations/`, `[model] url` | the database: each pending migration, oldest first |
+| `brocanth migrate down [N]` | the same | the database: the newest N applied migrations are rolled back (default 1) |
+| `brocanth migrate status` | the same | nothing; prints `applied` or `pending` per migration |
 
 `make` applies nothing. The generator proposes and the developer commits.
 Use `--snapshot-only` one time in a project whose tables a hand-written
 migration already made.
+
+### The list and the apply
+
+`migrations/mod.rs` holds the `Migrator`: one `mod` line and one
+`Box::new(<name>::Migration)` per file in `migrations/`, sorted by name. A
+name starts with its UTC time, so that order is the order of writing.
+`make`, `up`, `down` and `status` rewrite the list from the directory, so a
+migration written by hand is listed too. The file carries a digest, like the
+files `brocanth add` owns. When you edit it, the commands do not rewrite it:
+they name the files it does not list.
+
+`up`, `down` and `status` run `migrate` in the project's own binary, the way
+every project command runs: the migrations are compiled into that binary.
+The scaffold writes that command as `src/commands/migrate.rs` when the
+project has `model` and `commands`. It reads `[model] url` through the
+application's own config loader, so `$<APP>_ENV` and `$<APP>_MODEL__URL`
+work. Where there is no `brocanth` (a container, a release job), run the
+binary: `<binary> migrate up`.
+
+The development URL is a SQLite file, so a generated project turns on the
+`sqlite` feature of `brocanth-model` beside the default `postgres` one. The
+command makes the directory of the SQLite file.
 
 `make` refuses, and writes nothing, when:
 
@@ -90,8 +115,8 @@ The file marks each step that needs a check with `// Check:`. Examples: a
 
 - It does not diff foreign keys, indexes or default values. Write those by
   hand in the generated file.
-- It does not add the migration to a `Migrator`. Add `m<..>::Migration` to
-  yours.
+- `up` without `commands` cannot run: there is no project binary command to
+  hand over to. `brocanth add commands` gives one.
 - SQLite cannot alter a column. An alter step runs on Postgres only.
 - Two fields that swap names in one step make two renames that collide. Make
   that change in two migrations.
@@ -103,4 +128,7 @@ The file marks each step that needs a check with `// Check:`. Examples: a
   migrations and run them up and down on SQLite.
 - `crates/brocanth-model-derive`: `#[ids]`, and the id removal in
   `#[validates]`.
-- `crates/brocanth-cli/src/commands/migrate.rs`: the command.
+- `crates/brocanth-cli/src/commands/migrate.rs`: the command, and the
+  `migrations/mod.rs` list.
+- `crates/brocanth-cli/src/modules/model.rs`: the project's
+  `src/commands/migrate.rs`.

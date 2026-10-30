@@ -14,7 +14,7 @@ default-run = "my-blog"
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["sqlite"] }  # Postgres by default; SQLite for config/development.toml
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -85,6 +85,8 @@ run = "cargo run -- css --watch"
 mod app;
 mod assets;
 mod commands;
+#[path = "../migrations/mod.rs"]
+mod migrations;
 mod pages;
 mod plugins;
 
@@ -92,7 +94,7 @@ fn main() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main(brocanth_command::Context::boot()?)
 }
 
-// brocanth-digest: f49df3f0193e376f
+// brocanth-digest: 3a0eee27e55bc24e
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1904,10 +1906,11 @@ overflow = "drop-oldest"
 
 pub mod api;
 pub mod css;
+pub mod migrate;
 pub mod routes;
 pub mod serve;
 
-// brocanth-digest: b7b48badfdf74b0f
+// brocanth-digest: f23dbd82b2a8f35e
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
 //!
@@ -1959,6 +1962,29 @@ impl Command for Serve {
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
+===== migrations/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth migrate` rewrites this file.
+//! A migration is a file beside this one; `brocanth migrate` lists it here.
+//!
+//! The migrations in this directory, oldest first.
+//!
+//! A file name starts with its UTC time, so the order of the names is the
+//! order the migrations were written. `src/commands/migrate.rs` applies this
+//! list, and `src/main.rs` reaches this file through `#[path]`.
+
+use brocanth_model::sea_orm_migration::prelude::*;
+
+/// Every migration this binary applies, oldest first.
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![]
+    }
+}
+
+// brocanth-digest: 9b046d02d5ac934e
 ===== package.json =====
 {
   "name": "my-blog",
@@ -2141,6 +2167,125 @@ impl Command for Css {
 fn touch(path: &Path) -> anyhow::Result<()> {
     let same = std::fs::read(path)?;
     std::fs::write(path, same)?;
+    Ok(())
+}
+===== src/commands/migrate.rs =====
+//! `migrate` -- apply the migrations in `migrations/` to `[model] url`.
+//!
+//! `brocanth migrate up`, `brocanth migrate down [N]` and
+//! `brocanth migrate status` run this command through this binary. Where
+//! there is no `brocanth` -- a container, a release job -- run the binary
+//! itself: `<binary> migrate up`.
+//!
+//! `brocanth migrate make` writes a migration and lists it in
+//! `migrations/mod.rs`. This command applies what that list holds.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_model::sea_orm::Database;
+use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
+
+use crate::migrations::Migrator;
+
+/// Apply, roll back or list the migrations in migrations/
+#[cmd]
+#[derive(clap::Args)]
+pub struct Migrate {
+    #[command(subcommand)]
+    action: Action,
+}
+
+#[derive(clap::Subcommand)]
+enum Action {
+    /// Apply each pending migration, oldest first
+    Up,
+    /// Roll back the newest N applied migrations
+    Down {
+        /// How many migrations to roll back
+        #[arg(value_name = "N", default_value_t = 1)]
+        n: u32,
+    },
+    /// List each migration as applied or pending
+    Status,
+}
+
+impl Command for Migrate {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        // The config files and a relative SQLite path both resolve from the
+        // project root, wherever the command started.
+        std::env::set_current_dir(ctx.root())?;
+        let url = database_url()?;
+        sqlite_directory(&url)?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let db = Database::connect(url.as_str()).await?;
+            let before = Migrator::get_migration_with_status(&db).await?;
+            let named = |status: MigrationStatus| -> Vec<String> {
+                before
+                    .iter()
+                    .filter(|m| m.status() == status)
+                    .map(|m| m.name().to_string())
+                    .collect()
+            };
+            match self.action {
+                Action::Up => {
+                    let pending = named(MigrationStatus::Pending);
+                    Migrator::up(&db, None).await?;
+                    if pending.is_empty() {
+                        println!("Nothing to apply: each migration is applied.");
+                    }
+                    for name in pending {
+                        println!("applied      {name}");
+                    }
+                }
+                Action::Down { n } => {
+                    let applied = named(MigrationStatus::Applied);
+                    Migrator::down(&db, Some(n)).await?;
+                    if applied.is_empty() {
+                        println!("Nothing to roll back: no migration is applied.");
+                    }
+                    for name in applied.iter().rev().take(n as usize) {
+                        println!("rolled back  {name}");
+                    }
+                }
+                Action::Status => {
+                    if before.is_empty() {
+                        println!("No migration in migrations/.");
+                    }
+                    for m in &before {
+                        let status = match m.status() {
+                            MigrationStatus::Applied => "applied",
+                            MigrationStatus::Pending => "pending",
+                        };
+                        println!("{status:<12} {}", m.name());
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `[model] url`, through the loader the server uses, so the files,
+/// `$<APP>_ENV` and `$<APP>_MODEL__URL` agree with what the server sees.
+fn database_url() -> anyhow::Result<String> {
+    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
+    Ok(config
+        .section::<crate::plugins::model::Settings>("model")?
+        .url)
+}
+
+/// Makes the directory of a SQLite file. `mode=rwc` creates the file, and
+/// not the directory it is in.
+fn sqlite_directory(url: &str) -> anyhow::Result<()> {
+    let Some(rest) = url.strip_prefix("sqlite://") else {
+        return Ok(());
+    };
+    let path = rest.split('?').next().unwrap_or_default();
+    if path.is_empty() || path == ":memory:" {
+        return Ok(());
+    }
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     Ok(())
 }
 ===== src/commands/routes.rs =====
@@ -4918,7 +5063,7 @@ config = ["sessions"]
 crates = []
 
 [modules.model]
-files = ["src/plugins/model/"]
+files = ["migrations/", "src/commands/migrate.rs", "src/plugins/model/"]
 config = ["model"]
 crates = ["brocanth-model"]
 
@@ -5017,4 +5162,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 10f686e74a1ad30b
+# brocanth-digest: 4965e59c9b8e50a1

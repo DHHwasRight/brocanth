@@ -91,7 +91,23 @@ fn instead(path: &str) -> &'static str {
         }
         "brocanth.toml" => "Change the module list with `brocanth add`, not here.",
         "AGENTS.md" => "Notes of your own go in a file of your own, beside this one.",
+        MIGRATOR => "A migration is a file beside this one; `brocanth migrate` lists it here.",
         _ => "Something else belongs here? Put it in `src/app.rs`, which is yours.",
+    }
+}
+
+/// The migration list. Stamped like an owned file, and rewritten by
+/// `brocanth migrate make` and `migrate up`, `down` and `status` rather than
+/// by `brocanth add`: what it lists follows from the files in
+/// `migrations/`, not from the module list. To `add` it is the
+/// developer's, so a module added later never empties it.
+pub const MIGRATOR: &str = "migrations/mod.rs";
+
+/// Which command rewrites a stamped file, for its header.
+fn rewriter(path: &str) -> &'static str {
+    match path {
+        MIGRATOR => "`brocanth migrate`",
+        _ => "`brocanth add`",
     }
 }
 
@@ -103,9 +119,10 @@ pub fn stamp(path: &str, text: &str) -> String {
         _ => (open, "", format!("{open}\n")),
     };
     let head = format!(
-        "{doc} Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.{shut}\n\
+        "{doc} Written by `brocanth`. Do not edit -- {by} rewrites this file.{shut}\n\
          {doc} {instead}{shut}\n\
          {blank}",
+        by = rewriter(path),
         instead = instead(path)
     );
     // The header goes above the file's own prose, and the digest goes at the

@@ -28,6 +28,18 @@ use crate::ui::{Diagnostic, Ui, ACCENT};
 /// The marker that says "a project starts here".
 pub const MARKER: &str = "brocanth.toml";
 
+/// The subcommands `brocanth` defines itself, and their aliases. A project
+/// command with one of these names is not listed in `brocanth --help`.
+const BUILT_IN: &[&str] = &[
+    "create",
+    "new",
+    "add",
+    "migrate",
+    "dbshell",
+    "dbconsole",
+    "check",
+];
+
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {
         Some(dir) => dir.to_path_buf(),
@@ -59,7 +71,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
 
     build(&root)?;
     let binary = binary_path(&root)?;
-    handoff(&binary, &args)
+    // With `-C`, the caller's directory is outside the project, and the
+    // binary finds its root by walking up from where it runs. So it runs in
+    // the root. Without `-C`, the caller is already inside the project, and
+    // a relative path argument keeps meaning what the caller meant.
+    handoff(&binary, &args, dir.map(|_| root.as_path()))
 }
 
 /// The nearest ancestor of `start` holding [`MARKER`].
@@ -89,25 +105,25 @@ pub fn project_root(start: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
 /// its arguments and serves, and handing it `--help` would start a server
 /// and never come back.
 fn has_command_line(root: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(root.join(MARKER)) else {
-        return false;
-    };
-    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-        // Unreadable rather than absent. A project whose marker this tool
-        // cannot parse still gets the old behaviour, which is to try.
-        return true;
-    };
-    match doc
+    // Scaffolded before the marker held the list, or a marker this tool
+    // cannot parse. Before the list existed the marker was only written for
+    // a project that had a command line, so its presence alone is the
+    // answer, and an unreadable one still gets the old behaviour: try.
+    std::fs::read_to_string(root.join(MARKER)).is_ok()
+        && has_module(root, "commands").unwrap_or(true)
+}
+
+/// Whether `brocanth.toml` lists `key` in `[modules] enabled`, or `None`
+/// when the marker is unreadable or has no list.
+pub fn has_module(root: &Path, key: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(root.join(MARKER)).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let listed = doc
         .get("modules")
         .and_then(|m| m.get("enabled"))
-        .and_then(|e| e.as_array())
-    {
-        Some(listed) => listed.iter().any(|v| v.as_str() == Some("commands")),
-        // Scaffolded before the marker held the list. Before that it was
-        // only written for a project that had a command line, so its
-        // presence alone is the answer.
-        None => true,
-    }
+        .and_then(|e| e.as_array())?;
+    let found = listed.iter().any(|v| v.as_str() == Some(key));
+    Some(found)
 }
 
 /// Builds the project, with cargo's own output passed through.
@@ -204,10 +220,14 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
 /// a wrapper that has to decide what to do about it. `exec` only returns on
 /// failure, which is why the error path is after the call.
 #[cfg(unix)]
-fn handoff(binary: &Path, args: &[OsString]) -> Outcome {
+fn handoff(binary: &Path, args: &[OsString], cwd: Option<&Path>) -> Outcome {
     use std::os::unix::process::CommandExt;
 
-    let error = Command::new(binary).args(args).exec();
+    let mut command = Command::new(binary);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let error = command.args(args).exec();
     Err(vec![Diagnostic::error(
         "exec",
         format!("cannot run {}: {error}", binary.display()),
@@ -216,8 +236,12 @@ fn handoff(binary: &Path, args: &[OsString]) -> Outcome {
 
 /// The fallback where `exec` does not exist: run it and copy the exit code.
 #[cfg(not(unix))]
-fn handoff(binary: &Path, args: &[OsString]) -> Outcome {
-    let status = Command::new(binary).args(args).status().map_err(|e| {
+fn handoff(binary: &Path, args: &[OsString], cwd: Option<&Path>) -> Outcome {
+    let mut command = Command::new(binary);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let status = command.args(args).status().map_err(|e| {
         vec![Diagnostic::error(
             "spawn",
             format!("cannot run {}: {e}", binary.display()),
@@ -296,7 +320,10 @@ fn parse_help(help: &str) -> Vec<(String, String)> {
         };
         let name = name.trim();
         // `help` is clap's, not the project's, and `brocanth` has its own.
-        if name.is_empty() || name == "help" {
+        // A built-in name is `brocanth`'s too: the project's `migrate` is
+        // what `brocanth migrate up` hands over to, and a second
+        // subcommand with one name is a clap panic.
+        if name.is_empty() || name == "help" || BUILT_IN.contains(&name) {
             continue;
         }
         out.push((name.to_string(), about.trim().to_string()));
@@ -316,9 +343,10 @@ A brocanth application.
 Usage: blog [OPTIONS] <COMMAND>
 
 Commands:
-  serve  Serve the application over HTTP
-  ping   Answer pong
-  help   Print this message or the help of the given subcommand(s)
+  serve    Serve the application over HTTP
+  ping     Answer pong
+  migrate  Apply, roll back or list the migrations in migrations/
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -336,7 +364,8 @@ Options:
                 ),
                 ("ping".to_string(), "Answer pong".to_string()),
             ],
-            "`help` is clap's own and the options block is not a command list"
+            "`help` and `migrate` are brocanth's own, and the options block is not a \
+             command list"
         );
     }
 

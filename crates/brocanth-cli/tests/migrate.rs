@@ -62,9 +62,14 @@ fn migrations(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("migrations"))
         .map(|d| d.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    files.retain(|p| p.extension().is_some_and(|e| e == "rs"));
+    files.retain(|p| p.extension().is_some_and(|e| e == "rs") && !p.ends_with("mod.rs"));
     files.sort();
     files
+}
+
+/// `migrations/mod.rs`, the list `make` keeps.
+fn migrator(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("migrations/mod.rs")).expect("make writes the list")
 }
 
 #[test]
@@ -124,6 +129,12 @@ fn ids_then_make_then_a_rename_is_a_rename() {
         "the name is the file stem:\n{text}"
     );
     assert!(dir.join("migrations/schema.json").is_file());
+    let list = migrator(&dir);
+    assert!(list.contains(&format!("mod {name};")), "{list}");
+    assert!(
+        list.contains(&format!("Box::new({name}::Migration)")),
+        "{list}"
+    );
 
     let r = run(&dir, &["migrate", "make", "nothing"]);
     assert_eq!(r.code, 0, "{}", r.out);
@@ -160,6 +171,17 @@ fn ids_then_make_then_a_rename_is_a_rename() {
         !text.contains("drop_column"),
         "a rename is not a drop:\n{text}"
     );
+    // Both files, oldest first: the list is the directory, sorted.
+    let list = migrator(&dir);
+    let stems: Vec<String> = all
+        .iter()
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    let (first, second) = (
+        list.find(&format!("Box::new({}::Migration)", stems[0])),
+        list.find(&format!("Box::new({}::Migration)", stems[1])),
+    );
+    assert!(first.is_some() && first < second, "{list}");
     let snapshot = std::fs::read_to_string(dir.join("migrations/schema.json")).unwrap();
     assert!(snapshot.contains("\"headline\"") && !snapshot.contains("\"title\""));
 }
@@ -174,4 +196,115 @@ fn make_refuses_a_name_that_is_not_snake_case() {
         "{}",
         r.out
     );
+}
+
+#[test]
+fn an_edited_list_is_not_rewritten_and_the_missing_file_is_named() {
+    let dir = project("edited");
+    assert_eq!(run(&dir, &["migrate", "ids"]).code, 0);
+    let r = run(&dir, &["migrate", "make", "create_posts"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let list = dir.join("migrations/mod.rs");
+    let edited = format!("{}// mine\n", migrator(&dir));
+    std::fs::write(&list, &edited).unwrap();
+
+    std::fs::write(
+        dir.join("migrations/m20990101_000000_by_hand.rs"),
+        "// written by hand\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(
+        dir.join("src/models/post.rs"),
+        std::fs::read_to_string(dir.join("src/models/post.rs"))
+            .unwrap()
+            .replace("pub title: String", "pub headline: String"),
+    )
+    .unwrap();
+    let r = run(&dir, &["migrate", "make", "rename_title"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        r.out.contains("was edited, so it was not rewritten"),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains("m20990101_000000_by_hand"), "{}", r.out);
+    assert_eq!(std::fs::read_to_string(&list).unwrap(), edited);
+}
+
+#[test]
+fn up_refuses_a_project_with_no_model_and_says_what_to_add() {
+    let dir = project("no-model");
+    std::fs::write(
+        dir.join("brocanth.toml"),
+        "[project]\nname = \"t\"\n\n[modules]\nenabled = [\"commands\"]\n",
+    )
+    .unwrap();
+    let r = run(&dir, &["migrate", "up"]);
+    assert_eq!(r.code, 1, "{}", r.out);
+    assert!(r.out.contains("has no `model` module"), "{}", r.out);
+    assert!(r.out.contains("brocanth add model"), "{}", r.out);
+}
+
+/// The whole loop in a generated project: `make` writes and lists a
+/// migration, and `up`, `status` and `down` apply it to the development
+/// SQLite file through the project's own binary.
+///
+/// `cargo test -p brocanth-cli -- --ignored`.
+#[test]
+#[ignore = "runs cargo build over a generated application"]
+fn up_status_and_down_run_through_the_project_binary() {
+    let base = std::env::temp_dir().join(format!("brocanth-migrate-up-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("brocanth")
+        .canonicalize()
+        .unwrap();
+    let r = run(
+        &base,
+        &[
+            "create",
+            "shop",
+            "--with",
+            "config,commands,model",
+            "--no-git",
+            "--brocanth-path",
+            &brocanth.display().to_string(),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    let dir = base.join("shop");
+    std::fs::create_dir_all(dir.join("src/models")).unwrap();
+    std::fs::write(dir.join("src/models/post.rs"), POST).unwrap();
+    assert_eq!(run(&dir, &["migrate", "ids"]).code, 0);
+    let r = run(&dir, &["migrate", "make", "create_posts"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let name = migrations(&dir)[0]
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let r = run(&dir, &["migrate", "status"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.out.contains(&format!("pending      {name}")), "{}", r.out);
+
+    let r = run(&dir, &["migrate", "up"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.out.contains(&format!("applied      {name}")), "{}", r.out);
+    assert!(dir.join("db/development.sqlite").is_file());
+
+    let r = run(&dir, &["migrate", "status"]);
+    assert!(r.out.contains(&format!("applied      {name}")), "{}", r.out);
+
+    let r = run(&dir, &["migrate", "down"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.out.contains(&format!("rolled back  {name}")), "{}", r.out);
+
+    let r = run(&dir, &["migrate", "status"]);
+    assert!(r.out.contains(&format!("pending      {name}")), "{}", r.out);
+    let _ = std::fs::remove_dir_all(&base);
 }
