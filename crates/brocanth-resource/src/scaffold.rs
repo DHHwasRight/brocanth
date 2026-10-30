@@ -1,76 +1,47 @@
-//! `resource` -- listed on the `brocanth create` menu, and not available.
+//! `resource` -- what `brocanth create` writes when somebody asks for typed
+//! CRUD routes.
 //!
 //! This crate is the records API: typed routes over one table, with the
 //! policy in the `WHERE` clause rather than in a filter that runs after the
-//! page has been read. It is written, it is tested against a real engine, and
-//! a generated project can now mount it -- see [`crate::pages`]. What it still
-//! has no answer for is which table, which is why this module says so on the
-//! menu, where the question is asked, rather than leaving the crate off it and
-//! letting somebody ask again next month. `brocanth-realtime`'s two
-//! transports are listed the same way, for the same reason.
+//! page has been read.
 //!
-//! # Why it is blocked
+//! # What the module writes, and what it does not
 //!
-//! One reason now, and it is about the project rather than about the
-//! framework. The first reason is answered.
+//! It writes the seam and no entity. `src/plugins/resource/mod.rs` holds:
 //!
-//! **1. The routes reach a generated project. Answered.**
-//! [`pages::mount`](crate::pages::mount) writes the seven routes straight into
-//! the `RouterBuilder` a generated `src/pages/mod.rs` builds its table from,
-//! so they are in the one table `dispatch` consults and a path two sources
-//! both claim is a build error. `ResourceRoutes` stays beside it for a host
-//! that mounts a `RouteSource`; both drive [`flow`](crate::flow) and render
-//! through [`render`](crate::render), so there is one authorisation path.
+//! * the three impls that make the project's own `Ctx`, `Response` and
+//!   `Error` a page triple ([`PageCtx`](crate::pages::PageCtx),
+//!   [`PageResponse`](crate::pages::PageResponse),
+//!   [`PageError`](crate::pages::PageError)). They delegate, one line each,
+//!   and the compiler checks them against the generated types;
+//! * a `mount` with the shape `Slot::RouterMounts` expects, which mounts
+//!   every resource the application lists. The list starts empty.
 //!
-//! **2. A resource is one entity, and a new project has none.**
-//! [`Resource`](crate::Resource) names an
+//! `src/pages/mod.rs` calls that `mount` at `/api`, so a resource added to the
+//! list is in the one table `dispatch` consults, and a path a page and a
+//! resource both claim is a build error.
+//!
+//! # Why no example entity
+//!
+//! A [`Resource`](crate::Resource) names an
 //! [`Entity`](brocanth_policy::Entity), a
-//! [`Policy`](brocanth_policy::Policy) over that entity, a
-//! [`ResourceData`](crate::ResourceData) that reads it, and three functions
-//! that turn an id, a body and a row into and out of the application's own
-//! types. None of those has a default and none of them can be guessed. The
-//! admin solves the same problem by accepting an empty list --
-//! `admin_source!` with no entities is a backoffice that says "nothing to
-//! administer" and shows its contributed panels, which is accurate rather
-//! than broken. That answer does not transfer: an admin is a registry and an
-//! empty registry is still an admin, where a resource *is* its entity and
-//! there is no inhabitant of `Resource` with no table behind it. Scaffolding
-//! an invented `Post` would mean generating an entity, a policy, a data
-//! source and a migration for a table nobody asked for -- the crate's own
-//! fixture is six hundred lines for exactly that -- and then deleting all of
-//! it is the first thing anybody would do.
+//! [`Policy`](brocanth_policy::Policy), a [`ResourceData`](crate::ResourceData)
+//! that runs SQL, and three functions that turn an id, a body and a row into
+//! and out of the application's own types. None of those has a default and
+//! none can be guessed. An invented `Post` would bring an entity, a policy, a
+//! data source and a migration for a table nobody asked for, and deleting
+//! them is the first thing anybody would do.
 //!
-//! The second reason is also why `Manifest::needs("model", ..)` would be a
-//! lie: the ORM does not help. `brocanth-policy`'s `Entity` is written by
-//! hand, has no derive, and nothing in this workspace turns a SeaORM entity
-//! into one -- `brocanth-policy`'s own dependency comment calls that adapter
-//! "a later crate", and it does not exist yet. So a project with `model` on
-//! is no closer to a resource than a project without it.
-//!
-//! # What would unblock it
-//!
-//! Something for `contribute` to write. Reason 2 is the whole of what is
-//! left, so the question is no longer "can these routes be reached" but "over
-//! which table", and a module answers it one of two ways:
-//!
-//! 1. It asks. A module that takes a table name, a primary key and a column
-//!    list can write the entity, the policy, the data source and the four
-//!    lines that call [`pages::mount`](crate::pages::mount) -- and a
-//!    migration, which is `model`'s business and not this crate's.
-//! 2. It reads. An adapter from a SeaORM entity to
-//!    [`Entity`](brocanth_policy::Entity) would make `model` the source of
-//!    the answer. `brocanth-policy`'s own dependency comment calls that
-//!    adapter "a later crate", and it does not exist yet.
-//!
-//! Until one of those is settled, a module here would scaffold an invented
-//! `Post`, and deleting it is the first thing anybody would do.
+//! So the module stops where guessing starts. The list is a registry, the
+//! way the admin's model list is: empty is accurate, not broken. Until it
+//! has an entry, the table holds no route under `/api`.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
 
-/// The records API, listed and not available.
+/// The records API, as a choice on the `brocanth create` menu.
 ///
 /// A unit struct, because a module is asked once per run and everything it
 /// needs arrives in [`Project`].
@@ -90,18 +61,100 @@ impl Module for Records {
             "typed CRUD routes over one table, with the policy in the WHERE clause",
         )
         .asked_in("doors", "")
-        .blocked("a resource is one entity, and a new project has none to name")
+        .krate(
+            Dep::brocanth("brocanth-resource")
+                // The page-shaped surface and nothing else. `plugin` is the
+                // `RouteSource`, which a generated table cannot mount.
+                .no_default_features()
+                .feature("pages"),
+        )
+        .absent(
+            "brocanth-resource",
+            "no records API; every CRUD route is a page somebody wrote by hand",
+        )
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        // Never reached while the CLI honours `Manifest::blocked`. Here so
-        // that a CLI which does not stops rather than writing a project whose
-        // routes answer nothing.
-        s.refuse(
-            "resource cannot be scaffolded: it needs an entity, a policy and a data source, \
-             and a new project has none of the three. The routes themselves reach a \
-             generated project through `brocanth_resource::pages::mount`, which writes them \
-             into the table `src/pages/mod.rs` builds",
-        );
+        s.file("src/plugins/resource/mod.rs", RESOURCE_RS);
+        s.at(Slot::PluginsMod).line("pub mod resource;");
+        // The prefix is the application's decision, so it is written at the
+        // call and not inside `mount`. No `PagesRoutes` line: the list of
+        // resources is empty, so the table gains no route.
+        s.at(Slot::RouterMounts)
+            .line("    crate::plugins::resource::mount(routes, \"/api\")?;");
     }
 }
+
+/// `src/plugins/resource/mod.rs`.
+const RESOURCE_RS: &str = r##"//! Typed CRUD routes over your tables, with the policy in the `WHERE` clause.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! [`mount`] is the list of resources this application serves, and it starts
+//! empty: a resource is one table, and a new project has none. Add one line
+//! per resource. A resource is a `brocanth_resource::Resource`: an entity, a
+//! policy over its rows (there is no default, so a resource without one does
+//! not compile), a data source and three conversions. That crate's own
+//! documentation has the worked example.
+//!
+//! `src/pages/mod.rs` calls [`mount`] at `/api`, so every route lands in the
+//! one table. A page and a resource that claim one path are a build error.
+//!
+//! The three impls below make this project's `Ctx`, `Response` and `Error`
+//! the page triple `brocanth_resource::pages` is written against. A resource
+//! also implements `PageSubject<Ctx>`, which reads who is asking off a
+//! request.
+
+use brocanth::routing::{BuildError, RouterBuilder};
+use brocanth_resource::pages::{PageCtx, PageError, PageResponse};
+
+use crate::pages::{Ctx, Error, Handler, Response};
+
+/// Every resource, under `prefix`.
+///
+/// Seven routes each: the five REST routes, and `POST /{id}` and
+/// `POST /{id}/delete` for an HTML form, which can send nothing but GET and
+/// POST. `brocanth_resource::pages::mount_api` mounts the five alone.
+///
+/// ```ignore
+/// brocanth_resource::pages::mount(routes, &format!("{prefix}/posts"), Arc::new(Posts::new()))?;
+/// ```
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let _ = (routes, prefix);
+    Ok(())
+}
+
+impl PageCtx for Ctx {
+    fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn param(&self, name: &str) -> Option<&str> {
+        Ctx::param(self, name)
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        Ctx::header(self, name)
+    }
+}
+
+impl PageResponse for Response {
+    fn page_response(status: u16, body: String, headers: Vec<(String, String)>) -> Self {
+        Response {
+            status,
+            body,
+            headers,
+        }
+    }
+}
+
+impl PageError for Error {
+    fn page_error(status: u16, message: String) -> Self {
+        Error::new(status, message)
+    }
+}
+"##;

@@ -189,10 +189,9 @@ impl ListQuery {
 /// `+` is a space here and not in a path, which is why this is not the
 /// same function as the one a router would use.
 ///
-/// Only the plugin reads a body: `Admin::dispatch` takes a `Submission`
-/// somebody else built. With `plugin` off the function is absent rather
-/// than unused, which is what §8.2 asks of a feature that is off.
-#[cfg(feature = "plugin")]
+/// `Admin::dispatch` takes a `Submission` somebody else built. Two hosts
+/// build one from a body: the plugin, and a generated project's own route
+/// table through [`Submission::from_urlencoded`](crate::Submission::from_urlencoded).
 pub(crate) fn pairs(body: &str) -> Vec<(String, String)> {
     body.split('&')
         .filter(|pair| !pair.is_empty())

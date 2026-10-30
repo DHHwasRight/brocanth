@@ -26,6 +26,8 @@ brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
+brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", default-features = false }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
@@ -360,7 +362,7 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
 //!
 //! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
 
-brocanth_pages::pages!("src/pages", describe);
+brocanth_pages::pages!("src/pages", describe, mounts);
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::routing::{BuildError, Params, Router, Verb};
@@ -981,6 +983,23 @@ pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
     Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
 }
 
+/// Every route this project did not read off `src/pages`.
+///
+/// One table holds all of them. A module contributes routes by offering a
+/// `mount` and the application decides the prefix, which is the same rule
+/// the core states for a plugin: a path is a decision, so a module that
+/// mounted itself would be making one on the application's behalf.
+///
+/// A prefix two sources both claim is a `BuildError` naming the pattern,
+/// rather than whichever of them happened to run last.
+fn mounted(
+    routes: &mut ::brocanth::routing::RouterBuilder<Handler>,
+) -> Result<(), ::brocanth::routing::BuildError> {
+    crate::plugins::resource::mount(routes, "/api")?;
+    crate::plugins::admin::mount(routes, "/admin")?;
+    Ok(())
+}
+
 // -- the entrance ----------------------------------------------------------
 //
 // Written because this project chose `input`. A body arrives as bytes and
@@ -1149,6 +1168,8 @@ mod tests {
             [
                 "/",
                 "/about",
+                "/admin",
+                "/admin/{*rest}",
                 "/openapi.json",
                 "/openapi.yaml",
                 "/status",
@@ -1245,6 +1266,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
+pub mod admin;
 pub mod auth;
 pub mod cache;
 pub mod jobs;
@@ -1253,6 +1275,7 @@ pub mod model;
 pub mod openapi;
 pub mod policy;
 pub mod realtime;
+pub mod resource;
 pub mod sessions;
 pub mod storage;
 pub mod validation;
@@ -1505,7 +1528,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-// brocanth-digest: c5fe9f36983f4b79
+// brocanth-digest: 714fec51cedd5406
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -2226,6 +2249,140 @@ pub fn Layout(layout: &str, children: Element) -> Element {
         <nav><a href="/">home</a></nav>
         <div dp-layout={layout}>{children}</div>
     </section>
+}
+===== src/plugins/admin/mod.rs =====
+//! The backoffice, at `/admin`.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! It ships locked, and two answers are yours to give:
+//!
+//! 1. **Who may open a screen.** The policy is `DenyAll` until
+//!    `AdminConfig::with_policy` names another, so every screen answers 403.
+//! 2. **Who is asking.** [`principal`] returns an anonymous principal until
+//!    it reads your user off the request.
+//!
+//! It has no models yet. A model needs a data source that reads its rows and
+//! a row policy: `AdminConfig::resource(..)`, one per model. A model with no
+//! resource answers 403 on every screen. `brocanth_admin::rows` has the
+//! worked example, and `brocanth-admin-model` is the data source over
+//! SeaORM.
+//!
+//! The routes are in the one table `src/pages/mod.rs` builds:
+//! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
+//! therefore a build error, not a race.
+
+use std::future::Future;
+use std::sync::Arc;
+
+use brocanth::routing::{BuildError, RouterBuilder, Verb};
+use brocanth_admin::policy::Principal;
+use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+
+use crate::pages::{Ctx, Handler, Response};
+
+/// Every screen of the admin, under `prefix`.
+///
+/// Four routes: the index and everything under it, for GET and for POST.
+/// The admin parses its own paths, so the table gives it the whole path and
+/// does not split it into twelve routes.
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let admin = Arc::new(Admin::new(
+        // An empty in-memory source: no models, so no rows to read. Put
+        // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
+        // over your database connection.
+        Arc::new(Fixture::new()),
+        AdminConfig::new().titled("My Blog admin").at(prefix),
+    ));
+    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+    for pattern in [prefix, rest.as_str()] {
+        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+    }
+    Ok(())
+}
+
+/// One handler for every screen. The admin reads the path and decides.
+fn screen(admin: Arc<Admin>) -> Handler {
+    Box::new(move |ctx: &mut Ctx| {
+        let ctx = &*ctx;
+        // HEAD reaches the GET handler, and the admin knows two verbs.
+        let method = match ctx.verb {
+            Verb::Post => "POST",
+            _ => "GET",
+        };
+        let form = submission(ctx);
+        let who = principal(ctx);
+        // `?` on the admin's own failure: a data source that failed, or a
+        // template that did not render. A refusal is not one: it is a page.
+        let answer = wait(admin.dispatch(who, method, &ctx.path, &ctx.query, &form))?;
+        Ok(match answer {
+            brocanth_admin::Response::Page { status, html } => Response::new(status, html),
+            brocanth_admin::Response::Redirect { status, location } => {
+                Response::empty(status).with_header("location", location)
+            }
+        })
+    })
+}
+
+/// Who is asking, as the admin's policy sees it.
+///
+/// Anonymous until this reads your user off the request. When a plugin
+/// publishes one, this is one line:
+///
+/// ```ignore
+/// ctx.provided::<CurrentUser, _>()
+///     .map_or_else(Principal::anonymous, |user| Principal::new(user))
+/// ```
+fn principal(_ctx: &Ctx) -> Principal<'_> {
+    Principal::anonymous()
+}
+
+/// The form a POST sent. Anything that is not urlencoded is an empty form,
+/// so the screen shows its errors and writes nothing.
+fn submission(ctx: &Ctx) -> Submission {
+    let urlencoded = ctx
+        .content_type()
+        .is_some_and(|t| t.starts_with("application/x-www-form-urlencoded"));
+    match ctx.body_text() {
+        Some(body) if urlencoded => Submission::from_urlencoded(body),
+        _ => Submission::new(),
+    }
+}
+
+/// Runs the admin's answer to completion on this thread.
+///
+/// The admin is async because a database is, and a handler in this table is
+/// not. Under `serve` the runtime has worker threads, so this tells tokio the
+/// thread blocks. Anywhere else, such as a test, the admin's own small
+/// executor runs it.
+fn wait<F: Future>(future: F) -> F::Output {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        _ => brocanth_admin::rt::block_on(future),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::{Dispatch, Verb};
+
+    use crate::pages::Ctx;
+
+    /// The admin is in the table, and it answers 403 until somebody opens it.
+    #[test]
+    fn the_admin_is_mounted_and_ships_locked() {
+        let router = crate::pages::router().expect("the table builds");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
+            panic!("/admin is not in the table");
+        };
+        let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
+        let answer = handler(&mut ctx).expect("the admin answers");
+        assert_eq!(answer.status, 403);
+    }
 }
 ===== src/plugins/auth/mod.rs =====
 //! Accounts and sessions, as this application registers them.
@@ -3676,6 +3833,78 @@ impl Plugin for Realtime {
         }
     }
 }
+===== src/plugins/resource/mod.rs =====
+//! Typed CRUD routes over your tables, with the policy in the `WHERE` clause.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! [`mount`] is the list of resources this application serves, and it starts
+//! empty: a resource is one table, and a new project has none. Add one line
+//! per resource. A resource is a `brocanth_resource::Resource`: an entity, a
+//! policy over its rows (there is no default, so a resource without one does
+//! not compile), a data source and three conversions. That crate's own
+//! documentation has the worked example.
+//!
+//! `src/pages/mod.rs` calls [`mount`] at `/api`, so every route lands in the
+//! one table. A page and a resource that claim one path are a build error.
+//!
+//! The three impls below make this project's `Ctx`, `Response` and `Error`
+//! the page triple `brocanth_resource::pages` is written against. A resource
+//! also implements `PageSubject<Ctx>`, which reads who is asking off a
+//! request.
+
+use brocanth::routing::{BuildError, RouterBuilder};
+use brocanth_resource::pages::{PageCtx, PageError, PageResponse};
+
+use crate::pages::{Ctx, Error, Handler, Response};
+
+/// Every resource, under `prefix`.
+///
+/// Seven routes each: the five REST routes, and `POST /{id}` and
+/// `POST /{id}/delete` for an HTML form, which can send nothing but GET and
+/// POST. `brocanth_resource::pages::mount_api` mounts the five alone.
+///
+/// ```ignore
+/// brocanth_resource::pages::mount(routes, &format!("{prefix}/posts"), Arc::new(Posts::new()))?;
+/// ```
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let _ = (routes, prefix);
+    Ok(())
+}
+
+impl PageCtx for Ctx {
+    fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn param(&self, name: &str) -> Option<&str> {
+        Ctx::param(self, name)
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        Ctx::header(self, name)
+    }
+}
+
+impl PageResponse for Response {
+    fn page_response(status: u16, body: String, headers: Vec<(String, String)>) -> Self {
+        Response {
+            status,
+            body,
+            headers,
+        }
+    }
+}
+
+impl PageError for Error {
+    fn page_error(status: u16, message: String) -> Self {
+        Error::new(status, message)
+    }
+}
 ===== src/plugins/sessions/mod.rs =====
 //! Cookie sessions, and the one value they put on the context.
 
@@ -4170,6 +4399,8 @@ request.
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
+- `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
+- `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
@@ -4365,6 +4596,18 @@ which proxy to trust, which host is canonical, which origins may call
 enable them as a set, and do not invent an address or an origin to
 make one compile.
 
+## The admin
+
+`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+locked: the policy is `DenyAll` and `principal` returns an anonymous
+principal, so every screen answers 403. Do not open it with
+`AllowAllUnsafeForDevelopment` outside a test.
+
+A model reaches the admin through `AdminConfig::resource(..)`: a
+`brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
+the model's rows. A model with no resource answers 403. Never filter
+rows after a read; the row policy goes into the query.
+
 ## The client
 
 `src/commands/api.rs` is a command line for this application's own
@@ -4396,7 +4639,7 @@ A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
 
-<!-- brocanth-digest: e9de574403a79c0c -->
+<!-- brocanth-digest: c0b3987e9921d219 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -4408,7 +4651,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "openapi", "validation", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx"]
+enabled = ["logging", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx"]
 
 [modules.logging]
 files = ["src/plugins/logging/"]
@@ -4485,6 +4728,16 @@ files = ["src/plugins/validation/"]
 config = ["validation"]
 crates = ["brocanth-schema"]
 
+[modules.resource]
+files = ["src/plugins/resource/"]
+config = []
+crates = ["brocanth-resource"]
+
+[modules.admin]
+files = ["src/plugins/admin/"]
+config = []
+crates = ["brocanth-admin"]
+
 [modules.realtime]
 files = ["src/plugins/realtime/"]
 config = ["realtime"]
@@ -4515,4 +4768,4 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 72fb11cbc3d1c565
+# brocanth-digest: 10f686e74a1ad30b

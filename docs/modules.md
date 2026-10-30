@@ -42,7 +42,7 @@ brocanth create            cargo build             a request
       │                         │                      │
   Module::contribute   ──▶  the written source  ──▶  Plugin lifecycle
   Slot::*                    pages! / html!          hooks, context, routes
-  (16 slots, 11 read)        (macros read the tree)  (5 stages + 5 seams)
+  (17 slots, 16 read)        (macros read the tree)  (5 stages + 5 seams)
 ```
 
 **The gap is the middle column.** The macros that read `src/pages` know one
@@ -110,8 +110,9 @@ neither has a crate in this workspace to host one.
 | `brocanth-schema` | boundary | `PagesItems` | — |
 | `brocanth-openapi` | boundary + bundle | page file at `/openapi.json` | `RouteSource` (unmounted) |
 | `brocanth-client` | boundary + tooling | `CommandsMod` | reads `pages::described()` |
-| `brocanth-resource` | bundle | **blocked** | `RouteSource`, nothing mounts it |
-| `brocanth-admin` | bundle | not on the menu | `RouteSource`, nothing mounts it |
+| `brocanth-resource` | bundle | `RouterMounts`, `PluginsMod` | `pages::mount` into the one table; `RouteSource` for other hosts |
+| `brocanth-admin` | bundle | `RouterMounts`, `PagesRoutes`, `AgentsSections` | a page-shaped `mount` the project owns; `RouteSource` for other hosts |
+| `brocanth-admin-model` | service | **blocked**: the model plugin opens no pool | `AdminData` over SeaORM |
 | `brocanth-events` | service | — | `ModelEvent` carrier |
 | `brocanth-assets` | **renderer-like** | written by hand in `create.rs` | — |
 | `rsx` | **renderer** | `PagesRenderers`, five template files | — |
@@ -191,11 +192,27 @@ declaration, several readers, no author.**
 **Ships screens the application mounts at a prefix it chooses.** The admin
 has twelve, OpenAPI has two, `brocanth-resource` has five per entity.
 
-Seam: `RouteSource` plus `App::mount_routes::<T>("/admin")`. The trait, the
-prefix suggestion, the name filter and `unmounted_route_sources` are all
-written and tested. **`create.rs` emits no mount**, so no generated project
-can take the offer. This is what blocks `brocanth-resource` and the admin
-from the menu.
+Seam: **`Slot::RouterMounts`**. A module offers one function,
+
+```rust
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError>;
+```
+
+and writes one line that calls it into the generated `pages::mounted`. The
+prefix is on that line, so it is the application's decision. The pages, a
+module and a `routes!` file fill one `RouterBuilder`, so a path two sources
+claim is a `BuildError` at startup. `dispatch` consults that one table.
+
+`RouteSource` plus `App::mount_routes::<T>("/admin")` is the core's other
+bundle seam, and a generated project does not use it. Its handlers are
+async, take a `RouteCx` over a `Context<E>`, and answer an
+`http::Response`; a generated table holds the project's own synchronous
+`Handler`, and the generated `Ctx` does not lend out its context.
+`brocanth-resource` measured those walls (`c50fc1e`) and answered with a
+page-shaped `pages::mount`. The admin answers the same way, with the
+adapter written into the project: `src/plugins/admin/mod.rs` registers
+four routes that call `Admin::dispatch`. Both crates keep their
+`RouteSource` for a host that mounts one.
 
 ### 4.7 Tooling
 
@@ -203,7 +220,8 @@ from the menu.
 worker, migrations, `api` from `brocanth-client`.
 
 Seams: `Slot::CommandsMod`, `Slot::MiseTasks`, `Slot::NodeDependencies`,
-`Scaffold::binary`. The first works. The other two are declared and unread.
+`Scaffold::binary`. `CommandsMod` and `MiseTasks` are read.
+`NodeDependencies` is declared and unread.
 
 ---
 
@@ -554,7 +572,7 @@ generated projects, and all ten are clean.
 
 ## 7. Every seam, and its state
 
-### Build time — `Slot`, 16 variants
+### Build time — `Slot`, 17 variants
 
 | Slot | State |
 | --- | --- |
@@ -563,14 +581,12 @@ generated projects, and all ten are clean.
 | `PluginsInstalled` | read — the provider list, §6 |
 | `PagesItems`, `CommandsMod`, `ConfigSections` | read |
 | `GitIgnore`, `AgentsSections` | read |
-| `CargoExtra` | **declared, never read** |
-| `AppItems` | **declared, never read** |
-| `AppBeforeRouter` | **declared, never read** |
+| `CargoExtra`, `AppItems`, `AppBeforeRouter` | **deleted**: no module had a use. `src/app.rs` is the developer's file, so a module writes its own file under `src/plugins/<key>/`; an answer before the router is a route in the one table |
 | `MiseTasks` | read — `rsx-tailwind` was its first customer |
 | `NodeDependencies` | **declared, never read** — `rsx-tailwind` wants it |
 | `PagesRenderers` | read — the renderer seam, §5 |
 | `PagesRoutes` | read — a module's page joins the table's own test, §6b |
-| `AppMounts` | **missing** — §4.6, for `mount_routes` |
+| `RouterMounts` | read — a module's `mount`, called from `pages::mounted` (§4.6). `resource` and `admin` are its customers |
 
 A module that writes into an unread slot is recorded and discarded in
 silence. That has already happened once, with a `.gitignore` line.
@@ -588,7 +604,7 @@ silence. That has already happened once, with a `.gitignore` line.
 | `ShutdownPhase::Begin` / `Drain` | works |
 | `ProvidesContext<T>` | works, and reaches a handler through `Ctx::provided` (§6) |
 | `Plugin::provide` seeing the request | **missing** — a provider cannot read a cookie (§6) |
-| `RouteSource` + `mount_routes` | works; **never generated** (§4.6) |
+| `RouteSource` + `mount_routes` | works; not generated, by decision: a generated project mounts page-shaped routes through `Slot::RouterMounts` (§4.6) |
 | A renderer registry | **does not exist** (§5) |
 
 ---
@@ -616,10 +632,15 @@ silence. That has already happened once, with a `.gitignore` line.
    `Ctx::provided::<T, _>()`, bounded by `Has`, over a provider list the
    generator writes from the same ordered list `register!` uses. What
    remains of this seam is `Plugin::provide` seeing the request (§6).
-4. **Add `Slot::AppMounts` and emit a mount.** Unblocks `brocanth-resource`
-   and the admin, both of which are written and unreachable.
-5. **Read the five unread slots, or delete them.** `MiseTasks` and
-   `NodeDependencies` have a waiting customer in `rsx-tailwind`.
+4. ~~**Add a mount slot and emit a mount.**~~ **Done.** `Slot::RouterMounts`
+   (`244b603`), and now two customers: `resource` writes the page triple
+   and an empty list of resources at `/api`; `admin` mounts the backoffice
+   at `/admin`, locked. `admin-model` is listed and blocked, because the
+   generated model plugin opens no pool for it to read.
+5. ~~**Read the unread slots, or delete them.**~~ **Done**, except one.
+   `MiseTasks` is read. `CargoExtra`, `AppItems` and `AppBeforeRouter` are
+   deleted. `NodeDependencies` is still unread: `rsx-tailwind` writes the
+   whole `package.json` itself.
 
 Steps 1 and 2 are one piece of work and should be one branch. Step 3 is
 independent. Step 4 is independent. Step 5 is small and can ride with any of

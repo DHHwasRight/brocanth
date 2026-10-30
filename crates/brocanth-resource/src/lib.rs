@@ -122,7 +122,7 @@ pub mod routes;
 #[cfg(feature = "pages")]
 pub mod pages;
 
-/// Why this crate is listed on the `brocanth create` menu and not available.
+/// What `brocanth create` writes for `resource`: the seam, and no entity.
 ///
 /// Behind an off-by-default feature. The one program that reads it is the
 /// CLI.

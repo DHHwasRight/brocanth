@@ -2669,6 +2669,13 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // this runs, so a path claimed twice is a `BuildError` naming both --
     // which is the property that makes one table worth having.
     if !built.slot_is_empty(Slot::RouterMounts) {
+        // One blank line above it, whatever the renderer block ended with.
+        // No golden shape mounted anything until `admin`, and the first
+        // one that did showed `mounted` glued to `render_json`.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out.push('\n');
         out.push_str(MOUNTED_HEAD);
         for line in built.slot(Slot::RouterMounts) {
             out.push_str(line);
@@ -2732,9 +2739,16 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // read 100 and so emitted a one-liner for any argument list between
     // the two, which `--with openapi` lands in exactly: a brand-new
     // project that fails `cargo fmt --check` on its first day.
-    let args = format!("patterns, [{}]", quoted.join(", "));
+    let inner = quoted.join(", ");
+    let args = format!("patterns, [{inner}]");
     let routes = if args.len() <= 60 {
         args
+    } else if inner.len() <= 60 {
+        // The call breaks and the array does not. rustfmt measures an array
+        // on `array_width` (60) applied to what is between the brackets, so
+        // a list 61 to 72 wide is two arguments on two lines with the array
+        // whole. `--with admin` was the first shape to land here.
+        format!("\n            patterns,\n            [{inner}]\n        ")
     } else {
         let items = quoted
             .iter()
@@ -3234,6 +3248,11 @@ mod tests {
             // The queue, with a config file, which is the shape that opens
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
+            // The two modules that mount routes, and nothing else: no
+            // config file and no renderer, so the admin's own rsx is the
+            // only template engine in the tree and `mounted` is written
+            // with no other block around it.
+            ("admin", vec!["admin", "resource"]),
             ("rsx", vec!["rsx"]),
             // The second renderer, alone: a project that answers JSON and
             // has no HTML engine at all. The shape that would catch
@@ -3892,8 +3911,10 @@ mod tests {
         // nothing crept back in.
         let a = answers(&available());
         let table = pages_mod_rs(&a, &built_for(&a));
+        // `mounts` too: `admin` and `resource` each offer a `mount`, so the
+        // table has a second source and the macro is told to call it.
         assert!(
-            table.contains(r#"brocanth_pages::pages!("src/pages", describe);"#),
+            table.contains(r#"brocanth_pages::pages!("src/pages", describe, mounts);"#),
             "{table}"
         );
         // Code, not prose: the comment beside the templates explains why the
@@ -4438,6 +4459,61 @@ mod context {
             "the entrance did not hold:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The two modules that mount routes, built and tested for real.
+    ///
+    /// `admin` writes a `mount` into the one table and a test asserting
+    /// `/admin` answers 403; `resource` writes the page-triple impls, which
+    /// only the compiler can check against the generated `Ctx`, `Response`
+    /// and `Error`. The project's own `cargo test` runs both, and its
+    /// route-table test lists `/admin`, so a mount that did not reach the
+    /// table fails here.
+    ///
+    /// `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    fn the_backoffice_compiles() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-backoffice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            name: "backoffice-test".into(),
+            title: "Backoffice Test".into(),
+            picks: vec!["logging", "config", "rsx", "admin", "resource"],
+            local: Some(brocanth.display().to_string()),
+            git: false,
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("test")
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the backoffice did not hold:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Ran, not merely compiled: a filter typo or a `cfg` would pass
+        // `cargo test` with the admin's own test never reached.
+        assert!(
+            stdout.contains("the_admin_is_mounted_and_ships_locked ... ok"),
+            "{stdout}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

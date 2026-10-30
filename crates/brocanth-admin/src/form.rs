@@ -195,6 +195,26 @@ impl Submission {
         }
     }
 
+    /// A submission from an `application/x-www-form-urlencoded` body.
+    ///
+    /// `+` is a space and `%XX` is a byte, as a browser sends a form. A host
+    /// that is not the brocanth plugin -- a generated project's own route
+    /// table -- reads the body and calls this, so the decoding is the
+    /// admin's and not repeated in every project.
+    ///
+    /// ```
+    /// use brocanth_admin::Submission;
+    ///
+    /// let form = Submission::from_urlencoded("title=Hello+world&tag=a%26b");
+    /// assert_eq!(form.get("title"), Some("Hello world"));
+    /// assert_eq!(form.get("tag"), Some("a&b"));
+    /// ```
+    pub fn from_urlencoded(body: &str) -> Self {
+        Submission {
+            pairs: crate::query::pairs(body),
+        }
+    }
+
     /// Adds a pair.
     pub fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.pairs.push((name.into(), value.into()));

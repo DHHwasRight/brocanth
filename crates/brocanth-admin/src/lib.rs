@@ -161,6 +161,14 @@ pub mod rows;
 pub mod rt;
 pub mod view;
 
+/// What `brocanth create` writes for `admin`, and why `admin-model` is listed
+/// and not available.
+///
+/// Behind an off-by-default feature. The one program that reads it is the
+/// CLI.
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+
 /// The shipped screens.
 ///
 /// Compiled into the binary by rsx at macro expansion: nothing is read from

@@ -44,6 +44,11 @@ brocanth-schema = { workspace = true, default-features = false, features = [
     "scaffold",
 ] }
 brocanth-storage = { workspace = true, features = ["scaffold"] }
+# The backoffice. `default-features = false` keeps the `RouteSource` and the
+# core's `http` out of the CLI; the module writes text and reads none of it.
+brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", default-features = false, features = [
+    "scaffold",
+] }
 brocanth-realtime = { workspace = true, features = ["scaffold"] }
 
 # `string` so a command name discovered at run time -- a project's own, read

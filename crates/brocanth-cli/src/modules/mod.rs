@@ -99,9 +99,15 @@ pub const ALL: &[&dyn Module] = &[
     // The schema vocabulary. Keyed `validation`, because what a project
     // gets is a `Valid<T>` rather than a schema library.
     &brocanth_schema::scaffold::Validation,
-    // Listed and not available: five typed CRUD routes that arrive as a
-    // `RouteSource`, and a generated `app.rs` mounts no bundle.
+    // Typed CRUD routes. It writes the page triple and an empty list of
+    // resources mounted at `/api`, and no entity: a resource is one table,
+    // and a new project has none to name.
     &brocanth_resource::scaffold::Records,
+    // The backoffice, mounted at `/admin` through `Slot::RouterMounts` and
+    // locked until the application says who may in. Its SeaORM source is
+    // listed and not available: the generated model plugin opens no pool.
+    &brocanth_admin::scaffold::Backoffice,
+    &brocanth_admin::scaffold::BackofficeModels,
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,

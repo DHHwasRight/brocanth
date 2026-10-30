@@ -25,6 +25,8 @@ edition = "2021"
 #   csrf                 no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   brocanth-openapi     no document; a client learns this API by reading the handlers
 #   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
+#   brocanth-resource    no records API; every CRUD route is a page somebody wrote by hand
+#   brocanth-admin       no backoffice; a row is changed through a page somebody wrote, or SQL
 #   rsx                  no template engine; a page builds the String it returns
 #   jt                   no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   serde                nothing here is deserialised
@@ -1143,7 +1145,7 @@ request.
 - `core`  the router, the context, the plugin seams
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 
-**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1188,7 +1190,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 257d46c1ca493058 -->
+<!-- brocanth-digest: 4f340817c7e801df -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

@@ -19,6 +19,12 @@ description = "A Django-admin-shaped backoffice for brocanth, with every screen 
 # off, `brocanth` is not in the tree at all.
 default = ["plugin"]
 plugin = ["dep:brocanth", "dep:http"]
+# The module `brocanth create` lists under the key `admin`, and `admin-model`
+# beside it. Off by default: the one program that wants it is the CLI, which
+# asks for `default-features = false, features = ["scaffold"]`. It writes
+# text and reads nothing from this crate, so it needs neither `plugin` nor
+# the core.
+scaffold = ["dep:brocanth-scaffold"]
 
 [dependencies]
 brocanth = { workspace = true, optional = true }
@@ -39,6 +45,9 @@ thiserror = "2"
 # and a bind list, and the data source runs it.
 brocanth-policy = { workspace = true }
 brocanth-middleware = { workspace = true }
+
+# Optional, and off. See the `scaffold` feature.
+brocanth-scaffold = { workspace = true, optional = true }
 
 [dev-dependencies]
 # For the compile-fail cases under tests/ui: an admin resource with no

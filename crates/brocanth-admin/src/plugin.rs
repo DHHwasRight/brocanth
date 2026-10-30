@@ -252,7 +252,7 @@ fn submission_of(request: &Request) -> Submission {
         return Submission::new();
     }
     let body = std::str::from_utf8(request.body()).unwrap_or("");
-    Submission::from_pairs(crate::query::pairs(body))
+    Submission::from_urlencoded(body)
 }
 
 /// The admin's answer as the core's response.

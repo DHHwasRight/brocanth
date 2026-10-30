@@ -37,11 +37,10 @@ thiserror = "2"
 # registered must not compile` becomes an assertion rather than a sentence in a
 # README. `brocanth-command` set the precedent in this workspace.
 # `src/scaffold.rs` is the module `brocanth create` lists under the key
-# `resource`, and lists as blocked. It lives beside the crate it speaks for,
-# and not in the CLI, because the reason it is blocked is a fact about this
-# crate's shape: five routes that arrive as a `RouteSource`, over an entity
-# and a policy a new project does not have. A copy of that reasoning in the
-# CLI rots the first time either changes.
+# `resource`. It lives beside the crate it speaks for, and not in the CLI,
+# because what it writes is a fact about this crate's shape: the page triple
+# `pages` is written against, and a `mount` into the one table. A copy of
+# that in the CLI rots the first time either changes.
 #
 # Optional, and off by default. The one program that wants it is the CLI,
 # which asks for `features = ["scaffold"]`.
