@@ -47,8 +47,10 @@
 
 use brocanth_scaffold::Module;
 
+pub mod ci;
 pub mod commands;
 pub mod config;
+pub mod docker;
 pub mod jt;
 pub mod logging;
 pub mod model;
@@ -63,9 +65,14 @@ pub mod sessions;
 /// one slot never depend on this array.
 pub const ALL: &[&dyn Module] = &[
     &logging::Logging,
-    // JSON logs, /up, /readyz and /metrics, from the crate that serves
-    // them. It replaces `logging`: `create` refuses the two together.
+    // Observability, from the crate that serves it: a parent and four
+    // children, each a cargo feature or a pair of paths. Its logs child
+    // replaces `logging`: `create` refuses the two together.
     &brocanth_observe::scaffold::Observe,
+    &brocanth_observe::scaffold::Logs,
+    &brocanth_observe::scaffold::Health,
+    &brocanth_observe::scaffold::Metrics,
+    &brocanth_observe::scaffold::Tracing,
     &config::Config,
     &sessions::Sessions,
     &model::Model,
@@ -96,6 +103,10 @@ pub const ALL: &[&dyn Module] = &[
     // the other five are a fact about somebody's network, and this one is
     // a fact about browsers.
     &brocanth_middleware::scaffold::Csrf,
+    // Policy headers ride with the middleware; rate limiting waits to be
+    // asked for, because its rules are a fact about one application.
+    &brocanth_middleware::scaffold::SecurityHeaders,
+    &brocanth_middleware::scaffold::RateLimit,
     // The document, served at `/openapi.json` as a page, because a route
     // here is a file.
     &brocanth_openapi::scaffold::OpenApi,
@@ -127,6 +138,12 @@ pub const ALL: &[&dyn Module] = &[
     &jt::Jt,
     &rsx::Tailwind,
     &rsx::Htmx,
+    // Shipping: the image, a deployment of it, and the checks on every
+    // push, each a choice because each is one way among several.
+    &docker::Docker,
+    &docker::Kubernetes,
+    &ci::Ci,
+    &ci::GitHub,
 ];
 
 /// The module with this key, if this CLI has one.

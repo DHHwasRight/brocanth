@@ -115,16 +115,30 @@ pub fn offered() -> clap::builder::PossibleValuesParser {
 /// it. Three keys rather than three modules, because this list outlives any
 /// particular registry -- a CLI compiled without one of them says so.
 ///
-/// `observe` and not `logging`: a deployed application needs a request log
-/// a machine reads, and a probe that tells ready from alive.
-const DEFAULT: [&str; 3] = ["observe", "config", "commands"];
+/// `observability` and not `logging`: a deployed application needs a
+/// request log a machine reads, a probe that tells ready from alive, and
+/// counters. Traces wait for a collector. The image and the checks on every
+/// push come too, each a choice the wizard can untick.
+const DEFAULT: [&str; 11] = [
+    "observability",
+    "observability-logs",
+    "observability-health",
+    "observability-metrics",
+    "config",
+    "commands",
+    "docker",
+    "ci",
+    "ci-github",
+    "middleware",
+    "middleware-security-headers",
+];
 
 /// Pairs of modules that do the same job, so a project has one of each
-/// pair at most. `logging` and `observe` both log every request.
+/// pair at most. `logging` and `observability-logs` both log every request.
 const EXCLUSIVE: &[(&str, &str, &str)] = &[(
     "logging",
-    "observe",
-    "both write a line per request; `observe` also serves /up, /readyz and /metrics",
+    "observability-logs",
+    "both write a line per request; `observability-logs` writes JSON on stdout",
 )];
 
 /// Picks that hold both halves of an [`EXCLUSIVE`] pair.
@@ -866,18 +880,6 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         ("src/pages/about.rs".to_string(), about_rs(a)),
         ("src/pages/users/[id].rs".to_string(), user_rs(a)),
     ];
-    // The container image, for every project. Its text depends on the name
-    // alone, so `brocanth add` never has to change a file the developer
-    // tunes: a serve-only binary ignores the `serve` argument, the config
-    // directory is made empty when there is none, and the health check
-    // accepts any HTTP answer, so a project without `observe` passes it
-    // with a 404 from `/up`.
-    files.push(("Dockerfile".to_string(), dockerfile(a)));
-    files.push((".dockerignore".to_string(), DOCKERIGNORE.to_string()));
-    if a.has("observe") {
-        // Probes need `/up` and `/readyz`, which only `observe` serves.
-        files.push(("deploy/kubernetes.yaml".to_string(), kubernetes_yaml(a)));
-    }
     // For every project, including one with no plugins. `src/app.rs` asks
     // this file the same four questions whatever the module list is, which
     // is what lets `brocanth add` leave `src/app.rs` alone.
@@ -921,159 +923,6 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     ));
     Ok(files)
 }
-
-/// `Dockerfile`: cargo-chef for the dependency layer, a slim Debian runtime,
-/// a user that is not root, and a health check on `/up`.
-fn dockerfile(a: &Answers) -> String {
-    DOCKERFILE
-        .replace("@NAME@", &a.name)
-        .replace("@TITLE@", &a.title)
-        .replace("@UPPER@", &a.ident().to_uppercase())
-}
-
-const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1
-#
-# The image of @TITLE@.
-#
-#   docker build -t @NAME@ .
-#   docker run --rm -p 3000:3000 @NAME@
-#
-# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
-# the dependencies from the recipe, in a layer that stays cached until
-# Cargo.toml or Cargo.lock changes, and then builds the application. The
-# runtime holds the binary, the config directory and nothing else.
-#
-# Dependencies on a path outside this directory (`brocanth create
-# --brocanth-path`) are not in the build context, and the build fails. Build
-# from git dependencies, or add the checkout to the context.
-
-ARG RUST_VERSION=1.98
-
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
-RUN cargo install cargo-chef --locked
-WORKDIR /app
-
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
-RUN cargo build --release --bin @NAME@ \
- && mkdir -p config
-
-FROM debian:bookworm-slim AS runtime
-# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
-WORKDIR /app
-COPY --from=builder /app/target/release/@NAME@ /app/@NAME@
-COPY --from=builder /app/config /app/config
-USER 10001
-
-# Every interface, inside the container. `$@UPPER@_ENV` picks
-# config/production.toml, and a variable such as `$@UPPER@_MODEL__URL`
-# overrides one key of it.
-ENV @UPPER@_ADDR=0.0.0.0:3000 \
-    @UPPER@_ENV=production
-EXPOSE 3000
-
-# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
-# project without `observe` passes with a 404: the process answers.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
-
-# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
-# default). Give `docker stop` more than that: `docker stop -t 30`.
-STOPSIGNAL SIGTERM
-CMD ["/app/@NAME@", "serve"]
-"#;
-
-/// `.dockerignore`: what the build context does not need.
-const DOCKERIGNORE: &str = "/target
-/.git
-/db
-*.sqlite
-*.sqlite-*
-/node_modules
-";
-
-/// `deploy/kubernetes.yaml`: a Deployment and a Service, with the probes
-/// `observe` serves and a grace period that covers the drain.
-fn kubernetes_yaml(a: &Answers) -> String {
-    KUBERNETES_YAML
-        .replace("@NAME@", &a.name)
-        .replace("@UPPER@", &a.ident().to_uppercase())
-}
-
-const KUBERNETES_YAML: &str = r#"# A minimal deployment of this image. Change the image, the replica count
-# and the secrets; keep the probes and the timings in step.
-#
-# The stop, in order:
-#   1. SIGTERM. `/readyz` answers 503 at once, so the Service stops routing
-#      here. The listener stays open for `drain_delay_secs` (5 below), while
-#      the endpoint change reaches every node.
-#   2. The listener closes. Open requests have what is left of
-#      `shutdown_grace_secs` (25) to finish, then the plugins stop.
-#   3. terminationGracePeriodSeconds (30) is the hard limit: SIGKILL. It is
-#      above the 25, so a clean drain never meets it.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: @NAME@
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: @NAME@
-  template:
-    metadata:
-      labels:
-        app: @NAME@
-    spec:
-      terminationGracePeriodSeconds: 30
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-      containers:
-        - name: @NAME@
-          image: @NAME@:latest
-          ports:
-            - name: http
-              containerPort: 3000
-          env:
-            - name: @UPPER@_SERVER__SHUTDOWN_GRACE_SECS
-              value: "25"
-            - name: @UPPER@_OBSERVE__DRAIN_DELAY_SECS
-              value: "5"
-          livenessProbe:
-            httpGet:
-              path: /up
-              port: http
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
-            periodSeconds: 2
-            failureThreshold: 1
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: @NAME@
-spec:
-  selector:
-    app: @NAME@
-  ports:
-    - name: http
-      port: 80
-      targetPort: http
-"#;
 
 /// `brocanth.toml`: the marker, the module list, and what each module put
 /// in the project.
@@ -2148,7 +1997,7 @@ async fn run(
     let started = Instant::now();
     if failed.is_none() {
         // With `observe`, `/readyz` fails first, and the listener closes
-        // after `[observe] drain_delay_secs`. Inside the grace period.
+        // after `[observability] drain_delay_secs`. Inside the grace period.
         plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
@@ -3661,15 +3510,22 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // the same reason: `observe` changes it, and `src/app.rs` is not
     // rewritten.
     out.push('\n');
-    out.push_str(if a.has("observe") {
-        SERVING_OBSERVED
+    if a.has("observability") {
+        // `metrics_bind` is a field of the `metrics` feature, so the side
+        // listener exists only with `observability-metrics`.
+        let side = if a.has("observability-metrics") {
+            SIDE_LISTENERS_METRICS
+        } else {
+            SIDE_LISTENERS_NONE
+        };
+        out.push_str(&SERVING_OBSERVED.replace("@SIDE_LISTENERS@", side));
     } else {
-        SERVING_PLAIN
-    });
+        out.push_str(SERVING_PLAIN);
+    }
     out
 }
 
-/// `wrap`, `side_listeners` and `stop_accepting` with the `observe` plugin.
+/// `wrap`, `side_listeners` and `stop_accepting` with the `observability` plugin.
 const SERVING_OBSERVED: &str = r#"/// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
@@ -3694,8 +3550,28 @@ where
 }
 
 /// The probes and `/metrics` on a second listener, when
-/// `[observe] metrics_bind` names one.
-pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+/// `[observability] metrics_bind` names one.
+@SIDE_LISTENERS@
+
+/// The first half of a stop. `/readyz` fails at once, so a load balancer
+/// stops sending requests; the listener closes `[observability] drain_delay_secs`
+/// later.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    observer(app).drain_then_stop(stopper).await;
+}
+
+/// The `Observer` the `observability` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observability` is registered in `register!`")
+}
+"#;
+
+/// `/metrics` on a second listener, when `[observability] metrics_bind` names one.
+const SIDE_LISTENERS_METRICS: &str = r#"pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
     let observer = observer(app);
     let Some(bind) = observer.config().metrics_bind.clone() else {
         return Ok(());
@@ -3707,24 +3583,14 @@ pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
         let _ = observer.serve_admin(server).await;
     });
     Ok(())
-}
+}"#;
 
-/// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observe] drain_delay_secs`
-/// later.
-pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    observer(app).drain_then_stop(stopper).await;
-}
-
-/// The `Observer` the `observe` plugin published.
-fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
-    app.core
-        .services()
-        .get::<brocanth_observe::Observer>()
-        .cloned()
-        .expect("`observe` is registered in `register!`")
-}
-"#;
+/// No metrics, so no second listener. `brocanth add observability-metrics`
+/// writes the other one.
+const SIDE_LISTENERS_NONE: &str = r#"pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let _ = app;
+    Ok(())
+}"#;
 
 /// The same three, with nothing to observe.
 const SERVING_PLAIN: &str = r#"/// What the server is handed for one request.
@@ -5019,7 +4885,12 @@ mod tests {
         let a = Answers {
             name: "drain-test".into(),
             title: "Drain Test".into(),
-            picks: vec!["observe", "config", "commands"],
+            picks: vec![
+                "observability",
+                "observability-health",
+                "config",
+                "commands",
+            ],
             local: Some(brocanth.display().to_string()),
             git: false,
         };

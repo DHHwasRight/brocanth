@@ -1229,7 +1229,7 @@ mod tests {
         let m = registry(Tab::Wizard);
         assert_eq!(m.preset, None, "the shape question starts unanswered");
         let screen = render(&m, None, 92, 34);
-        assert!(screen.contains("1 of 6  Shape"), "{screen}");
+        assert!(screen.contains("1 of 7  Shape"), "{screen}");
         assert!(screen.contains("( ) An HTML application"), "{screen}");
         assert!(
             !screen.contains("(•)"),
@@ -1241,11 +1241,14 @@ mod tests {
     fn a_shape_says_how_many_questions_it_leads_to() {
         let screen = render(&registry(Tab::Wizard), None, 92, 34);
         assert!(
-            screen.contains("5 more questions: Foundations · Data · Pages · Behaviour · Doors"),
+            screen.contains(
+                "6 more questions: Foundations · Data · Pages · Behaviour · Doors · Operations"
+            ),
             "{screen}"
         );
         assert!(
-            screen.contains("4 more questions: Foundations · Data · Behaviour · Doors"),
+            screen
+                .contains("5 more questions: Foundations · Data · Behaviour · Doors · Operations"),
             "a shape that makes no HTML is not asked how:\n{screen}"
         );
     }
@@ -1260,14 +1263,14 @@ mod tests {
                 .to_string()
         };
         let mut m = registry(Tab::Wizard);
-        for want in ["1 of 6", "1 of 5", "1 of 5", "1 of 6"] {
+        for want in ["1 of 7", "1 of 6", "1 of 6", "1 of 7"] {
             assert!(first(&m).contains(want), "{}", first(&m));
             m.wizard_step(1);
         }
 
         // Take the JSON API, then move back up to the HTML shape. The
         // counter is about the row under the cursor, so it has to say that
-        // the five questions are not six yet.
+        // the six questions are not seven yet.
         let mut m = registry(Tab::Wizard);
         m.wizard_step(1);
         m.wizard_toggle();
@@ -1279,7 +1282,7 @@ mod tests {
         m.wizard_step(-1);
         let line = first(&m);
         assert!(
-            line.contains("1 of 6") && line.contains("if you take this one"),
+            line.contains("1 of 7") && line.contains("if you take this one"),
             "a shape the cursor is only visiting reads: {line}"
         );
 
@@ -1319,8 +1322,16 @@ mod tests {
             "Pages",
             "Behaviour",
             "Doors",
+            "Operations",
         ];
-        let short = vec!["Shape", "Foundations", "Data", "Behaviour", "Doors"];
+        let short = vec![
+            "Shape",
+            "Foundations",
+            "Data",
+            "Behaviour",
+            "Doors",
+            "Operations",
+        ];
         assert_eq!(walk(0), full, "an HTML application is asked how");
         assert_eq!(walk(1), short, "a JSON API is not");
         assert_eq!(walk(2), short, "and neither is a worker");
@@ -1331,7 +1342,7 @@ mod tests {
     fn past_the_last_question_is_the_whole_answer() {
         let mut m = registry(Tab::Wizard);
         m.wizard_toggle(); // the HTML shape
-        for _ in 0..5 {
+        for _ in 0..6 {
             m.next_question();
         }
         assert_eq!(m.tab, Tab::Wizard, "the last question is still a question");
@@ -1342,11 +1353,11 @@ mod tests {
     #[test]
     fn a_question_draws_its_own_modules_and_no_others() {
         let mut m = registry(Tab::Wizard);
-        m.wizard_toggle(); // the HTML shape, which asks all six
+        m.wizard_toggle(); // the HTML shape, which asks all seven
         m.next_question();
         m.next_question();
         let screen = render(&m, None, 92, 24);
-        assert!(screen.contains("3 of 6  Data"), "{screen}");
+        assert!(screen.contains("3 of 7  Data"), "{screen}");
         assert!(screen.contains("An ORM with validations"), "{screen}");
         assert!(
             !screen.contains("A line per request"),
@@ -1362,7 +1373,7 @@ mod tests {
             m.next_question();
         }
         let screen = render(&m, None, 92, 20);
-        assert!(screen.contains("4 of 6  Pages"), "{screen}");
+        assert!(screen.contains("4 of 7  Pages"), "{screen}");
         let tailwind = screen
             .lines()
             .find(|line| line.contains("Tailwind"))

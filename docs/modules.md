@@ -120,7 +120,7 @@ neither has a crate in this workspace to host one.
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
 | `brocanth-test` | tooling | dev-dependency only | — |
-| `brocanth-observe` | edge + service | `ConfigSections`, `PluginsMod`, `AppPlugins`; **not in the CLI registry yet**, and `serve` needs lines no slot reaches | `Plugin`, `Services`, reads `Readiness` |
+| `brocanth-observe` | edge + service | `observability` and its children `observability-logs`, `-health`, `-metrics`, `-tracing`: `ConfigSections`, `PluginsMod`, `AppPlugins`; each child is a cargo feature or a pair of paths, and the generated `serve` wraps its handler with the `Observer` | `Plugin`, `Services`, reads `Readiness` |
 | `jt` | renderer | `PagesRenderers`, `PagesRoutes`, two files | — |
 
 Three rows say "written by hand". `rsx::Rsx::contribute()`, `Tailwind::contribute()`

@@ -13,7 +13,7 @@ default-run = "my-blog"
 # field on the context, no bytes in the binary.
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics", "otel"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["sqlite"] }  # Postgres by default; SQLite for config/development.toml
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -391,7 +391,7 @@ async fn run(
     let started = Instant::now();
     if failed.is_none() {
         // With `observe`, `/readyz` fails first, and the listener closes
-        // after `[observe] drain_delay_secs`. Inside the grace period.
+        // after `[observability] drain_delay_secs`. Inside the grace period.
         plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
@@ -1485,138 +1485,6 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
-===== Dockerfile =====
-# syntax=docker/dockerfile:1
-#
-# The image of My Blog.
-#
-#   docker build -t my-blog .
-#   docker run --rm -p 3000:3000 my-blog
-#
-# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
-# the dependencies from the recipe, in a layer that stays cached until
-# Cargo.toml or Cargo.lock changes, and then builds the application. The
-# runtime holds the binary, the config directory and nothing else.
-#
-# Dependencies on a path outside this directory (`brocanth create
-# --brocanth-path`) are not in the build context, and the build fails. Build
-# from git dependencies, or add the checkout to the context.
-
-ARG RUST_VERSION=1.98
-
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
-RUN cargo install cargo-chef --locked
-WORKDIR /app
-
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
-RUN cargo build --release --bin my-blog \
- && mkdir -p config
-
-FROM debian:bookworm-slim AS runtime
-# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
-WORKDIR /app
-COPY --from=builder /app/target/release/my-blog /app/my-blog
-COPY --from=builder /app/config /app/config
-USER 10001
-
-# Every interface, inside the container. `$MY_BLOG_ENV` picks
-# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
-# overrides one key of it.
-ENV MY_BLOG_ADDR=0.0.0.0:3000 \
-    MY_BLOG_ENV=production
-EXPOSE 3000
-
-# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
-# project without `observe` passes with a 404: the process answers.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
-
-# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
-# default). Give `docker stop` more than that: `docker stop -t 30`.
-STOPSIGNAL SIGTERM
-CMD ["/app/my-blog", "serve"]
-===== .dockerignore =====
-/target
-/.git
-/db
-*.sqlite
-*.sqlite-*
-/node_modules
-===== deploy/kubernetes.yaml =====
-# A minimal deployment of this image. Change the image, the replica count
-# and the secrets; keep the probes and the timings in step.
-#
-# The stop, in order:
-#   1. SIGTERM. `/readyz` answers 503 at once, so the Service stops routing
-#      here. The listener stays open for `drain_delay_secs` (5 below), while
-#      the endpoint change reaches every node.
-#   2. The listener closes. Open requests have what is left of
-#      `shutdown_grace_secs` (25) to finish, then the plugins stop.
-#   3. terminationGracePeriodSeconds (30) is the hard limit: SIGKILL. It is
-#      above the 25, so a clean drain never meets it.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: my-blog
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: my-blog
-  template:
-    metadata:
-      labels:
-        app: my-blog
-    spec:
-      terminationGracePeriodSeconds: 30
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-      containers:
-        - name: my-blog
-          image: my-blog:latest
-          ports:
-            - name: http
-              containerPort: 3000
-          env:
-            - name: MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS
-              value: "25"
-            - name: MY_BLOG_OBSERVE__DRAIN_DELAY_SECS
-              value: "5"
-          livenessProbe:
-            httpGet:
-              path: /up
-              port: http
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
-            periodSeconds: 2
-            failureThreshold: 1
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: my-blog
-spec:
-  selector:
-    app: my-blog
-  ports:
-    - name: http
-      port: 80
-      targetPort: http
 ===== src/plugins/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
@@ -1637,7 +1505,7 @@ pub mod auth;
 pub mod cache;
 pub mod jobs;
 pub mod model;
-pub mod observe;
+pub mod observability;
 pub mod openapi;
 pub mod policy;
 pub mod realtime;
@@ -1728,7 +1596,7 @@ macro_rules! register {
         //     ),
         // );
         let builder = builder
-            .plugin_from_config::<crate::plugins::observe::Observe>("observe")
+            .plugin_from_config::<crate::plugins::observability::Observe>("observability")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
@@ -1795,6 +1663,50 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::realtime::Realtime>("realtime")
             .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: security headers ------------------------
+        //
+        // HSTS (over HTTPS only), nosniff, Referrer-Policy, X-Frame-Options
+        // DENY, a Content-Security-Policy and a Permissions-Policy. The
+        // policy allows dp-swap's two inline scripts by their SHA-256, so
+        // there is no `'unsafe-inline'`. A script you inline yourself needs
+        // `Csp::default().inline_script(TEXT)`.
+        //
+        // HSTS goes out only when the request is known to be HTTPS. Behind
+        // a TLS terminator, say so: `SecurityHeadersConfig::default()
+        // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
+        //
+        // Commented for the two reasons the CSRF block gives: the `Hooks`
+        // alias and the hook pipeline.
+        //
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::SecurityHeadersConfig::default(),
+        //     ),
+        // );
+
+        // -- brocanth-middleware: rate limit ------------------------------
+        //
+        // A fixed window per key. Each rule is a group of routes, a limit
+        // and a window. The numbers below are an example for a login form,
+        // not a recommendation: pick them from your own traffic.
+        //
+        // The key is the client address. Behind a proxy, register
+        // `ProxyHeaders` above, or name the one header your edge sets and
+        // strips: `.ip_header("fly-client-ip")`.
+        //
+        // This counts in this process. With more than one process, use
+        // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
+        //
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::RateLimitConfig::rules([
+        //             brocanth_middleware::Rule::new("login", 5, 60)
+        //                 .paths(["/login"])
+        //                 .methods(["POST"]),
+        //         ]),
+        //     ),
+        // );
         builder
     }};
 }
@@ -1812,8 +1724,8 @@ pub(crate) use register;
 /// plugins all provide nothing.
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithModel = After<crate::plugins::model::Model, WithSessions>;
-type WithObserve = After<crate::plugins::observe::Observe, WithModel>;
-type WithCache = After<crate::plugins::cache::Cache, WithObserve>;
+type WithObservability = After<crate::plugins::observability::Observe, WithModel>;
+type WithCache = After<crate::plugins::cache::Cache, WithObservability>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithAuth>;
@@ -1943,7 +1855,7 @@ where
 }
 
 /// The probes and `/metrics` on a second listener, when
-/// `[observe] metrics_bind` names one.
+/// `[observability] metrics_bind` names one.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
     let observer = observer(app);
     let Some(bind) = observer.config().metrics_bind.clone() else {
@@ -1959,22 +1871,22 @@ pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
 }
 
 /// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observe] drain_delay_secs`
+/// stops sending requests; the listener closes `[observability] drain_delay_secs`
 /// later.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
     observer(app).drain_then_stop(stopper).await;
 }
 
-/// The `Observer` the `observe` plugin published.
+/// The `Observer` the `observability` plugin published.
 fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
     app.core
         .services()
         .get::<brocanth_observe::Observer>()
         .cloned()
-        .expect("`observe` is registered in `register!`")
+        .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: e65f4d85c4480c39
+// brocanth-digest: 2514cde785557588
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -2003,17 +1915,20 @@ secure = false
 [model]
 url = "sqlite://db/development.sqlite?mode=rwc"
 
-[observe]
+[observability]
 # "json" or "text". Unset: json when the environment is production.
 # format = "json"
 level = "info"
 live_path = "/up"
 ready_path = "/readyz"
+# Seconds to answer "not ready" after SIGTERM, before the listener stops.
+drain_delay_secs = 0
 metrics_path = "/metrics"
 # metrics_token = "a long random string"
 # metrics_bind = "127.0.0.1:9100"
-# Seconds to answer "not ready" after SIGTERM, before the listener stops.
-drain_delay_secs = 0
+# The collector. Unset: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.
+# otlp_endpoint = "http://localhost:4318"
+sample_ratio = 1.0
 
 [cache]
 url = "postgres://localhost/development"
@@ -2145,6 +2060,131 @@ impl Command for Serve {
         crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
     }
 }
+===== .dockerignore =====
+/target
+/.git
+/db
+*.sqlite
+*.sqlite-*
+/node_modules
+===== .github/workflows/ci.yml =====
+# Every push and every pull request: formatting, lints, tests.
+#
+# The toolchain is the one `rust-toolchain.toml` pins. A dependency on a path
+# outside this repository (`brocanth create --brocanth-path`) is not in the
+# checkout, and the build fails; depend on git instead.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The tests that need Postgres read this; without it they skip.
+      BROCANTH_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      # Reads rust-toolchain.toml, and caches the target directory.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Builds the image and pushes nothing. Add a registry login and
+      # `push: true` when there is somewhere to push to.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+===== Dockerfile =====
+# syntax=docker/dockerfile:1
+#
+# The image of My Blog.
+#
+#   docker build -t my-blog .
+#   docker run --rm -p 3000:3000 my-blog
+#
+# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
+# the dependencies from the recipe, in a layer that stays cached until
+# Cargo.toml or Cargo.lock changes, and then builds the application. The
+# runtime holds the binary, the config directory and nothing else.
+#
+# Dependencies on a path outside this directory (`brocanth create
+# --brocanth-path`) are not in the build context, and the build fails. Build
+# from git dependencies, or add the checkout to the context.
+
+ARG RUST_VERSION=1.98
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin my-blog \
+ && mkdir -p config
+
+FROM debian:bookworm-slim AS runtime
+# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
+WORKDIR /app
+COPY --from=builder /app/target/release/my-blog /app/my-blog
+COPY --from=builder /app/config /app/config
+USER 10001
+
+# Every interface, inside the container. `$MY_BLOG_ENV` picks
+# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
+# overrides one key of it.
+ENV MY_BLOG_ADDR=0.0.0.0:3000 \
+    MY_BLOG_ENV=production
+EXPOSE 3000
+
+# `/up` is the liveness probe of `observability-health`. Any HTTP answer
+# passes, so a project without it passes with a 404: the process answers.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
+
+# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
+# default). Give `docker stop` more than that: `docker stop -t 30`.
+STOPSIGNAL SIGTERM
+CMD ["/app/my-blog", "serve"]
 ===== assets/css/_tailwind.css =====
 /* The input of the CSS build. Never published.
  *
@@ -2174,6 +2214,70 @@ impl Command for Serve {
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
+===== deploy/kubernetes.yaml =====
+# A minimal deployment of this image. Change the image, the replica count
+# and the secrets; keep the probes and the timings in step.
+#
+# The stop, in order:
+#   1. SIGTERM. `/readyz` answers 503 at once, so the Service stops routing
+#      here. The listener stays open for `drain_delay_secs` (5 below), while
+#      the endpoint change reaches every node.
+#   2. The listener closes. Open requests have what is left of
+#      `shutdown_grace_secs` (25) to finish, then the plugins stop.
+#   3. terminationGracePeriodSeconds (30) is the hard limit: SIGKILL. It is
+#      above the 25, so a clean drain never meets it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-blog
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: my-blog
+  template:
+    metadata:
+      labels:
+        app: my-blog
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: my-blog
+          image: my-blog:latest
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS
+              value: "25"
+            - name: MY_BLOG_OBSERVE__DRAIN_DELAY_SECS
+              value: "5"
+          livenessProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-blog
+spec:
+  selector:
+    app: my-blog
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
 ===== migrations/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth migrate` rewrites this file.
 //! A migration is a file beside this one; `brocanth migrate` lists it here.
@@ -3809,13 +3913,13 @@ impl Plugin for Model {
         });
     }
 }
-===== src/plugins/observe/mod.rs =====
-//! Logs, probes and metrics, as this application registers them.
+===== src/plugins/observability/mod.rs =====
+//! Observability, as this application registers it: a JSON or text line per request on stdout, `/up` and `/readyz`, Prometheus text on `/metrics`, an OTLP span per request.
 //!
-//! The core assumes no log layer. This file is where the application chose
-//! one: a JSON or text line per request on stdout, `/up` and `/readyz`, and
-//! Prometheus text on `/metrics`. Delete the registration and this file, and
-//! none of it is compiled.
+//! The core assumes no log layer and no probes. This file is where the
+//! application chose them. Delete the registration and this file, and none
+//! of it is compiled. Each piece is its own module: `brocanth add
+//! observability-metrics` and the like.
 //!
 //! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
 //! its handler with it, and stops on SIGTERM through it.
@@ -3830,7 +3934,7 @@ use brocanth_observe::{LogFormat, ObserveConfig, ObservePlugin, Observer};
 /// What this plugin is built from.
 ///
 /// It derives `Deserialize` because this application reads it from
-/// `[observe]` in a TOML file. Drop the config plugin and the derive goes
+/// `[observability]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -3844,6 +3948,9 @@ pub struct Settings {
     pub live_path: String,
     /// Readiness: every plugin's check. Empty turns it off.
     pub ready_path: String,
+    /// Seconds to answer "not ready" after SIGTERM before the listener
+    /// stops. A few seconds on Kubernetes; zero on a laptop.
+    pub drain_delay_secs: u64,
     /// Prometheus text. Empty turns it off.
     pub metrics_path: String,
     /// When set, `/metrics` needs `Authorization: Bearer <token>`.
@@ -3851,9 +3958,10 @@ pub struct Settings {
     /// When set, `/metrics` is served on this address and not on the main
     /// listener.
     pub metrics_bind: String,
-    /// Seconds to answer "not ready" after SIGTERM before the listener
-    /// stops. A few seconds on Kubernetes; zero on a laptop.
-    pub drain_delay_secs: u64,
+    /// The OTLP/HTTP collector. Empty: `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    pub otlp_endpoint: String,
+    /// The share of new traces kept, from 0.0 to 1.0.
+    pub sample_ratio: f64,
 }
 
 impl Default for Settings {
@@ -3863,10 +3971,12 @@ impl Default for Settings {
             level: "info".to_string(),
             live_path: "/up".to_string(),
             ready_path: "/readyz".to_string(),
+            drain_delay_secs: 0,
             metrics_path: "/metrics".to_string(),
             metrics_token: String::new(),
             metrics_bind: String::new(),
-            drain_delay_secs: 0,
+            otlp_endpoint: String::new(),
+            sample_ratio: 1.0,
         }
     }
 }
@@ -3887,10 +3997,13 @@ fn observer(settings: Settings) -> Result<Observer, String> {
     config.log_level = settings.level;
     config.live_path = path(settings.live_path);
     config.ready_path = path(settings.ready_path);
+    config.drain_delay = Duration::from_secs(settings.drain_delay_secs);
     config.metrics_path = path(settings.metrics_path);
     config.metrics_token = path(settings.metrics_token);
     config.metrics_bind = path(settings.metrics_bind);
-    config.drain_delay = Duration::from_secs(settings.drain_delay_secs);
+    config.tracing.enabled = true;
+    config.tracing.endpoint = path(settings.otlp_endpoint);
+    config.tracing.sample_ratio = settings.sample_ratio;
     Observer::new(config)
 }
 
@@ -3902,17 +4015,17 @@ impl Observe {
     fn inner(&mut self) -> Result<&mut ObservePlugin, PluginError> {
         self.inner
             .as_mut()
-            .map_err(|e| PluginError::new(format!("[observe] {e}")))
+            .map_err(|e| PluginError::new(format!("[observability] {e}")))
     }
 }
 
 impl Plugin for Observe {
     type Config = Settings;
     type Provides = NoContext;
-    const NAME: &'static str = "observe";
+    const NAME: &'static str = "observability";
 
     fn new(settings: Settings) -> Self {
-        // `Plugin::new` cannot fail. A bad `format` fails `register` instead,
+        // `Plugin::new` cannot fail. A bad setting fails `register` instead,
         // with the line to write.
         Self {
             inner: observer(settings).map(ObservePlugin::new),
@@ -5131,7 +5244,11 @@ request.
 ## What this binary contains
 
 - `core`  the router, the context, the plugin seams
-- `observe`  JSON logs on stdout, /up and /readyz, Prometheus /metrics; the core assumes none
+- `observability`  a request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below
+- `observability-logs`  a JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else
+- `observability-health`  /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM
+- `observability-metrics`  Prometheus text on /metrics: requests by route and status, in-flight, job queues
+- `observability-tracing`  an OTLP span per request and per job, W3C traceparent in and out; needs a collector
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `model`  SeaORM, validations, migrations; without it no SQL driver at all
@@ -5144,6 +5261,8 @@ request.
 - `client`  a subcommand that calls this application's own API, built from its routes
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
+- `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
+- `middleware-rate-limit`  a fixed window per address, session or user, per group of routes; 429 with Retry-After
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
@@ -5154,6 +5273,10 @@ request.
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
+- `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
+- `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
+- `ci`  fmt, clippy and the tests on every push; pick the provider below
+- `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
 
 **Absent:** `logging` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
@@ -5386,7 +5509,33 @@ A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
 
-<!-- brocanth-digest: cd1d8cfd63bc889a -->
+## Security headers
+
+`src/app.rs` holds a commented registration for
+`brocanth_middleware::SecurityHeaders`. Its Content-Security-Policy
+allows inline scripts by hash only. To inline a new script, add
+`Csp::default().inline_script(TEXT)` with the exact text between the
+tags. Do not add `'unsafe-inline'` to `script-src`. A value that
+depends on the request goes in a `data-` attribute or a `<meta>` tag,
+not in the script.
+
+HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
+is in front. Set `include_subdomains` or `preload` only when the
+person who owns the domain says so.
+
+## Rate limit
+
+`src/app.rs` holds a commented registration for
+`brocanth_middleware::RateLimit`. Its numbers are an example. Do not
+enable it with invented limits. Ask for the limit and the window of
+each route group.
+
+A request whose key cannot be found is not counted. Behind a proxy,
+the address comes from `ProxyHeaders` or from `ip_header`. Never set
+`ip_header` to a header the client can send, such as
+`X-Forwarded-For`, unless the edge overwrites it.
+
+<!-- brocanth-digest: 16e8836dfa35f08f -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -5398,11 +5547,31 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observe", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
 
-[modules.observe]
-files = ["deploy/kubernetes.yaml", "src/plugins/observe/"]
-config = ["observe"]
+[modules.observability]
+files = ["src/plugins/observability/"]
+config = ["observability"]
+crates = ["brocanth-observe"]
+
+[modules.observability-logs]
+files = []
+config = []
+crates = ["brocanth-observe"]
+
+[modules.observability-health]
+files = []
+config = []
+crates = ["brocanth-observe"]
+
+[modules.observability-metrics]
+files = []
+config = []
+crates = ["brocanth-observe"]
+
+[modules.observability-tracing]
+files = []
+config = []
 crates = ["brocanth-observe"]
 
 [modules.config]
@@ -5465,6 +5634,16 @@ files = []
 config = []
 crates = []
 
+[modules.middleware-security-headers]
+files = []
+config = []
+crates = []
+
+[modules.middleware-rate-limit]
+files = []
+config = []
+crates = []
+
 [modules.openapi]
 files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
@@ -5515,4 +5694,24 @@ files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
 
-# brocanth-digest: 9ba8843744faea14
+[modules.docker]
+files = [".dockerignore", "Dockerfile"]
+config = []
+crates = []
+
+[modules.docker-kubernetes]
+files = ["deploy/kubernetes.yaml"]
+config = []
+crates = []
+
+[modules.ci]
+files = []
+config = []
+crates = []
+
+[modules.ci-github]
+files = [".github/workflows/ci.yml"]
+config = []
+crates = []
+
+# brocanth-digest: aab1dff738bf2d43

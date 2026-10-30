@@ -235,23 +235,45 @@ The d2s concerns, against what the code does today.
   streams drain through `StreamGate`.
 - [x] **Tests without a server.** `brocanth-test` drives a built `App` in
   process. Postgres tests make their own schema.
-- [x] **Structured logs on stdout.** `brocanth-observe` writes one JSON or text line per request and per `tracing` event, with a request id (JSON by default in production).
-- [x] **Health probes.** `/up` asks nothing; `/readyz` runs each plugin's `ready_when` check and fails before shutdown drains.
-- [x] **Metrics.** `/metrics` serves Prometheus text: requests by route template and status class, in-flight, and job queue depth and runs.
-- [x] **Tracing.** The `otel` feature exports a span per request and per job run over OTLP, with W3C `traceparent` in and out.
-- [ ] **Graceful shutdown on SIGTERM in a generated project.** The generated
-  `serve` does not listen for signals and does not call `App::shutdown`.
-  You must wire it yourself.
-- [ ] **Container image.** There is no Dockerfile and no generated one.
-- [ ] **Apply migrations from the CLI.** There is no `migrate up`. You call
-  SeaORM's migrator from your own code or a project command.
-- [x] **Security headers.** `brocanth_middleware::SecurityHeaders` sends
-  HSTS (over HTTPS only), nosniff, Referrer-Policy, framing, a CSP that
-  allows dp-swap's inline scripts by hash, and Permissions-Policy.
-- [x] **Rate limiting.** `brocanth_middleware::RateLimit` counts a fixed
-  window per IP, session or user for each route group and answers 429 with
-  `Retry-After` and `RateLimit-*`. In memory, or in one UNLOGGED Postgres
-  table.
+Each item below is a module in `brocanth create`: opt-in, and the wizard's
+**Operations** question can untick it. `observability` is a parent that can
+be turned off whole; its children are `observability-logs`,
+`observability-health`, `observability-metrics` (all on by default) and
+`observability-tracing` (off).
+
+- [x] **Structured logs on stdout** (`observability-logs`). One JSON or text
+  line per request and per `tracing` event, with a request id; JSON by
+  default in production.
+- [x] **Health probes** (`observability-health`). `/up` asks nothing;
+  `/readyz` runs each plugin's `ready_when` check and fails first on SIGTERM.
+- [x] **Metrics** (`observability-metrics`). `/metrics` serves Prometheus
+  text: requests by route template and status class, in-flight, and job
+  queue depth and runs.
+- [x] **Tracing** (`observability-tracing`). A span per request and per job
+  run over OTLP, with W3C `traceparent` in and out.
+- [x] **Graceful shutdown on SIGTERM in a generated project.** `serve` stops
+  accepting, drains open requests, runs `App::shutdown` inside `[server]
+  shutdown_grace_secs` (25 s), and exits non-zero when the drain ran out of
+  time. With `observability-health`, `/readyz` fails first.
+- [x] **Container image** (`docker`). A cargo-chef `Dockerfile`, slim Debian,
+  a user that is not root, a `HEALTHCHECK` on `/up`, and a `.dockerignore`.
+  `docker-kubernetes` adds `deploy/kubernetes.yaml` with matching probes and
+  grace period.
+- [x] **CI** (`ci`, provider `ci-github`). `.github/workflows/ci.yml` runs
+  fmt, clippy and the tests, with a Postgres service when the project has a
+  database, and builds the image when `docker` is chosen. Another provider
+  is another child of `ci`.
+- [x] **Apply migrations from the CLI.** `brocanth migrate up | down [N] |
+  status` runs the project's own `migrate` command; `migrate make` lists each
+  new file in `migrations/mod.rs`.
+- [ ] **Security headers and rate limiting in a generated project.** The
+  hooks exist and are tested (`brocanth_middleware::SecurityHeaders`:
+  HSTS over HTTPS, nosniff, Referrer-Policy, framing, a CSP that allows
+  dp-swap by hash, Permissions-Policy; `RateLimit`: a fixed window per IP,
+  session or user, 429 with `Retry-After`, in memory or one UNLOGGED
+  Postgres table). The modules `middleware-security-headers` and
+  `middleware-rate-limit` write their registration commented, as CSRF's is:
+  the generated `dispatch` does not enter the hook pipeline yet.
 - [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project uses it when it has `jobs` or `cache`, and `MemoryStore` otherwise.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).

@@ -22,6 +22,8 @@ edition = "2021"
 #   brocanth-client      no client; calling this application means writing the URL and the JSON by hand
 #   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
 #   csrf                 no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
+#   security-headers     no security headers; a browser sniffs types, frames the pages and runs any inline script
+#   rate-limit           no rate limit; a password guesser gets as many tries as the server answers
 #   brocanth-openapi     no document; a client learns this API by reading the handlers
 #   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-resource    no records API; every CRUD route is a page somebody wrote by hand
@@ -330,7 +332,7 @@ async fn run(
     let started = Instant::now();
     if failed.is_none() {
         // With `observe`, `/readyz` fails first, and the listener closes
-        // after `[observe] drain_delay_secs`. Inside the grace period.
+        // after `[observability] drain_delay_secs`. Inside the grace period.
         plugins::stop_accepting(&app, stopper).await;
         failed = tokio::select! {
             served = &mut serving => match served {
@@ -1061,74 +1063,6 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
-===== Dockerfile =====
-# syntax=docker/dockerfile:1
-#
-# The image of My Blog.
-#
-#   docker build -t my-blog .
-#   docker run --rm -p 3000:3000 my-blog
-#
-# Three stages. `planner` reduces the manifests to a recipe. `builder` builds
-# the dependencies from the recipe, in a layer that stays cached until
-# Cargo.toml or Cargo.lock changes, and then builds the application. The
-# runtime holds the binary, the config directory and nothing else.
-#
-# Dependencies on a path outside this directory (`brocanth create
-# --brocanth-path`) are not in the build context, and the build fails. Build
-# from git dependencies, or add the checkout to the context.
-
-ARG RUST_VERSION=1.98
-
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
-RUN cargo install cargo-chef --locked
-WORKDIR /app
-
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
-RUN cargo build --release --bin my-blog \
- && mkdir -p config
-
-FROM debian:bookworm-slim AS runtime
-# ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
-WORKDIR /app
-COPY --from=builder /app/target/release/my-blog /app/my-blog
-COPY --from=builder /app/config /app/config
-USER 10001
-
-# Every interface, inside the container. `$MY_BLOG_ENV` picks
-# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
-# overrides one key of it.
-ENV MY_BLOG_ADDR=0.0.0.0:3000 \
-    MY_BLOG_ENV=production
-EXPOSE 3000
-
-# `/up` is the liveness probe of `observe`. Any HTTP answer passes, so a
-# project without `observe` passes with a 404: the process answers.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
-
-# `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
-# default). Give `docker stop` more than that: `docker stop -t 30`.
-STOPSIGNAL SIGTERM
-CMD ["/app/my-blog", "serve"]
-===== .dockerignore =====
-/target
-/.git
-/db
-*.sqlite
-*.sqlite-*
-/node_modules
 ===== src/plugins/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
@@ -1599,7 +1533,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 
-**Absent:** `logging`, `observe`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1644,7 +1578,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: aac5ab93f477bf5a -->
+<!-- brocanth-digest: a3dea35c4710f31d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
