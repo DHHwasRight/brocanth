@@ -1,0 +1,54 @@
+error[E0277]: `i64` does not compare with this column
+  --> tests/ui/fail_type_mismatch.rs:14:25
+   |
+14 |         list: status == who.id,
+   |                         ^^^ wrong type for the column
+   |
+   = help: the trait `Operand<brocanth_policy::typed::Text>` is not implemented for `i64`
+   = note: Give a value of the column's own type. This column holds `brocanth_policy::typed::Text` values.
+help: the following other types implement trait `Operand<K>`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   |         impl Operand<$kind> for $ty {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64`
+...
+   | operands!(Int => i8, i16, i32, i64, u8, u16, u32);
+   | ------------------------------------------------- in this macro invocation
+...
+   |         impl Operand<$kind> for &$ty {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i64`
+...
+   | copied_operands!(Int => i8, i16, i32, i64, u8, u16, u32);
+   | -------------------------------------------------------- in this macro invocation
+note: required by a bound in `bind`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   | pub fn bind<K: Kind, V: Operand<K>>(value: V) -> Bound {
+   |                         ^^^^^^^^^^ required by this bound in `bind`
+   = note: this error originates in the macro `operands` which comes from the expansion of the macro `copied_operands` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `String` does not compare with this column
+  --> tests/ui/fail_type_mismatch.rs:15:30
+   |
+15 |         update: author_id == who.name,
+   |                              ^^^ wrong type for the column
+   |
+   = help: the trait `Operand<brocanth_policy::typed::Int>` is not implemented for `String`
+   = note: Give a value of the column's own type. This column holds `brocanth_policy::typed::Int` values.
+help: the following other types implement trait `Operand<K>`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   |         impl Operand<$kind> for $ty {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `String`
+...
+   | operands!(Text => String, &str);
+   | ------------------------------- in this macro invocation
+...
+   | impl Operand<Text> for &String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&String`
+note: required by a bound in `bind`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   | pub fn bind<K: Kind, V: Operand<K>>(value: V) -> Bound {
+   |                         ^^^^^^^^^^ required by this bound in `bind`
+   = note: this error originates in the macro `operands` (in Nightly builds, run with -Z macro-backtrace for more info)

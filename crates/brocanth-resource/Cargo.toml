@@ -49,6 +49,10 @@ brocanth-scaffold = { workspace = true, optional = true }
 [dev-dependencies]
 trybuild = "1"
 
+# The test policy is written with `policy!` (PLAN.md §12 item 10), so every
+# status-code test runs against what the macro emits.
+brocanth-policy = { workspace = true, features = ["macro"] }
+
 # The claim under test is that the policy filters **in the query**. A fixture
 # that filtered in Rust would prove only that this crate and that fixture agree
 # about a predicate neither of them sent to a database, so the tests run against

@@ -92,12 +92,14 @@
 //! execute"*. [`Pred::audience`] does the inversion for the shapes §10 names,
 //! and says in words why it could not for the rest. See [`audience`].
 //!
-//! # Not here, on purpose
+//! # The `policy!` macro
 //!
-//! The `policy!` macro. PLAN.md §12 puts it at item 10, *"deliberately late,
-//! after a real application has used the algebra, so the syntax is informed
-//! rather than imitated"*. This is item 2. Policies are plain Rust values, and
-//! what they teach us is the input to that macro.
+//! PLAN.md §12 item 10, built after `brocanth-resource`, `brocanth-realtime`
+//! and the admin had used the algebra by hand. Behind the `macro` feature.
+//! It declares an entity with typed columns and the rules over it, and
+//! expands to the hand-written [`Column`], [`Entity`] and [`Policy`] impls.
+//! [`typed`] is what it checks values against. `docs/policy.md` has the
+//! syntax, with each real call site before and after.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -119,6 +121,7 @@ pub mod pred;
 pub mod scaffold;
 
 pub mod sql;
+pub mod typed;
 pub mod value;
 
 pub use audience::{Audience, NotInvertible};
@@ -131,5 +134,8 @@ pub use pred::{EntityPred, Membership, Op, Opaque, Pred, Shape};
 pub use sql::{Condition, Dialect, Query};
 pub use value::{Bound, Missing, Value};
 pub use verified::{Admission, Verified, Write};
+
+#[cfg(feature = "macro")]
+pub use brocanth_policy_macros::policy;
 
 mod verified;

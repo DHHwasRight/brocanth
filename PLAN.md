@@ -525,6 +525,13 @@ top of the five to seven months §7 already budgets for the model layer.
 10. The `policy!` macro, deliberately late, after a real application has used
     the algebra, so the syntax is informed rather than imitated.
 
+Status of item 10: built. `brocanth_policy::policy!` (the `macro` feature,
+crate `brocanth-policy-macros`) declares an entity with typed columns and its
+rules, and expands to the hand-written `Column`, `Entity` and `Policy` impls.
+An `eval { … }` clause emits the agreement test of §9 obligation 1. The
+resource, realtime and admin-model test policies use it. `docs/policy.md` has
+the syntax, the call sites before and after, and the open items.
+
 **And one more assertion in the same spirit as the dependency test: a build of
 `brocanth-resource` with no policy registered must not compile.**
 Authorization claimed in a README rots. Authorization asserted by the type

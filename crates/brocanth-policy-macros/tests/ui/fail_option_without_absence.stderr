@@ -1,0 +1,21 @@
+error[E0277]: this value can be absent. The rule does not say what absence means
+  --> tests/ui/fail_option_without_absence.rs:15:28
+   |
+15 |         list: author_id != who.user_id,
+   |                            ^^^ `Option` value
+   |
+   = help: the trait `AbsenceIsExplicit` is not implemented for `i64`
+   = note: Write `<value> else deny`, `<value> else allow` or `<value> else null`.
+help: the trait `Operand<K>` is conditionally implemented for `Option<T>`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   | impl<K, T: AbsenceIsExplicit> Operand<K> for Option<T> {
+   | ^^^^^^^^^^^-----------------^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |            |
+   |            unsatisfied requirement introduced here: `i64: AbsenceIsExplicit`
+   = note: required for `Option<i64>` to implement `Operand<brocanth_policy::typed::Int>`
+note: required by a bound in `bind`
+  --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
+   |
+   | pub fn bind<K: Kind, V: Operand<K>>(value: V) -> Bound {
+   |                         ^^^^^^^^^^ required by this bound in `bind`

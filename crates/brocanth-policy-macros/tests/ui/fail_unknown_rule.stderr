@@ -1,0 +1,6 @@
+error: `read` is not a rule
+       help: the rule for one row is `view`
+  --> tests/ui/fail_unknown_rule.rs:10:9
+   |
+10 |         read: always,
+   |         ^^^^

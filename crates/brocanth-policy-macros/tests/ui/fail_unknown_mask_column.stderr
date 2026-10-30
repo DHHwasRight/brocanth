@@ -1,0 +1,6 @@
+error: `titel` is not a column of entity `Post`
+       help: did you mean `title`?
+  --> tests/ui/fail_unknown_mask_column.rs:11:25
+   |
+11 |         writable: only [titel],
+   |                         ^^^^^

@@ -39,13 +39,19 @@ thiserror = "2"
 # project is never linked into an application that merely has it.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# The `policy!` macro of PLAN.md §12 item 10. Optional and off, for the same
+# reason as everything else here: an application that writes its rules by
+# hand compiles no `syn`. With `macro` on, `brocanth_policy::policy!` is the
+# macro, and it expands to paths in this crate.
+brocanth-policy-macros = { workspace = true, optional = true }
+
 [dependencies.proptest]
 # Optional, and off. PLAN.md §9 obligation 1 says opting into `eval()`
 # generates a property test asserting `eval(row) == (row in query(condition))`.
-# Tier one has no macro, so what ships instead is the harness in
-# `agreement`: strategies over predicates and rows that an application drives
-# against its own database. An application that never calls `eval()` needs
-# none of it and links none of it.
+# `policy!` with an `eval { … }` clause emits that test, and the test calls
+# `agreement::policy_agrees`. A hand-written policy drives the same harness
+# (`agreement::check` and the strategies) against its own database. An
+# application that never calls `eval()` needs none of it and links none of it.
 version = "1"
 optional = true
 
@@ -72,8 +78,13 @@ proptest = "1"
 
 [features]
 default = []
-# The property-test harness of PLAN.md §9 obligation 1.
+# The property-test harness of PLAN.md §9 obligation 1. A `policy!` with an
+# `eval { … }` clause emits a `#[test]` that needs it, so an application that
+# opts into `eval()` turns this on for its tests.
 agreement-proptest = ["dep:proptest"]
+
+# `policy!`: an entity with typed columns, and its rules, in one block.
+macro = ["dep:brocanth-policy-macros"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's

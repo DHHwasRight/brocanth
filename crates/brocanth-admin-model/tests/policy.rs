@@ -24,9 +24,7 @@ use brocanth_admin::data::{AdminData, DataError, ListRequest, Scope, Search};
 use brocanth_admin::discovery::RegistryEntry;
 use brocanth_admin::model::{ModelDescriptor, PrimaryKey, Row, Value};
 use brocanth_admin::policy::{policy_fn, Principal};
-use brocanth_admin::row_policy::{
-    Bound, Column, Dialect, Entity, EntityPred, FieldMask, Ident, Policy, Pred,
-};
+use brocanth_admin::row_policy::{Dialect, Policy};
 use brocanth_admin::{AdminConfig, AdminPlugin, AdminResource, AdminSetup, Discovery};
 use brocanth_admin_model::{admin_source, async_trait};
 use brocanth_model::sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -66,34 +64,6 @@ const SCHEMA: &str = "CREATE TABLE post (id INTEGER PRIMARY KEY AUTOINCREMENT, \
 // The policy, as an application writes it
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum PostColumn {
-    Id,
-    AuthorId,
-    Title,
-    Status,
-}
-
-impl Column for PostColumn {
-    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Title, Self::Status];
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::AuthorId => "author_id",
-            Self::Title => "title",
-            Self::Status => "status",
-        }
-    }
-}
-
-struct Post;
-
-impl Entity for Post {
-    type Column = PostColumn;
-    const TABLE: Ident = Ident::must("post");
-    const PRIMARY_KEY: Self::Column = PostColumn::Id;
-}
-
 /// What the application's authentication hook put in the request state.
 #[derive(Clone, Copy, Debug)]
 struct Staff {
@@ -101,35 +71,29 @@ struct Staff {
     superuser: bool,
 }
 
-struct PostRules;
+// The entity is checked against the SeaORM model: each column is a field of
+// `blog::post::Model` with the same type. So the names the admin matches at
+// runtime (`Column::name()` against its own column names) come from the
+// same struct, and a typo or a changed type is a compile error.
+brocanth_policy::policy! {
+    #[model(blog::post::Model)]
+    entity Post in "post" {
+        #[key] id: i32,
+        author_id: i32,
+        title: String,
+        status: String,
+    }
 
-impl Policy for PostRules {
-    type Entity = Post;
-    type Subject = Staff;
-
-    fn list(&self, who: &Staff) -> EntityPred<Post> {
-        if who.superuser {
-            return Pred::Always;
+    policy PostRules(who: &Staff) for Post {
+        list {
+            who.superuser => always,
+            author_id == who.id,
         }
-        Pred::eq(PostColumn::AuthorId, Bound::or_deny(Some(who.id)))
-    }
-
-    fn update(&self, who: &Staff) -> EntityPred<Post> {
-        Pred::all([
-            Pred::eq(PostColumn::AuthorId, who.id),
-            Pred::eq(PostColumn::Status, "draft"),
-        ])
-    }
-
-    fn delete(&self, who: &Staff) -> EntityPred<Post> {
-        Pred::eq(PostColumn::AuthorId, who.id)
-    }
-
-    fn writable(&self, who: &Staff) -> FieldMask<PostColumn> {
-        if who.superuser {
-            FieldMask::except([PostColumn::Id])
-        } else {
-            FieldMask::only([PostColumn::Title])
+        update: author_id == who.id && status == "draft",
+        delete: author_id == who.id,
+        writable {
+            who.superuser => except [id],
+            only [title],
         }
     }
 }
