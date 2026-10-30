@@ -417,11 +417,17 @@ impl<'a> Project<'a> {
 /// letting a module edit a file it did not write, which is the same rule the
 /// framework's core follows for plugins. A module that needs a seam this list
 /// does not have needs a change here, in the open, with a name and a comment.
+///
+/// A variant needs a reader. Three had none -- `CargoExtra`, `AppItems` and
+/// `AppBeforeRouter` -- so a module that wrote into one was recorded and
+/// discarded in silence. They were deleted rather than read, because no
+/// module had a use for them: `src/app.rs` is the developer's file, so a
+/// module writes its own file under `src/plugins/<key>/` instead, and an
+/// answer before the router is a route in the one table
+/// ([`Slot::RouterMounts`]). Add one back with its first reader.
+/// [`Slot::NodeDependencies`] is the last variant with no reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Slot {
-    /// `Cargo.toml`, after the dependencies the choices brought. For a
-    /// `[features]` table or anything else a dependency line cannot say.
-    CargoExtra,
     /// The `use` lines the registration chain needs. Use
     /// [`Writer::once`](crate::Writer::once), because two modules needing
     /// one import is the normal case and `use` twice does not compile.
@@ -457,11 +463,6 @@ pub enum Slot {
     /// does not compile. That is the modularity claim, checked by the
     /// compiler rather than written in a README.
     AppContext,
-    /// `src/app.rs`, free items beside the dispatcher.
-    AppItems,
-    /// `src/app.rs`, inside `dispatch`, before the router is consulted. For
-    /// an answer that is not a route, such as a static file.
-    AppBeforeRouter,
     /// `src/plugins/mod.rs`, one `pub mod` line per plugin.
     PluginsMod,
     /// One plugin type path per registered plugin, in registration order:
@@ -557,13 +558,10 @@ pub enum Slot {
 impl fmt::Display for Slot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Slot::CargoExtra => "Cargo.toml",
             Slot::AppUses => "src/plugins/mod.rs (uses)",
             Slot::AppPlugins => "src/plugins/mod.rs (the builder chain)",
             Slot::AppSetup => "src/app.rs (setup)",
             Slot::AppContext => "src/plugins/mod.rs (the context)",
-            Slot::AppItems => "src/app.rs (items)",
-            Slot::AppBeforeRouter => "src/app.rs (before the router)",
             Slot::PluginsMod => "src/plugins/mod.rs",
             Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
