@@ -193,7 +193,7 @@ else.
 | Cache | `PgCache` on unlogged tables | `Cache` (tags, `CacheExt`) | Another `Cache` impl. The route cache and `TagInvalidator` stay the same. |
 | Files | `Postgres` in `brocanth-storage` (`postgres` feature), bytes in `bytea` | `Storage` | `LocalDisk` exists. An object store would be another `Storage` impl. |
 | Realtime | `NotifySink` over `LISTEN/NOTIFY` (`listen-notify` feature) | `ChangeSink`, `Notifier` | Another `ChangeSink`. The broker and the subscribers stay the same. |
-| Accounts | not yet | `AuthStore` (+ `MfaStore`, `OtpStore`, ...) | Only `MemoryStore` ships. A Postgres store is on the roadmap. |
+| Accounts | `PgStore` in `brocanth-auth` (`postgres` feature) | `AuthStore` (+ `MfaStore`, `OtpStore`, ...) | Another `AuthStore` impl. `MemoryStore` is for tests. Both pass one conformance suite. |
 
 The queue shows the pattern best. A job has a lane. A `Transactional` job
 commits with the data that it refers to and stays in your database. A `Bulk`
@@ -250,7 +250,7 @@ The d2s concerns, against what the code does today.
 - [ ] **Security headers.** There is no HSTS hook. `check --deploy` warns
   about it.
 - [ ] **Rate limiting.**
-- [ ] **A Postgres `AuthStore`**, so accounts survive a restart.
+- [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project still starts on `MemoryStore`.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).
 - [ ] **A realtime transport.** The broker works. The SSE and WebSocket
@@ -272,6 +272,7 @@ The d2s concerns, against what the code does today.
 | [`docs/input.md`](docs/input.md) | Reading a request body into a struct. |
 | [`docs/middleware.md`](docs/middleware.md) | The middleware hooks. |
 | [`docs/cache.md`](docs/cache.md) | Tags, route cache, fragments, invalidation. |
+| [`docs/auth-store.md`](docs/auth-store.md) | Where accounts live: `MemoryStore`, `PgStore`, the conformance suite. |
 | [`docs/async-handlers.md`](docs/async-handlers.md) | How a route gets to `.await`, and the cost. |
 | [`docs/surface.md`](docs/surface.md) | How a handler's signature becomes the OpenAPI document and the client. |
 | [`docs/backoffice.md`](docs/backoffice.md) | The admin. |
