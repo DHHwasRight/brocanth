@@ -247,3 +247,149 @@ const CSRF_AGENTS: &str = "\n\
     A 403 from this hook is a form that lost its token, or a caller that\n\
     is not a browser. Add that path to `exempt`; do not remove the\n\
     registration.\n";
+
+/// The security headers, as a choice on the menu that arrives ticked.
+///
+/// Ticked for the reason CSRF is: every default it sends is a fact about
+/// browsers, not about this deployment. The one header that depends on
+/// the deployment is HSTS, and the hook sends it only on a request it
+/// knows is HTTPS, so the default cannot pin `localhost`.
+pub struct SecurityHeaders;
+
+impl Module for SecurityHeaders {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "middleware-security-headers",
+            "HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash",
+        )
+        .asked_in("doors", "Send the headers a browser reads as policy")
+        .part_of("middleware")
+        .because(
+            "the hook is `brocanth_middleware::SecurityHeaders`, so the crate arrives with that choice",
+        )
+        .after("middleware-csrf")
+        .absent(
+            "security-headers",
+            "no security headers; a browser sniffs types, frames the pages and runs any inline script",
+        )
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.at(Slot::AppPlugins)
+            .block(SECURITY_HEADERS_REGISTRATION.to_string());
+        s.at(Slot::AgentsSections)
+            .block(SECURITY_HEADERS_AGENTS.to_string());
+    }
+}
+
+/// The registration. Commented for the two reasons the CSRF block above
+/// it gives, and for no reason of its own.
+const SECURITY_HEADERS_REGISTRATION: &str = r#"
+        // -- brocanth-middleware: security headers ------------------------
+        //
+        // HSTS (over HTTPS only), nosniff, Referrer-Policy, X-Frame-Options
+        // DENY, a Content-Security-Policy and a Permissions-Policy. The
+        // policy allows dp-swap's two inline scripts by their SHA-256, so
+        // there is no `'unsafe-inline'`. A script you inline yourself needs
+        // `Csp::default().inline_script(TEXT)`.
+        //
+        // HSTS goes out only when the request is known to be HTTPS. Behind
+        // a TLS terminator, say so: `SecurityHeadersConfig::default()
+        // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
+        //
+        // Commented for the two reasons the CSRF block gives: the `Hooks`
+        // alias and the hook pipeline.
+        //
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::SecurityHeadersConfig::default(),
+        //     ),
+        // );
+"#;
+
+/// What the generated `AGENTS.md` says about the policy.
+const SECURITY_HEADERS_AGENTS: &str = "\n\
+    ## Security headers\n\
+    \n\
+    `src/app.rs` holds a commented registration for\n\
+    `brocanth_middleware::SecurityHeaders`. Its Content-Security-Policy\n\
+    allows inline scripts by hash only. To inline a new script, add\n\
+    `Csp::default().inline_script(TEXT)` with the exact text between the\n\
+    tags. Do not add `'unsafe-inline'` to `script-src`. A value that\n\
+    depends on the request goes in a `data-` attribute or a `<meta>` tag,\n\
+    not in the script.\n\
+    \n\
+    HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator\n\
+    is in front. Set `include_subdomains` or `preload` only when the\n\
+    person who owns the domain says so.\n";
+
+/// Rate limiting, as a choice on the menu that arrives unticked.
+///
+/// Off, because a limit is a number about this application's traffic,
+/// and the generator does not know that number.
+pub struct RateLimit;
+
+impl Module for RateLimit {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "middleware-rate-limit",
+            "a fixed window per address, session or user, per group of routes; 429 with Retry-After",
+        )
+        .asked_in("doors", "Limit how often one caller may hit a route")
+        .part_of_but_off("middleware")
+        .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
+        .after("middleware-security-headers")
+        .absent(
+            "rate-limit",
+            "no rate limit; a password guesser gets as many tries as the server answers",
+        )
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.at(Slot::AppPlugins)
+            .block(RATE_LIMIT_REGISTRATION.to_string());
+        s.at(Slot::AgentsSections)
+            .block(RATE_LIMIT_AGENTS.to_string());
+    }
+}
+
+/// The registration, with an example rule that is marked as one.
+const RATE_LIMIT_REGISTRATION: &str = r#"
+        // -- brocanth-middleware: rate limit ------------------------------
+        //
+        // A fixed window per key. Each rule is a group of routes, a limit
+        // and a window. The numbers below are an example for a login form,
+        // not a recommendation: pick them from your own traffic.
+        //
+        // The key is the client address. Behind a proxy, register
+        // `ProxyHeaders` above, or name the one header your edge sets and
+        // strips: `.ip_header("fly-client-ip")`.
+        //
+        // This counts in this process. With more than one process, use
+        // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
+        //
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::RateLimitConfig::rules([
+        //             brocanth_middleware::Rule::new("login", 5, 60)
+        //                 .paths(["/login"])
+        //                 .methods(["POST"]),
+        //         ]),
+        //     ),
+        // );
+"#;
+
+/// What the generated `AGENTS.md` says, so an agent does not invent a
+/// limit.
+const RATE_LIMIT_AGENTS: &str = "\n\
+    ## Rate limit\n\
+    \n\
+    `src/app.rs` holds a commented registration for\n\
+    `brocanth_middleware::RateLimit`. Its numbers are an example. Do not\n\
+    enable it with invented limits. Ask for the limit and the window of\n\
+    each route group.\n\
+    \n\
+    A request whose key cannot be found is not counted. Behind a proxy,\n\
+    the address comes from `ProxyHeaders` or from `ip_header`. Never set\n\
+    `ip_header` to a header the client can send, such as\n\
+    `X-Forwarded-For`, unless the edge overwrites it.\n";

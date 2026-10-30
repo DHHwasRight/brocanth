@@ -245,9 +245,13 @@ The d2s concerns, against what the code does today.
 - [ ] **Container image.** There is no Dockerfile and no generated one.
 - [ ] **Apply migrations from the CLI.** There is no `migrate up`. You call
   SeaORM's migrator from your own code or a project command.
-- [ ] **Security headers.** There is no HSTS hook. `check --deploy` warns
-  about it.
-- [ ] **Rate limiting.**
+- [x] **Security headers.** `brocanth_middleware::SecurityHeaders` sends
+  HSTS (over HTTPS only), nosniff, Referrer-Policy, framing, a CSP that
+  allows dp-swap's inline scripts by hash, and Permissions-Policy.
+- [x] **Rate limiting.** `brocanth_middleware::RateLimit` counts a fixed
+  window per IP, session or user for each route group and answers 429 with
+  `Retry-After` and `RateLimit-*`. In memory, or in one UNLOGGED Postgres
+  table.
 - [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project still starts on `MemoryStore`.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).
