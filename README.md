@@ -239,12 +239,19 @@ The d2s concerns, against what the code does today.
 - [x] **Health probes.** `/up` asks nothing; `/readyz` runs each plugin's `ready_when` check and fails before shutdown drains.
 - [x] **Metrics.** `/metrics` serves Prometheus text: requests by route template and status class, in-flight, and job queue depth and runs.
 - [x] **Tracing.** The `otel` feature exports a span per request and per job run over OTLP, with W3C `traceparent` in and out.
-- [x] **Graceful shutdown on SIGTERM in a generated project.** The generated `serve` stops accepting, drains open requests, runs `App::shutdown` inside `[server] shutdown_grace_secs` (25 s), and exits non-zero when the drain ran out of time.
-- [x] **Container image.** `brocanth create` writes a cargo-chef `Dockerfile` (slim Debian runtime, non-root user, `HEALTHCHECK` on `/up`), a `.dockerignore`, and with `observe` a `deploy/kubernetes.yaml`.
-- [x] **Apply migrations from the CLI.** `brocanth migrate up | down [N] | status` runs the project's own `migrate` command; `migrate make` lists each new file in `migrations/mod.rs`.
-- [ ] **Security headers.** There is no HSTS hook. `check --deploy` warns
-  about it.
-- [ ] **Rate limiting.**
+- [ ] **Graceful shutdown on SIGTERM in a generated project.** The generated
+  `serve` does not listen for signals and does not call `App::shutdown`.
+  You must wire it yourself.
+- [ ] **Container image.** There is no Dockerfile and no generated one.
+- [ ] **Apply migrations from the CLI.** There is no `migrate up`. You call
+  SeaORM's migrator from your own code or a project command.
+- [x] **Security headers.** `brocanth_middleware::SecurityHeaders` sends
+  HSTS (over HTTPS only), nosniff, Referrer-Policy, framing, a CSP that
+  allows dp-swap's inline scripts by hash, and Permissions-Policy.
+- [x] **Rate limiting.** `brocanth_middleware::RateLimit` counts a fixed
+  window per IP, session or user for each route group and answers 429 with
+  `Retry-After` and `RateLimit-*`. In memory, or in one UNLOGGED Postgres
+  table.
 - [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project uses it when it has `jobs` or `cache`, and `MemoryStore` otherwise.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).

@@ -20,6 +20,19 @@
 //! request headers, sets `Vary`, and gives a handler typed response
 //! headers and out-of-band fragments.
 //!
+//! And two for the day after launch:
+//!
+//! | Hook | Answers |
+//! |---|---|
+//! | [`SecurityHeaders`] | HSTS, `nosniff`, `Referrer-Policy`, framing, a CSP that lets dp-swap's inline scripts run by hash, `Permissions-Policy` |
+//! | [`RateLimit`] / [`SharedRateLimit`] | a fixed window per address, session or user, per group of routes; 429 with `Retry-After` |
+//!
+//! Under the `config` feature their configuration types deserialise, so
+//! `config.section::<SecurityHeadersConfig>("security_headers")` builds
+//! one from a brocanth-config file. Under `postgres`,
+//! [`rate_limit::PgStore`] shares the rate limiter's counts across
+//! processes in one `UNLOGGED` table.
+//!
 //! # The one that is on by default
 //!
 //! Five of the six encode a fact about somebody else's network: which
@@ -69,6 +82,8 @@ mod csrf;
 pub mod dp;
 mod method_override;
 mod proxy_headers;
+pub mod rate_limit;
+mod security_headers;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
@@ -79,7 +94,11 @@ pub use cors::{Cors, CorsConfig, Origins};
 pub use csrf::{Csrf, CsrfConfig, CsrfToken};
 pub use dp::{Directive, DpRequest, DpSwap, Oob};
 pub use method_override::{MethodOverride, MethodOverrideConfig};
-pub use proxy_headers::{ClientInfo, ProxyHeaders, ProxyHeadersConfig};
+pub use proxy_headers::{ClientInfo, PeerAddress, ProxyHeaders, ProxyHeadersConfig};
+pub use rate_limit::{RateLimit, RateLimitConfig, Rule, SharedRateLimit};
+pub use security_headers::{
+    script_hash, Csp, Frames, Hsts, SecurityHeaders, SecurityHeadersConfig, ONE_YEAR,
+};
 
 /// Reads one header as UTF-8, or `None` when it is absent or not text.
 ///
