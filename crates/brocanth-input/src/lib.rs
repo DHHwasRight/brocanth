@@ -79,12 +79,14 @@ use std::fmt;
 
 pub use described::Described;
 pub use multipart::{FilePart, Limits, Multipart};
+pub use rerender::{rerender, FieldErrors};
 pub use zod;
 
 use zod::{Faults, Input, Refusal, Value};
 
 pub mod described;
 pub mod multipart;
+pub mod rerender;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;

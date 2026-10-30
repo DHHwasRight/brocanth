@@ -22,6 +22,15 @@ http = "1"
 # lengths in as well and does not return early on them.
 getrandom = "0.4"
 
+[dev-dependencies]
+# `tests/dp.rs` drives the CSRF hook and the dp-swap hook through the real
+# pipeline, and re-renders a form with its faults the way an application
+# does. None of this reaches a library build.
+brocanth-test.workspace = true
+brocanth-input.workspace = true
+brocanth-server.workspace = true
+zod = { workspace = true, features = ["json"] }
+
 [features]
 default = []
 scaffold = ["dep:brocanth-scaffold"]

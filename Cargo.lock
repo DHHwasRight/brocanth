@@ -852,6 +852,7 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-jobs",
+ "brocanth-middleware",
  "brocanth-queue",
  "brocanth-queue-memory",
  "brocanth-queue-postgres",
@@ -885,9 +886,13 @@ name = "brocanth-middleware"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-input",
  "brocanth-scaffold",
+ "brocanth-server",
+ "brocanth-test",
  "getrandom 0.4.3",
  "http",
+ "zod",
 ]
 
 [[package]]

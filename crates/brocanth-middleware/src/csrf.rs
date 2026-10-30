@@ -70,6 +70,9 @@ pub struct CsrfToken {
     pub value: String,
     /// The form field this token goes in.
     pub field: String,
+    /// The header a script sends it back in, when the configuration takes
+    /// one.
+    pub header: Option<String>,
     /// Whether this request minted it, so the response must set the
     /// cookie. Private: a hook writes it and a hook reads it.
     fresh: bool,
@@ -86,6 +89,25 @@ impl CsrfToken {
             r#"<input type="hidden" name="{}" value="{}">"#,
             self.field, self.value
         )
+    }
+
+    /// The `<meta>` tag dp-swap's mutating verbs read the token from.
+    ///
+    /// It goes in the layout's `<head>`. The script sends the value in
+    /// the header this tag names, or in the field when the configuration
+    /// takes no header. Not escaped, for the reason
+    /// [`hidden_field`](Self::hidden_field) gives.
+    pub fn meta_tag(&self) -> String {
+        match &self.header {
+            Some(header) => format!(
+                r#"<meta name="csrf-token" content="{}" data-header="{}">"#,
+                self.value, header
+            ),
+            None => format!(
+                r#"<meta name="csrf-token" content="{}" data-field="{}">"#,
+                self.value, self.field
+            ),
+        }
     }
 }
 
@@ -188,6 +210,12 @@ impl CsrfConfig {
             return Err(
                 "the field name goes in an HTML attribute unescaped: keep it to \
                         letters, digits, `_` and `-`",
+            );
+        }
+        if self.header.as_deref().is_some_and(|h| !is_name(h)) {
+            return Err(
+                "the header name goes in a header and in an HTML attribute: keep it \
+                        to letters, digits, `_` and `-`",
             );
         }
         Ok(())
@@ -325,6 +353,7 @@ impl RequestHook for Hook {
         state.insert(CsrfToken {
             value,
             field: self.config.field.clone(),
+            header: self.config.header.clone(),
             fresh: held.is_none(),
         });
 
