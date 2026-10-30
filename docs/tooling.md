@@ -126,3 +126,43 @@ and the scaffold has no entities to put in it.
 Not done: `dumpdata`, and a JSON, array, `Decimal` or `Uuid` column. Those
 types are behind SeaORM features that `brocanth-model` does not turn on, and
 the error says so.
+
+## 2. `brocanth dbshell` (Django D26)
+
+```text
+brocanth dbshell                      # the development database
+brocanth dbshell --env production     # [model] url of config/production.toml
+brocanth dbshell -- -c 'select 1'     # arguments after -- go to the client
+brocanth dbshell --print              # print the command line, run nothing
+```
+
+It reads `[model] url` through the same `brocanth_config::Loader` the
+application uses, so the files, `$<APP>_ENV` and `$<APP>_MODEL__URL` agree
+with what the application sees. Then it replaces itself with the database's
+own client:
+
+| URL | Client | Notes |
+|---|---|---|
+| `postgres://` or `postgresql://` | `psql <url>` | The password goes in `PGPASSWORD`, not on the command line, where `ps` shows it |
+| `sqlite://<path>` | `sqlite3 <path>` | A relative path is read from the project root. A file that does not exist is refused, because `sqlite3` would create an empty one without a word |
+| `sqlite::memory:` | none | Refused: no other process can open an in-memory database |
+
+The alias is `dbconsole`, the Rails name.
+
+### Why there is no `brocanth shell`
+
+`rails console` and `manage.py shell` evaluate the application's own language
+against its loaded classes. Rust has no interpreter, and the types of a
+project exist only inside its compiled binary. A REPL such as `evcxr`
+compiles each line as a new crate. It cannot see the private modules of a
+project, it cannot hold the state of a running application, and it builds
+the dependency tree again on the first line. A command named `shell` would
+promise a thing it cannot do.
+
+A console has two uses, and each one has an honest tool:
+
+- **Look at the data**: `brocanth dbshell`.
+- **Run application code one time**: a project command in
+  `src/commands/<name>.rs`, run as `brocanth <name>`. The compiler checks it
+  against the project, and it is a file, so you can review it and run it
+  again.

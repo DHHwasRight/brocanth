@@ -205,6 +205,15 @@ impl Ui {
         let _ = err.flush();
     }
 
+    /// The product of a command that prints one, such as `dbshell --print`.
+    /// Stdout and plain, so a pipe or `$(...)` gets it, and never suppressed:
+    /// `--quiet` drops the commentary, not the answer.
+    pub fn result(&self, text: impl Display) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{text}");
+        let _ = out.flush();
+    }
+
     /// A blank line of commentary. Collapses under `--quiet` with the rest.
     pub fn gap(&self) {
         self.note("");

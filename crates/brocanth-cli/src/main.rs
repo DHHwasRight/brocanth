@@ -97,6 +97,14 @@ enum Command {
     /// writes a SeaORM migration file. It applies nothing. `ids` writes the
     /// ids that `make` needs.
     Migrate(commands::migrate::MigrateArgs),
+    /// Open psql or sqlite3 on this project's database
+    ///
+    /// Reads `[model] url` from the configuration of one environment and
+    /// runs the database's own client on it. A Postgres password goes in
+    /// PGPASSWORD, not on the command line. This is a data shell: Rust has
+    /// no interpreter, so code runs as a project command instead.
+    #[command(alias = "dbconsole")]
+    Dbshell(commands::dbshell::DbshellArgs),
     /// A command defined in this project, run by the project's own binary
     ///
     /// Everything this tool does not recognise is one. `brocanth` is
@@ -195,6 +203,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::migrate::MigrateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("dbshell", m)) => commands::dbshell::run(
+            &ui,
+            dir,
+            commands::dbshell::DbshellArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         // Everything else belongs to the project: the ones listed in the help
         // and the ones added since it was last built take the same path.
