@@ -849,10 +849,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // cargo is the build tool; hooking one into the other conflates them.
         // The ways in are `brocanth <command>` from anywhere inside the
         // project, and the built binary itself.
-        files.push((
-            "src/commands/mod.rs".to_string(),
-            commands_mod_rs(&built),
-        ));
+        files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(&built)));
         files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
     }
     // The modules' own files, after the ones every project has. A clash
@@ -1394,8 +1391,10 @@ fn sibling(brocanth_crate: &str, name: &str) -> Option<std::path::PathBuf> {
 /// A `[workspace]` with no `[package]` is a virtual manifest: a real file,
 /// and not a crate.
 fn is_package(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("Cargo.toml"))
-        .is_ok_and(|text| text.lines().any(|line| line.trim_start().starts_with("[package]")))
+    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|text| {
+        text.lines()
+            .any(|line| line.trim_start().starts_with("[package]"))
+    })
 }
 
 /// One of brocanth's own crates, which every project gets whatever it chose.
@@ -2416,7 +2415,6 @@ where
 
 "##;
 
-
 /// How many layout layers the client says it holds, from `DP-Partial`.
 ///
 /// Written only with partial navigation; without it every request takes the
@@ -2508,7 +2506,6 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 }
 
 "##;
-
 
 const PAGES_MOD_RS_TESTS: &str = r##"#[cfg(test)]
 mod tests {
@@ -2717,7 +2714,11 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     let mut routes: Vec<String> = ["/", "/about", "/users/{id}"]
         .iter()
         .map(|r| (*r).to_string())
-        .chain(built.slot(Slot::PagesRoutes).map(|r| r.trim_end().to_string()))
+        .chain(
+            built
+                .slot(Slot::PagesRoutes)
+                .map(|r| r.trim_end().to_string()),
+        )
         .collect();
     routes.sort();
     routes.dedup();
@@ -3092,7 +3093,10 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         // alias is named after it: a key is unique by construction and a
         // type name is not, so two modules whose plugin types share a
         // final segment used to emit one `type WithCache` twice.
-        let (key, path) = line.trim_end().split_once(' ').unwrap_or(("", line.trim_end()));
+        let (key, path) = line
+            .trim_end()
+            .split_once(' ')
+            .unwrap_or(("", line.trim_end()));
         let name = format!("With{}", upper_camel(key));
         out.push_str(&format!("type {name} = After<{path}, {held}>;\n"));
         held = name;
@@ -3439,8 +3443,12 @@ mod tests {
     fn commented_guidance_in_the_chain_is_not_a_registration() {
         // `brocanth-middleware` writes five commented registrations at
         // the place they would be uncommented, and must not be reported.
-        assert!(registers("        let builder = builder.plugin(X::new(s));"));
-        assert!(!registers("        // let builder = builder.plugin(X::new(s));"));
+        assert!(registers(
+            "        let builder = builder.plugin(X::new(s));"
+        ));
+        assert!(!registers(
+            "        // let builder = builder.plugin(X::new(s));"
+        ));
         assert!(!registers("        // Five edge hooks, none of them on."));
     }
 
@@ -3484,9 +3492,9 @@ mod tests {
         let a = answers(&["rsx"]);
         let mut built = contributions(&a).expect("a project");
         built.now_writing("records");
-        built.at(Slot::RouterMounts).line(
-            "    crate::plugins::records::mount(routes, \"/api\")?;",
-        );
+        built
+            .at(Slot::RouterMounts)
+            .line("    crate::plugins::records::mount(routes, \"/api\")?;");
 
         let pages = pages_mod_rs(&a, &built);
         assert!(

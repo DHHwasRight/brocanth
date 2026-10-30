@@ -74,7 +74,9 @@ pub fn section(slug: &str) -> Option<&'static Section> {
 
 /// The label of a tab slug, which is also the test that it exists.
 pub fn tab(slug: &str) -> Option<&'static str> {
-    TABS.iter().find(|(s, _)| *s == slug).map(|(_, label)| *label)
+    TABS.iter()
+        .find(|(s, _)| *s == slug)
+        .map(|(_, label)| *label)
 }
 
 impl Section {

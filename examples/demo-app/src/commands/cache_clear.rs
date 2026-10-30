@@ -1,7 +1,7 @@
 //! `cache:clear` -- a name no Rust identifier can spell, which is what
 //! `name = "..."` is for.
 
-use brocanth_command::{anyhow, clap, cmd, Context, Command};
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
 /// Empty every cache this project writes.
 #[cmd(name = "cache:clear")]

@@ -480,7 +480,6 @@ pub fn User(id: u64) -> Element {
 
 // -- tailwind ----------------------------------------------------------------
 
-
 /// `src/assets.rs`: two directories, embedded.
 const ASSETS_RS: &str = r#"//! Every static file this binary serves.
 //!

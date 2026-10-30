@@ -18,18 +18,8 @@ use crate::rt::block_on;
 /// characters, and the test below asserts exactly that distinction rather
 /// than pretending they are refused.
 const BREAKS: &[&str] = &[
-    "\r\n",
-    "\n",
-    "\r",
-    "\r\n\r\n",
-    "\n\n",
-    "\u{0}",
-    "\u{b}",
-    "\u{c}",
-    "\u{85}",
-    "\u{2028}",
-    "\u{2029}",
-    "\t",
+    "\r\n", "\n", "\r", "\r\n\r\n", "\n\n", "\u{0}", "\u{b}", "\u{c}", "\u{85}", "\u{2028}",
+    "\u{2029}", "\t",
 ];
 
 fn from() -> Address {
@@ -50,7 +40,10 @@ mod header_injection {
             assert!(
                 matches!(
                     Subject::parse(&injected),
-                    Err(MailError::InvalidHeader { field: "subject", .. })
+                    Err(MailError::InvalidHeader {
+                        field: "subject",
+                        ..
+                    })
                 ),
                 "{attempt:?} was accepted in a subject"
             );
@@ -90,16 +83,20 @@ mod header_injection {
         for attempt in BREAKS {
             let injected = format!("person@example.test{attempt}Bcc: harvest@attacker.test");
             assert!(
-                matches!(Address::parse(&injected), Err(MailError::InvalidAddress { .. })),
+                matches!(
+                    Address::parse(&injected),
+                    Err(MailError::InvalidAddress { .. })
+                ),
                 "{attempt:?} was accepted in an address"
             );
             // The break in front of the address too, which is how a value
             // appended to a header rather than prepended to one arrives.
             let injected = format!("{attempt}person@example.test");
             assert!(
-                matches!(Address::parse(&injected), Err(MailError::InvalidAddress { .. }))
-                    || Address::parse(&injected).is_ok_and(|a| a.address()
-                        == "person@example.test"),
+                matches!(
+                    Address::parse(&injected),
+                    Err(MailError::InvalidAddress { .. })
+                ) || Address::parse(&injected).is_ok_and(|a| a.address() == "person@example.test"),
                 "{attempt:?} changed the address it was in front of"
             );
         }
@@ -136,7 +133,10 @@ mod header_injection {
         let long = "a".repeat(crate::MAX_SUBJECT + 1);
         assert!(matches!(
             Subject::parse(&long),
-            Err(MailError::InvalidHeader { field: "subject", .. })
+            Err(MailError::InvalidHeader {
+                field: "subject",
+                ..
+            })
         ));
     }
 
@@ -192,7 +192,10 @@ mod addresses {
     fn nothing_in_the_list_is_an_address() {
         for attempt in NOT_ADDRESSES {
             assert!(
-                matches!(Address::parse(attempt), Err(MailError::InvalidAddress { .. })),
+                matches!(
+                    Address::parse(attempt),
+                    Err(MailError::InvalidAddress { .. })
+                ),
                 "{attempt:?} parsed as an address"
             );
         }
@@ -236,7 +239,10 @@ mod addresses {
         let value = address.header_value();
         assert!(value.starts_with("=?utf-8?B?"), "{value}");
         assert!(value.ends_with("<person@example.test>"), "{value}");
-        assert!(value.is_ascii(), "a header carried a non-ASCII byte: {value}");
+        assert!(
+            value.is_ascii(),
+            "a header carried a non-ASCII byte: {value}"
+        );
     }
 }
 
@@ -352,11 +358,7 @@ mod rendering {
     #[test]
     fn the_envelope_is_to_then_cc_and_never_the_header_block() {
         let message = every_field();
-        let envelope: Vec<&str> = message
-            .recipients()
-            .iter()
-            .map(|a| a.address())
-            .collect();
+        let envelope: Vec<&str> = message.recipients().iter().map(|a| a.address()).collect();
         assert_eq!(
             envelope,
             vec![
@@ -400,14 +402,16 @@ mod memory_backend {
     fn it_answers_what_went_to_one_address() {
         let mailer = Memory::new();
         block_on(mailer.send(&every_field())).expect("sent");
-        block_on(mailer.send(
-            &Message::builder(from())
-                .to(Address::parse("other@example.test").expect("an address"))
-                .subject("Something else")
-                .text("body")
-                .build()
-                .expect("a message"),
-        ))
+        block_on(
+            mailer.send(
+                &Message::builder(from())
+                    .to(Address::parse("other@example.test").expect("an address"))
+                    .subject("Something else")
+                    .text("body")
+                    .build()
+                    .expect("a message"),
+            ),
+        )
         .expect("sent");
 
         assert_eq!(mailer.to("person@example.test").len(), 1);
@@ -470,7 +474,10 @@ mod building {
 
     #[test]
     fn a_message_with_no_recipient_is_refused() {
-        let built = Message::builder(from()).subject("Hello").text("body").build();
+        let built = Message::builder(from())
+            .subject("Hello")
+            .text("body")
+            .build();
         assert!(matches!(built, Err(MailError::NoRecipient)));
     }
 
@@ -493,7 +500,10 @@ mod building {
             .build();
         assert!(matches!(
             built,
-            Err(MailError::InvalidHeader { field: "subject", .. })
+            Err(MailError::InvalidHeader {
+                field: "subject",
+                ..
+            })
         ));
     }
 
@@ -502,8 +512,8 @@ mod building {
         // An error that quotes the refused value writes attacker-chosen bytes
         // into a log line, which is the same injection one layer down.
         let secret = "harvest@attacker.test";
-        let refused = Address::parse(&format!("person@example.test\r\nBcc: {secret}"))
-            .expect_err("refused");
+        let refused =
+            Address::parse(&format!("person@example.test\r\nBcc: {secret}")).expect_err("refused");
         assert!(!refused.to_string().contains(secret));
         let refused = Subject::parse(&format!("Hello\r\nBcc: {secret}")).expect_err("refused");
         assert!(!refused.to_string().contains(secret));
@@ -579,7 +589,10 @@ fn bodies(wire: &str) -> Vec<String> {
     use base64::Engine;
 
     let mut out = Vec::new();
-    for part in wire.split("Content-Transfer-Encoding: base64\r\n\r\n").skip(1) {
+    for part in wire
+        .split("Content-Transfer-Encoding: base64\r\n\r\n")
+        .skip(1)
+    {
         let encoded: String = part
             .split("\r\n")
             .take_while(|line| !line.starts_with("--=_brocanth"))

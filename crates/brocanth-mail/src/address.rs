@@ -210,17 +210,16 @@ fn parse_addr_spec(raw: &str) -> Result<String, MailError> {
             return Err(MailError::address("its domain has an empty label"));
         }
         if label.len() > 63 {
-            return Err(MailError::address("its domain has a label that is too long"));
+            return Err(MailError::address(
+                "its domain has a label that is too long",
+            ));
         }
         if label.starts_with('-') || label.ends_with('-') {
             return Err(MailError::address(
                 "its domain has a label that starts or ends with a hyphen",
             ));
         }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(MailError::address(
                 "its domain has a label with a character that is not a letter, a digit or a hyphen",
             ));

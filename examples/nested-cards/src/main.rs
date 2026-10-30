@@ -5,8 +5,8 @@
 //! into a command line with `serve` as one of its commands.
 
 mod app;
-mod data;
 mod assets;
+mod data;
 mod pages;
 
 use std::process::ExitCode;

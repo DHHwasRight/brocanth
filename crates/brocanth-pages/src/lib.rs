@@ -687,17 +687,27 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("a temp directory");
         // `layout.rs` is in here too: it would be a page at `/layout`, and
         // a file cannot be both.
-        for name in ["layout.css", "layout.md", "layout.svg", "layout.rsx~", "layout.rs"] {
+        for name in [
+            "layout.css",
+            "layout.md",
+            "layout.svg",
+            "layout.rsx~",
+            "layout.rs",
+        ] {
             std::fs::write(dir.join(name), "not a layout").expect("write");
         }
         assert!(
-            layout_in(&dir, LAYOUT_EXTENSIONS).expect("no layout here").is_none(),
+            layout_in(&dir, LAYOUT_EXTENSIONS)
+                .expect("no layout here")
+                .is_none(),
             "a sidecar was taken for a layout"
         );
 
         // And the one that is.
         std::fs::write(dir.join("layout.rsx"), "pub fn Layout() {}").expect("write");
-        let found = layout_in(&dir, LAYOUT_EXTENSIONS).expect("one layout").expect("found");
+        let found = layout_in(&dir, LAYOUT_EXTENSIONS)
+            .expect("one layout")
+            .expect("found");
         assert_eq!(found.file_name().expect("a name"), "layout.rsx");
         let _ = std::fs::remove_dir_all(&dir);
     }

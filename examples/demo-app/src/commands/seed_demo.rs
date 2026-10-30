@@ -1,6 +1,6 @@
 //! `seed_demo` -- the name derived from the struct, in snake_case.
 
-use brocanth_command::{anyhow, clap, cmd, Context, Command};
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
 /// Fill the demo database with sample rows.
 #[cmd]

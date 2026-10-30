@@ -102,7 +102,11 @@ impl SmtpConfig {
 
     /// Adds the username and password.
     #[must_use]
-    pub fn with_credentials(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn with_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         self.credentials = Some((username.into(), password.into()));
         self
     }

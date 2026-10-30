@@ -190,11 +190,17 @@ impl Message {
             push_line(&mut out, &address_list("Cc", &rendered(&self.cc)));
         }
         if !self.reply_to.is_empty() {
-            push_line(&mut out, &address_list("Reply-To", &rendered(&self.reply_to)));
+            push_line(
+                &mut out,
+                &address_list("Reply-To", &rendered(&self.reply_to)),
+            );
         }
         push_line(
             &mut out,
-            &format!("Subject: {}", unstructured("Subject", self.subject.as_str())),
+            &format!(
+                "Subject: {}",
+                unstructured("Subject", self.subject.as_str())
+            ),
         );
         push_line(&mut out, &format!("Date: {}", rfc5322_date(at)));
         push_line(&mut out, "MIME-Version: 1.0");
@@ -499,7 +505,10 @@ mod date_tests {
     #[test]
     fn the_date_header_is_rfc_5322() {
         // 2026-10-27T09:41:03Z, a Tuesday.
-        assert_eq!(rfc5322_date(1_793_094_063), "Tue, 27 Oct 2026 09:41:03 +0000");
+        assert_eq!(
+            rfc5322_date(1_793_094_063),
+            "Tue, 27 Oct 2026 09:41:03 +0000"
+        );
         assert_eq!(rfc5322_date(0), "Thu, 01 Jan 1970 00:00:00 +0000");
         // A leap day, to prove the civil calendar is not an approximation.
         assert_eq!(

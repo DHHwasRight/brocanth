@@ -466,6 +466,8 @@ fn method_not_allowed(allow: Allow) -> Response {
         .status(405)
         .header("content-type", "text/plain; charset=utf-8")
         .header("allow", allow.header_value())
-        .body(brocanth::plugin_body::Body::from(b"Method Not Allowed".to_vec()))
+        .body(brocanth::plugin_body::Body::from(
+            b"Method Not Allowed".to_vec(),
+        ))
         .expect("a response this crate wrote")
 }

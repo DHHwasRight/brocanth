@@ -73,7 +73,8 @@ pub(crate) fn check_header_text(text: &str) -> Result<(), &'static str> {
         // A right-to-left override reverses what a mail client shows without
         // changing a byte of what it does. `moc.rekcatta@` renders as
         // `attacker.com`. The trick is old and still works.
-        if matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}') {
+        if matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+        {
             return Err("it contains a bidirectional override");
         }
         // U+2028 and U+2029 are not line breaks to a mail relay, but they are
