@@ -151,15 +151,15 @@ async fn the_list_shows_what_an_operator_came_for() {
 #[tokio::test]
 async fn the_list_says_plainly_that_the_store_is_a_hashmap() {
     // The screen looks like a user database. It is a `HashMap` behind a
-    // `Mutex`, and `MemoryStore` is the only `AuthStore` in this workspace,
-    // so the screen has to say so where somebody about to act can read it.
+    // `Mutex`, so the screen has to say so where somebody about to act can
+    // read it, and name the store that would keep the accounts.
     let store = store();
     account(&store, Some("ada@example.com"), true, true).await;
 
     let page = get(&admin(store.clone(), true), "/admin/accounts");
     page.assert_text("These accounts are held in memory.");
     page.assert_text("gone when this process restarts");
-    page.assert_text("MemoryStore is the only AuthStore in this workspace");
+    page.assert_text("PgStore, behind the postgres feature");
 }
 
 #[tokio::test]

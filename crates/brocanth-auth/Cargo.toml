@@ -3,7 +3,7 @@ name = "brocanth-auth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Authentication for brocanth: OAuth 2.0 and OIDC with mandatory PKCE, providers as data, argon2id local accounts, database-backed sessions and explicit identity linking — a plugin, because an application with no accounts should link none of it."
+description = "Authentication for brocanth: OAuth 2.0 and OIDC with mandatory PKCE, providers as data, argon2id local accounts, server-side sessions with an optional Postgres store, and explicit identity linking — a plugin, because an application with no accounts should link none of it."
 
 [dependencies]
 # The arrow points plugin -> core, always. The core does not know this crate
@@ -68,12 +68,34 @@ reqwest = { version = "0.13", default-features = false, features = [
     "form",
 ], optional = true }
 
+# `src/postgres.rs` is `PgStore`: every storage trait in `src/storage.rs`,
+# over Postgres, so accounts and sessions survive a restart.
+#
+# `sqlx` 0.9, because `brocanth-queue-postgres`, `brocanth-cache`,
+# `brocanth-storage` and the model layer already resolve it. An application
+# that runs them together links one driver and one pool. Every statement is a
+# runtime `sqlx::query`, never `query!`, so the crate builds without a server.
+#
+# Optional, and off by default (§8). An application that keeps its accounts
+# somewhere else implements `AuthStore` itself and links no SQL driver.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+], optional = true }
+
+# The conformance suite (`src/conformance.rs`) races several callers against
+# one store, so it needs a runtime to spawn them on. Only the `conformance`
+# feature turns it on, and only a test binary turns that on.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "sync",
+], optional = true }
+
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
 # `auth`. It lives beside the crate it writes into a project, and not in the
 # CLI, because what it must stay true to is this crate's own surface:
 # `AuthConfig`'s fields are values the application built rather than text a
 # TOML file can carry, `SigningKey::parse` refuses anything that is not 32
-# bytes, and `MemoryStore` is still the only `AuthStore` there is. A copy of
+# bytes, and the generated project starts on `MemoryStore`. A copy of
 # that knowledge in the CLI rots the first time a name here changes, and it
 # rots in silence, because nothing compiles the generator against this crate.
 #
@@ -119,7 +141,7 @@ trybuild = "1.0.122"
 # on a context struct. A screen that compiles and produces the wrong page is
 # the failure worth catching. The ordinary dependency tree is unaffected: a
 # published build links no admin and no rsx.
-brocanth-auth = { path = ".", features = ["admin"] }
+brocanth-auth = { path = ".", features = ["admin", "conformance"] }
 
 # The HTML assertions, and only those: `Html::assert_button` answers "is there
 # a button that says End every session", where `body.contains(..)` answers
@@ -148,6 +170,14 @@ scaffold = ["dep:brocanth-scaffold"]
 # means the code is absent and not merely unreachable: `src/admin.rs` and the
 # templates beside it are `#[cfg]`-ed out of the crate entirely.
 admin = ["dep:brocanth-admin", "dep:rsx"]
+
+# `PgStore`: the storage traits over Postgres. See the dependency line above.
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+
+# The storage contract as tests: `brocanth_auth::conformance`, and one macro
+# per storage trait that writes a `#[tokio::test]` for each case. For an
+# adapter author's test binary; an application never turns it on.
+conformance = ["dep:tokio"]
 
 [lints.rust]
 missing_docs = "warn"
