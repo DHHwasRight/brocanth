@@ -1,0 +1,92 @@
+[package]
+name = "brocanth-observe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Day-2 observability for brocanth: structured logs on stdout, a request id, /up and /readyz probes, Prometheus metrics, and OpenTelemetry tracing behind a feature."
+
+# Why a new crate, and not `brocanth-server` or the `logging` module.
+#
+# The core assumes no log layer (PLAN.md §8) and `brocanth-server` owns sockets
+# and framing only. Logs, probes, metrics and traces are one concern with one
+# input: a request going in and a response coming out. This crate wraps the
+# one function `Server::run` takes, so it sees every request, 404s and
+# static files included, and it needs nothing the server does not already
+# expose. An application that does not name `ObservePlugin` links none of it.
+[dependencies]
+brocanth.workspace = true
+
+# The wrapper takes and returns the server's `Request` and `Response`, and the
+# signal helper stops a `Server` through its `Stopper`.
+brocanth-server.workspace = true
+
+# Probe checks run concurrently under a timeout, and the signal helper waits
+# for SIGTERM. The server already links tokio with `rt` and `time`; `signal`
+# is the one feature this adds.
+tokio = { version = "1", features = ["rt", "time", "signal", "macros"] }
+
+# `logs`: the request line and the application's own `tracing::info!` go
+# through one subscriber. `tracing` is in the workspace already (sqlx and
+# sea-orm emit through it), so this adds no new crate. `tracing-subscriber`
+# without `fmt`, `ansi` or `env-filter`: the JSON and text formatters are in
+# `src/logs.rs`, about two hundred lines, because the stock JSON format
+# cannot name its fields `ts` and `msg` or add a trace id.
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry", "std"] }
+
+# `metrics`: Prometheus text. `prometheus-client` over `metrics` +
+# `metrics-exporter-prometheus`: four small crates (dtoa, itoa, parking_lot,
+# a derive) against an exporter that brings its own hyper server, quanta and
+# a global recorder. A registry that belongs to one `Observer` also matches
+# ADR 1: no process-global state that two applications would share.
+prometheus-client = { version = "0.25", optional = true }
+
+# `otel`: spans exported over OTLP/HTTP with protobuf, the protocol every
+# collector accepts on 4318. Not gRPC: `tonic` would double the tree. The
+# exporter's HTTP client is reqwest's blocking one, which runs on the batch
+# processor's own thread and needs no runtime from the application.
+opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.34", optional = true, default-features = false }
+
+# `jobs`: a span per job run and the queue's gauges, from the events and the
+# `Stats` that `brocanth-jobs` already publishes. `brocanth-jobs` will not
+# compile without a driver, so the feature names one: `jobs` is Postgres,
+# the jobs default; `jobs-sqlite` is SQLite, for an application that turned
+# the default off.
+brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", optional = true, default-features = false }
+
+# `scaffold`: the module `brocanth create` would offer under `observe`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "net", "io-util"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
+brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+
+[features]
+# Logs and metrics are what every deployed application wants on day 2, and
+# both are small. Traces need a collector, so they wait to be asked for.
+default = ["logs", "metrics"]
+logs = ["dep:tracing", "dep:tracing-subscriber"]
+metrics = ["dep:prometheus-client"]
+otel = [
+    "logs",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+jobs = ["_jobs", "brocanth-jobs/postgres"]
+jobs-sqlite = ["_jobs", "brocanth-jobs/sqlite"]
+# What the code is gated on. Not for an application to name.
+_jobs = ["dep:brocanth-jobs"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
+
+[package.metadata.docs.rs]
+all-features = true
