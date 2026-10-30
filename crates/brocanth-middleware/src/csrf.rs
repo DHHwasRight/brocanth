@@ -91,6 +91,40 @@ impl CsrfToken {
         )
     }
 
+    /// The same HTML with the hidden field inside every form that posts.
+    ///
+    /// For markup this application did not template itself, such as the
+    /// admin's screens. A form whose opening tag says `method="post"`, in
+    /// any case and with either quote, gets the field right after that tag.
+    /// A form that already carries the field is left alone. A GET form
+    /// gets nothing: it does not need the token and would leak it into a
+    /// URL.
+    pub fn stamp_forms(&self, html: &str) -> String {
+        let field = self.hidden_field();
+        let marker = format!(r#"name="{}""#, self.field);
+        let lower = html.to_ascii_lowercase();
+        let mut out = String::with_capacity(html.len() + field.len() * 2);
+        let mut at = 0;
+        while let Some(found) = lower[at..].find("<form") {
+            let open = at + found;
+            let Some(len) = lower[open..].find('>') else {
+                break;
+            };
+            let close = open + len + 1;
+            let tag = &lower[open..close];
+            let posts = tag.contains(r#"method="post""#) || tag.contains("method='post'");
+            let rest = &lower[close..];
+            let body = &rest[..rest.find("</form").unwrap_or(rest.len())];
+            out.push_str(&html[at..close]);
+            if posts && !body.contains(&marker.to_ascii_lowercase()) {
+                out.push_str(&field);
+            }
+            at = close;
+        }
+        out.push_str(&html[at..]);
+        out
+    }
+
     /// The `<meta>` tag dp-swap's mutating verbs read the token from.
     ///
     /// It goes in the layout's `<head>`. The script sends the value in
@@ -511,6 +545,38 @@ fn minted(state: &RequestState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stamp_token() -> CsrfToken {
+        CsrfToken {
+            value: "abc123".into(),
+            field: "_csrf_token".into(),
+            header: None,
+            fresh: false,
+        }
+    }
+
+    #[test]
+    fn every_posting_form_gets_the_field_and_a_get_form_does_not() {
+        let html = r#"<form method="get"><input name="q"></form><FORM class="x" METHOD="POST" action="/a"><button></button></FORM><form method='post'></form>"#;
+        let out = stamp_token().stamp_forms(html);
+        let field = stamp_token().hidden_field();
+        assert_eq!(out.matches(&field).count(), 2, "{out}");
+        assert!(
+            out.contains(&format!(r#"action="/a">{field}<button>"#)),
+            "{out}"
+        );
+        assert!(
+            out.starts_with(r#"<form method="get"><input name="q">"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_form_that_carries_the_field_is_left_alone() {
+        let field = stamp_token().hidden_field();
+        let html = format!(r#"<form method="post">{field}</form>"#);
+        assert_eq!(stamp_token().stamp_forms(&html), html);
+    }
 
     fn hook() -> Hook {
         Hook {

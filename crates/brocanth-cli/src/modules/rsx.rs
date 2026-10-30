@@ -21,6 +21,7 @@ impl Module for Rsx {
             "rsx",
             "`.rsx` templates compiled into the binary; without it a page builds a String",
         )
+        .outside_runtime()
         .asked_in("pages", "Templates compiled into the binary")
         .krate(Dep::git("rsx", REPOSITORY, "main").note("templates, compiled"))
         .absent(
@@ -70,6 +71,7 @@ impl Module for Tailwind {
             "rsx-tailwind",
             "a CSS build over the class names in your templates; needs node",
         )
+        .outside_runtime()
         .asked_in(
             "pages",
             "Tailwind, built from the class names in your templates",
@@ -120,6 +122,7 @@ impl Module for Htmx {
             "rsx-htmx",
             "a click swaps what changed; the server renders from the shared layout down",
         )
+        .outside_runtime()
         .asked_in("pages", "A click swaps what changed, not the whole page")
         .part_of("rsx")
         .because(

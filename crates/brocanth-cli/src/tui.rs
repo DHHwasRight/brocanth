@@ -108,6 +108,13 @@ pub struct Choice {
     /// the row's own blurb, so it is the first thing read. The cursor steps
     /// over it, so nothing invites a key that would do nothing.
     pub blocked: Option<String>,
+    /// Whether this choice runs nothing in a server, so a static site may
+    /// keep it. See `Manifest::outside_runtime`.
+    pub outside_runtime: bool,
+    /// Whether this choice compiles the project to files. Ticking it takes
+    /// off every choice that needs a server; ticking one of those takes it
+    /// off. See `Manifest::static_output`.
+    pub static_output: bool,
 }
 
 /// Everything `create` needs, and nothing it does not.
@@ -242,6 +249,9 @@ impl Model {
 
     fn settle(&mut self, index: usize, on: bool) {
         self.draft.choices[index].on = on;
+        if on {
+            self.no_server_beside_files(index);
+        }
         if !on {
             // Anything that needed it goes too, rather than staying ticked
             // against something that is not there. A child of a parent that
@@ -299,6 +309,34 @@ impl Model {
                 ));
                 self.settle(child, true);
             }
+        }
+    }
+
+    /// A static site and a choice that needs a server cannot both be on.
+    /// The later tick wins, and each row it took off says why.
+    fn no_server_beside_files(&mut self, index: usize) {
+        let ticked = &self.draft.choices[index];
+        let (label, site) = (ticked.label.clone(), ticked.static_output);
+        if !site && ticked.outside_runtime {
+            return;
+        }
+        for other in 0..self.draft.choices.len() {
+            let c = &self.draft.choices[other];
+            let clash = if site {
+                !c.outside_runtime && !c.static_output
+            } else {
+                c.static_output
+            };
+            if other == index || !c.on || !clash {
+                continue;
+            }
+            let name = c.label.clone();
+            self.notes.push(if site {
+                format!("{name} went off — {label} compiles to files, and {name} needs a server")
+            } else {
+                format!("{name} went off — {label} needs a server, and {name} compiles to files")
+            });
+            self.settle(other, false);
         }
     }
 
@@ -1117,6 +1155,8 @@ mod tests {
             under: None,
             needs: Vec::new(),
             blocked: None,
+            outside_runtime: false,
+            static_output: false,
         }
     }
 
@@ -1169,6 +1209,8 @@ mod tests {
                         .parent
                         .and_then(|parent| keys.iter().position(|k| *k == parent)),
                     blocked: m.blocked.map(str::to_string),
+                    outside_runtime: m.outside_runtime,
+                    static_output: m.static_output,
                     needs: m
                         .needs
                         .iter()
@@ -1263,7 +1305,7 @@ mod tests {
                 .to_string()
         };
         let mut m = registry(Tab::Wizard);
-        for want in ["1 of 7", "1 of 6", "1 of 6", "1 of 7"] {
+        for want in ["1 of 7", "1 of 6", "1 of 6", "1 of 4", "1 of 7"] {
             assert!(first(&m).contains(want), "{}", first(&m));
             m.wizard_step(1);
         }
@@ -1335,7 +1377,37 @@ mod tests {
         assert_eq!(walk(0), full, "an HTML application is asked how");
         assert_eq!(walk(1), short, "a JSON API is not");
         assert_eq!(walk(2), short, "and neither is a worker");
-        assert_eq!(walk(3), full, "picking nothing still asks everything");
+        assert_eq!(
+            walk(3),
+            vec!["Shape", "Foundations", "Pages", "Operations"],
+            "a static site is asked nothing a server would need"
+        );
+        assert_eq!(walk(4), full, "picking nothing still asks everything");
+    }
+
+    #[test]
+    fn a_static_site_and_a_server_module_take_each_other_off() {
+        let mut m = registry(Tab::Expert);
+        let (site, sessions, rsx) = (
+            m.draft.at("static").expect("static"),
+            m.draft.at("sessions").expect("sessions"),
+            m.draft.at("rsx").expect("rsx"),
+        );
+        m.set(sessions, true);
+        m.set(rsx, true);
+        m.set(site, true);
+        assert!(m.draft.taken(site));
+        assert!(!m.draft.choices[sessions].on, "a session needs a server");
+        assert!(m.draft.taken(rsx), "templates run at build time too");
+        assert!(
+            m.notes.iter().any(|n| n.starts_with("sessions went off")),
+            "{:?}",
+            m.notes
+        );
+
+        m.set(sessions, true);
+        assert!(!m.draft.choices[site].on, "the later tick wins");
+        assert!(m.draft.taken(sessions));
     }
 
     #[test]

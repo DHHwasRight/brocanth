@@ -31,16 +31,15 @@
 //! it, and that is true wherever the application runs. So it arrives
 //! ticked, configured, and with its own paragraph in `AGENTS.md`.
 //!
-//! Its line is still commented, and that is a gap rather than the choice
-//! the five make. Two pieces of generated code are in the way: the
-//! `plugins::Hooks` alias, which says `NoHooks` whatever registered, and
-//! a `dispatch` that goes from the route table to the handler without
-//! entering the hook pipeline. The block this module writes names both
-//! where somebody will read them, and the `AGENTS.md` paragraph opens by saying the
-//! check is not running, because a project that looks protected and is
-//! not is worse than one that says so.
+//! Its registration is real code, and so are the security headers' and
+//! the rate limit's. Each goes through [`snippet::hooking`], which also
+//! writes the plugin into the generated `plugins::Hooks` record, and the
+//! generated `src/app.rs` runs every request through `App::begin_async`
+//! and `App::finish`. So a hook this module registers runs.
+//!
+//! [`snippet::hooking`]: brocanth_scaffold::snippet::hooking
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{snippet, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
 pub struct Middleware;
@@ -80,7 +79,16 @@ const REGISTRATIONS: &str = r#"
         // -- brocanth-middleware ------------------------------------------
         //
         // Five edge hooks, none of them on. Each encodes a fact about this
-        // deployment, so each is uncommented by somebody who knows it.
+        // deployment, so each is turned on by somebody who knows it.
+        //
+        // This file is generated, so do not uncomment them here. Copy the
+        // line to `build()` in `src/app.rs`, after `plugins::register!`,
+        // and widen `type Core` there by the plugin's hook families:
+        //
+        //     brocanth::plugin_hooks::Both<
+        //         <brocanth_middleware::Cors as brocanth::plugin_hooks::HookSource>::Families,
+        //         plugins::Hooks,
+        //     >
 
         // Who the client is, behind a proxy. The list is the addresses of
         // YOUR load balancers: `X-Forwarded-For` is a claim anybody who
@@ -131,12 +139,14 @@ const REGISTRATIONS: &str = r#"
 const AGENTS: &str = "\n\
     ## Edge middleware\n\
     \n\
-    `src/app.rs` holds five commented registrations from\n\
+    `src/plugins/mod.rs` holds five commented registrations from\n\
     `brocanth-middleware`. Each encodes a fact about the deployment --\n\
     which proxy to trust, which host is canonical, which origins may call\n\
-    -- so each is uncommented by somebody who knows that fact. Do not\n\
+    -- so each is turned on by somebody who knows that fact. Do not\n\
     enable them as a set, and do not invent an address or an origin to\n\
-    make one compile.\n";
+    make one compile. To turn one on, copy it to `build()` in\n\
+    `src/app.rs` and widen `type Core` by its hook families; the comment\n\
+    above the five shows the type.\n";
 
 /// CSRF, as a choice on the menu that arrives ticked.
 ///
@@ -167,82 +177,53 @@ impl Module for Csrf {
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.at(Slot::AppPlugins).block(REGISTRATION.to_string());
+        snippet::hooking(
+            s,
+            "middleware-csrf",
+            "brocanth_middleware::Csrf",
+            REGISTRATION.to_string(),
+        );
         s.at(Slot::AgentsSections).block(CSRF_AGENTS.to_string());
     }
 }
 
 /// The registration, with the configuration already filled in.
-///
-/// Commented, and not for the reason the five above it are. Those are a
-/// decision somebody has to make; this one is two gaps in the generator,
-/// both named in the block so the person who meets them does not have to
-/// find them the way this was found -- by generating a project, serving
-/// it, and posting to it.
 const REGISTRATION: &str = r#"
         // -- brocanth-middleware: CSRF ------------------------------------
         //
         // Not one of the five above. Each of those encodes a fact about
         // this deployment; this one encodes a fact about browsers: any
         // page on any site can post a form here, and the cookies ride
-        // along. That is true wherever this runs, so this is the hook
-        // that should be on, and the only thing to decide is which paths
-        // are exempt -- a webhook, or anything else whose caller is not a
-        // browser:
+        // along. That is true wherever this runs, so this hook is on, and
+        // the only thing to decide is which paths are exempt -- a webhook,
+        // or anything else whose caller is not a browser:
         //
         //     CsrfConfig::default().exempt(["/webhooks"])
         //
-        // The token for the request is on the request state as a
-        // `CsrfToken`; `token.hidden_field()` is the input a form carries.
-        //
-        // READ THIS BEFORE YOU UNCOMMENT: this project has no CSRF check
-        // today, and uncommenting the line below does not give it one.
-        // Two things in the generated code are in the way.
-        //
-        // 1. `pub type Hooks` below says `NoHooks` whatever registered,
-        //    and `plugin_hooking` widens that record, so the line does
-        //    not compile until the alias says:
-        //
-        //        pub type Hooks = ::brocanth::plugin_hooks::Both<
-        //            <::brocanth_middleware::Csrf
-        //                as ::brocanth::plugin_hooks::HookSource>::Families,
-        //            ::brocanth::plugin_hooks::NoHooks,
-        //        >;
-        //
-        // 2. `dispatch` in `src/app.rs` goes from the route table to the
-        //    handler. The hook pipeline is `App::run`, which nothing in
-        //    that file calls, so no hook in this crate runs -- these
-        //    five included. `brocanth_server::Bridge` is the piece that
-        //    runs it, and serving through it is the change.
-        //
-        // let builder = builder.plugin_hooking(
-        //     <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
-        //         brocanth_middleware::CsrfConfig::default(),
-        //     ),
-        // );
+        // The token for the request is `ctx.hooked::<CsrfToken>()`;
+        // `token.hidden_field()` is the input a form carries.
+        let builder = builder.plugin_hooking(
+            <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
+                brocanth_middleware::CsrfConfig::default(),
+            ),
+        );
 "#;
 
-/// What the generated `AGENTS.md` says, which is first of all that the
-/// check is not running.
-///
-/// An agent that read "CSRF" in `src/app.rs` and stopped there would
-/// report a protected application. This says the opposite in the first
-/// line.
+/// What the generated `AGENTS.md` says about forms.
 const CSRF_AGENTS: &str = "\n\
     ## CSRF\n\
     \n\
-    **This project does not check CSRF tokens yet.** `src/app.rs` holds a\n\
-    commented registration for `brocanth_middleware::Csrf` and, beside\n\
-    it, the two things in the generated code that are in the way: the\n\
-    `plugins::Hooks` alias, and a `dispatch` that never enters the hook\n\
-    pipeline. Read that block before you tell anybody this is covered.\n\
+    `brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It\n\
+    is a double-submit cookie: the hook mints a token, sets it as its own\n\
+    cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE\n\
+    unless the request sends the same value back -- in the `_csrf_token`\n\
+    field, or in the `X-CSRF-Token` header.\n\
     \n\
-    What it will do once it runs: it is a double-submit cookie. The hook\n\
-    mints a token, sets it as its own cookie, and refuses any verb that\n\
-    is not GET, HEAD, OPTIONS or TRACE unless the request sends the same\n\
-    value back -- in the `_csrf_token` field, or in the `X-CSRF-Token`\n\
-    header. So a form needs the hidden field: read `CsrfToken` off the\n\
-    request state and write `token.hidden_field()`.\n\
+    So every form that posts carries the hidden field. In a page, read\n\
+    the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and\n\
+    write `token.hidden_field()` inside the `<form>`. For HTML this\n\
+    project did not template, `token.stamp_forms(html)` adds the field to\n\
+    every posting form; the admin uses it.\n\
     \n\
     A 403 from this hook is a form that lost its token, or a caller that\n\
     is not a browser. Add that path to `exempt`; do not remove the\n\
@@ -274,16 +255,30 @@ impl Module for SecurityHeaders {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.at(Slot::AppPlugins)
-            .block(SECURITY_HEADERS_REGISTRATION.to_string());
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        // The admin layout inlines dp-swap's vendored copy, which the
+        // default policy does not know. Its hash goes in, or the policy
+        // blocks the admin's script.
+        let config = if project.has("admin") {
+            "brocanth_middleware::SecurityHeadersConfig::default().csp(\n\
+             \x20                   brocanth_middleware::Csp::default()\n\
+             \x20                       .inline_script(brocanth_admin::INLINE_SCRIPT),\n\
+             \x20               ),"
+        } else {
+            "brocanth_middleware::SecurityHeadersConfig::default(),"
+        };
+        snippet::hooking(
+            s,
+            "middleware-security-headers",
+            "brocanth_middleware::SecurityHeaders",
+            SECURITY_HEADERS_REGISTRATION.replace("@CONFIG@", config),
+        );
         s.at(Slot::AgentsSections)
             .block(SECURITY_HEADERS_AGENTS.to_string());
     }
 }
 
-/// The registration. Commented for the two reasons the CSRF block above
-/// it gives, and for no reason of its own.
+/// The registration. `@CONFIG@` is the configuration expression.
 const SECURITY_HEADERS_REGISTRATION: &str = r#"
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -297,22 +292,19 @@ const SECURITY_HEADERS_REGISTRATION: &str = r#"
         // a TLS terminator, say so: `SecurityHeadersConfig::default()
         // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
         //
-        // Commented for the two reasons the CSRF block gives: the `Hooks`
-        // alias and the hook pipeline.
-        //
-        // let builder = builder.plugin_hooking(
-        //     <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
-        //         brocanth_middleware::SecurityHeadersConfig::default(),
-        //     ),
-        // );
+        let builder = builder.plugin_hooking(
+            <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
+                @CONFIG@
+            ),
+        );
 "#;
 
 /// What the generated `AGENTS.md` says about the policy.
 const SECURITY_HEADERS_AGENTS: &str = "\n\
     ## Security headers\n\
     \n\
-    `src/app.rs` holds a commented registration for\n\
-    `brocanth_middleware::SecurityHeaders`. Its Content-Security-Policy\n\
+    `brocanth_middleware::SecurityHeaders` is registered in\n\
+    `src/plugins/mod.rs`. Its Content-Security-Policy\n\
     allows inline scripts by hash only. To inline a new script, add\n\
     `Csp::default().inline_script(TEXT)` with the exact text between the\n\
     tags. Do not add `'unsafe-inline'` to `script-src`. A value that\n\
@@ -346,8 +338,12 @@ impl Module for RateLimit {
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.at(Slot::AppPlugins)
-            .block(RATE_LIMIT_REGISTRATION.to_string());
+        snippet::hooking(
+            s,
+            "middleware-rate-limit",
+            "brocanth_middleware::RateLimit",
+            RATE_LIMIT_REGISTRATION.to_string(),
+        );
         s.at(Slot::AgentsSections)
             .block(RATE_LIMIT_AGENTS.to_string());
     }
@@ -358,8 +354,8 @@ const RATE_LIMIT_REGISTRATION: &str = r#"
         // -- brocanth-middleware: rate limit ------------------------------
         //
         // A fixed window per key. Each rule is a group of routes, a limit
-        // and a window. The numbers below are an example for a login form,
-        // not a recommendation: pick them from your own traffic.
+        // and a window. THE RULE BELOW IS AN EXAMPLE for a login form, not
+        // a recommendation: replace it with numbers from your own traffic.
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
@@ -368,15 +364,14 @@ const RATE_LIMIT_REGISTRATION: &str = r#"
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
         //
-        // let builder = builder.plugin_hooking(
-        //     <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
-        //         brocanth_middleware::RateLimitConfig::rules([
-        //             brocanth_middleware::Rule::new("login", 5, 60)
-        //                 .paths(["/login"])
-        //                 .methods(["POST"]),
-        //         ]),
-        //     ),
-        // );
+        let login = brocanth_middleware::Rule::new("login", 5, 60)
+            .paths(["/login"])
+            .methods(["POST"]);
+        let builder = builder.plugin_hooking(
+            <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
+                brocanth_middleware::RateLimitConfig::rules([login]),
+            ),
+        );
 "#;
 
 /// What the generated `AGENTS.md` says, so an agent does not invent a
@@ -384,10 +379,10 @@ const RATE_LIMIT_REGISTRATION: &str = r#"
 const RATE_LIMIT_AGENTS: &str = "\n\
     ## Rate limit\n\
     \n\
-    `src/app.rs` holds a commented registration for\n\
-    `brocanth_middleware::RateLimit`. Its numbers are an example. Do not\n\
-    enable it with invented limits. Ask for the limit and the window of\n\
-    each route group.\n\
+    `brocanth_middleware::RateLimit` is registered in\n\
+    `src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).\n\
+    The numbers are an example. Do not invent limits: ask for the limit\n\
+    and the window of each route group.\n\
     \n\
     A request whose key cannot be found is not counted. Behind a proxy,\n\
     the address comes from `ProxyHeaders` or from `ip_header`. Never set\n\

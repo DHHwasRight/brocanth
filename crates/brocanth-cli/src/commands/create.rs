@@ -141,9 +141,10 @@ const EXCLUSIVE: &[(&str, &str, &str)] = &[(
     "both write a line per request; `observability-logs` writes JSON on stdout",
 )];
 
-/// Picks that hold both halves of an [`EXCLUSIVE`] pair.
+/// Picks that hold both halves of an [`EXCLUSIVE`] pair, or a module that
+/// needs a server beside one that compiles the project to files.
 pub fn exclusive(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
-    let bad: Vec<Diagnostic> = EXCLUSIVE
+    let mut bad: Vec<Diagnostic> = EXCLUSIVE
         .iter()
         .filter(|(a, b, _)| picks.contains(a) && picks.contains(b))
         .map(|(a, b, why)| {
@@ -152,11 +153,44 @@ pub fn exclusive(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
                 .help(format!("keep `{b}` and drop `{a}` from --with"))
         })
         .collect();
+    bad.extend(runtime_in_static(picks));
     if bad.is_empty() {
         Ok(())
     } else {
         Err(bad)
     }
+}
+
+/// One error per pick that needs a running server, when another pick
+/// compiles the project to files.
+///
+/// A static site has no process to run a session, a probe or a queue in.
+/// The modules it may take say `outside_runtime` in their manifests.
+fn runtime_in_static(picks: &[&str]) -> Vec<Diagnostic> {
+    // A key this CLI does not have is somebody else's diagnostic.
+    let manifest = |key: &str| crate::modules::find(key).map(|m| m.manifest());
+    let Some(site) = picks
+        .iter()
+        .find(|key| manifest(key).is_some_and(|m| m.static_output))
+    else {
+        return Vec::new();
+    };
+    let needs_server: Vec<&str> = picks
+        .iter()
+        .copied()
+        .filter(|key| manifest(key).is_some_and(|m| !m.outside_runtime && !m.static_output))
+        .collect();
+    needs_server
+        .iter()
+        .map(|key| {
+            Diagnostic::error(
+                *key,
+                format!("`{key}` needs a running server, and `{site}` compiles to files"),
+            )
+            .note("a static site takes only modules outside the runtime: templates, CSS, config, commands, CI")
+            .help(format!("drop `{key}` from --with, or drop `{site}` to build a server"))
+        })
+        .collect()
 }
 
 /// Everything the CLI was compiled with, in listing order.
@@ -539,6 +573,8 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                     .parent
                     .and_then(|parent| all().iter().position(|p| *p == parent)),
                 blocked: about(pick).blocked.map(str::to_string),
+                outside_runtime: about(pick).outside_runtime,
+                static_output: about(pick).static_output,
                 // A tick brings what it requires, and an untick takes the
                 // ticks that required it. The screen can do that honestly
                 // because every row it changed is still on the screen.
@@ -1523,7 +1559,8 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     }
     {
         // Every project serves, so every project gets a socket and a reactor.
-        deps.push(source_of(a, &core("brocanth-server")));
+        // `bridge` for the two conversions `handle` makes around the hooks.
+        deps.push(source_of(a, &core("brocanth-server").feature("bridge")));
         deps.push(
             "tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"signal\", \"sync\", \"time\"] }  # the reactor `serve` runs on, and the signals that stop it"
                 .to_string(),
@@ -1682,8 +1719,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          use std::time::{{Duration, Instant}};\n\
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
+         use brocanth::plugin_hooks::{{self as hooks, Begin, RequestState}};\n\
          use brocanth::plugin_shutdown::ShutdownReason;\n\
-         use brocanth::routing::{{Dispatch, MiddlewareStack, Router}};\n\
+         use brocanth::routing::{{Dispatch, MiddlewareStack, Router, Verb}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
          use crate::plugins;\n\
@@ -1800,13 +1838,42 @@ fn app_rs(a: &Answers, built: &Built) -> String {
 
     out.push_str(&serve_fns(a));
     out.push_str(
-        "/// One request: the table, then the chain, then the handler.\n\
+        "/// One request: the request hooks, the table, then the response hooks.\n\
+         ///\n\
+         /// A request hook may answer instead of the page -- a CSRF refusal, a\n\
+         /// 429 -- and then the page never runs. It may also rewrite the request\n\
+         /// first, so the table reads the request as the hooks left it. The\n\
+         /// response hooks see every answer, the 404 and the 405 included.\n\
+         ///\n\
+         /// `begin_async` and not `begin`: it runs a hook that waits as well as\n\
+         /// one that does not. With no hook that waits, it is ready on its first\n\
+         /// poll.\n\
+         pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {\n\
+        \x20   let Ok(mut request) = brocanth_server::bridge::to_core(request) else {\n\
+        \x20       // The path and the query do not make a URI. The table was not\n\
+        \x20       // asked, so this is not a 404.\n\
+        \x20       return brocanth_server::Response::text(400, \"Bad Request\");\n\
+        \x20   };\n\
+        \x20   let mut state = RequestState::new();\n\
+        \x20   let outcome = match app.core.begin_async(&mut request, &mut state).await {\n\
+        \x20       Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),\n\
+        \x20       Begin::Answered(outcome) => outcome,\n\
+        \x20   };\n\
+        \x20   let response = app.core.finish(&mut request, &mut state, outcome);\n\
+        \x20   brocanth_server::bridge::from_core(response)\n\
+         }\n\
+         \n\
+         /// The table, then the chain, then the handler.\n\
          ///\n\
          /// The chain runs only for a route that matched. A 404 has no route and\n\
-         /// therefore no context, which is also why the request hooks the plan\n\
-         /// reserves for a logger are the core's job and not a layer's.\n\
-         pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {\n\
-        \x20   let (verb, path) = (request.verb, request.path.as_str());\n\
+         /// therefore no context. `state` is what the request hooks wrote; the\n\
+         /// page reads it through `Ctx::hooked`, and it goes back afterwards so\n\
+         /// the response hooks read what the page left.\n\
+         pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {\n\
+        \x20   let Some(verb) = Verb::from_http(request.method()) else {\n\
+        \x20       return Response::new(501, \"Not Implemented\");\n\
+        \x20   };\n\
+        \x20   let path = request.uri().path();\n\
         \x20   match app.router.dispatch(verb, path) {\n\
         \x20       Dispatch::Found { handler, matched } => {\n\
         \x20           let mut ctx = @CTX@;\n\
@@ -1814,9 +1881,11 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20           // what Echo calls an HTTPErrorHandler. It sits inside\n\
         \x20           // the chain's terminal, so a layer still sees what the\n\
         \x20           // error turned into and can rewrite it.\n\
-        \x20           app.stack.run(path, &mut ctx, |c| {\n\
+        \x20           let response = app.stack.run(path, &mut ctx, |c| {\n\
         \x20               handler(c).unwrap_or_else(IntoResponse::into_response)\n\
-        \x20           })\n\
+        \x20           });\n\
+        \x20           *state = ctx.take_state();\n\
+        \x20           response\n\
         \x20       }\n\
         \x20       Dispatch::MethodNotAllowed { allow, .. } => Response {\n\
         \x20           status: 405,\n\
@@ -1835,12 +1904,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     // context lives for the handler, and a borrow would tie the two.
     // Two shapes, because rustfmt has two: one call after `Ctx::new` stays
     // on the line, and two break the chain.
-    let args = "\x20               &request.query,\n\
-         \x20               request.body.to_vec(),\n\
-         \x20               request\n\
-         \x20                   .headers()\n\
-         \x20                   .map(|(name, value)| (name.to_string(), value.to_string()))\n\
-         \x20                   .collect(),\n";
+    let args = "\x20               request.uri().query().unwrap_or(\"\"),\n\
+         \x20               request.body().clone(),\n\
+         \x20               headers(request),\n";
     let deeper: String = args.lines().map(|line| format!("    {line}\n")).collect();
     // `.with_plugins` last, and always: a handler reads what a plugin put
     // on the context, and `Ctx::new` cannot build one because the
@@ -1853,12 +1919,14 @@ fn app_rs(a: &Answers, built: &Built) -> String {
                 "Ctx::new(verb, path, matched.params())\n\
                  \x20               .holding(holding(request))\n\
                  \x20               .with_plugins(app.core.context())\n\
+                 \x20               .with_state(std::mem::take(state))\n\
                  \x20               .sent(\n{deeper}\x20               )"
             )
         } else {
             format!(
                 "Ctx::new(verb, path, matched.params())\n\
                  \x20               .with_plugins(app.core.context())\n\
+                 \x20               .with_state(std::mem::take(state))\n\
                  \x20               .sent(\n{deeper}\x20               )"
             )
         },
@@ -1876,9 +1944,14 @@ fn serve_fns(a: &Answers) -> String {
     let dispatch = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         // Static files never reach a page. They are bytes with a content
         // type, and the page contract carries a `String` body on purpose.
-        "serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));"
+        "async move {\n\
+        \x20               match serve_asset(&request) {\n\
+        \x20                   Some(file) => file,\n\
+        \x20                   None => handle(&app, request).await,\n\
+        \x20               }\n\
+        \x20           }"
     } else {
-        "sent(dispatch(&app, &request));"
+        "async move { handle(&app, request).await }"
     };
     SERVE_FN.replace("@DISPATCH@", dispatch) + "\n"
 }
@@ -1966,11 +2039,8 @@ async fn run(
     let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
-            // Dispatch is synchronous and runs here, outside the
-            // future, so what crosses the await is a finished
-            // response and nothing borrowed.
-            let out = @DISPATCH@
-            async move { out }
+            let app = Arc::clone(&app);
+            @DISPATCH@
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -2302,6 +2372,7 @@ const PAGES_MOD_RS_HEAD: &str = r##"//! The route table, which is this directory
 brocanth_pages::pages!("src/pages"@DESCRIBE@);
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
+use brocanth::plugin_hooks::RequestState;
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 use crate::plugins;
@@ -2558,7 +2629,10 @@ pub struct Ctx {
     headers: Vec<(String, String)>,
     /// What the plugins put here for this request, or `None` for a context
     /// built by hand.
-    plugins: Option<Context<plugins::Installed>>,@DEPTH_FIELD@
+    plugins: Option<Context<plugins::Installed>>,
+    /// What the request hooks wrote for this request: a `CsrfToken`, a
+    /// client address. Empty for a context built by hand.
+    state: RequestState,@DEPTH_FIELD@
 }
 
 impl Ctx {
@@ -2573,7 +2647,8 @@ impl Ctx {
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
             headers: Vec::new(),
-            plugins: None,@DEPTH_INIT@
+            plugins: None,
+            state: RequestState::new(),@DEPTH_INIT@
         }
     }
 
@@ -2603,6 +2678,19 @@ impl Ctx {
     pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
         self.plugins = Some(plugins);
         self
+    }
+
+    /// What the request hooks wrote. `src/app.rs` hands it over before the
+    /// page runs and takes it back after, for the response hooks.
+    #[must_use]
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The hook state back, leaving this context an empty one.
+    pub fn take_state(&mut self) -> RequestState {
+        std::mem::take(&mut self.state)
     }
 
     /// The value a plugin published for this request.
@@ -2673,6 +2761,15 @@ impl Ctx {
 /// than a line.
 #[allow(dead_code)]
 impl Ctx {
+    /// A value a request hook wrote for this request, by its type.
+    ///
+    /// `ctx.hooked::<brocanth_middleware::CsrfToken>()` is the token a form
+    /// carries. `None` when no registered hook wrote one, and always for a
+    /// context built by hand.
+    pub fn hooked<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.get::<T>()
+    }
+
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -2740,8 +2837,9 @@ const HOLDING_FN: &str = r#"/// How many layout layers the client already has, f
 /// `true` is dp-swap's word for "a fragment, I did not count", which is one
 /// layer. Anything that does not parse is zero: a client that cannot say
 /// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &brocanth_server::Request) -> u32 {
-    match request.header("dp-partial") {
+fn holding(request: &hooks::Request) -> u32 {
+    let header = request.headers().get("dp-partial");
+    match header.and_then(|value| value.to_str().ok()) {
         None => 0,
         Some("true") => 1,
         Some(value) => value.parse().unwrap_or(0),
@@ -2752,27 +2850,29 @@ fn holding(request: &brocanth_server::Request) -> u32 {
 
 /// A page's answer, as the server sends it. Always written: both shapes of
 /// `serve` go through it, so one place turns a `Response` into bytes.
-const SENT_FN: &str = r#"/// Turns a page's answer into the bytes the server writes.
+const SENT_FN: &str = r#"/// Turns a page's answer into the response the hooks see.
 ///
-/// `html` rather than a guess: most pages return markup, and a handler that
-/// wants another type says so with a `content-type` header.
+/// `text/html` unless the page names its own `content-type`, which then
+/// replaces it rather than joining it. Every other header is appended,
+/// because `set-cookie` has to repeat.
+fn sent(answered: Response) -> hooks::Response {
+    brocanth_server::bridge::buffered(
+        answered.status,
+        answered.headers,
+        answered.body.into_bytes(),
+    )
+}
+
+/// The request headers as text, for the page.
 ///
-/// That header replaces the seeded one rather than joining it. `with_header`
-/// appends, because `set-cookie` has to repeat, so a page answering JSON
-/// used to put two `content-type` lines on the wire and let the client pick.
-fn sent(answered: Response) -> brocanth_server::Response {
-    let mut out = brocanth_server::Response::html(answered.status, answered.body);
-    if answered
-        .headers
+/// A value that is not UTF-8 is dropped: a page reads a header as `&str`,
+/// and a lossy copy would say something the client did not send.
+fn headers(request: &hooks::Request) -> Vec<(String, String)> {
+    request
+        .headers()
         .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        out = out.without_header("content-type");
-    }
-    for (name, value) in &answered.headers {
-        out = out.with_header(name, value);
-    }
-    out
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
 }
 
 "#;
@@ -2851,25 +2951,55 @@ fn registers(line: &str) -> bool {
     !line.starts_with("//") && line.starts_with("let builder")
 }
 
-/// The header and body of the generated `Hooks` alias.
+/// The header over the generated `Hooks` alias.
 ///
-/// `NoHooks`, and it is not a placeholder. The record widens only through
-/// `AppBuilder::plugin_hooking`, and no module in this CLI registers a
-/// hooking plugin: `brocanth-middleware` writes five, all commented out,
-/// at the place somebody uncomments one. The day a module registers one
-/// for real, this becomes `Hooked<ThatPlugin, NoHooks>` and is built the
-/// way `Installed` is, one alias per hooking plugin.
-///
-/// It is written down rather than inferred for the reason `Installed` is:
-/// `App` is a struct and a struct field needs a type to name.
+/// `NoHooks` when nothing registers with `plugin_hooking`, and one `Both`
+/// per hooking plugin otherwise, built from [`Slot::PluginsHooks`] the way
+/// `Installed` is built from [`Slot::PluginsInstalled`]. It is written down
+/// rather than inferred for the reason `Installed` is: `App` is a struct
+/// and a struct field needs a type to name.
 const HOOK_RECORD_DOC: &str = "\
 /// Which hook families this binary installed, as a type.
 ///
-/// `NoHooks` while nothing registers with `plugin_hooking`. A hook nobody
-/// registers costs nothing, and this type is how the compiler knows:
-/// every hook entry point opens with a constant `if` on this record.
-pub type Hooks = ::brocanth::plugin_hooks::NoHooks;
+/// One `Both` per plugin registered with `plugin_hooking`, innermost first,
+/// which is exactly the record `register!` builds. A hook family nobody
+/// installed costs nothing, and this type is how the compiler knows: every
+/// hook entry point opens with a constant `if` on this record.
 ";
+
+/// The `Hooks` alias and the aliases it is built from.
+fn hook_record(built: &Built) -> String {
+    let mut out = String::from(HOOK_RECORD_DOC);
+    let mut held = String::from("NoHooks");
+    let mut names: Vec<String> = Vec::new();
+    let mut aliases = String::new();
+    for ty in built.slot(Slot::PluginsHooks) {
+        let ty = ty.trim_end();
+        let last = ty.rsplit("::").next().unwrap_or(ty);
+        let mut name = format!("Hooked{}", upper_camel(last));
+        while names.contains(&name) {
+            name.push('2');
+        }
+        names.push(name.clone());
+        let line = format!("type {name} = Both<<{ty} as HookSource>::Families, {held}>;\n");
+        if line.len() > 101 {
+            aliases.push_str(&format!(
+                "type {name} =\n    Both<<{ty} as HookSource>::Families, {held}>;\n"
+            ));
+        } else {
+            aliases.push_str(&line);
+        }
+        held = name;
+    }
+    if names.is_empty() {
+        out.push_str("pub type Hooks = brocanth::plugin_hooks::NoHooks;\n");
+    } else {
+        // The aliases above the doc comment, so the comment stays on `Hooks`.
+        out = aliases + "\n" + &out;
+        out.push_str(&format!("pub type Hooks = {held};\n"));
+    }
+    out
+}
 
 /// `my-store` -> `MyStore`, for a type name built from a module key.
 fn upper_camel(key: &str) -> String {
@@ -3319,6 +3449,9 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         "use brocanth::plugin_context::{After, Base};\n"
     });
+    if !built.slot_is_empty(Slot::PluginsHooks) {
+        out.push_str("use brocanth::plugin_hooks::{Both, HookSource, NoHooks};\n");
+    }
     out.push_str(concat!(
         "use brocanth::routing::Next;\n",
         "\n",
@@ -3421,11 +3554,18 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
             .split_once(' ')
             .unwrap_or(("", line.trim_end()));
         let name = format!("With{}", upper_camel(key));
-        out.push_str(&format!("type {name} = After<{path}, {held}>;\n"));
+        // rustfmt breaks after `=` past 100 columns, so this does too.
+        let line = format!("type {name} = After<{path}, {held}>;");
+        if line.len() > 100 {
+            out.push_str(&format!("type {name} =\n    After<{path}, {held}>;\n"));
+        } else {
+            out.push_str(&line);
+            out.push('\n');
+        }
         held = name;
     }
     out.push_str(&format!("pub type Installed = {held};\n\n"));
-    out.push_str(HOOK_RECORD_DOC);
+    out.push_str(&hook_record(built));
 
     // -- announce -----------------------------------------------------
     out.push_str(
@@ -3725,8 +3865,23 @@ mod tests {
                 "everything",
                 available()
                     .into_iter()
-                    .filter(|key| *key != "logging")
+                    // `static` refuses every module that needs a server.
+                    .filter(|key| *key != "logging" && *key != "static")
                     .collect(),
+            ),
+            // The pages as files, with only what runs outside a server.
+            (
+                "static",
+                vec![
+                    "static",
+                    "config",
+                    "commands",
+                    "rsx",
+                    "rsx-tailwind",
+                    "rsx-htmx",
+                    "ci",
+                    "ci-github",
+                ],
             ),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin

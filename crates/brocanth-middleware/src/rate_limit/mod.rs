@@ -435,7 +435,7 @@ impl Limiter {
         state
             .get::<ClientInfo>()
             .and_then(|info| info.address)
-            .or_else(|| request.extensions().get::<PeerAddress>().map(|p| p.0))
+            .or_else(|| PeerAddress::of(request))
     }
 
     /// What the counts mean: a 429, or the status to put on the response.
@@ -796,6 +796,15 @@ mod tests {
             chain: Vec::new(),
         });
         assert_eq!(l.plan(&req, &state)[0].1, "api:ip:203.0.113.9");
+    }
+
+    #[test]
+    fn the_socket_address_the_server_bridge_sets_is_a_key() {
+        let l = limiter(RateLimitConfig::rules([Rule::new("api", 10, 60)]));
+        let mut req = request(http::Method::GET, "/", &[]);
+        req.extensions_mut()
+            .insert(std::net::SocketAddr::from(([192, 0, 2, 7], 4000)));
+        assert_eq!(l.plan(&req, &RequestState::new())[0].1, "api:ip:192.0.2.7");
     }
 
     #[test]

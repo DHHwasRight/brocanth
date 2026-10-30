@@ -471,7 +471,9 @@ pub fn deploy(
         )
         .help("register `brocanth_middleware::Csrf` with `plugin_hooking` in src/plugins/mod.rs");
         if project.has("middleware-csrf") {
-            d = d.note("the scaffold wrote the registration commented out; its comment says the two changes that make it work");
+            d = d.note(
+                "the scaffold registered it in src/plugins/mod.rs; something removed that line",
+            );
         }
         out.push(d);
     }
@@ -481,6 +483,7 @@ pub fn deploy(
         "brocanth_server::serve",
         "bridge::serve",
         "App::run",
+        "begin_async(",
     ]);
     if !hooks.is_empty() && runner.is_empty() {
         out.push(

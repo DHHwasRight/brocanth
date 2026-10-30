@@ -1,0 +1,2378 @@
+===== Cargo.toml =====
+[package]
+name = "my-blog"
+version = "0.1.0"
+edition = "2021"
+default-run = "my-blog"
+
+# Exactly what was chosen when this application was scaffolded.
+#
+# The core is a router handing a request and a context to a handler, and it
+# depends on none of the rest. A capability that is not listed below is not
+# compiled, not linked, and contributes nothing: no section in the config, no
+# field on the context, no bytes in the binary.
+#
+# Not here, because nothing asked for it:
+#   brocanth-observe     no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
+#   brocanth-model       no ORM, no SQL driver, no sea-orm anywhere in the lock file
+#   brocanth-cache       no cache; every read does the work a hit would have skipped
+#   brocanth-jobs        no queue; slow work happens inside the request that asked for it
+#   brocanth-auth        no accounts; nothing hashes a password and nothing signs a session cookie
+#   brocanth-policy      no rule algebra; authorisation is whatever each handler remembered to check
+#   brocanth-storage     no file storage; an upload has nowhere to go and no address to be read back from
+#   brocanth-input       no entrance; `handle_post` reads `ctx.body` and parses it by hand
+#   brocanth-client      no client; calling this application means writing the URL and the JSON by hand
+#   brocanth-middleware  no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
+#   csrf                 no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
+#   security-headers     no security headers; a browser sniffs types, frames the pages and runs any inline script
+#   rate-limit           no rate limit; a password guesser gets as many tries as the server answers
+#   brocanth-openapi     no document; a client learns this API by reading the handlers
+#   brocanth-schema      no schema vocabulary; a body is checked by hand, or it is not checked
+#   brocanth-resource    no records API; every CRUD route is a page somebody wrote by hand
+#   brocanth-admin       no backoffice; a row is changed through a page somebody wrote, or SQL
+#   brocanth-realtime    no broker; a write tells nobody, and a client finds out by asking again
+#   jt                   no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
+#   serde                nothing here is deserialised
+[dependencies]
+brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
+brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
+===== .gitignore =====
+/target
+/dist
+/node_modules
+===== rust-toolchain.toml =====
+[toolchain]
+channel = "1.98"
+===== mise.toml =====
+[tools]
+# Must match the toolchain brocanth's proc-macro artifacts were built with:
+# they are not compatible across patch releases.
+rust = "1.98"
+
+# Named for what it does, and not `run`: `run` is one of mise's own
+# subcommands, so a task called that is only reachable as `mise run run`.
+# The alias keeps a bare `mise run` working, because mise runs the task
+# called `default` when it is given no name.
+[tasks.serve]
+alias = ["default"]
+run = "cargo run"
+
+[tasks.test]
+run = "cargo test"
+
+
+[tasks.export]
+description = "write the site to dist/"
+run = "cargo run -- export"
+
+[tasks.css]
+description = "build assets/css/site.css from _tailwind.css"
+run = "cargo run -- css"
+
+[tasks."css:watch"]
+description = "the same, again on each change"
+run = "cargo run -- css --watch"
+===== src/main.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! My Blog -- a brocanth application.
+//!
+//! This binary is the project's command line. `serve` is the one command the
+//! scaffold wrote; the rest are yours. A struct with `#[cmd]` under
+//! `src/commands/` is a subcommand, registered at link time, with no list to
+//! add it to.
+//!
+//! The wiring lives in `src/app.rs`, so `serve` and anything else that needs
+//! the router read the same thing.
+
+mod app;
+mod assets;
+mod commands;
+mod pages;
+mod plugins;
+
+fn main() -> brocanth_command::anyhow::Result<()> {
+    brocanth_command::main(brocanth_command::Context::boot()?)
+}
+
+// brocanth-digest: f49df3f0193e376f
+===== src/app.rs =====
+//! My Blog -- everything this binary contains, in the order it happens.
+//!
+//! This file is yours. `brocanth add` does not rewrite it: what it would
+//! have to say is in `src/plugins/mod.rs`, which is generated, and this one
+//! only asks that file four questions.
+//!
+//! A plugin that is not named in `plugins::register!` is not registered, and
+//! one that is not in `Cargo.toml` is not compiled at all. "The framework
+//! decided for you and you cannot see where" is the thing this layout exists
+//! to make impossible.
+//!
+//! `serve` and every other command read this, so there is one answer to what
+//! this application is.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
+use brocanth::plugin_shutdown::ShutdownReason;
+use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};
+
+use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
+use crate::plugins;
+
+/// The application name. Every environment variable this binary reads is
+/// `MY_BLOG_<SUFFIX>`: one convention, derived once, whatever spelling the
+/// name arrived in.
+pub const APP: &str = "my-blog";
+
+/// Where `serve` listens when nothing says else: `$MY_BLOG_ADDR`, or
+/// `127.0.0.1:3000`. The container image sets `0.0.0.0:3000`.
+pub fn default_addr() -> String {
+    std::env::var("MY_BLOG_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string())
+}
+
+/// What a request needs, built once and shared by every connection.
+pub struct App {
+    pub router: Router<Handler>,
+    pub stack: MiddlewareStack<Ctx, Response>,
+    pub plugins: Vec<String>,
+    /// The application the plugins built.
+    ///
+    /// Held rather than dropped, because three things need it
+    /// after `build` returns: a per-request context, the routes a
+    /// plugin contributed, and an HTTP test client. It used to be
+    /// a boxed closure over `context()` alone, which cost an
+    /// indirect call per request and reached none of the rest.
+    ///
+    /// Nameable at last: `plugins::Installed` and `plugins::Hooks`
+    /// are the two type parameters, and the generator writes both.
+    pub core: Core,
+}
+
+/// The built application, with its provider list and hook record.
+type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;
+
+/// Builds it. The only place that decides what this binary is.
+pub fn build() -> Result<App, String> {
+    // 1. The application, and every plugin it contains. The chain is in
+    //    `src/plugins/mod.rs`, one line per plugin and each one a line a
+    //    reader can delete. It is there rather than here because the
+    //    generator rewrites it whenever the module list changes.
+    let app = plugins::register!(AppBuilder::new())
+        .setup(|setup| {
+            // A plugin *offers* middleware and cannot mount it: a
+            // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
+            // pattern is a decision, and the decision is the application's --
+            // which is why these lines are here, in the file you own.
+            // Nothing in this binary offers middleware, so nothing is mounted.
+            let _ = setup.router();
+            Ok(())
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 2. The route table: the shape of src/pages and nothing else. A file is
+    //    a route, and `pages::router` is the only place that says so.
+    let router = pages::router().map_err(|e| e.to_string())?;
+
+    // 3. The chain, from exactly what the block above mounted. A name this
+    //    binary has no layer for stops the application rather than silently
+    //    not running.
+    let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();
+    for mount in app.router_plan().mounts() {
+        let layer = plugins::layer(&mount.middleware).ok_or_else(|| {
+            format!(
+                "`{}` is mounted, but this binary has no layer for it",
+                mount.middleware
+            )
+        })?;
+        stack
+            .use_at(&mount.pattern, layer)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 4. What the plugins put on the per-request context, said once.
+    plugins::announce!(&app);
+
+    let plugins = app.instance_names().map(str::to_string).collect();
+
+    Ok(App {
+        router,
+        stack,
+        plugins,
+        core: app,
+    })
+}
+
+/// Turns a page's answer into the response the hooks see.
+///
+/// `text/html` unless the page names its own `content-type`, which then
+/// replaces it rather than joining it. Every other header is appended,
+/// because `set-cookie` has to repeat.
+fn sent(answered: Response) -> hooks::Response {
+    brocanth_server::bridge::buffered(
+        answered.status,
+        answered.headers,
+        answered.body.into_bytes(),
+    )
+}
+
+/// The request headers as text, for the page.
+///
+/// A value that is not UTF-8 is dropped: a page reads a header as `&str`,
+/// and a lossy copy would say something the client did not send.
+fn headers(request: &hooks::Request) -> Vec<(String, String)> {
+    request
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
+}
+
+/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
+
+/// How many layout layers the client already has, from `DP-Partial`.
+///
+/// `html!` leaves out that many layouts, counting from the root, so a
+/// navigation inside a section sends the section's contents and not the
+/// document around them. dp-swap sends the number; the header is absent on
+/// a first load, for a crawler, and whenever JavaScript is off, and then
+/// this is zero and the whole document goes out.
+///
+/// `true` is dp-swap's word for "a fragment, I did not count", which is one
+/// layer. Anything that does not parse is zero: a client that cannot say
+/// what it holds gets everything, which is always correct and only slower.
+fn holding(request: &hooks::Request) -> u32 {
+    let header = request.headers().get("dp-partial");
+    match header.and_then(|value| value.to_str().ok()) {
+        None => 0,
+        Some("true") => 1,
+        Some(value) => value.parse().unwrap_or(0),
+    }
+}
+
+/// How long a stop waits for open requests and then for the plugins.
+///
+/// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
+/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
+/// `plugins::shutdown_grace`.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
+
+/// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
+///
+/// 1. The listener closes. Each open request has the grace period to
+///    finish, and each open response stream is told to end.
+/// 2. Each plugin stops, in reverse registration order, inside what is left
+///    of the grace period.
+///
+/// An error is a non-zero exit, and an orchestrator reads it: the drain ran
+/// out of time, the listener failed, or a plugin did not stop cleanly.
+///
+/// Synchronous on the outside because the command that calls it is, and
+/// the runtime is built here rather than wrapped around `main`: a command
+/// that never serves should not start a reactor to run.
+pub fn serve(addr: &str) -> Result<(), String> {
+    let grace = plugins::shutdown_grace()?;
+    // Before the socket, so a signal during startup stops the server
+    // through the drain and does not kill the process.
+    let stop = watch(grace).map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // The runtime first, and the application inside it. A plugin
+    // that opens a connection pool does it in `before_start`,
+    // where the hook is synchronous and connecting is not, so it
+    // reaches for the current runtime handle and blocks on a
+    // scoped thread. Building the application first would leave
+    // it with no handle to reach for.
+    let app = {
+        let _guard = runtime.enter();
+        build()?
+    };
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+
+    let result = runtime.block_on(run(addr, app, stop, grace));
+    // A request that outlived the drain can still be on a worker. Waiting
+    // for it here would undo the grace period, so it is dropped.
+    runtime.shutdown_background();
+    result
+}
+
+/// The async half of [`serve`].
+async fn run(
+    addr: &str,
+    mut app: App,
+    mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
+    grace: Duration,
+) -> Result<(), String> {
+    // One gate: a stop at the listener and a stop at `App::shutdown`
+    // close the same set of response streams.
+    let server = brocanth_server::Server::bind(addr)
+        .await
+        .map_err(|e| e.to_string())?
+        .with_streams(app.core.streams().clone());
+    let bound = server.local_addr().map_err(|e| e.to_string())?;
+    let stopper = server.stopper();
+
+    // After the bind, so a plugin does not start work for a port that
+    // turned out to be taken.
+    if let Err(e) = app.core.start() {
+        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        return Err(e.to_string());
+    }
+
+    // The probes and `/metrics` on a port of their own, when the
+    // configuration names one.
+    plugins::side_listeners(&app).await?;
+
+    let app = Arc::new(app);
+    // `plugins::wrap` puts whatever observes a request around it.
+    let handler = plugins::wrap(&app, {
+        let app = Arc::clone(&app);
+        move |request| {
+            let app = Arc::clone(&app);
+            async move {
+                match serve_asset(&request) {
+                    Some(file) => file,
+                    None => handle(&app, request).await,
+                }
+            }
+        }
+    });
+    let mut serving = tokio::spawn(server.run(handler));
+    eprintln!("{APP}: listening on http://{bound}");
+
+    // Phase 1: stop accepting, and give the open requests the grace period.
+    let mut failed = tokio::select! {
+        event = stop.recv() => {
+            let signal = match event {
+                Some(Stop::Signal(signal)) => signal,
+                _ => "stop",
+            };
+            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            None
+        }
+        // The listener stopped by itself. That is a failure, and the
+        // plugins still stop.
+        served = &mut serving => Some(stopped(served)),
+    };
+    let reason = match failed {
+        None => ShutdownReason::Signal,
+        Some(_) => ShutdownReason::Failed,
+    };
+    let started = Instant::now();
+    if failed.is_none() {
+        // With `observe`, `/readyz` fails first, and the listener closes
+        // after `[observability] drain_delay_secs`. Inside the grace period.
+        plugins::stop_accepting(&app, stopper).await;
+        failed = tokio::select! {
+            served = &mut serving => match served {
+                Ok(Ok(())) => None,
+                other => Some(stopped(other)),
+            },
+            event = stop.recv() => Some(match event {
+                // A second Ctrl-C means "now".
+                Some(Stop::Signal(signal)) => {
+                    format!("a second {signal} arrived, so open requests were cut off")
+                }
+                _ => format!("open requests did not finish in {grace:?} and were cut off"),
+            }),
+        };
+    }
+    // Nothing when the drain finished. After a timeout, this drops the
+    // connections that are still open.
+    serving.abort();
+
+    // Phase 2: the plugins, inside what is left of the grace period.
+    let remaining = grace.saturating_sub(started.elapsed());
+    match owned(app).await {
+        Some(mut app) => {
+            let report = app.core.shutdown(reason, Some(remaining));
+            eprintln!("{APP}: {report}");
+            if failed.is_none() && (!report.is_clean() || report.overran()) {
+                failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
+            }
+        }
+        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+    }
+    match failed {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
+}
+
+/// Why the listener task ended before a clean drain.
+fn stopped(
+    served: Result<Result<(), brocanth_server::ServeError>, tokio::task::JoinError>,
+) -> String {
+    match served {
+        Ok(Ok(())) => "the listener stopped with no signal".to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// The application back from the connections that shared it, or `None` when
+/// one of them still runs.
+///
+/// `App::shutdown` needs `&mut`. A finished connection task can be a few
+/// instructions from dropping its clone, so this yields a few times first.
+async fn owned(mut app: Arc<App>) -> Option<App> {
+    for _ in 0..64 {
+        match Arc::try_unwrap(app) {
+            Ok(app) => return Some(app),
+            Err(shared) => {
+                app = shared;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    None
+}
+
+/// What the stop thread reports to [`run`].
+enum Stop {
+    /// SIGTERM or SIGINT, by name.
+    Signal(&'static str),
+    /// The grace period since the first signal is over.
+    Deadline,
+}
+
+/// Watches for SIGTERM and SIGINT on a thread of its own. It reports each
+/// signal, and the end of the grace period after the first one.
+///
+/// Not on the serving runtime. A handler is synchronous and holds its
+/// worker, and while it runs that runtime can leave its signal and timer
+/// drivers unpolled: a stop would wait for the slowest request, and the
+/// grace period would not run out. This thread has a runtime of its own,
+/// and the channel wakes `run` directly.
+fn watch(grace: Duration) -> std::io::Result<tokio::sync::mpsc::UnboundedReceiver<Stop>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut signals = {
+        let _guard = runtime.enter();
+        Signals::listen()?
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::Builder::new()
+        .name("stop".to_string())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let first = signals.next().await;
+                if tx.send(Stop::Signal(first)).is_err() {
+                    return;
+                }
+                let next = tokio::select! {
+                    () = tokio::time::sleep(grace) => Stop::Deadline,
+                    second = signals.next() => Stop::Signal(second),
+                };
+                let _ = tx.send(next);
+            });
+        })?;
+    Ok(rx)
+}
+
+/// SIGTERM and SIGINT as one stream. An orchestrator sends SIGTERM, and
+/// Ctrl-C is SIGINT.
+#[cfg(unix)]
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
+        }
+    }
+}
+
+/// Ctrl-C alone, where there is no SIGTERM.
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn listen() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    /// The next signal, by name.
+    async fn next(&mut self) -> &'static str {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
+}
+
+/// One request: the request hooks, the table, then the response hooks.
+///
+/// A request hook may answer instead of the page -- a CSRF refusal, a
+/// 429 -- and then the page never runs. It may also rewrite the request
+/// first, so the table reads the request as the hooks left it. The
+/// response hooks see every answer, the 404 and the 405 included.
+///
+/// `begin_async` and not `begin`: it runs a hook that waits as well as
+/// one that does not. With no hook that waits, it is ready on its first
+/// poll.
+pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
+    let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
+        // The path and the query do not make a URI. The table was not
+        // asked, so this is not a 404.
+        return brocanth_server::Response::text(400, "Bad Request");
+    };
+    let mut state = RequestState::new();
+    let outcome = match app.core.begin_async(&mut request, &mut state).await {
+        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),
+        Begin::Answered(outcome) => outcome,
+    };
+    let response = app.core.finish(&mut request, &mut state, outcome);
+    brocanth_server::bridge::from_core(response)
+}
+
+/// The table, then the chain, then the handler.
+///
+/// The chain runs only for a route that matched. A 404 has no route and
+/// therefore no context. `state` is what the request hooks wrote; the
+/// page reads it through `Ctx::hooked`, and it goes back afterwards so
+/// the response hooks read what the page left.
+pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {
+    let Some(verb) = Verb::from_http(request.method()) else {
+        return Response::new(501, "Not Implemented");
+    };
+    let path = request.uri().path();
+    match app.router.dispatch(verb, path) {
+        Dispatch::Found { handler, matched } => {
+            let mut ctx = Ctx::new(verb, path, matched.params())
+                .holding(holding(request))
+                .with_plugins(app.core.context())
+                .with_state(std::mem::take(state))
+                .sent(
+                    request.uri().query().unwrap_or(""),
+                    request.body().clone(),
+                    headers(request),
+                );
+            // The one place a failed handler becomes a response --
+            // what Echo calls an HTTPErrorHandler. It sits inside
+            // the chain's terminal, so a layer still sees what the
+            // error turned into and can rewrite it.
+            let response = app.stack.run(path, &mut ctx, |c| {
+                handler(c).unwrap_or_else(IntoResponse::into_response)
+            });
+            *state = ctx.take_state();
+            response
+        }
+        Dispatch::MethodNotAllowed { allow, .. } => Response {
+            status: 405,
+            headers: vec![("allow".to_string(), allow.to_string())],
+            ..Default::default()
+        },
+        Dispatch::NotFound => Response::new(404, "Not Found"),
+    }
+}
+===== src/pages/mod.rs =====
+//! The route table, which is this directory.
+//!
+//! One file is one route, and the path on disk is the URL: `index.rs` is `/`,
+//! `about.rs` is `/about`, `users/[id].rs` is `/users/{id}`.
+//!
+//! Nothing below lists them. The macro reads this directory while the crate
+//! is compiled and writes the `mod` lines and [`router`] from what is there,
+//! so adding a page is adding a file and renaming one renames its route.
+//! The verb comes off the handler's name: `handle` is GET, `handle_post` is
+//! POST, and a `pub fn handle_*` that is not a verb is a build error rather
+//! than a handler nothing reaches.
+//!
+//! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
+
+brocanth_pages::pages!("src/pages");
+
+use brocanth::plugin_context::{Context, ContextItem, Has};
+use brocanth::plugin_hooks::RequestState;
+use brocanth::routing::{BuildError, Params, Router, Verb};
+
+use crate::plugins;
+
+/// What a handler produces.
+///
+/// The framework owns rendering: a handler returns a value and never writes a
+/// response itself, so a half-written body on an error is not something that
+/// can happen. Echo and Gin hand the handler a writer and take an error back,
+/// and both carry the scar -- once a 200 has gone out, the central error
+/// handler cannot take it back. Here there is nothing to take back.
+pub struct Response {
+    pub status: u16,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Written by hand rather than derived, and the difference matters.
+///
+/// A derived `Default` would give `status: 0`, which is not an HTTP status, so
+/// `Response { body: .., ..Default::default() }` would compile and be wrong.
+/// 200 is what "I did not say" means for a response.
+impl Default for Response {
+    fn default() -> Self {
+        Self {
+            status: 200,
+            body: String::new(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+impl Response {
+    pub fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn ok(body: impl Into<String>) -> Self {
+        Self::new(200, body)
+    }
+
+    pub fn empty(status: u16) -> Self {
+        Self::new(status, "")
+    }
+
+    /// For what the struct literal does not cover: several headers, added one
+    /// at a time. Rust has no variadic generics, so a tuple return is
+    /// fixed-arity and this is the unbounded form.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Drops every header with this name, ignoring case.
+    ///
+    /// `with_header` appends, because `set-cookie` has to repeat. A
+    /// single-valued header does not: two `content-type` lines are two
+    /// claims and the client picks. Replacing one drops it first, which
+    /// is what `set_header` below does.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(held, _)| !held.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// The one value for this header, replacing any already set.
+    ///
+    /// What to compose with when overriding a type an earlier step chose:
+    /// `Ok(render_json(tpl)?.set_header("content-type", "application/problem+json"))`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn set_header(self, name: &str, value: impl Into<String>) -> Self {
+        self.without_header(name).with_header(name, value)
+    }
+}
+
+/// What a handler may return instead of building a [`Response`] by hand.
+///
+/// The Crystal brocanth overloads `write_response` on the handler's return
+/// type, so a page returns the simplest thing that says what it means. Rust
+/// spells the same idea as a trait: each handler still returns exactly one
+/// type, and this is what lets different handlers return different ones.
+pub trait IntoResponse {
+    fn into_response(self) -> Response;
+}
+
+impl IntoResponse for Response {
+    fn into_response(self) -> Response {
+        self
+    }
+}
+
+/// A body, answered 200.
+impl IntoResponse for String {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+impl IntoResponse for &str {
+    fn into_response(self) -> Response {
+        Response::ok(self)
+    }
+}
+
+/// Nothing: 200 with no body. Crystal's `Nil` return.
+impl IntoResponse for () {
+    fn into_response(self) -> Response {
+        Response::empty(200)
+    }
+}
+
+/// A status and nothing else -- `Ok(404)`.
+impl IntoResponse for u16 {
+    fn into_response(self) -> Response {
+        Response::empty(self)
+    }
+}
+
+/// A body and a status.
+impl<T: IntoResponse> IntoResponse for (T, u16) {
+    fn into_response(self) -> Response {
+        Response {
+            status: self.1,
+            ..self.0.into_response()
+        }
+    }
+}
+
+/// A body and headers.
+impl<T: IntoResponse> IntoResponse for (T, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.headers.extend(self.1);
+        response
+    }
+}
+
+/// A body, a status and headers.
+impl<T: IntoResponse> IntoResponse for (T, u16, Vec<(String, String)>) {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response.status = self.1;
+        response.headers.extend(self.2);
+        response
+    }
+}
+
+/// What a handler may fail with.
+///
+/// Deliberately **not** an `impl std::error::Error`, which is what lets the
+/// blanket `From` below exist without colliding with the reflexive
+/// `impl<T> From<T> for T`. `anyhow::Error` is this shape for the same reason.
+/// The effect is that `?` works on anything in a handler.
+#[derive(Debug)]
+pub struct Error {
+    pub status: u16,
+    pub message: String,
+    /// Headers the failure needs. A `content-type` for a body that is not
+    /// HTML, a `www-authenticate` for a 401, a `retry-after` for a 429.
+    ///
+    /// `Response` always had these and `Error` did not, which made a
+    /// machine-readable error body impossible to send.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Error {
+    pub fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// The default for a failure nobody classified: it is a bug here, not a
+    /// mistake by the caller.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(500, message)
+    }
+
+    /// The same, carrying a header.
+    ///
+    /// `allow(dead_code)` for the same reason the request readers below
+    /// have it: it is here for the first handler that needs it, and a
+    /// brand-new project has none yet.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
+    fn from(error: E) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        // Everything a client sees for a 5xx is the status. The message is for
+        // whoever is reading the logs, and putting it in the body is how an
+        // internal path ends up on a stranger's screen.
+        let withheld = self.status >= 500;
+        let body = if withheld {
+            String::from("Internal Server Error")
+        } else {
+            self.message
+        };
+        let mut headers = self.headers;
+        if withheld {
+            // The body is replaced, so a `content-type` describing the
+            // original no longer describes anything. Keeping it labelled a
+            // plain sentence `application/problem+json` -- harmless while
+            // `sent` sent two types and the client could pick the other,
+            // and wrong now that the replacement is exact.
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        }
+        Response {
+            status: self.status,
+            body,
+            // The rest survive: the body is withheld, not the framing the
+            // client needs to read what is left.
+            headers,
+        }
+    }
+}
+
+/// What a handler is given. Middleware sees it too, and may change it before
+/// the handler runs or after it returns.
+pub struct Ctx {
+    /// Which verb matched. A layer reads it; a page usually does not,
+    /// because the verb is already in the name of the function it is in.
+    #[allow(dead_code)]
+    pub verb: Verb,
+    pub path: String,
+    /// Everything after the first `?`, without it. Empty when there was none.
+    #[allow(dead_code)]
+    pub query: String,
+    /// The body as it arrived. Empty for the verbs that carry none, and for
+    /// a context built by a test that did not set one.
+    #[allow(dead_code)]
+    pub body: Vec<u8>,
+    params: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+    /// What the plugins put here for this request, or `None` for a context
+    /// built by hand.
+    plugins: Option<Context<plugins::Installed>>,
+    /// What the request hooks wrote for this request: a `CsrfToken`, a
+    /// client address. Empty for a context built by hand.
+    state: RequestState,
+    /// How many layout layers the client says it already holds.
+    ///
+    /// Zero unless a request asked for less, so a first load, a crawler
+    /// and a reader with JavaScript off all get the whole document.
+    partial: u32,
+}
+
+impl Ctx {
+    pub fn new(verb: Verb, path: &str, params: Params<'_>) -> Self {
+        Self {
+            verb,
+            path: path.to_string(),
+            query: String::new(),
+            body: Vec::new(),
+            params: params
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            headers: Vec::new(),
+            plugins: None,
+            state: RequestState::new(),
+            partial: 0,
+        }
+    }
+
+    /// The rest of the request: what the client sent, rather than what the
+    /// router matched.
+    ///
+    /// Two calls and not one, because a test that exercises a handler
+    /// usually wants the first and not the second. `src/app.rs` makes both.
+    ///
+    /// The three are copied out of the server's request, which lives for
+    /// the connection and not for the handler. One copy per request, and
+    /// the handler owns what it reads.
+    #[must_use]
+    pub fn sent(mut self, query: &str, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
+        self.query = query.to_string();
+        self.body = body;
+        self.headers = headers;
+        self
+    }
+
+    /// What the plugins put on this request's context.
+    ///
+    /// `src/app.rs` calls it once per request, with a context the
+    /// application made from its providers. A `Ctx` built in a test has
+    /// none, which is what the `Option` says.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
+    /// What the request hooks wrote. `src/app.rs` hands it over before the
+    /// page runs and takes it back after, for the response hooks.
+    #[must_use]
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The hook state back, leaving this context an empty one.
+    pub fn take_state(&mut self) -> RequestState {
+        std::mem::take(&mut self.state)
+    }
+
+    /// The value a plugin published for this request.
+    ///
+    /// **Compiles only when some registered plugin provides `T`.** Ask for
+    /// a type nothing installs and the build stops and names it; there is
+    /// no string key to misspell and no guard to forget. That check is the
+    /// whole point, and it is the compiler's, not this method's.
+    ///
+    /// `Option` is the other half, and it is not about `T`'s type. It is
+    /// `None` in two cases: a `Ctx` built by hand in a test, which has no
+    /// application behind it and so no providers; and a provider that
+    /// declared `T` and inserted nothing, which `Plugin::provide` allows
+    /// because it is one method and `Provides` is a separate declaration.
+    /// A dispatched request whose provider wrote its value gets `Some`.
+    ///
+    /// The `_` is the position of `T` in the provider list, which is
+    /// always inferred. It is there so two impls do not overlap, and it is
+    /// the same `_` `Context::get` takes.
+    ///
+    /// ```ignore
+    /// let session = ctx.provided::<Session, _>().expect("dispatched");
+    /// ```
+    #[allow(dead_code)]
+    pub fn provided<T, I>(&self) -> Option<&T>
+    where
+        T: ContextItem,
+        plugins::Installed: Has<T, I>,
+    {
+        // `and_then` with `try_get`, not `map` with `get`: `get` panics
+        // when the provider list claims `T` and the provider inserted
+        // nothing, which the generated plugin templates make easy --
+        // `Provides` is unconditional and `provide` is often
+        // `if let Some(..)`. A method returning `Option` must not abort
+        // the process to say no.
+        self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
+    }
+
+    /// The same, for a request that said how much of the page it has.
+    #[must_use]
+    pub fn holding(mut self, layers: u32) -> Self {
+        self.partial = layers;
+        self
+    }
+
+    /// What `html!` asks, to leave out the layouts the client has.
+    ///
+    /// A method rather than a public field so the number has one
+    /// meaning: layers to skip, counted from the root.
+    pub fn partial_depth(&self) -> u32 {
+        self.partial
+    }
+
+    /// A route parameter, or `None`.
+    ///
+    /// Never `""`. The Crystal prototype returned an empty string for a name
+    /// nobody declared, so a typo read as a present-but-blank value and went
+    /// unnoticed; `Option` is that bug deleted rather than documented.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The same, for a parameter the route declares and so must be there.
+    ///
+    /// Returns `Result` rather than `Option` so it composes with `?`. A name
+    /// the route does not declare is this file disagreeing with its own
+    /// filename, which is a 500 and not a 400: nobody sent a bad request.
+    pub fn require(&self, name: &str) -> Result<&str, Error> {
+        self.param(name)
+            .ok_or_else(|| Error::internal(format!("the route declares no `{name}` parameter")))
+    }
+}
+
+/// What the client sent, as opposed to what the router matched.
+///
+/// A second block, and `allow(dead_code)`, for one reason: the request is
+/// on the context whether or not this project reads it yet. The other way
+/// round is a context whose shape depends on which modules were chosen,
+/// and then a page that starts reading a header needs the generator rather
+/// than a line.
+#[allow(dead_code)]
+impl Ctx {
+    /// A value a request hook wrote for this request, by its type.
+    ///
+    /// `ctx.hooked::<brocanth_middleware::CsrfToken>()` is the token a form
+    /// carries. `None` when no registered hook wrote one, and always for a
+    /// context built by hand.
+    pub fn hooked<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.get::<T>()
+    }
+
+    /// A request header by name, case-insensitively, or `None`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every request header, in the order they arrived.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// What the body is written in, or `None` when the client did not say.
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    /// The body as text, or `None` when it is not UTF-8.
+    ///
+    /// `Option` and not a lossy conversion: a body that is not text is a
+    /// request to answer, not a string to repair.
+    pub fn body_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.body).ok()
+    }
+}
+
+/// A handler, as the table stores it. One per verb a page answers.
+///
+/// Boxed rather than a bare `fn` pointer, because every handler returns its
+/// own type and a `fn` pointer can only hold one of them. [`page`] is what
+/// unifies them, and it runs once per route at startup rather than per
+/// request.
+pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+
+/// Puts a handler in the table whatever it returns.
+///
+/// Generic over the return type, so `-> Result<impl IntoResponse, Error>` on
+/// the handler and one concrete `Handler` in the table are the same thing.
+pub fn page<H, T>(handler: H) -> Handler
+where
+    H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
+    T: IntoResponse,
+{
+    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+}
+
+/// The application's name, as the root layout writes it.
+pub const TITLE: &str = "My Blog";
+
+/// Every template in this application.
+///
+/// The `.rsx` files sit next to the pages they render -- `index.rsx` beside
+/// `index.rs` -- and `load_dir!` compiles the tree while this crate is being
+/// compiled. Nothing is read from disk when a request arrives, and a template
+/// that does not parse is a compile error on its own line.
+///
+/// A module of their own, because `load_dir!` emits a `pub mod index` for
+/// `index.rsx` and `pages!` emits one for `index.rs`: unnested they collide.
+/// The path is relative to the package root and not to this file, because a
+/// proc macro cannot learn where it was written on stable Rust.
+///
+/// A file whose name is not an identifier gets the nearest one: `[id].rsx` is
+/// `views::users::_id_`.
+pub mod views {
+    rsx::load_dir!("src/pages");
+}
+
+/// Renders a page inside the layouts that cover it.
+///
+/// `layout.rsx` wraps every page in its directory and in every directory
+/// below it, and they stack from the root down. A page never names one,
+/// because which layout covers a page is a property of where the page is --
+/// the rule Crystal's page_router uses for `layout.cr`.
+///
+/// The macro reads that off the directory tree at compile time: it knows
+/// which file it was written in, walks up to `src/`, and wraps the page in
+/// every `layout.rsx` it passes. Add one to a directory and every page under
+/// it is wrapped, with nothing to register and no chain to keep in step.
+///
+/// Re-exported here so a page imports it from the same place as everything
+/// else it uses, and so the layout rule lives beside the route table rather
+/// than in a crate name.
+pub use brocanth_pages::html;
+
+/// The URL prefix a layout covers, for a layout under a parameter.
+///
+/// `html!` passes a layout the prefix it wraps, which is the marker dp-swap
+/// reads to work out how much of a page two URLs share. A directory named
+/// after a parameter has no prefix of its own until a request arrives, so
+/// the macro hands this function the template and the request fills it:
+/// `/{section}` under `/alpha/card-2` is `/alpha`.
+///
+/// Called only from the expansion, and only for a layout that sits under a
+/// parameter. A marker reading `/[section]` would be the same string on
+/// every section, and the client would conclude that two pages share a
+/// layer they do not.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
+pub fn prefix(ctx: &Ctx, template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        // A parameter the router did not match cannot happen: this template
+        // is built from the directory the route was read out of, so the
+        // name is one the pattern declares.
+        out.push_str(ctx.param(&rest[open + 1..open + close]).unwrap_or_default());
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A partial, and the replacements for the chrome it left behind.
+///
+/// A layout the client keeps is a layout this answer does not contain, which
+/// is the point of asking for a partial and the reason its chrome goes
+/// stale: the sidebar still marks the section you came from. A layout that
+/// has something to correct defines `Oob` beside its `Layout`, and `html!`
+/// renders one per skipped layer and passes them here.
+///
+/// They lead, because the static version of this writes them that way. The
+/// client reads the whole body before it swaps anything, so the order is a
+/// convention rather than a requirement, and one convention is better than
+/// two.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
+pub fn render_with(
+    out_of_band: Vec<String>,
+    content: impl rsx::Template,
+) -> Result<Response, Error> {
+    let mut body = out_of_band.concat();
+    body.push_str(&content.render_to_string()?);
+    Ok(Response::ok(body))
+}
+
+/// One skipped layout's replacement chrome, rendered on its own.
+///
+/// `html!` calls this once per layer it left out, and `render_with` puts
+/// the results in front of the page. A function here rather than a call to
+/// `rsx::Template` inside the macro: the other two renders already come
+/// back through this file, and the macro naming one engine was the reason
+/// a project could have only that engine.
+/// `allow(dead_code)`: `html!` emits a call to this only for a layout that
+/// defines an `Oob` component, and no scaffolded layout does. It is here
+/// for the first one that needs it, which is the same reason the request
+/// readers on `Ctx` carry the attribute.
+#[allow(dead_code)]
+pub fn render_oob(content: impl rsx::Template) -> Result<String, Error> {
+    Ok(content.render_to_string()?)
+}
+
+/// A page with no layout at all: a fragment, a partial, an htmx swap.
+///
+/// What `html!` expands into, once it has wrapped the page, so this is also
+/// the escape hatch -- name a layout by hand and pass it here.
+///
+/// It returns the handler's own `Result` rather than a value, so a template
+/// that bails propagates with `?` instead of turning into a blank 200. For
+/// another status or a header, compose with the forms above:
+/// `Ok((html!(ctx, tpl)?, 404))`, or `Ok(html!(ctx, tpl)?.with_header("x-kind", "page"))`.
+///
+/// Deliberately a function and not `impl<T: rsx::Template> IntoResponse for T`.
+/// `()`, `Option<T>` and `Vec<T>` are templates, so a blanket impl overlaps
+/// the ones above and does not compile -- and an `into_response` that cannot
+/// fail would have to swallow a render error. A blanket impl could not apply
+/// a layout either, since it would not know which page it was rendering.
+pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
+    // `render_to_string` builds into its own String, so a page that fails
+    // half way through its layout leaves nothing behind. There is no partial
+    // body to take back, which is the property the rest of this file is
+    // built on.
+    Ok(Response::ok(content.render_to_string()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_is_the_shape_of_the_directory() {
+        let router = router().expect("the pages produce a table");
+        let mut patterns: Vec<&str> = router
+            .routes()
+            .iter()
+            .map(|(template, _)| template.pattern())
+            .collect();
+        patterns.sort();
+        assert_eq!(patterns, ["/", "/about", "/users/{id}"]);
+    }
+
+    #[test]
+    fn a_path_that_exists_with_a_verb_that_does_not_is_a_405() {
+        let router = router().expect("the pages produce a table");
+        let allow = router.allow_for("/about").expect("/about is a route");
+        assert_eq!(allow.to_string(), "GET, HEAD");
+    }
+}
+===== src/pages/index.rs =====
+//! `/` -- because the file is called `index.rs`.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, TITLE};
+
+/// GET. The framework reads the verb off the function name: `handle` is GET
+/// and `handle_post` is POST.
+///
+/// The whole body is the bridge. `html` takes a component and gives back this
+/// handler's own `Result`, so there is no `Ok(..)` to write and a template
+/// that bails is propagated rather than swallowed.
+///
+/// The markup is in `src/pages/index.rsx`, beside this file and compiled into
+/// the binary: nothing is read from disk when a request arrives, and a
+/// template that does not parse is a compile error on the `.rsx` line.
+///
+/// Nothing here names a layout. `html!` reads them off the directory tree:
+/// this file is in `src/pages`, so it is wrapped in `src/pages/layout.rsx`,
+/// and a page under `src/pages/users/` is wrapped in that one too.
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html!(ctx, views::index::Index { title: TITLE })
+}
+===== src/pages/about.rs =====
+//! `/about` -- one file, one route.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, TITLE};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // The context is the request, and a component's parameters are an
+    // ordinary struct: whatever the page needs, named, and type-checked
+    // against `src/pages/about.rsx` beside this file. A field the component
+    // does not declare is a compile error, not a blank in the output.
+    let verb = ctx.verb.to_string();
+    html!(
+        ctx,
+        views::about::About {
+            title: TITLE,
+            verb: &verb,
+            path: &ctx.path,
+        }
+    )
+}
+===== src/pages/users/[id].rs =====
+//! `/users/{id}` -- the brackets in the file name are the parameter.
+
+use crate::pages::{html, routes, views, Ctx, Error, IntoResponse, Response};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // `?` is why a handler returns `Result`. Anything that fails converts
+    // into `Error` through a blanket `From` -- a parse here, and a template
+    // that bails inside `html`, by the same route.
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    html!(ctx, views::users::_id_::User { id })
+}
+
+/// POST to the same path. One file, one route, one handler per verb.
+///
+/// Not every response is a page, and this is the reason `html` is a function
+/// rather than something the framework does to every return: a redirect is a
+/// status and one header, with no markup anywhere near it.
+pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let id: u64 = ctx.require("id")?.parse()?;
+
+    Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
+}
+===== src/plugins/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! The plugins this application contains, and the four things `src/app.rs`
+//! asks this file for.
+//!
+//! Each plugin is also named in `register!`: being here makes it compile,
+//! being named there makes it run. The core depends on none of them, and the
+//! dependency arrow points this way and never back.
+//!
+//! The registration chain sits here and not in `src/app.rs` because the
+//! generator rewrites it every time the module list changes, and `src/app.rs`
+//! is yours.
+
+use brocanth::plugin_context::Base;
+use brocanth::routing::Next;
+
+use crate::pages::{Ctx, Response};
+
+/// Every plugin this application contains, in dependency order.
+///
+/// A macro and not a function, and the reason is the builder's type:
+/// registering a plugin that provides a context item widens
+/// `AppBuilder`'s type-level provider list, so the type this chain ends
+/// on is one nested associated type per plugin. A function would have to
+/// spell that type out and re-spell it on every change. The macro expands
+/// at its one call site in `src/app.rs`, where the compiler works it out
+/// and nobody has to read it.
+///
+/// Each registration is still one line, and a line a reader can delete.
+macro_rules! register {
+    ($builder:expr) => {{
+        use brocanth_config::{AppBuilderConfigExt, Loader};
+
+        // The core takes already-built values; finding the files, layering
+        // them and typing each section is `brocanth-config`'s job, and it is
+        // the only reason a TOML parser is in the tree.
+        let config = Loader::new(crate::app::APP)
+            .load()
+            .map_err(|e| e.to_string())?;
+        $builder.with_config(config)
+    }};
+}
+pub(crate) use register;
+
+/// What this binary installs on a request's context, as a type.
+///
+/// One `Install` per registered plugin, innermost first, which is exactly
+/// what `register!` builds. The two have to be the same type: if they
+/// drift this file does not compile, which is why the list is written
+/// once and both readers derive from it.
+///
+/// A plugin that puts nothing on the context folds away, because
+/// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
+/// plugins all provide nothing.
+pub type Installed = Base;
+
+/// Which hook families this binary installed, as a type.
+///
+/// One `Both` per plugin registered with `plugin_hooking`, innermost first,
+/// which is exactly the record `register!` builds. A hook family nobody
+/// installed costs nothing, and this type is how the compiler knows: every
+/// hook entry point opens with a constant `if` on this record.
+pub type Hooks = brocanth::plugin_hooks::NoHooks;
+/// What this binary puts on the context, said once at startup.
+///
+/// The lines are a demonstration and they are load-bearing: the installed
+/// provider set lives in the application's *type*, so an `extract` for a
+/// plugin nobody registered does not compile. That is the modularity claim,
+/// checked by the compiler rather than written in a README.
+///
+/// A handler reads the same values through `Ctx::provided`, which carries
+/// the same check. This runs at startup so a misconfiguration is a failure
+/// to start rather than a failure on the first request that needed it.
+///
+/// A macro for the reason `register!` is one: the context's type is the
+/// builder's type, and neither is worth spelling.
+macro_rules! announce {
+    ($app:expr) => {{
+        // Nothing in this binary puts a value on the context.
+        let _ = $app;
+    }};
+}
+pub(crate) use announce;
+
+/// One middleware layer, as the stack stores it.
+///
+/// A name rather than the type written out: clippy calls the bare
+/// form a very complex type, and it is also the type `src/app.rs`
+/// would have to spell to hold one.
+pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
+
+/// The function behind a middleware name the application mounted.
+///
+/// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
+/// decision and the decision is the application's. Which function answers
+/// to `"request_log"` is not a decision, so it is here, where adding a
+/// plugin can write it.
+pub fn layer(name: &str) -> Option<Layer> {
+    // Nothing in this binary offers middleware, so nothing can be
+    // mounted and nothing is ever looked up.
+    let _ = name;
+    None
+}
+
+/// `[server] shutdown_grace_secs`, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
+pub fn shutdown_grace() -> Result<std::time::Duration, String> {
+    let config = brocanth_config::Loader::new(crate::app::APP)
+        .load()
+        .map_err(|e| e.to_string())?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("shutdown_grace_secs"))
+    else {
+        return Ok(crate::app::SHUTDOWN_GRACE);
+    };
+    // An integer in a file, and a string in `$MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS`.
+    value
+        .as_integer()
+        .and_then(|secs| u64::try_from(secs).ok())
+        .or_else(|| value.as_str().and_then(|secs| secs.trim().parse().ok()))
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(|| {
+            format!(
+                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds",
+                value.display()
+            )
+        })
+}
+
+/// What the server is handed for one request.
+pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
+
+/// What `serve` answers a request with: `next`, as it is. `brocanth add
+/// observe` logs and counts each request here, and answers the probes.
+pub fn wrap<F, Fut>(
+    app: &std::sync::Arc<crate::app::App>,
+    next: F,
+) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
+where
+    F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
+{
+    let _ = app;
+    move |request| -> Answer { Box::pin(next(request)) }
+}
+
+/// No second listener: nothing here serves probes or metrics.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+    let _ = app;
+    Ok(())
+}
+
+/// The first half of a stop: the listener closes at once.
+pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
+    let _ = app;
+    stopper.stop();
+}
+
+// brocanth-digest: 2866efc0c9bea70d
+===== config/development.toml =====
+# The configuration of this environment.
+#
+# The framework owns `[app]` and `[server]`. Every other section is claimed by
+# the plugin instance registered under that name in src/main.rs, and a section
+# nothing claims stops the build rather than being silently ignored -- a
+# misspelt section must never build clean.
+#
+# Layered, highest precedence first: $MY_BLOG_CONFIG, /etc/my_blog/development.toml,
+# ./my_blog_development.toml, ./config/development.toml. $MY_BLOG_ENV picks the
+# environment; without it, development.
+
+[app]
+name = "My Blog"
+
+[server]
+# Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the
+# plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
+shutdown_grace_secs = 25
+===== src/commands/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! A command of your own is a file beside this one; nothing lists it.
+//!
+//! Every command in this project.
+//!
+//! The `mod` lines are the whole of it. A command registers itself through a
+//! link-time slice, so adding one is a file and a `mod`, and there is no list
+//! to keep in step.
+//!
+//! `serve` arrived with the scaffold and is ordinary code here: rename it,
+//! give it flags, or delete it. The framework does not own this command line.
+
+pub mod css;
+pub mod export;
+pub mod routes;
+pub mod serve;
+
+// brocanth-digest: 023f1dacfd76b835
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value_t = crate::app::default_addr())]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+===== .github/workflows/ci.yml =====
+# Every push and every pull request: formatting, lints, tests.
+#
+# The toolchain is the one `rust-toolchain.toml` pins. A dependency on a path
+# outside this repository (`brocanth create --brocanth-path`) is not in the
+# checkout, and the build fails; depend on git instead.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads rust-toolchain.toml, and caches the target directory.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo run -- export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist
+===== assets/css/_tailwind.css =====
+/* The input of the CSS build. Never published.
+ *
+ * The leading underscore marks an input: a file that is bundled into another
+ * and that `assets!` must not publish on its own. The build reads this file
+ * and writes assets/css/site.css, which is the one that ships:
+ *
+ *     brocanth css          # once, minified
+ *     brocanth css -W       # again on each change
+ */
+
+@import "tailwindcss";
+
+/* Where the class names are.
+ *
+ * Tailwind resolves each path against this stylesheet and keeps its automatic
+ * detection on as well. These are explicit for two reasons: `.rsx` is not an
+ * extension Tailwind knows, and an explicit glob states the contract.
+ */
+
+/* The templates. A .rsx file is Rust with an HTML-shaped body. */
+@source "../../src/pages/**/*.rsx";
+
+/* Plain Rust holds class names too -- a helper that builds a class string,
+ * or a handler choosing one. */
+@source "../../src/**/*.rs";
+===== assets/css/site.css =====
+/* Written by `brocanth create` so the first build works.
+   `brocanth css` replaces it with the real one. */
+===== package.json =====
+{
+  "name": "my-blog",
+  "version": "0.0.0",
+  "private": true,
+  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14"
+  }
+}
+===== public/dpswap.min.js =====
+"use strict";var dpswap=(()=>{var T=Object.defineProperty;var se=Object.getOwnPropertyDescriptor;var ae=Object.getOwnPropertyNames;var le=Object.prototype.hasOwnProperty;var k=(e,t)=>{for(var r in t)T(e,r,{get:t[r],enumerable:!0})},ue=(e,t,r,n)=>{if(t&&typeof t=="object"||typeof t=="function")for(let o of ae(t))!le.call(e,o)&&o!==r&&T(e,o,{get:()=>t[o],enumerable:!(n=se(t,o))||n.enumerable});return e};var ce=e=>ue(T({},"__esModule",{value:!0}),e);var Be={};k(Be,{config:()=>a,configure:()=>K,fragmentUrl:()=>h,hydrate:()=>E,perform:()=>m,prefetch:()=>Ve,process:()=>L,start:()=>$,swapping:()=>Ue});var a={fragmentSuffix:"/_fragment.html",fragmentMode:"suffix",partialHeader:"DP-Partial",layoutAttr:"dp-layout",requestClass:"dp-request",settlingClass:"dp-settling",defaultBoostTarget:"body",timeout:1e4,prefetchLimit:32,fetch:(...e)=>globalThis.fetch(...e)};function K(e){Object.assign(a,e)}function h(e,t){let r=new URL(e,t??"http://localhost");return a.fragmentMode==="header"||(r.pathname=r.pathname.replace(/\/+$/,"")+a.fragmentSuffix),r.pathname+r.search+r.hash}function b(e,t=1){let r={"DP-Request":"true"};return e&&a.fragmentMode==="header"&&(r[a.partialHeader]=t>1?String(t):"true"),r}var v=["innerHTML","outerHTML","beforebegin","afterbegin","beforeend","afterend","delete","none"];var A="dp-";function f(e,t){return e.getAttribute(A+t)}function q(e,t){return e.hasAttribute(A+t)}function l(e,t){let r=e;for(;r;){let n=r.getAttribute(A+t);if(n!==null)return n;r=r.parentElement}return null}function w(e,t){return!t||t==="this"?e:t.startsWith("closest ")?e.closest(t.slice(8).trim()):t.startsWith("find ")?e.querySelector(t.slice(5).trim()):t==="next"?e.nextElementSibling:t==="previous"?e.previousElementSibling:e.ownerDocument.querySelector(t)}var Y={style:"innerHTML",scroll:null,delay:0};function H(e){if(!e)return{...Y};let t=e.trim().split(/\s+/),r={...Y};for(let n of t)fe(n)?r.style=n:n==="scroll:top"||n==="scroll:bottom"?r.scroll=n.slice(7):n.startsWith("swap:")&&(r.delay=D(n.slice(5)));return r}function fe(e){return v.includes(e)}function j(e,t){let r={event:de(t),once:!1,delay:0,throttle:0,from:null,changed:!1};if(!e)return r;let n=e.trim().split(/\s+/),[o,...i]=n;o&&(r.event=o);for(let s of i)s==="once"?r.once=!0:s==="changed"?r.changed=!0:s.startsWith("delay:")?r.delay=D(s.slice(6)):s.startsWith("throttle:")?r.throttle=D(s.slice(9)):s.startsWith("from:")&&(r.from=s.slice(5));return r}function de(e){let t=e.tagName.toLowerCase();return t==="form"?"submit":t==="input"||t==="textarea"||t==="select"?"change":"click"}function D(e){let t=/^(\d+(?:\.\d+)?)(ms|s)?$/.exec(e.trim());if(!t)return 0;let r=Number(t[1]);return t[2]==="s"?r*1e3:r}function u(e,t,r={}){let o=e.ownerDocument.defaultView?.CustomEvent??globalThis.CustomEvent;return e.dispatchEvent(new o(t,{detail:r,bubbles:!0,cancelable:!0}))}var z=new WeakSet;function E(e){for(let t of Array.from(e.querySelectorAll("[dp-island]")))J(t);pe(e)&&e.hasAttribute("dp-island")&&J(e)}function pe(e){return"hasAttribute"in e}function J(e){if(z.has(e))return;z.add(e);let t=me(f(e,"client")),r=()=>void ge(e);switch(t.kind){case"load":r();return;case"idle":ye(e,r);return;case"visible":we(e,r);return;case"media":be(e,t.query,r);return}}function me(e){if(!e)return{kind:"load"};let t=e.trim();return t.startsWith("media:")?{kind:"media",query:t.slice(6).trim()}:t==="idle"?{kind:"idle"}:t==="visible"?{kind:"visible"}:{kind:"load"}}async function ge(e){let t=f(e,"island");if(t)try{let r=await import(t),n=r.default??r.mount;if(typeof n!="function")throw new TypeError(`${t} exports no default function and no mount`);n(e,he(e)),u(e,"dp:island",{source:t})}catch(r){u(e,"dp:islandError",{source:t,error:r})}}function he(e){let t=f(e,"props");if(!t)return{};try{let r=JSON.parse(t);return r&&typeof r=="object"?r:{}}catch{return{}}}function ye(e,t){let r=e.ownerDocument.defaultView,n=r?.requestIdleCallback;n?n.call(r,()=>t()):setTimeout(t,1)}function we(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t();return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t())});n.observe(e)}function be(e,t,r){let n=e.ownerDocument.defaultView;if(!n||typeof n.matchMedia!="function"){r();return}let o=n.matchMedia(t);if(o.matches){r();return}let i=()=>{o.matches&&(o.removeEventListener("change",i),r())};o.addEventListener("change",i)}var M="dpswap";function X(e,t,r){e.defaultView?.history?.pushState({[M]:r},"",t)}function G(e,t,r){e.defaultView?.history?.replaceState({[M]:r},"",t)}function C(e){if(!e||typeof e!="object")return null;let t=e[M];if(!t||typeof t!="object")return null;let{target:r,select:n}=t;return typeof r!="string"?null:{target:r,select:typeof n=="string"?n:null}}var N={};k(N,{clear:()=>Ee,prefetch:()=>R,size:()=>Se,take:()=>P});var d=new Map;function Ee(){d.clear()}function Se(){return d.size}function R(e,t){let r=h(e,t);d.has(r)||(Le(),d.set(r,xe(r)))}function P(e){return d.get(e)??null}async function xe(e){try{let t=await a.fetch(e,{headers:b(!0)});return t.ok?await t.text():(d.delete(e),null)}catch{return d.delete(e),null}}function Le(){if(d.size<a.prefetchLimit)return;let e=d.keys().next();e.done||d.delete(e.value)}var _={};k(_,{applyOutOfBand:()=>O,layerTarget:()=>I,narrowToSharedLayout:()=>V,parseFragment:()=>W,selectFrom:()=>F,settle:()=>U,sharedLayerDepth:()=>B,swapInto:()=>S});function W(e,t){let r=e.createElement("template");return r.innerHTML=t,r.content}function F(e,t,r){if(!r)return t;let n=e.createDocumentFragment();for(let o of Array.from(t.querySelectorAll(r)))n.appendChild(o);return n}function O(e,t){let r=Array.from(t.querySelectorAll("[dp-swap-oob]"));for(let n of r){let o=f(n,"swap-oob")??"outerHTML",[i,s]=Te(o),c=s??(n.id?`#${n.id}`:null);if(n.removeAttribute("dp-swap-oob"),n.remove(),!c)continue;let p=e.querySelector(c);if(!p)continue;let g=e.createDocumentFragment();i==="outerHTML"?g.appendChild(n):g.append(...Array.from(n.childNodes)),S(p,g,{style:i,scroll:null,delay:0})}}function Te(e){let t=e.indexOf(":"),r=t===-1?e:e.slice(0,t),n=t===-1?null:e.slice(t+1);return[ke(r)?r:"outerHTML",n||null]}function ke(e){return v.includes(e)}function S(e,t,r){switch(r.style){case"innerHTML":e.replaceChildren(t);break;case"outerHTML":e.replaceWith(t);break;case"beforebegin":e.parentElement?.insertBefore(t,e);break;case"afterbegin":e.insertBefore(t,e.firstChild);break;case"beforeend":e.appendChild(t);break;case"afterend":e.parentElement?.insertBefore(t,e.nextSibling);break;case"delete":e.remove();break;case"none":break}}function U(e,t){t.style==="delete"||t.style==="none"||e.isConnected&&(e.classList.add(a.settlingClass),queueMicrotask(()=>e.classList.remove(a.settlingClass)),t.scroll==="top"&&(e.scrollTop=0),t.scroll==="bottom"&&(e.scrollTop=e.scrollHeight))}function V(e,t){let r=a.layoutAttr;if(!r)return{target:e,content:t};let n=`[${r}]`,o=e,i=t;for(;;){let c=o.querySelector(n),p=i.querySelector(n);if(!c||!p||c.getAttribute(r)!==p.getAttribute(r))break;o=c,i=p}if(o===e)return{target:e,content:t};let s=e.ownerDocument.createDocumentFragment();return s.append(...Array.from(i.childNodes)),{target:o,content:s}}function B(e,t){let r=a.layoutAttr;if(!r)return 1;let n=new URL(t,e.defaultView?.location?.href??"http://localhost").pathname,o=[...e.querySelectorAll(`[${r}]`)].map(s=>s.getAttribute(r)??""),i=0;for(let s of o){if(!(s==="/"||n===s||n.startsWith(`${s}/`)))break;i++}return Math.max(1,i)}function I(e,t){let r=a.layoutAttr;if(!r||t<1)return null;let n=e,o=null;for(let i=0;i<t;i++){let s=n.querySelector(`[${r}]`);if(!s)return null;o=s,n=s}return o}async function m(e){if(!u(e.source,"dp:beforeRequest",{spec:e}))return;let t=Ae(e),r=e.indicator;r?.classList.add(a.requestClass);try{let n=e.fragment?B(e.target.ownerDocument,e.url):1,o=await P(t)?.catch(()=>null);if(o!=null){Q(e,o,n);return}let i=await qe(t,e.fragment,n);if(!i.ok){u(e.source,"dp:responseError",{spec:e,response:i}),e.boosted&&Z(e.source,e.url);return}Q(e,await i.text(),n)}catch(n){u(e.source,"dp:sendError",{spec:e,error:n}),e.boosted&&Z(e.source,e.url)}finally{r?.classList.remove(a.requestClass),u(e.source,"dp:afterRequest",{spec:e})}}function Q(e,t,r=1){let n=e.target.ownerDocument,o=W(n,t);O(n,o);let i=F(n,o,e.select),s=e.target;if(!e.select&&e.swap.style==="innerHTML"){let p=r>1?I(n,r):null;if(p)s=p;else{let g=V(s,i);s=g.target,i=g.content}}if(!u(s,"dp:beforeSwap",{spec:e,content:i}))return;let c=De({...e,target:s});S(s,i,e.swap),u(c,"dp:afterSwap",{spec:e}),U(s,e.swap),u(c,"dp:afterSettle",{spec:e})}function De(e){switch(e.swap.style){case"innerHTML":case"afterbegin":case"beforeend":case"none":return e.target;default:return e.target.parentElement??e.target.ownerDocument.documentElement}}function Ae(e){let t=He(e.source);if(e.fragment)return h(e.url,t);let r=new URL(e.url,t??"http://localhost");return r.pathname+r.search+r.hash}async function qe(e,t,r){let n=new AbortController,o=setTimeout(()=>n.abort(),a.timeout);try{return await a.fetch(e,{signal:n.signal,headers:b(t,r)})}finally{clearTimeout(o)}}function He(e){return e.ownerDocument.defaultView?.location.href}function Z(e,t){e.ownerDocument.defaultView?.location?.assign(t)}var x=new WeakSet;function L(e){for(let t of Array.from(e.querySelectorAll("[dp-get]")))te(t);ee(e)&&q(e,"get")&&te(e);for(let t of Array.from(e.querySelectorAll("[dp-boost]")))re(t);ee(e)&&q(e,"boost")&&re(e)}function ee(e){return"getAttribute"in e}function te(e){if(x.has(e))return;x.add(e);let t=j(f(e,"trigger"),e),r=Fe(t.throttle,o=>{if(Ne(e)&&o.preventDefault(),t.changed&&!We(e))return;let i=Me(e);i&&(t.delay>0?setTimeout(()=>void m(i),t.delay):m(i))});if(t.event==="load"){r(new Event("load"));return}if(t.event==="revealed"){Oe(e,r);return}(t.from?e.ownerDocument.querySelector(t.from)??e:e).addEventListener(t.event,r,{once:t.once})}function Me(e){let t=f(e,"get");if(!t)return null;let r=w(e,l(e,"target"));if(!r)return null;let n=l(e,"push-url");return{source:e,url:t,target:r,swap:H(l(e,"swap")),select:l(e,"select"),pushUrl:n==="true"?t:n==="false"||n===null?null:n,indicator:w(e,l(e,"indicator")),boosted:!1,fragment:l(e,"fragment")!==null}}function re(e){x.has(e)||(x.add(e),Ce(e),e.addEventListener("click",t=>{let r=oe(t);if(!r)return;t.preventDefault();let n=l(r,"target")??a.defaultBoostTarget,o=w(r,n);if(!o)return;let i=l(r,"select"),s=r.getAttribute("href")??"";X(r.ownerDocument,s,{target:n,select:i}),m({source:r,url:s,target:o,swap:H(l(r,"swap")??"innerHTML"),select:i,pushUrl:s,indicator:w(r,l(r,"indicator")),boosted:!0,fragment:!0})}))}function oe(e){if(e.defaultPrevented)return null;let t=e;if(typeof t.button=="number"&&t.button!==0||t.metaKey||t.ctrlKey||t.shiftKey||t.altKey)return null;let r=e.target?.closest("a");if(!r||r.tagName.toLowerCase()!=="a")return null;let n=r.getAttribute("href");if(!n||n.startsWith("#")||r.hasAttribute("download"))return null;let o=r.getAttribute("target");if(o&&o!=="_self"||f(r,"boost")==="false")return null;let i=r.ownerDocument.defaultView;return i&&new URL(n,i.location.href).origin!==i.location.origin?null:r}function Ce(e){let t=r=>{let n=oe(r)??Re(r);if(!n)return;let o=l(n,"prefetch");if(o===null||o==="false")return;let i=n.getAttribute("href");i&&R(i,n.ownerDocument.defaultView?.location.href)};e.addEventListener("pointerenter",t,{capture:!0}),e.addEventListener("focusin",t),e.addEventListener("touchstart",t,{passive:!0})}function Re(e){let t=e.target?.closest("a");if(!t||t.tagName.toLowerCase()!=="a")return null;let r=t.getAttribute("href");return!r||r.startsWith("#")||r.includes("://")?null:t}function Pe(e){return e.querySelector("[dp-boost][dp-target]")?.getAttribute("dp-target")||a.defaultBoostTarget}function ie(e){let t=e.defaultView;t&&(C(t.history?.state)||G(e,t.location.pathname+t.location.search,{target:Pe(e),select:null}),t.addEventListener("popstate",r=>{let n=C(r.state);if(!n)return;let o=e.querySelector(n.target);o&&m({source:e.documentElement,url:t.location.pathname+t.location.search,target:o,swap:{style:"innerHTML",scroll:"top",delay:0},select:n.select,pushUrl:null,indicator:null,boosted:!0,fragment:!0})}))}function Ne(e){let t=e.tagName.toLowerCase();return t==="a"||t==="form"||t==="button"}var ne=new WeakMap;function We(e){let t=e.value??"";return ne.get(e)===t?!1:(ne.set(e,t),!0)}function Fe(e,t){if(e<=0)return t;let r=0;return n=>{let o=Date.now();o-r<e||(r=o,t(n))}}function Oe(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t(new Event("revealed"));return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t(new Event("revealed")))});n.observe(e)}function $(e=document){L(e),E(e),ie(e),e.addEventListener("dp:afterSwap",t=>{let r=t.target;!r||!("querySelectorAll"in r)||(L(r),E(r))})}var Ue=_,Ve=N,y=globalThis.document;y&&y.currentScript?.getAttribute("data-dp-auto")!=="false"&&(y.readyState==="loading"?y.addEventListener("DOMContentLoaded",()=>$(y),{once:!0}):$(y));return ce(Be);})();
+//# sourceMappingURL=dpswap.min.js.map
+===== src/assets.rs =====
+//! Every static file this binary serves.
+//!
+//! Two directories, two rules. `assets/` is **fingerprinted** -- `site.css`
+//! is published at `/css/site.<hash>.css`, so it can be cached forever and a
+//! new build invalidates it by having a different name. `public/` is served
+//! **verbatim**, because `robots.txt`, `favicon.ico` and anything linked to
+//! from outside must keep the name they were given.
+//!
+//! Write a reference with `assets::url`, never by hand:
+//!
+//! ```ignore
+//! <link rel="stylesheet" href={assets::url("css/site.css")}>
+//! ```
+//!
+//! A name nothing publishes panics there rather than 404ing in a browser.
+//!
+//! Embedded, like the templates and the route table, so `serve` works from
+//! any directory and nothing can go missing after the build passed. A file
+//! added where there was none needs `touch src/assets.rs`, because nothing
+//! referenced it yet.
+
+brocanth_assets::assets!("assets", "public");
+===== src/commands/css.rs =====
+//! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
+//!
+//!     brocanth css          once, minified
+//!     brocanth css -W       again on each change
+//!
+//! Ordinary project code, like `serve`: rename it, give it more flags, or
+//! delete it. It is here rather than in a shell script because this project
+//! already has a command line, and a second way to run things is a second
+//! thing to keep in step.
+//!
+//! The Tailwind CLI comes out of `node_modules` and there is no fallback to
+//! `npx`. A fallback downloads some other version and hides the one fact
+//! worth knowing, which is that nobody ran `npm install`.
+
+use std::path::Path;
+use std::process::Command as Child;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Build the stylesheet from the Tailwind input.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Css {
+    /// Rebuild on each change instead of once.
+    #[arg(short = 'W', long)]
+    pub watch: bool,
+}
+
+const INPUT: &str = "assets/css/_tailwind.css";
+const OUTPUT: &str = "assets/css/site.css";
+const CLI: &str = "node_modules/.bin/tailwindcss";
+
+impl Command for Css {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        // The project root and not the working directory: `brocanth css`
+        // runs from wherever you happen to be, and every path below is
+        // written relative to the project.
+        let root = ctx.root();
+        let cli = root.join(CLI);
+        if !cli.is_file() {
+            anyhow::bail!(
+                "the Tailwind CLI is absent at {}\n       run `npm install` in {} first",
+                cli.display(),
+                root.display()
+            );
+        }
+
+        let mut child = Child::new(&cli);
+        child
+            .current_dir(root)
+            .args(["--input", INPUT, "--output", OUTPUT]);
+        if self.watch {
+            child.arg("--watch");
+        } else {
+            child.arg("--minify");
+        }
+
+        let status = child.status()?;
+        if !status.success() {
+            // No message beyond this: the CLI has already written its own
+            // on the stderr this process inherited.
+            anyhow::bail!("the Tailwind CLI failed");
+        }
+
+        // `--watch` only ever returns when it was interrupted, and the
+        // output it leaves behind is whatever the last change produced.
+        // Checking it, or touching the module below, would both be about a
+        // build that is over.
+        if self.watch {
+            return Ok(());
+        }
+
+        let written = root.join(OUTPUT);
+        let bytes = std::fs::metadata(&written)?.len();
+        if bytes == 0 {
+            anyhow::bail!("the build wrote no CSS to {}", written.display());
+        }
+
+        touch(&root.join("src/assets.rs"))?;
+        println!("built {OUTPUT} ({bytes} bytes)");
+        Ok(())
+    }
+}
+
+/// Make cargo notice a stylesheet it has already compiled in.
+///
+/// The CSS is embedded at compile time, so a new one is a new binary, and
+/// nothing rebuilds until the module that embeds it looks newer than the
+/// artefact. Rewriting its own bytes is the portable way to say so: there is
+/// no `utimes` in `std`, and a dependency for one call is not worth it.
+fn touch(path: &Path) -> anyhow::Result<()> {
+    let same = std::fs::read(path)?;
+    std::fs::write(path, same)?;
+    Ok(())
+}
+===== src/commands/export.rs =====
+//! `export` -- the site, as files.
+//!
+//! Every route that answers GET is requested once, through the same
+//! `handle` that `serve` uses, and its answer is written under `--out`. A
+//! page at `/about` becomes `about/index.html`, so `/about` works on any
+//! static host. A route whose last segment has a dot (`/feed.xml`) is
+//! written under its own name. Every embedded asset is written at the path
+//! it is published at, and the 404 page is `404.html`.
+//!
+//! This file is yours. Add the paths of routes with parameters to `PATHS`.
+
+use std::path::{Path, PathBuf};
+
+use brocanth::routing::Verb;
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// The concrete paths of routes with a parameter. The export cannot guess
+/// which ids exist, so a route like `/users/{id}` is written only for the
+/// paths listed here.
+const PATHS: &[&str] = &["/users/7"];
+
+/// Write the site to a directory any static host can serve.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Export {
+    /// Directory to write. Emptied first.
+    #[arg(long, default_value = "dist")]
+    pub out: PathBuf,
+}
+
+impl Command for Export {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let app = {
+            let _guard = runtime.enter();
+            crate::app::build().map_err(anyhow::Error::msg)?
+        };
+
+        let mut paths: Vec<String> = Vec::new();
+        let mut skipped: Vec<&str> = Vec::new();
+        for (template, allow) in app.router.routes() {
+            if !allow.iter().any(|verb| verb == Verb::Get) {
+                continue;
+            }
+            if template.params().is_empty() {
+                paths.push(template.pattern().to_string());
+            } else {
+                skipped.push(template.pattern());
+            }
+        }
+        paths.extend(PATHS.iter().map(|path| path.to_string()));
+
+        if self.out.exists() {
+            std::fs::remove_dir_all(&self.out)?;
+        }
+        std::fs::create_dir_all(&self.out)?;
+
+        for path in &paths {
+            let (status, body) = runtime.block_on(get(&app, path))?;
+            if status != 200 {
+                anyhow::bail!(
+                    "GET {path} answered {status}\n\
+                     help: a page in a static site must answer 200 to a bare GET"
+                );
+            }
+            write(&self.out.join(file_for(path)), &body)?;
+        }
+        // Whatever a missing path answers, for the hosts that read 404.html.
+        let (status, body) = runtime.block_on(get(&app, "/__export_missing__"))?;
+        let mut files = paths.len();
+        if status == 404 {
+            write(&self.out.join("404.html"), &body)?;
+            files += 1;
+        }
+        for asset in assets() {
+            write(&self.out.join(asset.0.trim_start_matches('/')), asset.1)?;
+            files += 1;
+        }
+
+        eprintln!("export: {files} file(s) in {}", self.out.display());
+        for pattern in skipped {
+            eprintln!(
+                "export: skipped {pattern}: it has a parameter; add its paths to PATHS in src/commands/export.rs"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// One GET, through the hooks, as a static host would see it: no cookie,
+/// no header, no query.
+async fn get(app: &crate::app::App, path: &str) -> anyhow::Result<(u16, Vec<u8>)> {
+    let request = brocanth_server::Request::new(Verb::Get, path);
+    let response = crate::app::handle(app, request).await;
+    match response.body {
+        brocanth_server::Body::Bytes(bytes) => Ok((response.status, bytes.to_vec())),
+        brocanth_server::Body::Stream(_) => anyhow::bail!(
+            "GET {path} answered a stream\n\
+             help: a static page has an end; return the whole body"
+        ),
+    }
+}
+
+/// Where a path's answer goes: `about/index.html`, or the name itself when
+/// the last segment has an extension.
+fn file_for(path: &str) -> PathBuf {
+    let path = path.trim_matches('/');
+    let last = path.rsplit('/').next().unwrap_or("");
+    if last.contains('.') {
+        return PathBuf::from(path);
+    }
+    Path::new(path).join("index.html")
+}
+
+/// Every embedded asset, at the path it is published at.
+fn assets() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    crate::assets::ASSETS
+        .iter()
+        .map(|asset| (asset.published, asset.body))
+}
+
+fn write(at: &Path, body: &[u8]) -> anyhow::Result<()> {
+    if let Some(dir) = at.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(at, body)?;
+    Ok(())
+}
+===== src/commands/routes.rs =====
+//! Every route this application answers.
+//!
+//! `brocanth routes` builds this project and runs this command, so the
+//! listing is the binary's own answer rather than a second reading of the
+//! directory. The rows are `crate::pages::handlers()`, read off `src/pages`
+//! while the crate compiled: a route is a file, so there is nothing to
+//! regenerate and nothing that can fall behind.
+//!
+//! ```text
+//! $ brocanth routes
+//! VERB    PATTERN        HANDLER
+//! GET     /              pages::index::handle
+//! GET     /about         pages::about::handle
+//! POST    /signup        pages::signup::handle_post
+//! ```
+//!
+//! An argument keeps the rows that contain it, in any column, so
+//! `routes signup` is the one page and `routes POST` is every route that
+//! writes.
+//!
+//! These are the pages. A plugin that mounts its own routes through a
+//! `RouteSource` would not be in the list, and nothing this project has
+//! mounts one -- so today the two are the same table. Say so here if that
+//! stops being true.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// List the routes this application answers.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Routes {
+    /// Keep only the rows containing this text
+    pub filter: Option<String>,
+}
+
+impl Command for Routes {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        let (header, mut rows) = table();
+        if let Some(filter) = &self.filter {
+            rows.retain(|row| row.iter().any(|cell| cell.contains(filter)));
+        }
+        if rows.is_empty() {
+            // An application with no page and a filter that matched nothing
+            // both print nothing, and only one of the two is the reader's
+            // own doing.
+            match &self.filter {
+                Some(filter) => println!("no route matches `{filter}`"),
+                None => println!("this application answers no route"),
+            }
+            return Ok(());
+        }
+
+        let mut widths: Vec<usize> = header.iter().map(|title| title.chars().count()).collect();
+        for row in &rows {
+            for (column, cell) in row.iter().enumerate() {
+                widths[column] = widths[column].max(cell.chars().count());
+            }
+        }
+
+        print_row(&widths, header.iter().copied());
+        for row in &rows {
+            print_row(&widths, row.iter().map(String::as_str));
+        }
+        Ok(())
+    }
+}
+
+/// One line, every cell padded to its column but the last.
+///
+/// The last is left alone, because trailing spaces are invisible until
+/// something pipes this into a diff.
+fn print_row<'a>(widths: &[usize], cells: impl Iterator<Item = &'a str>) {
+    let mut line = String::new();
+    for (column, cell) in cells.enumerate() {
+        if column > 0 {
+            line.push_str("  ");
+        }
+        if column + 1 == widths.len() {
+            line.push_str(cell);
+        } else {
+            line.push_str(&format!("{cell:<width$}", width = widths[column]));
+        }
+    }
+    println!("{line}");
+}
+
+/// The header, and one row per route.
+///
+/// Three columns: a route is a verb, a pattern, and the function that
+/// answers it. What each one takes and gives would be a fourth and a fifth,
+/// and they arrive with the `input` module -- without it nothing in this
+/// project has read a handler's signature.
+fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
+    let rows = crate::pages::handlers()
+        .iter()
+        .map(|(verb, pattern, handler)| {
+            vec![
+                verb.as_str().to_string(),
+                (*pattern).to_string(),
+                format!("pages::{handler}"),
+            ]
+        })
+        .collect();
+    (vec!["VERB", "PATTERN", "HANDLER"], rows)
+}
+===== src/pages/about.rsx =====
+// The parameters are this page's contract with its handler. Rename one and
+// src/pages/about.rs stops compiling, which is the point.
+
+pub fn About(title: &str, verb: &str, path: &str) -> Element {
+    <h1>About</h1>
+    <p>
+        You asked for <code>{verb} {path}</code>. This page answers GET
+        and nothing else, so a DELETE to it is a 405 carrying
+        an <code>Allow</code> header rather than a 404.
+    </p>
+    <p>The shell around this is <code>src/pages/layout.rsx</code>, which {title} shares with every page.</p>
+}
+===== src/pages/index.rsx =====
+use crate::pages::views::link::Link;
+
+// The page, and only the page. The document around it is layout.rsx, and
+// this file does not know it exists.
+
+pub fn Index(title: &str) -> Element {
+    <h1>{title}</h1>
+    <p>
+        This file is <code>src/pages/index.rsx</code>, beside the handler
+        in <code>index.rs</code>, and it is compiled into the binary. Edit it
+        and cargo rebuilds; break it and the build stops on the line you broke.
+    </p>
+    <p>
+        An interpolated value is escaped on the way out, always. Writing
+        markup verbatim needs a different and greppable hole, so an injection
+        is something you can search for rather than something you have to
+        remember.
+    </p>
+    <ul>
+        <li><Link to="/about">/about</Link></li>
+        <li><Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link></li>
+    </ul>
+}
+===== src/pages/layout.rsx =====
+// The document every page in this directory, and every directory below it,
+// is rendered inside. A page never names it: which layout wraps a page is a
+// property of where the page is, which is the rule the Crystal page_router
+// uses for layout.cr.
+//
+// A layout is an ordinary component with a parameter of type `Element`, and
+// `children` is the only parameter `html!` fills -- it cannot know what a
+// second one would mean. A value every page shares comes from a const, as
+// the title does here; a value belonging to one request belongs on the page
+// component, which the handler builds and which already has the context.
+
+use crate::pages::TITLE;
+
+pub fn Layout(layout: &str, children: Element) -> Element {
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{TITLE}</title>
+            <link rel="stylesheet" href={crate::assets::url("css/site.css")}>
+            <script src={crate::assets::url("dpswap.min.js")} defer></script>
+        </head>
+        <body class="min-h-screen bg-white text-slate-900">
+            <header><a href="/">{TITLE}</a></header>
+            <main dp-layout={layout} id="outlet">{children}</main>
+        </body>
+    </html>
+}
+===== src/pages/link.rsx =====
+// An anchor that swaps instead of reloading the document.
+//
+// Written as a real <a href> and enhanced afterwards. With JavaScript off,
+// to a crawler, and on the first load of any page it is a link and the
+// browser does what it always did -- which is why `to` is required and why
+// there is no version of this that renders a <span> with a click handler.
+//
+// `to` takes what the route helpers return:
+//
+//     <Link to={routes::users::id::path(7)}>User 7</Link>
+//
+// never a string. A route that does not exist is then a compile error
+// rather than a 404 somebody finds later.
+
+pub fn Link(to: &str, children: Element) -> Element {
+    <a href={to} dp-boost>{children}</a>
+}
+===== src/pages/users/[id].rsx =====
+// Two layouts wrap this one: the root, and users/layout.rsx beside it.
+// Neither is named here or anywhere else -- `html!` reads the directory
+// tree. Delete users/layout.rsx and this page is wrapped in one.
+
+pub fn User(id: u64) -> Element {
+    <h1>User {id}</h1>
+    <p>
+        The <code>id</code> came out of the path. A component takes typed
+        parameters, so this one is a <code>u64</code> the whole way
+        from <code>src/pages/users/[id].rs</code>, never a string that
+        might not be a number.
+    </p>
+}
+===== src/pages/users/layout.rsx =====
+// Wraps every page under src/pages/users/, inside the root layout rather
+// than instead of it. Nothing declares the stacking: `html!` reads it off
+// the directory tree.
+//
+// `layout` is the URL prefix this layout covers, filled in by `html!`, and
+// `dp-layout` is the marker dp-swap walks to find the deepest layer two
+// pages share. It goes on the element wrapping exactly the children and
+// nothing else: anything inside it is replaced along with them, so a
+// sidebar in here would lose its scroll position on every navigation.
+
+pub fn Layout(layout: &str, children: Element) -> Element {
+    <section class="users">
+        <nav><a href="/">home</a></nav>
+        <div dp-layout={layout}>{children}</div>
+    </section>
+}
+===== AGENTS.md =====
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Notes of your own go in a file of your own, beside this one. -->
+# Working in My Blog
+
+A brief for a coding agent. Written by `brocanth`, so the lists
+below are this project's and not the framework's in general.
+
+## Check your work
+
+Run these after every change, in this order. They are ordered by how
+fast they fail.
+
+```
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+The route table is `pages::router()` and the test beside it asserts the
+shape of the directory. Read it rather than guessing what covers a
+request.
+
+## What this binary contains
+
+- `core`  the router, the context, the plugin seams
+- `static`  `export` writes every GET page and every asset to dist/; no server, so no runtime modules
+- `config`  config/<env>.toml, merged; without it nothing links a TOML parser
+- `commands`  this project's own command line, `serve` plus whatever you add
+- `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
+- `rsx-tailwind`  a CSS build over the class names in your templates; needs node
+- `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
+- `ci`  fmt, clippy and the tests on every push; pick the provider below
+- `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
+
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `jt`, `docker`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+
+That is the framework's central rule: a capability nobody asked for is
+not compiled and not linked. If you need one, add it to `Cargo.toml`
+*and* name its plugin in `src/main.rs`. Nothing registers itself.
+
+## Adding a route
+
+A route is a file. `src/pages/about.rs` is `/about`;
+`src/pages/users/[id].rs` is `/users/{id}`. **Write the file. That is
+the whole of it** -- no `mod` line, no row to register, because there is
+no list. `brocanth_pages::pages!` in `src/pages/mod.rs` reads this
+directory while the crate compiles and writes both.
+
+The verb comes off the handler's name: `handle` is GET, then
+`handle_head`, `handle_post`, `handle_put`, `handle_patch`,
+`handle_delete`, `handle_options`. A `pub fn handle_*` outside that
+list is a build error naming the list, rather than a handler nothing
+reaches; a page with no handler is a build error too. A private
+`fn handle_*` is a helper and is left alone.
+
+**Adding a file does not rebuild on its own** -- nothing referenced it
+yet. Run `touch src/pages/mod.rs` after creating a page or a layout.
+Editing or deleting one is noticed.
+
+A handler returns a value and never writes a response itself. That is
+what makes a half-written body on an error impossible rather than
+unlikely.
+
+## Views
+
+The markup for a route is a `.rsx` file **next to the page that renders it**:
+`src/pages/index.rsx` beside `src/pages/index.rs`. There is no second tree and
+nothing to register -- `rsx::load_dir!("src/pages")` in `src/pages/mod.rs`
+compiles them all into the binary. One file is one module, under `views`, so
+`index.rsx` is `views::index` and `users/[id].rsx` is `views::users::_id_`.
+
+### Layouts
+
+`layout.rsx` wraps every page in its directory **and every directory below**,
+and a page never names it: which layout wraps a page is a property of where
+the page is. That is the Crystal page_router's rule for `layout.cr`.
+
+They stack root to leaf, and **the chain is not written down anywhere**.
+`html!` is a macro: it knows which file it was written in, walks up to
+`src/`, and wraps the page in every `layout.rsx` it passes. So
+`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
+layout, and deleting that file removes exactly that layer with no other edit.
+
+Every page uses the same import and the same call, whatever directory it is
+in. Do not add a chain of your own; if a page is wrapped wrongly, the
+directory tree is what to change.
+
+A layout takes `children: Element`, and may also take `layout: &str`, which
+`html!` fills with the URL prefix that layout covers. Those two are the only
+parameters it fills, because it cannot know what a third one would mean.
+A value every page shares comes from a `const` -- the root layout reads
+`pages::TITLE` that way. A value belonging to one request belongs on the page
+component, which the handler builds and which already has the context.
+
+For a fragment that is not a document -- an htmx swap, a partial -- call
+`render` instead of `html!`: the same thing with no shell.
+
+**Adding a `layout.rsx` where there was none does not rebuild anything**,
+because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
+creating one. Editing or deleting an existing layout is noticed.
+
+A component is a function returning `Element`. Its parameters are its contract
+with the handler, and a caller fills them as struct fields, so a field the
+component does not declare is a compile error rather than a blank in the page.
+A parameter of type `Element` receives children, which is all a layout is.
+
+Reach a template from a handler with `html!`, and with nothing else:
+
+```rust
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html!(ctx, views::index::Index { title: TITLE })
+}
+```
+
+It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
+template that bails propagates with `?`. For another status or a header,
+compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
+
+Adding a page with markup is two files in one directory -- `<name>.rs` and
+`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
+`src/pages/mod.rs`, because the directory is the registry.
+
+Not every response is a page. A redirect is `Response::empty(303)` with a
+header and no template anywhere near it.
+
+An interpolated value is escaped on the way out. Templates are read at
+**compile** time, so an edit needs a rebuild, and a template that does not
+parse is a build failure on its own line rather than a 500.
+
+## Static files
+
+Two directories, and the difference matters. `assets/` is **fingerprinted**:
+`site.css` is published at `/css/site.<hash>.css` and cached for a year.
+`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
+`favicon.ico`, anything linked to from outside.
+
+Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
+logical path and returns the published one, and a name nothing publishes
+panics there rather than 404ing in a browser.
+
+A basename starting with `_` is an input and is never published, which is what
+`assets/css/_tailwind.css` is.
+
+Both directories are embedded in the binary. **Adding a file where there was
+none does not rebuild anything**; run `touch src/assets.rs` after creating one.
+
+## Partial navigation
+
+Link to a route with the `Link` component, never a bare `<a>`:
+
+```
+<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
+```
+
+`to` takes what a route helper returns, so a link to a route that does not
+exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
+so the page still works with no JavaScript.
+
+A layout marks what a swap may replace with `dp-layout={layout}`, on the
+element wrapping **exactly** the children. Anything inside that element is
+replaced with them, so a sidebar or a scroll position belongs outside it.
+
+A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
+`html!` resolves that into a `match` over the chain. A handler never reads the
+header and never changes for it.
+
+## Tasks
+
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
+`src/commands/`, plus a `mod` line. It becomes a subcommand automatically —
+registration happens at link time and there is no list to add it to.
+
+```
+brocanth --help      # lists this project's commands too
+brocanth serve
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
+
+## House style
+
+- A comment says **why**, next to the decision, and what was chosen
+  against. Not what the line does.
+- A test name is a sentence describing the guarantee it protects.
+- Prefer a type that cannot be built wrong over a check that can be
+  forgotten.
+- State a limit where someone would look for it rather than leaving it
+  to be discovered.
+
+## Framework reference
+
+`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
+cannot compile and can therefore be relied on, what can still go wrong
+and therefore needs a test, and the crate map.
+
+## Static site
+
+This project compiles to files. `cargo run -- export` writes every
+route that answers GET to `dist/`, and every asset beside it. `serve`
+is the preview, not the deployment.
+
+- A page must answer the same bytes whatever the request says. It must
+  not read a cookie, a header or the query: the export sends none.
+- A route with a parameter (`users/[id].rs`) is written only for the
+  paths listed in `PATHS` in `src/commands/export.rs`. Add each one.
+- Do not add a module that runs in a server (a session, a database, a
+  queue, the observability probes). `brocanth add` refuses it.
+
+<!-- brocanth-digest: 0959b4d1a1798735 -->
+===== brocanth.toml =====
+# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+# Change the module list with `brocanth add`, not here.
+#
+# What this project is made of. Every other generated file follows from it.
+
+[project]
+name = "my-blog"
+title = "My Blog"
+
+[modules]
+enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github"]
+
+[modules.static]
+files = ["src/commands/export.rs"]
+config = []
+crates = []
+
+[modules.config]
+files = ["config/development.toml"]
+config = []
+crates = ["brocanth-config"]
+
+[modules.commands]
+files = ["src/commands/"]
+config = []
+crates = ["brocanth-command"]
+
+[modules.rsx]
+files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
+config = []
+crates = ["rsx"]
+
+[modules.rsx-tailwind]
+files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
+config = []
+crates = []
+
+[modules.rsx-htmx]
+files = ["public/dpswap.min.js", "src/pages/link.rsx"]
+config = []
+crates = []
+
+[modules.ci]
+files = []
+config = []
+crates = []
+
+[modules.ci-github]
+files = [".github/workflows/ci.yml"]
+config = []
+crates = []
+
+# brocanth-digest: 50b247dc8a8606c0

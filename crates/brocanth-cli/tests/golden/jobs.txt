@@ -36,7 +36,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
 ===== .gitignore =====
@@ -106,8 +106,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
 use brocanth::plugin_shutdown::ShutdownReason;
-use brocanth::routing::{Dispatch, MiddlewareStack, Router};
+use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
 use crate::plugins;
@@ -196,27 +197,29 @@ pub fn build() -> Result<App, String> {
     })
 }
 
-/// Turns a page's answer into the bytes the server writes.
+/// Turns a page's answer into the response the hooks see.
 ///
-/// `html` rather than a guess: most pages return markup, and a handler that
-/// wants another type says so with a `content-type` header.
+/// `text/html` unless the page names its own `content-type`, which then
+/// replaces it rather than joining it. Every other header is appended,
+/// because `set-cookie` has to repeat.
+fn sent(answered: Response) -> hooks::Response {
+    brocanth_server::bridge::buffered(
+        answered.status,
+        answered.headers,
+        answered.body.into_bytes(),
+    )
+}
+
+/// The request headers as text, for the page.
 ///
-/// That header replaces the seeded one rather than joining it. `with_header`
-/// appends, because `set-cookie` has to repeat, so a page answering JSON
-/// used to put two `content-type` lines on the wire and let the client pick.
-fn sent(answered: Response) -> brocanth_server::Response {
-    let mut out = brocanth_server::Response::html(answered.status, answered.body);
-    if answered
-        .headers
+/// A value that is not UTF-8 is dropped: a page reads a header as `&str`,
+/// and a lossy copy would say something the client did not send.
+fn headers(request: &hooks::Request) -> Vec<(String, String)> {
+    request
+        .headers()
         .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        out = out.without_header("content-type");
-    }
-    for (name, value) in &answered.headers {
-        out = out.with_header(name, value);
-    }
-    out
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
 }
 
 /// How long a stop waits for open requests and then for the plugins.
@@ -301,11 +304,8 @@ async fn run(
     let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
-            // Dispatch is synchronous and runs here, outside the
-            // future, so what crosses the await is a finished
-            // response and nothing borrowed.
-            let out = sent(dispatch(&app, &request));
-            async move { out }
+            let app = Arc::clone(&app);
+            async move { handle(&app, request).await }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -486,32 +486,61 @@ impl Signals {
     }
 }
 
-/// One request: the table, then the chain, then the handler.
+/// One request: the request hooks, the table, then the response hooks.
+///
+/// A request hook may answer instead of the page -- a CSRF refusal, a
+/// 429 -- and then the page never runs. It may also rewrite the request
+/// first, so the table reads the request as the hooks left it. The
+/// response hooks see every answer, the 404 and the 405 included.
+///
+/// `begin_async` and not `begin`: it runs a hook that waits as well as
+/// one that does not. With no hook that waits, it is ready on its first
+/// poll.
+pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
+    let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
+        // The path and the query do not make a URI. The table was not
+        // asked, so this is not a 404.
+        return brocanth_server::Response::text(400, "Bad Request");
+    };
+    let mut state = RequestState::new();
+    let outcome = match app.core.begin_async(&mut request, &mut state).await {
+        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),
+        Begin::Answered(outcome) => outcome,
+    };
+    let response = app.core.finish(&mut request, &mut state, outcome);
+    brocanth_server::bridge::from_core(response)
+}
+
+/// The table, then the chain, then the handler.
 ///
 /// The chain runs only for a route that matched. A 404 has no route and
-/// therefore no context, which is also why the request hooks the plan
-/// reserves for a logger are the core's job and not a layer's.
-pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
-    let (verb, path) = (request.verb, request.path.as_str());
+/// therefore no context. `state` is what the request hooks wrote; the
+/// page reads it through `Ctx::hooked`, and it goes back afterwards so
+/// the response hooks read what the page left.
+pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {
+    let Some(verb) = Verb::from_http(request.method()) else {
+        return Response::new(501, "Not Implemented");
+    };
+    let path = request.uri().path();
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
                 .with_plugins(app.core.context())
+                .with_state(std::mem::take(state))
                 .sent(
-                    &request.query,
-                    request.body.to_vec(),
-                    request
-                        .headers()
-                        .map(|(name, value)| (name.to_string(), value.to_string()))
-                        .collect(),
+                    request.uri().query().unwrap_or(""),
+                    request.body().clone(),
+                    headers(request),
                 );
             // The one place a failed handler becomes a response --
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the
             // error turned into and can rewrite it.
-            app.stack.run(path, &mut ctx, |c| {
+            let response = app.stack.run(path, &mut ctx, |c| {
                 handler(c).unwrap_or_else(IntoResponse::into_response)
-            })
+            });
+            *state = ctx.take_state();
+            response
         }
         Dispatch::MethodNotAllowed { allow, .. } => Response {
             status: 405,
@@ -539,6 +568,7 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
 brocanth_pages::pages!("src/pages");
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
+use brocanth::plugin_hooks::RequestState;
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 use crate::plugins;
@@ -796,6 +826,9 @@ pub struct Ctx {
     /// What the plugins put here for this request, or `None` for a context
     /// built by hand.
     plugins: Option<Context<plugins::Installed>>,
+    /// What the request hooks wrote for this request: a `CsrfToken`, a
+    /// client address. Empty for a context built by hand.
+    state: RequestState,
 }
 
 impl Ctx {
@@ -811,6 +844,7 @@ impl Ctx {
                 .collect(),
             headers: Vec::new(),
             plugins: None,
+            state: RequestState::new(),
         }
     }
 
@@ -840,6 +874,19 @@ impl Ctx {
     pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
         self.plugins = Some(plugins);
         self
+    }
+
+    /// What the request hooks wrote. `src/app.rs` hands it over before the
+    /// page runs and takes it back after, for the response hooks.
+    #[must_use]
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The hook state back, leaving this context an empty one.
+    pub fn take_state(&mut self) -> RequestState {
+        std::mem::take(&mut self.state)
     }
 
     /// The value a plugin published for this request.
@@ -910,6 +957,15 @@ impl Ctx {
 /// than a line.
 #[allow(dead_code)]
 impl Ctx {
+    /// A value a request hook wrote for this request, by its type.
+    ///
+    /// `ctx.hooked::<brocanth_middleware::CsrfToken>()` is the token a form
+    /// carries. `None` when no registered hook wrote one, and always for a
+    /// context built by hand.
+    pub fn hooked<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.get::<T>()
+    }
+
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1130,10 +1186,11 @@ pub type Installed = WithJobs;
 
 /// Which hook families this binary installed, as a type.
 ///
-/// `NoHooks` while nothing registers with `plugin_hooking`. A hook nobody
-/// registers costs nothing, and this type is how the compiler knows:
-/// every hook entry point opens with a constant `if` on this record.
-pub type Hooks = ::brocanth::plugin_hooks::NoHooks;
+/// One `Both` per plugin registered with `plugin_hooking`, innermost first,
+/// which is exactly the record `register!` builds. A hook family nobody
+/// installed costs nothing, and this type is how the compiler knows: every
+/// hook entry point opens with a constant `if` on this record.
+pub type Hooks = brocanth::plugin_hooks::NoHooks;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1230,7 +1287,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: c7f8f0b29d92e449
+// brocanth-digest: 98037fe569e688e5
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1533,7 +1590,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1578,7 +1635,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: a3dea35c4710f31d -->
+<!-- brocanth-digest: 45fbab8532f8a66b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

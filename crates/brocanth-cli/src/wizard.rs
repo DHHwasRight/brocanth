@@ -170,6 +170,22 @@ pub const PRESETS: &[Preset] = &[
         skips: &["pages"],
     },
     Preset {
+        name: "A static site",
+        blurb: "The same pages, compiled to files. No server to run.",
+        picks: &[
+            "static",
+            "ci",
+            "ci-github",
+            "config",
+            "commands",
+            "rsx",
+            "rsx-tailwind",
+            "rsx-htmx",
+        ],
+        // Each of these asks only about modules that need a server.
+        skips: &["data", "behaviour", "doors"],
+    },
+    Preset {
         name: "Nothing yet",
         blurb: "The core and a router. Add the rest by hand.",
         picks: &[],
@@ -334,6 +350,6 @@ mod tests {
 
     #[test]
     fn with_no_shape_taken_every_question_is_still_on_the_table() {
-        assert_eq!(plan(None).len(), plan(Some(3)).len());
+        assert_eq!(plan(None).len(), plan(Some(4)).len());
     }
 }

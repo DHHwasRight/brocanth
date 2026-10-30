@@ -109,10 +109,10 @@ impl RequestHook for Hook {
     ) -> Result<Flow, PluginError> {
         // The peer is whoever opened the socket. Without one there is
         // nothing to trust, so there is nothing to read.
-        let Some(peer) = request.extensions().get::<PeerAddress>() else {
+        let Some(peer) = PeerAddress::of(request) else {
             return Ok(Flow::Continue);
         };
-        if !self.trust.contains(&peer.0) {
+        if !self.trust.contains(&peer) {
             return Ok(Flow::Continue);
         }
         if let Some(info) = read(request.headers()) {
@@ -127,8 +127,28 @@ impl RequestHook for Hook {
 /// Put in the request's extensions by whatever accepted the connection.
 /// Declared here because this is the only thing that reads it, and a
 /// transport that does not set it simply never trusts a proxy.
+///
+/// A plain [`std::net::SocketAddr`] extension counts too: that is what
+/// `brocanth-server`'s bridge sets, and that crate does not depend on this
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerAddress(pub IpAddr);
+
+impl PeerAddress {
+    /// The peer of this request: a `PeerAddress` extension, or else a
+    /// `SocketAddr` one. `None` when the transport set neither.
+    pub fn of(request: &Request) -> Option<IpAddr> {
+        let extensions = request.extensions();
+        extensions
+            .get::<PeerAddress>()
+            .map(|peer| peer.0)
+            .or_else(|| {
+                extensions
+                    .get::<std::net::SocketAddr>()
+                    .map(|peer| peer.ip())
+            })
+    }
+}
 
 /// Reads both spellings. RFC 7239 `Forwarded` wins where both are present,
 /// because it is the one with a specification.

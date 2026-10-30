@@ -16,6 +16,7 @@ impl Module for Config {
             "config",
             "config/<env>.toml, merged; without it nothing links a TOML parser",
         )
+        .outside_runtime()
         .asked_in(
             "foundations",
             "Settings in config/<env>.toml, layered per environment",

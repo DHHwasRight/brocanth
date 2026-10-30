@@ -18,6 +18,7 @@ impl Module for Ci {
             "ci",
             "fmt, clippy and the tests on every push; pick the provider below",
         )
+        .outside_runtime()
         .asked_in("operations", "Continuous integration")
     }
 
@@ -32,6 +33,7 @@ impl Module for GitHub {
             "ci-github",
             ".github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image",
         )
+        .outside_runtime()
         .asked_in("operations", "GitHub Actions")
         .part_of("ci")
         .because("it is one provider of the checks `ci` stands for")
@@ -101,6 +103,18 @@ jobs:
       - run: cargo test
 "#,
     );
+    if project.has("static") {
+        // The site is the build output, so CI keeps it. A deploy step to
+        // a host reads this artifact.
+        out.push_str(
+            r#"      - run: cargo run -- export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist
+"#,
+        );
+    }
     if project.has("docker") {
         out.push_str(
             r#"

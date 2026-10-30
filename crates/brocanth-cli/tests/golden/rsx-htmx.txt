@@ -38,7 +38,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 ===== .gitignore =====
 /target
@@ -108,8 +108,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
 use brocanth::plugin_shutdown::ShutdownReason;
-use brocanth::routing::{Dispatch, MiddlewareStack, Router};
+use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
 use crate::plugins;
@@ -198,27 +199,29 @@ pub fn build() -> Result<App, String> {
     })
 }
 
-/// Turns a page's answer into the bytes the server writes.
+/// Turns a page's answer into the response the hooks see.
 ///
-/// `html` rather than a guess: most pages return markup, and a handler that
-/// wants another type says so with a `content-type` header.
+/// `text/html` unless the page names its own `content-type`, which then
+/// replaces it rather than joining it. Every other header is appended,
+/// because `set-cookie` has to repeat.
+fn sent(answered: Response) -> hooks::Response {
+    brocanth_server::bridge::buffered(
+        answered.status,
+        answered.headers,
+        answered.body.into_bytes(),
+    )
+}
+
+/// The request headers as text, for the page.
 ///
-/// That header replaces the seeded one rather than joining it. `with_header`
-/// appends, because `set-cookie` has to repeat, so a page answering JSON
-/// used to put two `content-type` lines on the wire and let the client pick.
-fn sent(answered: Response) -> brocanth_server::Response {
-    let mut out = brocanth_server::Response::html(answered.status, answered.body);
-    if answered
-        .headers
+/// A value that is not UTF-8 is dropped: a page reads a header as `&str`,
+/// and a lossy copy would say something the client did not send.
+fn headers(request: &hooks::Request) -> Vec<(String, String)> {
+    request
+        .headers()
         .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        out = out.without_header("content-type");
-    }
-    for (name, value) in &answered.headers {
-        out = out.with_header(name, value);
-    }
-    out
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
 }
 
 /// The file a request named, or `None` to let the router answer.
@@ -264,8 +267,9 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 /// `true` is dp-swap's word for "a fragment, I did not count", which is one
 /// layer. Anything that does not parse is zero: a client that cannot say
 /// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &brocanth_server::Request) -> u32 {
-    match request.header("dp-partial") {
+fn holding(request: &hooks::Request) -> u32 {
+    let header = request.headers().get("dp-partial");
+    match header.and_then(|value| value.to_str().ok()) {
         None => 0,
         Some("true") => 1,
         Some(value) => value.parse().unwrap_or(0),
@@ -354,11 +358,13 @@ async fn run(
     let handler = plugins::wrap(&app, {
         let app = Arc::clone(&app);
         move |request| {
-            // Dispatch is synchronous and runs here, outside the
-            // future, so what crosses the await is a finished
-            // response and nothing borrowed.
-            let out = serve_asset(&request).unwrap_or_else(|| sent(dispatch(&app, &request)));
-            async move { out }
+            let app = Arc::clone(&app);
+            async move {
+                match serve_asset(&request) {
+                    Some(file) => file,
+                    None => handle(&app, request).await,
+                }
+            }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -539,33 +545,62 @@ impl Signals {
     }
 }
 
-/// One request: the table, then the chain, then the handler.
+/// One request: the request hooks, the table, then the response hooks.
+///
+/// A request hook may answer instead of the page -- a CSRF refusal, a
+/// 429 -- and then the page never runs. It may also rewrite the request
+/// first, so the table reads the request as the hooks left it. The
+/// response hooks see every answer, the 404 and the 405 included.
+///
+/// `begin_async` and not `begin`: it runs a hook that waits as well as
+/// one that does not. With no hook that waits, it is ready on its first
+/// poll.
+pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
+    let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
+        // The path and the query do not make a URI. The table was not
+        // asked, so this is not a 404.
+        return brocanth_server::Response::text(400, "Bad Request");
+    };
+    let mut state = RequestState::new();
+    let outcome = match app.core.begin_async(&mut request, &mut state).await {
+        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),
+        Begin::Answered(outcome) => outcome,
+    };
+    let response = app.core.finish(&mut request, &mut state, outcome);
+    brocanth_server::bridge::from_core(response)
+}
+
+/// The table, then the chain, then the handler.
 ///
 /// The chain runs only for a route that matched. A 404 has no route and
-/// therefore no context, which is also why the request hooks the plan
-/// reserves for a logger are the core's job and not a layer's.
-pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
-    let (verb, path) = (request.verb, request.path.as_str());
+/// therefore no context. `state` is what the request hooks wrote; the
+/// page reads it through `Ctx::hooked`, and it goes back afterwards so
+/// the response hooks read what the page left.
+pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {
+    let Some(verb) = Verb::from_http(request.method()) else {
+        return Response::new(501, "Not Implemented");
+    };
+    let path = request.uri().path();
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
                 .holding(holding(request))
                 .with_plugins(app.core.context())
+                .with_state(std::mem::take(state))
                 .sent(
-                    &request.query,
-                    request.body.to_vec(),
-                    request
-                        .headers()
-                        .map(|(name, value)| (name.to_string(), value.to_string()))
-                        .collect(),
+                    request.uri().query().unwrap_or(""),
+                    request.body().clone(),
+                    headers(request),
                 );
             // The one place a failed handler becomes a response --
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the
             // error turned into and can rewrite it.
-            app.stack.run(path, &mut ctx, |c| {
+            let response = app.stack.run(path, &mut ctx, |c| {
                 handler(c).unwrap_or_else(IntoResponse::into_response)
-            })
+            });
+            *state = ctx.take_state();
+            response
         }
         Dispatch::MethodNotAllowed { allow, .. } => Response {
             status: 405,
@@ -593,6 +628,7 @@ pub fn dispatch(app: &App, request: &brocanth_server::Request) -> Response {
 brocanth_pages::pages!("src/pages");
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
+use brocanth::plugin_hooks::RequestState;
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 use crate::plugins;
@@ -850,6 +886,9 @@ pub struct Ctx {
     /// What the plugins put here for this request, or `None` for a context
     /// built by hand.
     plugins: Option<Context<plugins::Installed>>,
+    /// What the request hooks wrote for this request: a `CsrfToken`, a
+    /// client address. Empty for a context built by hand.
+    state: RequestState,
     /// How many layout layers the client says it already holds.
     ///
     /// Zero unless a request asked for less, so a first load, a crawler
@@ -870,6 +909,7 @@ impl Ctx {
                 .collect(),
             headers: Vec::new(),
             plugins: None,
+            state: RequestState::new(),
             partial: 0,
         }
     }
@@ -900,6 +940,19 @@ impl Ctx {
     pub fn with_plugins(mut self, plugins: Context<plugins::Installed>) -> Self {
         self.plugins = Some(plugins);
         self
+    }
+
+    /// What the request hooks wrote. `src/app.rs` hands it over before the
+    /// page runs and takes it back after, for the response hooks.
+    #[must_use]
+    pub fn with_state(mut self, state: RequestState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The hook state back, leaving this context an empty one.
+    pub fn take_state(&mut self) -> RequestState {
+        std::mem::take(&mut self.state)
     }
 
     /// The value a plugin published for this request.
@@ -985,6 +1038,15 @@ impl Ctx {
 /// than a line.
 #[allow(dead_code)]
 impl Ctx {
+    /// A value a request hook wrote for this request, by its type.
+    ///
+    /// `ctx.hooked::<brocanth_middleware::CsrfToken>()` is the token a form
+    /// carries. `None` when no registered hook wrote one, and always for a
+    /// context built by hand.
+    pub fn hooked<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.get::<T>()
+    }
+
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1317,10 +1379,11 @@ pub type Installed = Base;
 
 /// Which hook families this binary installed, as a type.
 ///
-/// `NoHooks` while nothing registers with `plugin_hooking`. A hook nobody
-/// registers costs nothing, and this type is how the compiler knows:
-/// every hook entry point opens with a constant `if` on this record.
-pub type Hooks = ::brocanth::plugin_hooks::NoHooks;
+/// One `Both` per plugin registered with `plugin_hooking`, innermost first,
+/// which is exactly the record `register!` builds. A hook family nobody
+/// installed costs nothing, and this type is how the compiler knows: every
+/// hook entry point opens with a constant `if` on this record.
+pub type Hooks = brocanth::plugin_hooks::NoHooks;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1399,7 +1462,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 5fc180911ae0d2f1
+// brocanth-digest: 4698e07a5a1d3883
 ===== public/dpswap.min.js =====
 "use strict";var dpswap=(()=>{var T=Object.defineProperty;var se=Object.getOwnPropertyDescriptor;var ae=Object.getOwnPropertyNames;var le=Object.prototype.hasOwnProperty;var k=(e,t)=>{for(var r in t)T(e,r,{get:t[r],enumerable:!0})},ue=(e,t,r,n)=>{if(t&&typeof t=="object"||typeof t=="function")for(let o of ae(t))!le.call(e,o)&&o!==r&&T(e,o,{get:()=>t[o],enumerable:!(n=se(t,o))||n.enumerable});return e};var ce=e=>ue(T({},"__esModule",{value:!0}),e);var Be={};k(Be,{config:()=>a,configure:()=>K,fragmentUrl:()=>h,hydrate:()=>E,perform:()=>m,prefetch:()=>Ve,process:()=>L,start:()=>$,swapping:()=>Ue});var a={fragmentSuffix:"/_fragment.html",fragmentMode:"suffix",partialHeader:"DP-Partial",layoutAttr:"dp-layout",requestClass:"dp-request",settlingClass:"dp-settling",defaultBoostTarget:"body",timeout:1e4,prefetchLimit:32,fetch:(...e)=>globalThis.fetch(...e)};function K(e){Object.assign(a,e)}function h(e,t){let r=new URL(e,t??"http://localhost");return a.fragmentMode==="header"||(r.pathname=r.pathname.replace(/\/+$/,"")+a.fragmentSuffix),r.pathname+r.search+r.hash}function b(e,t=1){let r={"DP-Request":"true"};return e&&a.fragmentMode==="header"&&(r[a.partialHeader]=t>1?String(t):"true"),r}var v=["innerHTML","outerHTML","beforebegin","afterbegin","beforeend","afterend","delete","none"];var A="dp-";function f(e,t){return e.getAttribute(A+t)}function q(e,t){return e.hasAttribute(A+t)}function l(e,t){let r=e;for(;r;){let n=r.getAttribute(A+t);if(n!==null)return n;r=r.parentElement}return null}function w(e,t){return!t||t==="this"?e:t.startsWith("closest ")?e.closest(t.slice(8).trim()):t.startsWith("find ")?e.querySelector(t.slice(5).trim()):t==="next"?e.nextElementSibling:t==="previous"?e.previousElementSibling:e.ownerDocument.querySelector(t)}var Y={style:"innerHTML",scroll:null,delay:0};function H(e){if(!e)return{...Y};let t=e.trim().split(/\s+/),r={...Y};for(let n of t)fe(n)?r.style=n:n==="scroll:top"||n==="scroll:bottom"?r.scroll=n.slice(7):n.startsWith("swap:")&&(r.delay=D(n.slice(5)));return r}function fe(e){return v.includes(e)}function j(e,t){let r={event:de(t),once:!1,delay:0,throttle:0,from:null,changed:!1};if(!e)return r;let n=e.trim().split(/\s+/),[o,...i]=n;o&&(r.event=o);for(let s of i)s==="once"?r.once=!0:s==="changed"?r.changed=!0:s.startsWith("delay:")?r.delay=D(s.slice(6)):s.startsWith("throttle:")?r.throttle=D(s.slice(9)):s.startsWith("from:")&&(r.from=s.slice(5));return r}function de(e){let t=e.tagName.toLowerCase();return t==="form"?"submit":t==="input"||t==="textarea"||t==="select"?"change":"click"}function D(e){let t=/^(\d+(?:\.\d+)?)(ms|s)?$/.exec(e.trim());if(!t)return 0;let r=Number(t[1]);return t[2]==="s"?r*1e3:r}function u(e,t,r={}){let o=e.ownerDocument.defaultView?.CustomEvent??globalThis.CustomEvent;return e.dispatchEvent(new o(t,{detail:r,bubbles:!0,cancelable:!0}))}var z=new WeakSet;function E(e){for(let t of Array.from(e.querySelectorAll("[dp-island]")))J(t);pe(e)&&e.hasAttribute("dp-island")&&J(e)}function pe(e){return"hasAttribute"in e}function J(e){if(z.has(e))return;z.add(e);let t=me(f(e,"client")),r=()=>void ge(e);switch(t.kind){case"load":r();return;case"idle":ye(e,r);return;case"visible":we(e,r);return;case"media":be(e,t.query,r);return}}function me(e){if(!e)return{kind:"load"};let t=e.trim();return t.startsWith("media:")?{kind:"media",query:t.slice(6).trim()}:t==="idle"?{kind:"idle"}:t==="visible"?{kind:"visible"}:{kind:"load"}}async function ge(e){let t=f(e,"island");if(t)try{let r=await import(t),n=r.default??r.mount;if(typeof n!="function")throw new TypeError(`${t} exports no default function and no mount`);n(e,he(e)),u(e,"dp:island",{source:t})}catch(r){u(e,"dp:islandError",{source:t,error:r})}}function he(e){let t=f(e,"props");if(!t)return{};try{let r=JSON.parse(t);return r&&typeof r=="object"?r:{}}catch{return{}}}function ye(e,t){let r=e.ownerDocument.defaultView,n=r?.requestIdleCallback;n?n.call(r,()=>t()):setTimeout(t,1)}function we(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t();return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t())});n.observe(e)}function be(e,t,r){let n=e.ownerDocument.defaultView;if(!n||typeof n.matchMedia!="function"){r();return}let o=n.matchMedia(t);if(o.matches){r();return}let i=()=>{o.matches&&(o.removeEventListener("change",i),r())};o.addEventListener("change",i)}var M="dpswap";function X(e,t,r){e.defaultView?.history?.pushState({[M]:r},"",t)}function G(e,t,r){e.defaultView?.history?.replaceState({[M]:r},"",t)}function C(e){if(!e||typeof e!="object")return null;let t=e[M];if(!t||typeof t!="object")return null;let{target:r,select:n}=t;return typeof r!="string"?null:{target:r,select:typeof n=="string"?n:null}}var N={};k(N,{clear:()=>Ee,prefetch:()=>R,size:()=>Se,take:()=>P});var d=new Map;function Ee(){d.clear()}function Se(){return d.size}function R(e,t){let r=h(e,t);d.has(r)||(Le(),d.set(r,xe(r)))}function P(e){return d.get(e)??null}async function xe(e){try{let t=await a.fetch(e,{headers:b(!0)});return t.ok?await t.text():(d.delete(e),null)}catch{return d.delete(e),null}}function Le(){if(d.size<a.prefetchLimit)return;let e=d.keys().next();e.done||d.delete(e.value)}var _={};k(_,{applyOutOfBand:()=>O,layerTarget:()=>I,narrowToSharedLayout:()=>V,parseFragment:()=>W,selectFrom:()=>F,settle:()=>U,sharedLayerDepth:()=>B,swapInto:()=>S});function W(e,t){let r=e.createElement("template");return r.innerHTML=t,r.content}function F(e,t,r){if(!r)return t;let n=e.createDocumentFragment();for(let o of Array.from(t.querySelectorAll(r)))n.appendChild(o);return n}function O(e,t){let r=Array.from(t.querySelectorAll("[dp-swap-oob]"));for(let n of r){let o=f(n,"swap-oob")??"outerHTML",[i,s]=Te(o),c=s??(n.id?`#${n.id}`:null);if(n.removeAttribute("dp-swap-oob"),n.remove(),!c)continue;let p=e.querySelector(c);if(!p)continue;let g=e.createDocumentFragment();i==="outerHTML"?g.appendChild(n):g.append(...Array.from(n.childNodes)),S(p,g,{style:i,scroll:null,delay:0})}}function Te(e){let t=e.indexOf(":"),r=t===-1?e:e.slice(0,t),n=t===-1?null:e.slice(t+1);return[ke(r)?r:"outerHTML",n||null]}function ke(e){return v.includes(e)}function S(e,t,r){switch(r.style){case"innerHTML":e.replaceChildren(t);break;case"outerHTML":e.replaceWith(t);break;case"beforebegin":e.parentElement?.insertBefore(t,e);break;case"afterbegin":e.insertBefore(t,e.firstChild);break;case"beforeend":e.appendChild(t);break;case"afterend":e.parentElement?.insertBefore(t,e.nextSibling);break;case"delete":e.remove();break;case"none":break}}function U(e,t){t.style==="delete"||t.style==="none"||e.isConnected&&(e.classList.add(a.settlingClass),queueMicrotask(()=>e.classList.remove(a.settlingClass)),t.scroll==="top"&&(e.scrollTop=0),t.scroll==="bottom"&&(e.scrollTop=e.scrollHeight))}function V(e,t){let r=a.layoutAttr;if(!r)return{target:e,content:t};let n=`[${r}]`,o=e,i=t;for(;;){let c=o.querySelector(n),p=i.querySelector(n);if(!c||!p||c.getAttribute(r)!==p.getAttribute(r))break;o=c,i=p}if(o===e)return{target:e,content:t};let s=e.ownerDocument.createDocumentFragment();return s.append(...Array.from(i.childNodes)),{target:o,content:s}}function B(e,t){let r=a.layoutAttr;if(!r)return 1;let n=new URL(t,e.defaultView?.location?.href??"http://localhost").pathname,o=[...e.querySelectorAll(`[${r}]`)].map(s=>s.getAttribute(r)??""),i=0;for(let s of o){if(!(s==="/"||n===s||n.startsWith(`${s}/`)))break;i++}return Math.max(1,i)}function I(e,t){let r=a.layoutAttr;if(!r||t<1)return null;let n=e,o=null;for(let i=0;i<t;i++){let s=n.querySelector(`[${r}]`);if(!s)return null;o=s,n=s}return o}async function m(e){if(!u(e.source,"dp:beforeRequest",{spec:e}))return;let t=Ae(e),r=e.indicator;r?.classList.add(a.requestClass);try{let n=e.fragment?B(e.target.ownerDocument,e.url):1,o=await P(t)?.catch(()=>null);if(o!=null){Q(e,o,n);return}let i=await qe(t,e.fragment,n);if(!i.ok){u(e.source,"dp:responseError",{spec:e,response:i}),e.boosted&&Z(e.source,e.url);return}Q(e,await i.text(),n)}catch(n){u(e.source,"dp:sendError",{spec:e,error:n}),e.boosted&&Z(e.source,e.url)}finally{r?.classList.remove(a.requestClass),u(e.source,"dp:afterRequest",{spec:e})}}function Q(e,t,r=1){let n=e.target.ownerDocument,o=W(n,t);O(n,o);let i=F(n,o,e.select),s=e.target;if(!e.select&&e.swap.style==="innerHTML"){let p=r>1?I(n,r):null;if(p)s=p;else{let g=V(s,i);s=g.target,i=g.content}}if(!u(s,"dp:beforeSwap",{spec:e,content:i}))return;let c=De({...e,target:s});S(s,i,e.swap),u(c,"dp:afterSwap",{spec:e}),U(s,e.swap),u(c,"dp:afterSettle",{spec:e})}function De(e){switch(e.swap.style){case"innerHTML":case"afterbegin":case"beforeend":case"none":return e.target;default:return e.target.parentElement??e.target.ownerDocument.documentElement}}function Ae(e){let t=He(e.source);if(e.fragment)return h(e.url,t);let r=new URL(e.url,t??"http://localhost");return r.pathname+r.search+r.hash}async function qe(e,t,r){let n=new AbortController,o=setTimeout(()=>n.abort(),a.timeout);try{return await a.fetch(e,{signal:n.signal,headers:b(t,r)})}finally{clearTimeout(o)}}function He(e){return e.ownerDocument.defaultView?.location.href}function Z(e,t){e.ownerDocument.defaultView?.location?.assign(t)}var x=new WeakSet;function L(e){for(let t of Array.from(e.querySelectorAll("[dp-get]")))te(t);ee(e)&&q(e,"get")&&te(e);for(let t of Array.from(e.querySelectorAll("[dp-boost]")))re(t);ee(e)&&q(e,"boost")&&re(e)}function ee(e){return"getAttribute"in e}function te(e){if(x.has(e))return;x.add(e);let t=j(f(e,"trigger"),e),r=Fe(t.throttle,o=>{if(Ne(e)&&o.preventDefault(),t.changed&&!We(e))return;let i=Me(e);i&&(t.delay>0?setTimeout(()=>void m(i),t.delay):m(i))});if(t.event==="load"){r(new Event("load"));return}if(t.event==="revealed"){Oe(e,r);return}(t.from?e.ownerDocument.querySelector(t.from)??e:e).addEventListener(t.event,r,{once:t.once})}function Me(e){let t=f(e,"get");if(!t)return null;let r=w(e,l(e,"target"));if(!r)return null;let n=l(e,"push-url");return{source:e,url:t,target:r,swap:H(l(e,"swap")),select:l(e,"select"),pushUrl:n==="true"?t:n==="false"||n===null?null:n,indicator:w(e,l(e,"indicator")),boosted:!1,fragment:l(e,"fragment")!==null}}function re(e){x.has(e)||(x.add(e),Ce(e),e.addEventListener("click",t=>{let r=oe(t);if(!r)return;t.preventDefault();let n=l(r,"target")??a.defaultBoostTarget,o=w(r,n);if(!o)return;let i=l(r,"select"),s=r.getAttribute("href")??"";X(r.ownerDocument,s,{target:n,select:i}),m({source:r,url:s,target:o,swap:H(l(r,"swap")??"innerHTML"),select:i,pushUrl:s,indicator:w(r,l(r,"indicator")),boosted:!0,fragment:!0})}))}function oe(e){if(e.defaultPrevented)return null;let t=e;if(typeof t.button=="number"&&t.button!==0||t.metaKey||t.ctrlKey||t.shiftKey||t.altKey)return null;let r=e.target?.closest("a");if(!r||r.tagName.toLowerCase()!=="a")return null;let n=r.getAttribute("href");if(!n||n.startsWith("#")||r.hasAttribute("download"))return null;let o=r.getAttribute("target");if(o&&o!=="_self"||f(r,"boost")==="false")return null;let i=r.ownerDocument.defaultView;return i&&new URL(n,i.location.href).origin!==i.location.origin?null:r}function Ce(e){let t=r=>{let n=oe(r)??Re(r);if(!n)return;let o=l(n,"prefetch");if(o===null||o==="false")return;let i=n.getAttribute("href");i&&R(i,n.ownerDocument.defaultView?.location.href)};e.addEventListener("pointerenter",t,{capture:!0}),e.addEventListener("focusin",t),e.addEventListener("touchstart",t,{passive:!0})}function Re(e){let t=e.target?.closest("a");if(!t||t.tagName.toLowerCase()!=="a")return null;let r=t.getAttribute("href");return!r||r.startsWith("#")||r.includes("://")?null:t}function Pe(e){return e.querySelector("[dp-boost][dp-target]")?.getAttribute("dp-target")||a.defaultBoostTarget}function ie(e){let t=e.defaultView;t&&(C(t.history?.state)||G(e,t.location.pathname+t.location.search,{target:Pe(e),select:null}),t.addEventListener("popstate",r=>{let n=C(r.state);if(!n)return;let o=e.querySelector(n.target);o&&m({source:e.documentElement,url:t.location.pathname+t.location.search,target:o,swap:{style:"innerHTML",scroll:"top",delay:0},select:n.select,pushUrl:null,indicator:null,boosted:!0,fragment:!0})}))}function Ne(e){let t=e.tagName.toLowerCase();return t==="a"||t==="form"||t==="button"}var ne=new WeakMap;function We(e){let t=e.value??"";return ne.get(e)===t?!1:(ne.set(e,t),!0)}function Fe(e,t){if(e<=0)return t;let r=0;return n=>{let o=Date.now();o-r<e||(r=o,t(n))}}function Oe(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t(new Event("revealed"));return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t(new Event("revealed")))});n.observe(e)}function $(e=document){L(e),E(e),ie(e),e.addEventListener("dp:afterSwap",t=>{let r=t.target;!r||!("querySelectorAll"in r)||(L(r),E(r))})}var Ue=_,Ve=N,y=globalThis.document;y&&y.currentScript?.getAttribute("data-dp-auto")!=="false"&&(y.readyState==="loading"?y.addEventListener("DOMContentLoaded",()=>$(y),{once:!0}):$(y));return ce(Be);})();
 //# sourceMappingURL=dpswap.min.js.map
@@ -1570,7 +1633,7 @@ request.
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `jt`, `rsx-tailwind`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `jt`, `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1718,7 +1781,7 @@ header and never changes for it.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 5206de0e6aab849f -->
+<!-- brocanth-digest: 0f4bef9c46ee7a11 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

@@ -56,6 +56,7 @@ pub mod logging;
 pub mod model;
 pub mod rsx;
 pub mod sessions;
+pub mod static_site;
 
 /// The modules, in the order the chooser lists them and the receipt prints
 /// them.
@@ -138,6 +139,9 @@ pub const ALL: &[&dyn Module] = &[
     &jt::Jt,
     &rsx::Tailwind,
     &rsx::Htmx,
+    // The pages as files, for a static host. It refuses every module that
+    // needs a running server.
+    &static_site::StaticSite,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

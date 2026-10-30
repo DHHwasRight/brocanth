@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::{NoContext, Provided};
+use brocanth::plugin_hooks::NoHooks;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -291,11 +292,11 @@ fn defaults_layer(claims: &[SectionClaim]) -> Value {
 /// links no parser at all. Both paths are supported, and they mix: a plugin
 /// registered the plain way claims its section name just the same, so the
 /// unknown-section check still covers it.
-pub trait AppBuilderConfigExt<E>: Sized {
+pub trait AppBuilderConfigExt<E, H = NoHooks>: Sized {
     /// Installs a loaded configuration and registers [`ConfigPlugin`].
     ///
     /// Call it before the plugins that read from it.
-    fn with_config(self, config: Config) -> AppBuilder<E>;
+    fn with_config(self, config: Config) -> AppBuilder<E, H>;
 
     /// Registers `P`, built from the section named `section`.
     ///
@@ -318,7 +319,7 @@ pub trait AppBuilderConfigExt<E>: Sized {
     fn plugin_from_config<P>(
         self,
         section: &str,
-    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>, H>, ConfigError>
     where
         P: Plugin,
         P::Config: DeserializeOwned + Default;
@@ -332,7 +333,7 @@ pub trait AppBuilderConfigExt<E>: Sized {
     ///
     /// [`ConfigError`] when no configuration is installed or the section does
     /// not fit `P::Config`.
-    fn plugin_as_from_config<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    fn plugin_as_from_config<P>(self, name: &str) -> Result<AppBuilder<E, H>, ConfigError>
     where
         P: Plugin,
         P::Config: DeserializeOwned + Default;
@@ -356,7 +357,7 @@ pub trait AppBuilderConfigExt<E>: Sized {
     fn plugin_with_defaults<P>(
         self,
         section: &str,
-    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>, H>, ConfigError>
     where
         P: ConfiguredPlugin,
         P::Config: Serialize + DeserializeOwned;
@@ -370,14 +371,14 @@ pub trait AppBuilderConfigExt<E>: Sized {
     /// # Errors
     ///
     /// The same as [`AppBuilderConfigExt::plugin_with_defaults`].
-    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E, H>, ConfigError>
     where
         P: ConfiguredPlugin,
         P::Config: Serialize + DeserializeOwned;
 }
 
-impl<E> AppBuilderConfigExt<E> for AppBuilder<E> {
-    fn with_config(mut self, config: Config) -> AppBuilder<E> {
+impl<E, H> AppBuilderConfigExt<E, H> for AppBuilder<E, H> {
+    fn with_config(mut self, config: Config) -> AppBuilder<E, H> {
         let shared: SharedConfig = Arc::new(config);
         let claims: SharedClaims = Arc::new(Mutex::new(Vec::new()));
         self.services_mut().insert(shared.clone());
@@ -388,47 +389,47 @@ impl<E> AppBuilderConfigExt<E> for AppBuilder<E> {
     fn plugin_from_config<P>(
         self,
         section: &str,
-    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>, H>, ConfigError>
     where
         P: Plugin,
         P::Config: DeserializeOwned + Default,
     {
-        let config = section_of::<P>(&self, section)?;
+        let config = section_of::<P, E, H>(&self, section)?;
         Ok(self.plugin_named(section, P::new(config)))
     }
 
-    fn plugin_as_from_config<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    fn plugin_as_from_config<P>(self, name: &str) -> Result<AppBuilder<E, H>, ConfigError>
     where
         P: Plugin,
         P::Config: DeserializeOwned + Default,
     {
-        let config = section_of::<P>(&self, name)?;
+        let config = section_of::<P, E, H>(&self, name)?;
         Ok(self.plugin_as(name, P::new(config)))
     }
 
     fn plugin_with_defaults<P>(
         self,
         section: &str,
-    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>>, ConfigError>
+    ) -> Result<AppBuilder<<P::Provides as Provided>::Install<E>, H>, ConfigError>
     where
         P: ConfiguredPlugin,
         P::Config: Serialize + DeserializeOwned,
     {
-        let config = claim_and_resolve::<P, E>(&self, section)?;
+        let config = claim_and_resolve::<P, E, H>(&self, section)?;
         Ok(self.plugin_named(section, P::new(config)))
     }
 
-    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E>, ConfigError>
+    fn plugin_as_with_defaults<P>(self, name: &str) -> Result<AppBuilder<E, H>, ConfigError>
     where
         P: ConfiguredPlugin,
         P::Config: Serialize + DeserializeOwned,
     {
-        let config = claim_and_resolve::<P, E>(&self, name)?;
+        let config = claim_and_resolve::<P, E, H>(&self, name)?;
         Ok(self.plugin_as(name, P::new(config)))
     }
 }
 
-fn section_of<P>(builder: &AppBuilder<impl Sized>, name: &str) -> Result<P::Config, ConfigError>
+fn section_of<P, E, H>(builder: &AppBuilder<E, H>, name: &str) -> Result<P::Config, ConfigError>
 where
     P: Plugin,
     P::Config: DeserializeOwned + Default,
@@ -445,7 +446,10 @@ where
 
 /// Records `P`'s claim on `name` and resolves its configuration: the plugin's
 /// defaults, with whatever the document says over the top.
-fn claim_and_resolve<P, E>(builder: &AppBuilder<E>, name: &str) -> Result<P::Config, ConfigError>
+fn claim_and_resolve<P, E, H>(
+    builder: &AppBuilder<E, H>,
+    name: &str,
+) -> Result<P::Config, ConfigError>
 where
     P: ConfiguredPlugin,
     P::Config: Serialize + DeserializeOwned,

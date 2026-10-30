@@ -58,7 +58,7 @@ The workspace has 36 crates under `crates/` and two examples under
 | File-based routes and nested layouts from `src/pages` | `brocanth-pages` | always |
 | The whole route table in one `routes!` file (an alternative) | `brocanth-routes` | |
 | Layered config with provenance and secret redaction | `brocanth-config` | `config` |
-| Proxy headers, method override, canonical host, CORS, CSRF | `brocanth-middleware` | `middleware`, `middleware-csrf` |
+| Proxy headers, method override, canonical host, CORS, CSRF, security headers, rate limiting | `brocanth-middleware` | `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit` |
 | Form or JSON body read into a struct, all faults at once | `brocanth-input` | `input` |
 | Schemas checked at compile time and at run time (`Valid<T>`) | `brocanth-schema` | `validation` |
 | OpenAPI 3.1 document at `/openapi.json`, with a drift check | `brocanth-openapi` | `openapi` |
@@ -106,6 +106,7 @@ The workspace has 36 crates under `crates/` and two examples under
 | Partial navigation (dp-swap, a vendored script from [htmx](https://github.com/DHHwasRight/htmx)) | (generated code) | `rsx-htmx` |
 | Tailwind CSS build over template class names | (generated code) | `rsx-tailwind` |
 | Fingerprinted static assets, embedded at compile time | `brocanth-assets` | with `rsx` |
+| The pages compiled to `dist/` for a static host (`cargo run -- export`) | (generated code) | `static` |
 | JS and CSS bundles from `build.rs` (rolldown, lightningcss) | `brocanth-bundle` | |
 | Django-shaped backoffice at `/admin` | `brocanth-admin`, `brocanth-admin-model` | `admin` |
 
@@ -120,6 +121,14 @@ The workspace has 36 crates under `crates/` and two examples under
 
 The menu also lists `admin-model`, `realtime-sse` and `realtime-websocket`.
 They are blocked, and each row says why.
+
+**Static sites.** `static` keeps the page router and drops the server:
+`cargo run -- export` requests every GET route once and writes the
+answers and the assets to `dist/`, ready for any static host. A route with
+a parameter is written for the paths listed in `src/commands/export.rs`.
+`static` refuses every module that needs a running server, so it goes
+only with `config`, `commands`, the template engines, `rsx-tailwind`,
+`rsx-htmx` and CI. The chooser has a shape for it.
 
 ## Quick start
 
@@ -266,14 +275,15 @@ be turned off whole; its children are `observability-logs`,
 - [x] **Apply migrations from the CLI.** `brocanth migrate up | down [N] |
   status` runs the project's own `migrate` command; `migrate make` lists each
   new file in `migrations/mod.rs`.
-- [ ] **Security headers and rate limiting in a generated project.** The
-  hooks exist and are tested (`brocanth_middleware::SecurityHeaders`:
-  HSTS over HTTPS, nosniff, Referrer-Policy, framing, a CSP that allows
-  dp-swap by hash, Permissions-Policy; `RateLimit`: a fixed window per IP,
-  session or user, 429 with `Retry-After`, in memory or one UNLOGGED
-  Postgres table). The modules `middleware-security-headers` and
-  `middleware-rate-limit` write their registration commented, as CSRF's is:
-  the generated `dispatch` does not enter the hook pipeline yet.
+- [x] **CSRF, security headers and rate limiting in a generated project.**
+  Every request goes through the hook pipeline (`App::begin_async`, the
+  page, `App::finish`), so a hook registered with `plugin_hooking` runs.
+  `middleware-csrf` and `middleware-security-headers` are on with
+  `middleware`: a double-submit cookie, and HSTS over HTTPS, nosniff,
+  Referrer-Policy, framing, a CSP that allows dp-swap by hash,
+  Permissions-Policy. `middleware-rate-limit` (off) adds a fixed window
+  per IP, session or user, 429 with `Retry-After`, with one example rule
+  to replace. The admin's forms carry the CSRF token.
 - [x] **A Postgres `AuthStore`.** `PgStore` (`postgres` feature); a generated project uses it when it has `jobs` or `cache`, and `MemoryStore` otherwise.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).

@@ -14,6 +14,7 @@ impl Module for Commands {
             "commands",
             "this project's own command line, `serve` plus whatever you add",
         )
+        .outside_runtime()
         .asked_in(
             "foundations",
             "Your own command line: `serve`, and whatever you add",

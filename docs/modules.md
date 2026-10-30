@@ -573,13 +573,14 @@ generated projects, and all ten are clean.
 
 ## 7. Every seam, and its state
 
-### Build time — `Slot`, 17 variants
+### Build time — `Slot`, 18 variants
 
 | Slot | State |
 | --- | --- |
 | `AppUses`, `AppPlugins`, `AppSetup`, `AppContext` | read |
 | `PluginsMod`, `PluginsLayers` | read |
 | `PluginsInstalled` | read — the provider list, §6 |
+| `PluginsHooks` | read — the hook record: one `Both` per plugin registered with `plugin_hooking`, written with `snippet::hooking` |
 | `PagesItems`, `CommandsMod`, `ConfigSections` | read |
 | `GitIgnore`, `AgentsSections` | read |
 | `CargoExtra`, `AppItems`, `AppBeforeRouter` | **deleted**: no module had a use. `src/app.rs` is the developer's file, so a module writes its own file under `src/plugins/<key>/`; an answer before the router is a route in the one table |
@@ -599,7 +600,7 @@ silence. That has already happened once, with a `.gitignore` line.
 | `Plugin` lifecycle, five stages | works |
 | `Services`, typed cross-plugin lookup | works |
 | `MiddlewareCatalog`, offer-not-mount | works |
-| `HookSource`: request, response, error | works, and costs nothing unregistered |
+| `HookSource`: request, response, error | works, and costs nothing unregistered. A generated project runs every request through `App::begin_async` and `App::finish`, and a page reads hook state with `Ctx::hooked` |
 | `ModelEvent` / `ModelHook` | works |
 | `plugin_order`, declared `after`/`before` | works |
 | `ShutdownPhase::Begin` / `Drain` | works |
@@ -608,6 +609,16 @@ silence. That has already happened once, with a `.gitignore` line.
 | `Plugin::provide` seeing the request | **missing** — a provider cannot read a cookie (§6) |
 | `RouteSource` + `mount_routes` | works; not generated, by decision: a generated project mounts page-shaped routes through `Slot::RouterMounts` (§4.6) |
 | A renderer registry | **does not exist** (§5) |
+
+### Static output — `outside_runtime` and `static_output`
+
+A first cut, to be redesigned. A manifest that says `static_output()`
+compiles the project to files (`static`). With one chosen, every other
+choice must say `outside_runtime()`: it adds nothing that only a running
+server uses. Today that is `config`, `commands`, `rsx`, `rsx-tailwind`,
+`rsx-htmx`, `jt`, `ci` and `ci-github`. `create::exclusive` enforces the
+rule for the flags and for `brocanth add`; the chooser takes the other
+side off and says so.
 
 ---
 

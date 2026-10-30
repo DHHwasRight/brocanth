@@ -71,10 +71,31 @@ impl Module for Backoffice {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file(
             "src/plugins/admin/mod.rs",
-            ADMIN_RS.replace(
-                "@TITLE@",
-                &format!("{:?}", format!("{} admin", project.title)),
-            ),
+            ADMIN_RS
+                .replace(
+                    "@TITLE@",
+                    &format!("{:?}", format!("{} admin", project.title)),
+                )
+                // With CSRF on, every form the admin posts carries the
+                // token, or the hook refuses the admin's own forms.
+                .replace(
+                    "@PAGE@",
+                    if project.has("middleware-csrf") {
+                        "brocanth_admin::Response::Page { status, html } => {\n\
+                         \x20               Response::new(status, stamped(ctx, html))\n\
+                         \x20           }"
+                    } else {
+                        "brocanth_admin::Response::Page { status, html } => Response::new(status, html),"
+                    },
+                )
+                .replace(
+                    "@STAMPED@",
+                    if project.has("middleware-csrf") {
+                        STAMPED_FN
+                    } else {
+                        ""
+                    },
+                ),
         );
         s.at(Slot::PluginsMod).line("pub mod admin;");
         // The prefix is the application's decision, so it is written at the
@@ -185,7 +206,7 @@ fn screen(admin: Arc<Admin>) -> Handler {
         // template that did not render. A refusal is not one: it is a page.
         let answer = wait(admin.dispatch(who, method, &ctx.path, &ctx.query, &form))?;
         Ok(match answer {
-            brocanth_admin::Response::Page { status, html } => Response::new(status, html),
+            @PAGE@
             brocanth_admin::Response::Redirect { status, location } => {
                 Response::empty(status).with_header("location", location)
             }
@@ -193,7 +214,7 @@ fn screen(admin: Arc<Admin>) -> Handler {
     })
 }
 
-/// Who is asking, as the admin's policy sees it.
+@STAMPED@/// Who is asking, as the admin's policy sees it.
 ///
 /// Anonymous until this reads your user off the request. When a plugin
 /// publishes one, this is one line:
@@ -267,3 +288,19 @@ const AGENTS: &str = "\n\
     `brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over\n\
     the model's rows. A model with no resource answers 403. Never filter\n\
     rows after a read; the row policy goes into the query.\n";
+
+/// The admin's page with the CSRF field in every form that posts.
+/// Written only when `middleware-csrf` is on.
+const STAMPED_FN: &str = r#"/// The page with the CSRF token in every form that posts.
+///
+/// The admin renders its own forms and does not know the token, so the
+/// field goes in here. Without a token on the request -- a test that built
+/// the context by hand -- the page goes out unchanged.
+fn stamped(ctx: &Ctx, html: String) -> String {
+    match ctx.hooked::<brocanth_middleware::CsrfToken>() {
+        Some(token) => token.stamp_forms(&html),
+        None => html,
+    }
+}
+
+"#;

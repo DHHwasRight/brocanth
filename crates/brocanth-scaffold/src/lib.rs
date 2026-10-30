@@ -170,6 +170,19 @@ pub struct Manifest {
     ///
     /// [`gist`]: Manifest::gist
     pub short: &'static str,
+    /// Whether this module adds nothing that only a running server uses: a
+    /// build step, a template engine, a CI file, the config file, the
+    /// command line. Set with [`Manifest::outside_runtime`].
+    ///
+    /// A project whose output is files and not a process takes only these.
+    pub outside_runtime: bool,
+    /// Whether this module turns the project into files rather than a
+    /// server. Set with [`Manifest::static_output`].
+    ///
+    /// With one of these chosen, every other choice must be
+    /// [`outside_runtime`](Manifest::outside_runtime): there is no process
+    /// to run the rest in.
+    pub static_output: bool,
 }
 
 impl Manifest {
@@ -188,7 +201,23 @@ impl Manifest {
             absent: None,
             section: "",
             short: "",
+            outside_runtime: false,
+            static_output: false,
         }
+    }
+
+    /// This module adds nothing that only a running server uses, so a
+    /// static site may take it.
+    pub fn outside_runtime(mut self) -> Self {
+        self.outside_runtime = true;
+        self
+    }
+
+    /// This module compiles the project to files. Every other module chosen
+    /// with it must be [`outside_runtime`](Manifest::outside_runtime).
+    pub fn static_output(mut self) -> Self {
+        self.static_output = true;
+        self
     }
 
     /// The guided route's question this module answers, and the phrasing it
@@ -478,6 +507,16 @@ pub enum Slot {
     /// line and this one together, which is the only way the two cannot
     /// drift.
     PluginsInstalled,
+    /// One hooking plugin type per line, in registration order:
+    /// `brocanth_middleware::Csrf`.
+    ///
+    /// `AppBuilder::plugin_hooking` widens the application's hook record
+    /// to `Both<P::Families, H>`, and the generated `plugins::Hooks` alias
+    /// has to name that exact type, so it is built from these lines the
+    /// way `Installed` is built from [`Slot::PluginsInstalled`].
+    /// [`snippet::hooking`] writes this line, the provider line and the
+    /// registration together.
+    PluginsHooks,
     /// `src/plugins/mod.rs`, one arm of `layer`, for a module that offers
     /// middleware: `"request_log" => Some(logging::layer),`.
     ///
@@ -564,6 +603,7 @@ impl fmt::Display for Slot {
             Slot::AppContext => "src/plugins/mod.rs (the context)",
             Slot::PluginsMod => "src/plugins/mod.rs",
             Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
+            Slot::PluginsHooks => "src/plugins/mod.rs (the hook record)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
             Slot::RouterMounts => "src/pages/mod.rs (the mounted routes)",
@@ -974,6 +1014,23 @@ pub mod snippet {
         s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
         s.at(Slot::PluginsInstalled)
             .line(format!("{key} crate::plugins::{key}::{ty}"));
+    }
+
+    /// Registers a plugin that installs hooks: the registration block, the
+    /// provider line, and the hook record line.
+    ///
+    /// `block` is the whole statement, comments included, and it must call
+    /// `plugin_hooking` on `builder`. `ty` is the plugin type as a path the
+    /// generated `src/plugins/mod.rs` can name: `brocanth_middleware::Csrf`.
+    /// `key` names the provider alias, so it is the module's key.
+    ///
+    /// Three slots from one call, because the three have to agree: the
+    /// chain's type is the provider list and the hook record, each applied
+    /// once per plugin in registration order.
+    pub fn hooking(s: &mut Scaffold, key: &str, ty: &str, block: String) {
+        s.at(Slot::AppPlugins).block(block);
+        s.at(Slot::PluginsInstalled).line(format!("{key} {ty}"));
+        s.at(Slot::PluginsHooks).line(ty);
     }
 
     /// The registration statement alone, without the provider list.

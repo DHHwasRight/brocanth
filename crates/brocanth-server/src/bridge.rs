@@ -279,8 +279,18 @@ impl From<ServeError> for BridgeError {
 // ---------------------------------------------------------------------------
 
 /// A request whose path and query do not recompose into a URI.
+///
+/// The answer is 400: the request line is one this server cannot represent.
 #[derive(Debug)]
-struct Unrepresentable;
+pub struct Unrepresentable;
+
+impl std::fmt::Display for Unrepresentable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the path and the query do not make a URI")
+    }
+}
+
+impl std::error::Error for Unrepresentable {}
 
 /// This crate's request into the core's.
 ///
@@ -306,8 +316,16 @@ struct Unrepresentable;
 /// lines stay two.
 ///
 /// *The peer.* It becomes a [`Peer`] extension, the only place an
-/// [`http::Request`] has for it.
-fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
+/// [`http::Request`] has for it, and a bare [`SocketAddr`] extension
+/// beside it for a reader that cannot name [`Peer`].
+///
+/// Public for an application that runs its own dispatch inside
+/// [`App::begin_async`] and [`App::finish`], as a generated project does.
+///
+/// # Errors
+///
+/// [`Unrepresentable`] when the path and the query do not make a URI.
+pub fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
     let Request {
         verb,
         path,
@@ -340,6 +358,10 @@ fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
 
     if let Some(peer) = peer {
         out.extensions_mut().insert(Peer(peer));
+        // The bare address as well, for a hook crate that reads the peer
+        // and does not depend on this one: `brocanth-middleware` reads it
+        // for its proxy allow-list and its rate-limit key.
+        out.extensions_mut().insert(peer);
     }
     Ok(out)
 }
@@ -361,7 +383,9 @@ fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
 /// send a different value under the same name; dropping says less rather than
 /// saying something wrong. `http` permits such a value and no formatter in
 /// this workspace emits one.
-fn from_core(response: CoreResponse) -> Response {
+///
+/// Public for the caller [`to_core`] names.
+pub fn from_core(response: CoreResponse) -> Response {
     let (parts, body) = response.into_parts();
     let mut headers = Vec::with_capacity(parts.headers.len());
     for (name, value) in parts.headers.iter() {
@@ -382,6 +406,40 @@ fn from_core(response: CoreResponse) -> Response {
         },
         headers,
     }
+}
+
+/// A buffered core response from what a page answered: a status, header
+/// pairs and the body.
+///
+/// `text/html; charset=utf-8` unless the pairs carry their own
+/// `content-type`, which then replaces it rather than joining it. Every other
+/// pair is appended, so two `set-cookie` lines stay two. A pair `http`
+/// refuses is dropped, for the reason [`to_core`] gives. A status outside
+/// 100..=999 is a 500, because nothing else is a status.
+pub fn buffered(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> CoreResponse {
+    let mut out = CoreResponse::new(CoreBody::Buffered(body));
+    *out.status_mut() =
+        http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+    let map = out.headers_mut();
+    map.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let mut typed = false;
+    for (name, value) in headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) else {
+            continue;
+        };
+        if name == CONTENT_TYPE && !typed {
+            map.remove(CONTENT_TYPE);
+            typed = true;
+        }
+        map.append(name, value);
+    }
+    out
 }
 
 /// A core response with a status, a plain-text body and nothing else.
@@ -927,6 +985,10 @@ mod tests {
             core.extensions().get::<Peer>().map(|p| p.0.port()),
             Some(4000)
         );
+        assert_eq!(
+            core.extensions().get::<SocketAddr>().map(|p| p.port()),
+            Some(4000)
+        );
     }
 
     #[test]
@@ -1093,5 +1155,30 @@ mod tests {
             .headers
             .iter()
             .any(|(name, value)| name == "allow" && value.contains("GET")));
+    }
+
+    #[test]
+    fn a_page_is_html_unless_it_names_its_own_type() {
+        let page = buffered(200, Vec::new(), b"<p>hi</p>".to_vec());
+        assert_eq!(page.headers()[CONTENT_TYPE], "text/html; charset=utf-8");
+
+        let json = buffered(
+            201,
+            vec![
+                ("content-type".into(), "application/json".into()),
+                ("set-cookie".into(), "a=1".into()),
+                ("set-cookie".into(), "b=2".into()),
+            ],
+            b"{}".to_vec(),
+        );
+        assert_eq!(json.status(), 201);
+        let types: Vec<_> = json.headers().get_all(CONTENT_TYPE).iter().collect();
+        assert_eq!(types, ["application/json"]);
+        assert_eq!(json.headers().get_all("set-cookie").iter().count(), 2);
+    }
+
+    #[test]
+    fn a_status_that_is_not_one_is_a_500() {
+        assert_eq!(buffered(0, Vec::new(), Vec::new()).status(), 500);
     }
 }

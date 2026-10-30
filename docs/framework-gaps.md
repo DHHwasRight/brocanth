@@ -425,7 +425,7 @@ means it is not yet a feature.
 | Per-collection rules applied in the admin (P7; PLAN.md §12 item 9) | **yes, except create** | `AdminConfig::resource`: the list and its count filter in the query, a record is a guarded select, a write is guarded by the condition it was checked against (zero rows is `409`), and forms take only `Policy::writable` columns. A model with no resource is `403`. A create rule other than `Always` or `Never` is refused, not decided |
 | Admin auto-discovery (D9) | **partial** | discovery reads the entity registry; entities are named once in `admin_source!` |
 | Auth: hashing, login, permissions (D10) | **yes, unwired** | `brocanth-auth`, 8,875 lines, not on the menu |
-| CSRF (D12) | **unknown** | not audited; `auth` is the likely home |
+| CSRF (D12) | **yes** | `brocanth_middleware::Csrf`, a double-submit cookie, registered by `middleware-csrf` and run on every request of a generated project; `CsrfToken::stamp_forms` puts the field in the admin's forms |
 | Class-based CRUD views (D14) | **yes, unwired** | `brocanth-resource`, nothing depends on it |
 | Named routes, `reverse()` (D15) | **better** | route helpers are generated and checked by the compiler |
 | App registry, `startapp` (D17) | **yes, and further** | the module system plus `brocanth add` |

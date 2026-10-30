@@ -179,6 +179,11 @@ mod templates {
 }
 
 pub use admin::{Admin, AdminError, Response, Route};
+
+/// The one inline script of the admin layout that is not dp-swap's own
+/// partial script. A Content-Security-Policy allows it by its hash:
+/// `Csp::default().inline_script(brocanth_admin::INLINE_SCRIPT)`.
+pub const INLINE_SCRIPT: &str = assets::SCRIPT;
 pub use config::{AdminConfig, ModelAdmin};
 pub use data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search, SharedData};
 pub use rows::{AdminResource, RowAction};
