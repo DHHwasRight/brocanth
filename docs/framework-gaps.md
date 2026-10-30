@@ -415,7 +415,7 @@ means it is not yet a feature.
 | Middleware (A18, N6, D16) | **yes** | `MiddlewareStack`, mounted at a pattern the application picks |
 | Endpoints returning a Response (A19) | **yes** | `pages!` handlers |
 | Sessions (A17, D11) | **yes** | the `sessions` module, cookie-backed |
-| Route caching with tags (A15) | **no** | `brocanth-cache` is a key/value cache, not a route cache |
+| Route caching with tags (A15) | **yes** | `brocanth_cache::route::RouteCache`: GET responses, a vary set, rule and handler tags, `invalidate_tag`. See `docs/cache.md` |
 | Streaming / Suspense (N9) | **no, and blocked** | `Response` is `http::Response<Vec<u8>>` |
 | ORM, lazy queries, N+1 help (D1, D4) | **yes** | `brocanth-model`, `Probe` detects N+1 |
 | Migrations from a model diff (D2, D3) | **partial** | SeaORM migrations exist; no `makemigrations` diffing |
@@ -429,7 +429,7 @@ means it is not yet a feature.
 | Named routes, `reverse()` (D15) | **better** | route helpers are generated and checked by the compiler |
 | App registry, `startapp` (D17) | **yes, and further** | the module system plus `brocanth add` |
 | `manage.py` custom commands (D18) | **yes** | `brocanth-command`, `#[cmd]` registers at link time |
-| Cache framework (D19) | **partial** | key/value only; no per-view or fragment caching |
+| Cache framework (D19) | **yes** | key/value, tags, a route cache and `CacheExt::fragment`; Postgres only, no Redis or memcached backend. See `docs/cache.md` |
 | Signals (D20) | **partial** | `brocanth-events` is tested and `brocanth-realtime` subscribes; `brocanth-model` publishes nothing |
 | Settings per environment (D21) | **yes** | `brocanth-config`, layered TOML |
 | Content-hashed static files (D22, A22) | **yes** | `brocanth-assets`, `assets::url()` |
@@ -464,7 +464,7 @@ because the argument is still why each one matters.
 | G5 | `resource` and `schema` are wired to nothing | **half**: `validation` reaches applications, `resource` is on the menu and blocked |
 | G6 | no HTTP test client | **done**: `brocanth-test`, with `TestClient` and an HTML reader |
 | G7 | no migration diffing | open |
-| G8 | the cache is key/value only | open; G1 no longer blocks the route-cache half |
+| G8 | the cache is key/value only | **done**: tags on `Cache` (`set_tagged`, `invalidate_tag`), `route::RouteCache`, `CacheExt::fragment`, and `TagInvalidator` from model changes. See `docs/cache.md` |
 | G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | open |
 | G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
@@ -615,6 +615,12 @@ not an argument against diffing.
 No per-view cache, no fragment cache, no tag invalidation (A15, D19). The
 `Cache` trait and the unlogged-table backend are the hard half; a route cache
 is a `ResponseHook` away — once G1 settles what a hook sees.
+
+**Closed, 2026-10-30.** The route cache is an `AsyncRequestHook` for the
+lookup and a `ResponseHook` for the store, and `BodyShape::Streaming` is how
+it refuses a stream. Tags live in a second unlogged table, so a plain `set`
+keeps its HOT update. `docs/cache.md` has the surface and what it does not
+do.
 
 ### G9. Smaller, and genuinely absent
 

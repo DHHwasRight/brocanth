@@ -99,6 +99,7 @@ use std::time::{Duration, Instant};
 use crate::cache::Cache;
 use crate::error::CacheError;
 use crate::key::Key;
+use crate::tag::Tag;
 
 /// A boxed future, as `async_trait` would make.
 ///
@@ -138,6 +139,9 @@ pub struct FetchPolicy {
     /// keeps a short computation's waiters responsive and a long one's cheap.
     /// Default: 200 ms.
     pub poll_at_most: Duration,
+    /// The tags the computed value is stored with. Empty by default, which
+    /// stores it with a plain [`Cache::set`].
+    pub tags: Vec<Tag>,
 }
 
 impl FetchPolicy {
@@ -149,7 +153,15 @@ impl FetchPolicy {
             wait_for: Duration::from_secs(5),
             poll_every: Duration::from_millis(20),
             poll_at_most: Duration::from_millis(200),
+            tags: Vec::new(),
         }
+    }
+
+    /// Stores the computed value with these tags. See [`crate::tag`].
+    #[must_use]
+    pub fn tags(mut self, tags: impl IntoIterator<Item = Tag>) -> Self {
+        self.tags = tags.into_iter().collect();
+        self
     }
 
     /// How long the claim on the key lasts.
@@ -327,7 +339,7 @@ pub trait CacheExt: Cache {
             }
 
             match compute().await {
-                Ok(value) => match self.set(key, &value, policy.ttl).await {
+                Ok(value) => match store(self, key, &value, &policy).await {
                     Ok(()) => Ok(value),
                     Err(error) => {
                         if holding_lease {
@@ -348,6 +360,105 @@ pub trait CacheExt: Cache {
             }
         })
     }
+
+    /// A rendered fragment of a page: the cached text at `key`, or `render`'s
+    /// output, stored with `tags` for `ttl`.
+    ///
+    /// `render` is a plain closure, not a future, because a template renders
+    /// synchronously: put the template call inside it. It runs at most once,
+    /// and only on a miss, under the same single-flight lease as
+    /// [`CacheExt::fetch`].
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use brocanth_cache::{CacheExt, Namespace, PgCache, Tag};
+    /// # async fn example(cache: &PgCache) -> Result<(), Box<dyn std::error::Error>> {
+    /// let fragments = Namespace::new("fragments")?;
+    /// let sidebar = cache
+    ///     .fragment(
+    ///         &fragments.key("sidebar")?,
+    ///         &[Tag::table("posts")?],
+    ///         Duration::from_secs(300),
+    ///         || render_sidebar(),
+    ///     )
+    ///     .await?;
+    /// # let _ = sidebar;
+    /// # Ok(())
+    /// # }
+    /// # fn render_sidebar() -> String { String::new() }
+    /// ```
+    ///
+    /// # Errors
+    /// [`CacheError`] when the cache failed, for the reason [`crate::fetch`]
+    /// gives for not hiding it.
+    fn fragment<'a, F>(
+        &'a self,
+        key: &'a Key,
+        tags: &'a [Tag],
+        ttl: Duration,
+        render: F,
+    ) -> BoxFuture<'a, std::result::Result<String, CacheError>>
+    where
+        F: FnOnce() -> String + Send + 'a,
+    {
+        Box::pin(async move {
+            self.try_fragment(key, tags, ttl, || {
+                Ok::<_, std::convert::Infallible>(render())
+            })
+            .await
+            .map_err(|error| match error {
+                FetchError::Cache(error) => error,
+                FetchError::Compute(never) => match never {},
+            })
+        })
+    }
+
+    /// [`CacheExt::fragment`], for a render that can fail. A failed render is
+    /// not stored.
+    ///
+    /// # Errors
+    /// [`FetchError::Compute`] when `render` failed; [`FetchError::Cache`]
+    /// when the cache did.
+    fn try_fragment<'a, F, E>(
+        &'a self,
+        key: &'a Key,
+        tags: &'a [Tag],
+        ttl: Duration,
+        render: F,
+    ) -> BoxFuture<'a, std::result::Result<String, FetchError<E>>>
+    where
+        F: FnOnce() -> std::result::Result<String, E> + Send + 'a,
+        E: Send + 'a,
+    {
+        let policy = FetchPolicy::new(ttl).tags(tags.iter().cloned());
+        Box::pin(async move {
+            let bytes = self
+                .fetch_with(key, policy, || {
+                    let rendered = render().map(String::into_bytes);
+                    std::future::ready(rendered)
+                })
+                .await?;
+            // Only this method stores text under a fragment key, so the bytes
+            // are UTF-8. A key shared with a byte value by mistake reads as
+            // replacement characters, not as a panic.
+            Ok(String::from_utf8(bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        })
+    }
 }
 
 impl<C: Cache + ?Sized> CacheExt for C {}
+
+/// Stores a computed value, with its tags when it has any.
+async fn store<C: Cache + ?Sized>(
+    cache: &C,
+    key: &Key,
+    value: &[u8],
+    policy: &FetchPolicy,
+) -> crate::error::Result<()> {
+    if policy.tags.is_empty() {
+        cache.set(key, value, policy.ttl).await
+    } else {
+        cache.set_tagged(key, value, policy.ttl, &policy.tags).await
+    }
+}

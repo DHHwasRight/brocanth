@@ -69,6 +69,7 @@ use async_trait::async_trait;
 use crate::error::{CacheError, Result};
 use crate::key::Key;
 use crate::key::Namespace;
+use crate::tag::Tag;
 
 /// The default cap on one value, in bytes: 1 MiB.
 ///
@@ -174,6 +175,34 @@ pub trait Cache: Send + Sync + 'static {
     /// unrepresentable `ttl`; [`CacheError::Backend`] when the write failed.
     async fn set(&self, key: &Key, value: &[u8], ttl: Duration) -> Result<()>;
 
+    /// [`Cache::set`], and records that the entry depends on `tags`.
+    ///
+    /// The tag set **replaces** the tags of any earlier tagged write to the
+    /// same key, in the same statement as the value. An empty `tags` clears
+    /// them. A plain [`Cache::set`] leaves the old tags in place, which can
+    /// only make a later invalidation remove more than it had to. See
+    /// [`crate::tag`] for what invalidation promises.
+    ///
+    /// # Errors
+    /// As [`Cache::set`].
+    async fn set_tagged(&self, key: &Key, value: &[u8], ttl: Duration, tags: &[Tag]) -> Result<()>;
+
+    /// Removes every entry stored with `tag`, in every namespace, and answers
+    /// how many went.
+    ///
+    /// # Errors
+    /// [`CacheError::Backend`] when the delete failed.
+    async fn invalidate_tag(&self, tag: &Tag) -> Result<u64> {
+        self.invalidate_tags(std::slice::from_ref(tag)).await
+    }
+
+    /// Removes every entry stored with any of `tags`, and answers how many
+    /// went. One round trip on a backend that can do it.
+    ///
+    /// # Errors
+    /// [`CacheError::Backend`] when the delete failed.
+    async fn invalidate_tags(&self, tags: &[Tag]) -> Result<u64>;
+
     /// Stores `value` at `key` only if nothing live is there, and answers
     /// whether it did.
     ///
@@ -252,6 +281,10 @@ pub trait Cache: Send + Sync + 'static {
     /// `limit` bounds the work so one call is a short transaction rather than
     /// a lock on the whole table. A return equal to `limit` means there is
     /// probably more to do.
+    ///
+    /// A backend that keeps tags removes the tag records of entries that are
+    /// gone in the same call, up to `limit` of them too. The return counts
+    /// entries only.
     ///
     /// # Errors
     /// [`CacheError::Backend`] when the delete failed.

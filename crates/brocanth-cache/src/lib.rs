@@ -153,6 +153,10 @@
 //!   structs.
 //! * [`clock`] — why time is a `BIGINT` and a parameter.
 //! * [`plugin`] — the lifecycle, and why this plugin starts nothing.
+//! * [`tag`] — what a tag invalidation promises, and what it does not.
+//! * [`route`] — the route cache, and every reason it refuses to store.
+//! * [`CacheExt::fragment`] — a rendered fragment, under the same lease as
+//!   `fetch`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -169,7 +173,12 @@ pub mod error;
 pub mod fetch;
 pub mod key;
 pub mod plugin;
+pub mod route;
 pub mod sweep;
+pub mod tag;
+
+#[cfg(feature = "events")]
+pub mod invalidate;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -199,13 +208,17 @@ pub use fetch::{CacheExt, FetchError, FetchPolicy};
 pub use key::{Key, Namespace, MAX_KEY_BYTES, MAX_NAMESPACE_BYTES};
 pub use plugin::{CacheConfig, CacheHandle, CachePlugin};
 pub use sweep::sweep;
+pub use tag::{Tag, MAX_TAG_BYTES};
+
+#[cfg(feature = "events")]
+pub use invalidate::TagInvalidator;
 
 #[cfg(feature = "postgres")]
 pub use postgres::{CacheStats, PgCache};
 
 /// Everything an application that caches needs, in one `use`.
 pub mod prelude {
-    pub use crate::{Cache, CacheConfig, CacheExt, CacheHandle, CachePlugin, Key, Namespace};
+    pub use crate::{Cache, CacheConfig, CacheExt, CacheHandle, CachePlugin, Key, Namespace, Tag};
 
     #[cfg(feature = "postgres")]
     pub use crate::PgCache;
