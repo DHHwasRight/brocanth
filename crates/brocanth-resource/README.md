@@ -50,9 +50,10 @@ brocanth_resource::pages::mount(routes, &format!("{prefix}/posts"), Arc::new(Pos
 The module declares no settings: there is no `[resource]` section, flag or
 variable. The resources are code.
 
-`brocanth add resource` refuses in an existing project. The module must change
-`src/pages/mod.rs`, and that file is yours. The command prints the change.
-Apply it by hand, or start from `brocanth create`.
+`brocanth add resource` works in an existing project. The module changes
+`src/pages/mod.rs`: if you have not edited that file, the command rewrites
+it. If you have, it prints the change, writes nothing, and goes through
+once you have made the change by hand.
 
 ## Examples
 

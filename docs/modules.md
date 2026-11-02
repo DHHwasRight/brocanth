@@ -675,6 +675,45 @@ without editing the CLI.
   nothing asks. `brocanth.toml` lists the present ones as `adapted_to`,
   for the `remove` that will need to know which modules to rewrite.
 
+### Adding to a project — what `add` may rewrite
+
+`brocanth add` generates the whole project again with one more module,
+compares it with what the generator wrote before, and writes the
+difference. Three rules decide what it may touch:
+
+1. **Every module runs again.** A module that adapts to the new one
+   writes its adaptation, as `create` would have: `admin` gets its
+   `admin eject` command when `commands` arrives, and `ci-github`
+   rewrites the workflow when `jobs` arrives. Nothing extra was needed
+   for this; a test holds it.
+2. **An unedited file is the generator's.** A file of the developer's
+   (`src/pages/mod.rs`, `.github/workflows/ci.yml`, a plugin's
+   `mod.rs`) that still holds, byte for byte, what the generator wrote
+   for the recorded modules is rewritten. Nobody edited it, so nothing is
+   lost. Before this rule, `add admin`, `add openapi` and `add resource`
+   were refused on a new project, because each changes
+   `src/pages/mod.rs`, and `add jobs` was refused on a default project,
+   because of the workflow.
+3. **An edit is never overwritten.** When the file was edited, `add`
+   prints the change and writes nothing. When the developer has made the
+   change by hand around their own lines, the next run finds every added
+   line present and every removed line gone, and goes through.
+
+Why refuse, rather than finish the add and leave the proposed file
+beside the real one (`<file>.brocanth-new`)? Every change the generator
+makes in a developer's file is a wiring line the new module needs: a
+`mod` line, a route, a derive. Without it the project does not compile,
+or compiles and silently does not run the module. Half an add is worse
+than none, and the refusal already shows the exact edit. `src/app.rs`
+stays the exception: its line is a middleware mount, a decision whose
+absence leaves a working project, so an edited `app.rs` gets the line
+printed and the add goes on.
+
+"Unedited" is measured against the generator of the brocanth that runs
+the command. After an upgrade that changed a template, an untouched file
+reads as edited, and `add` refuses with the diff. That is the safe
+direction: it never mistakes an edit for the generator's text.
+
 ---
 
 ## 8. What to do, in order
