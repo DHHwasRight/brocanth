@@ -192,6 +192,15 @@ impl SecurityHeadersConfig {
         self
     }
 
+    /// Allow one more inline script in the policy, by the hash of its
+    /// exact text. The rest of the policy stays as it is, so a policy read
+    /// from a file keeps what the file set.
+    #[must_use]
+    pub fn inline_script(mut self, text: &str) -> Self {
+        self.csp = self.csp.inline_script(text);
+        self
+    }
+
     /// Set the `Permissions-Policy`.
     #[must_use]
     pub fn permissions_policy(mut self, policy: impl Into<String>) -> Self {

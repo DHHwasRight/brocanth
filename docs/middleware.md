@@ -193,13 +193,37 @@ img-src = ["'self'", "https://img.example.com"]   # one directive, the rest stay
 ```
 
 ```rust
-let headers = config.section::<SecurityHeadersConfig>("security_headers")?;
-let builder = builder.plugin_hooking(SecurityHeaders::new(headers));
+use brocanth_config::AppBuilderConfigExt;
+
+let builder = builder
+    .with_config(config)
+    .plugin_hooking_from_config::<SecurityHeaders>("security_headers")?;
 ```
 
-`plugin_with_defaults` cannot register it: that path calls `plugin`,
-and a plugin that installs hooks must go through `plugin_hooking`.
-Registering it by its default name claims the section all the same.
+`plugin_hooking_from_config` is `plugin_from_config` for a plugin that
+installs hooks: the instance takes the section's name, so the section is
+claimed, and the hook record is widened. `plugin_with_defaults` cannot
+register a hooking plugin: that path calls `plugin`, and `build()`
+refuses a hooking plugin added that way.
+
+For a value only code can give, `plugin_hooking_from_config_with` takes a
+closure over the configuration. The file still decides every key the
+closure leaves alone:
+
+```rust
+let builder = builder.plugin_hooking_from_config_with::<SecurityHeaders>(
+    "security_headers",
+    |headers| headers.inline_script(brocanth_admin::INLINE_SCRIPT),
+)?;
+```
+
+**In a generated project.** The `middleware-security-headers` module
+declares `behind_tls`, `nosniff`, `referrer_policy`,
+`permissions_policy`, `hsts.*` and `csp.enabled`, `csp.report_only`,
+`csp.report_uri`. Each is a key in `[security_headers]` with `config`,
+and a flag (`--security_headers.behind_tls=true`) and an environment
+variable either way. `frames` and `csp.directives` are file-only: they
+do not parse from one string. See `docs/module-flags.md`.
 
 **`brocanth check --deploy`.** `deploy/hsts` now looks for this hook.
 It warns when no hook and no `Strict-Transport-Security` literal is in
@@ -307,12 +331,17 @@ window_secs = 60
 key = ["ip"]                    # the default
 ```
 
+In a generated project, `ip_header`, `session_cookie` and `fail_open` are
+also flags (`--rate_limit.ip_header=fly-client-ip`) and environment
+variables. The rules are file-only, as `[[rate_limit.rules]]`: a rule is
+a record, and a flag has no spelling for a list of records. Without
+`config` the example rule is code beside the registration.
+
+CSRF reads `[csrf]` the same way: `cookie`, `field`, `header` and
+`secure` are flags too, and `exempt` is file-only.
+
 **What is open.**
 
-- `ProxyHeaders` and the limiter read `PeerAddress`. brocanth-server's
-  bridge sets its own `brocanth_server::Peer`. Nothing converts one into
-  the other, so behind the bridge neither sees the socket address. The
-  limiter still works with `ip_header`.
 - `SharedRateLimit` cannot be served by `Bridge` until the bridge drives
   `App::begin_async`.
 - The limits are per process with `RateLimit`. A deployment with more

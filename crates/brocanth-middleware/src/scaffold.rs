@@ -32,14 +32,31 @@
 //! ticked, configured, and with its own paragraph in `AGENTS.md`.
 //!
 //! Its registration is real code, and so are the security headers' and
-//! the rate limit's. Each goes through [`snippet::hooking`], which also
-//! writes the plugin into the generated `plugins::Hooks` record, and the
-//! generated `src/app.rs` runs every request through `App::begin_async`
-//! and `App::finish`. So a hook this module registers runs.
+//! the rate limit's. Each goes through [`snippet::configurable_hooking`],
+//! which also writes the plugin into the generated `plugins::Hooks` record,
+//! and the generated `src/app.rs` runs every request through
+//! `App::begin_async` and `App::finish`. So a hook this module registers
+//! runs.
 //!
-//! [`snippet::hooking`]: brocanth_scaffold::snippet::hooking
+//! # Settings
+//!
+//! The three declare their settings, so each gets a section in
+//! `config/<env>.toml` when the project has `config`, and a flag and an
+//! environment variable either way: `--csrf.secure`, `--security_headers.
+//! behind_tls`, `--rate_limit.ip_header`. The section is the plugin's
+//! instance name, which is what `brocanth-config` checks a section
+//! against. The configuration types are this crate's own, so the generated
+//! readers start from their `Default`; the `config` feature derives
+//! `Deserialize` on them only when the project has the config file.
+//!
+//! A list has no flag. CSRF's `exempt` and the rate limit's rules are
+//! file-only: a rule is a record of six fields, and `[[rate_limit.rules]]`
+//! is how TOML writes a list of records.
+//!
+//! [`snippet::configurable_hooking`]: brocanth_scaffold::snippet::configurable_hooking
 
-use brocanth_scaffold::{snippet, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
 pub struct Middleware;
@@ -52,7 +69,7 @@ impl Module for Middleware {
         )
         .category(Category::Middleware)
         .asked_in("doors", "The edge hooks: proxies, CORS, a canonical host")
-        .krate(Dep::brocanth("brocanth-middleware"))
+        .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
         .absent(
             "brocanth-middleware",
             "no edge hooks; a forwarded address, a preflight and a canonical \
@@ -164,6 +181,10 @@ impl Module for Csrf {
             "a double-submit cookie, checked on every verb that is not a read",
         )
         .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
         .asked_in(
             "doors",
             "Refuse a form post this application did not hand out",
@@ -178,19 +199,54 @@ impl Module for Csrf {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        snippet::hooking(
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let exempt = if project.has("config") {
+            "        //     exempt = [\"/webhooks\"]    under [csrf] in config/<env>.toml\n"
+        } else {
+            "        //     a list has no flag: `brocanth add config` gives `exempt`\n\
+             \x20       //     a home under [csrf] in config/<env>.toml\n"
+        };
+        configurable_hooking(
             s,
-            "middleware-csrf",
-            "brocanth_middleware::Csrf",
-            REGISTRATION.to_string(),
+            project,
+            Hooking {
+                key: "middleware-csrf",
+                section: "csrf",
+                ty: "brocanth_middleware::Csrf",
+                config_ty: "brocanth_middleware::CsrfConfig",
+                prelude: CSRF_PRELUDE.replace("@EXEMPT@\n", exempt),
+                adjust: None,
+            },
+            vec![
+                Setting::text("cookie", "csrf_token", "The cookie this hook owns."),
+                Setting::text(
+                    "field",
+                    "_csrf_token",
+                    "The form field the token comes back in.",
+                ),
+                Setting::text(
+                    "header",
+                    "x-csrf-token",
+                    "The header a fetch caller may send instead of the field.",
+                )
+                .optional()
+                .note("While it is set, the cookie is not HttpOnly: a script reads it."),
+                Setting::list(
+                    "exempt",
+                    &[],
+                    "Paths never checked, each with everything under it.",
+                )
+                .note("For a caller that is not a browser: a webhook, a device."),
+                Setting::bool("secure", true, "Send the cookie over HTTPS only."),
+            ],
         );
         s.at(Slot::AgentsSections).block(CSRF_AGENTS.to_string());
     }
 }
 
-/// The registration, with the configuration already filled in.
-const REGISTRATION: &str = r#"
+/// The comment above the registration. `@EXEMPT@` is where an exempt path
+/// goes, which depends on whether there is a file.
+const CSRF_PRELUDE: &str = r#"
         // -- brocanth-middleware: CSRF ------------------------------------
         //
         // Not one of the five above. Each of those encodes a fact about
@@ -200,15 +256,10 @@ const REGISTRATION: &str = r#"
         // the only thing to decide is which paths are exempt -- a webhook,
         // or anything else whose caller is not a browser:
         //
-        //     CsrfConfig::default().exempt(["/webhooks"])
+@EXEMPT@
         //
         // The token for the request is `ctx.hooked::<CsrfToken>()`;
         // `token.hidden_field()` is the input a form carries.
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::CsrfConfig::default(),
-            ),
-        );
 "#;
 
 /// What the generated `AGENTS.md` says about forms.
@@ -247,6 +298,10 @@ impl Module for SecurityHeaders {
         )
         .category(Category::Middleware)
         .adapts_to("admin", "the CSP allows the admin's inline script by hash")
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
         .asked_in("doors", "Send the headers a browser reads as policy")
         .part_of("middleware")
         .because(
@@ -261,46 +316,97 @@ impl Module for SecurityHeaders {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         // The admin layout inlines dp-swap's vendored copy, which the
-        // default policy does not know. Its hash goes in, or the policy
-        // blocks the admin's script.
-        let config = if project.has("admin") {
-            "brocanth_middleware::SecurityHeadersConfig::default().csp(\n\
-             \x20                   brocanth_middleware::Csp::default()\n\
-             \x20                       .inline_script(brocanth_admin::INLINE_SCRIPT),\n\
-             \x20               ),"
+        // default policy does not know. Its hash goes in on top of what the
+        // file says, or the policy blocks the admin's script.
+        let adjust = project
+            .has("admin")
+            .then(|| ".inline_script(brocanth_admin::INLINE_SCRIPT)".to_string());
+        let behind_tls = if project.has("config") {
+            "`behind_tls = true` under\n        // [security_headers] in config/<env>.toml"
         } else {
-            "brocanth_middleware::SecurityHeadersConfig::default(),"
+            "`--security_headers.behind_tls=true`,\n        // or the environment variable `--help` names"
         };
-        snippet::hooking(
+        configurable_hooking(
             s,
-            "middleware-security-headers",
-            "brocanth_middleware::SecurityHeaders",
-            SECURITY_HEADERS_REGISTRATION.replace("@CONFIG@", config),
+            project,
+            Hooking {
+                key: "middleware-security-headers",
+                section: "security_headers",
+                ty: "brocanth_middleware::SecurityHeaders",
+                config_ty: "brocanth_middleware::SecurityHeadersConfig",
+                prelude: SECURITY_HEADERS_PRELUDE.replace("@BEHIND_TLS@", behind_tls),
+                adjust,
+            },
+            vec![
+                Setting::bool(
+                    "behind_tls",
+                    false,
+                    "Every request arrives through a TLS terminator, so HSTS always goes out.",
+                )
+                .note("False in development: HSTS from localhost pins the name in the browser."),
+                Setting::bool("nosniff", true, "Send `X-Content-Type-Options: nosniff`."),
+                Setting::text(
+                    "referrer_policy",
+                    "strict-origin-when-cross-origin",
+                    "The `Referrer-Policy`.",
+                )
+                .optional(),
+                Setting::text(
+                    "permissions_policy",
+                    "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+                    "The `Permissions-Policy`.",
+                )
+                .optional(),
+                Setting::bool("hsts.enabled", true, "Send `Strict-Transport-Security`."),
+                Setting::integer(
+                    "hsts.max_age",
+                    31_536_000,
+                    "How long the browser remembers HTTPS-only, in seconds.",
+                ),
+                Setting::bool(
+                    "hsts.include_subdomains",
+                    false,
+                    "The HSTS rule covers every subdomain too.",
+                )
+                .note("Only when the person who owns the domain says so."),
+                Setting::bool(
+                    "hsts.preload",
+                    false,
+                    "Ask to be on the browsers' built-in HSTS list.",
+                )
+                .note("Hard to undo: removal takes months to reach users."),
+                Setting::bool("csp.enabled", true, "Send a `Content-Security-Policy`."),
+                Setting::bool(
+                    "csp.report_only",
+                    false,
+                    "Send the policy as `Content-Security-Policy-Report-Only`.",
+                ),
+                Setting::text(
+                    "csp.report_uri",
+                    "/csp-reports",
+                    "Where a browser reports what the policy blocked.",
+                )
+                .optional(),
+            ],
         );
         s.at(Slot::AgentsSections)
             .block(SECURITY_HEADERS_AGENTS.to_string());
     }
 }
 
-/// The registration. `@CONFIG@` is the configuration expression.
-const SECURITY_HEADERS_REGISTRATION: &str = r#"
+/// The comment above the registration. `@BEHIND_TLS@` says where to set
+/// `behind_tls`, which depends on whether there is a file.
+const SECURITY_HEADERS_PRELUDE: &str = r#"
         // -- brocanth-middleware: security headers ------------------------
         //
         // HSTS (over HTTPS only), nosniff, Referrer-Policy, X-Frame-Options
         // DENY, a Content-Security-Policy and a Permissions-Policy. The
         // policy allows dp-swap's two inline scripts by their SHA-256, so
         // there is no `'unsafe-inline'`. A script you inline yourself needs
-        // `Csp::default().inline_script(TEXT)`.
+        // `.inline_script(TEXT)` on the configuration.
         //
         // HSTS goes out only when the request is known to be HTTPS. Behind
-        // a TLS terminator, say so: `SecurityHeadersConfig::default()
-        // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
-        //
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
-                @CONFIG@
-            ),
-        );
+        // a TLS terminator, say so: @BEHIND_TLS@.
 "#;
 
 /// What the generated `AGENTS.md` says about the policy.
@@ -332,6 +438,10 @@ impl Module for RateLimit {
             "a fixed window per address, session or user, per group of routes; 429 with Retry-After",
         )
         .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
@@ -342,41 +452,101 @@ impl Module for RateLimit {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        snippet::hooking(
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        // The rules are records, so they live in the file when there is
+        // one. Without it they are code: a list of records has no flag.
+        let (prelude, adjust) = if project.has("config") {
+            (RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_FILE), None)
+        } else {
+            (
+                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE) + LOGIN_RULE,
+                Some(".rule(login)".to_string()),
+            )
+        };
+        configurable_hooking(
             s,
-            "middleware-rate-limit",
-            "brocanth_middleware::RateLimit",
-            RATE_LIMIT_REGISTRATION.to_string(),
+            project,
+            Hooking {
+                key: "middleware-rate-limit",
+                section: "rate_limit",
+                ty: "brocanth_middleware::RateLimit",
+                config_ty: "brocanth_middleware::RateLimitConfig",
+                prelude,
+                adjust,
+            },
+            vec![
+                Setting::text(
+                    "ip_header",
+                    "fly-client-ip",
+                    "A header that holds the client address, set by your edge.",
+                )
+                .optional()
+                .note(
+                    "Only a header the edge overwrites. Never `X-Forwarded-For` as the client sent it.",
+                ),
+                Setting::text(
+                    "session_cookie",
+                    &format!("_{}_session", project.ident()),
+                    "The session cookie, for a rule keyed by session.",
+                )
+                .optional(),
+                Setting::bool(
+                    "fail_open",
+                    true,
+                    "Let a request through when the counter store fails.",
+                ),
+            ],
         );
+        if project.has("config") {
+            s.at(Slot::ConfigSections).block(RULES_TOML.to_string());
+        }
         s.at(Slot::AgentsSections)
             .block(RATE_LIMIT_AGENTS.to_string());
     }
 }
 
-/// The registration, with an example rule that is marked as one.
-const RATE_LIMIT_REGISTRATION: &str = r#"
+/// The comment above the registration. `@RULES@` says where the rules are.
+const RATE_LIMIT_PRELUDE: &str = r#"
         // -- brocanth-middleware: rate limit ------------------------------
         //
         // A fixed window per key. Each rule is a group of routes, a limit
-        // and a window. THE RULE BELOW IS AN EXAMPLE for a login form, not
-        // a recommendation: replace it with numbers from your own traffic.
+        // and a window. THE EXAMPLE RULE IS FOR A LOGIN FORM, not a
+        // recommendation: replace it with numbers from your own traffic.
+        // @RULES@
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips: `.ip_header("fly-client-ip")`.
+        // strips in `ip_header`.
         //
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
-        //
-        let login = brocanth_middleware::Rule::new("login", 5, 60)
+"#;
+
+/// Where the rules are, with a file.
+const RULES_IN_FILE: &str = "The rules are `[[rate_limit.rules]]` in config/<env>.toml.";
+
+/// Where the rules are, without one.
+const RULES_IN_CODE: &str = "The rule is below: `brocanth add config` moves rules to a file.";
+
+/// The example rule, as code.
+const LOGIN_RULE: &str = r#"        let login = brocanth_middleware::Rule::new("login", 5, 60)
             .paths(["/login"])
             .methods(["POST"]);
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::RateLimitConfig::rules([login]),
-            ),
-        );
+"#;
+
+/// The example rule, as the file holds it. An array of tables: a rule is a
+/// record of six fields, and this is how TOML writes a list of records.
+/// `key` and `paths` default to the client address and every path.
+const RULES_TOML: &str = r#"
+# THE RULE BELOW IS AN EXAMPLE for a login form, not a recommendation.
+# One table per group of routes; a request counts against each that matches.
+# `key` is a list of "ip", "session" and "user", first found wins.
+[[rate_limit.rules]]
+name = "login"
+paths = ["/login"]
+methods = ["POST"]
+limit = 5
+window_secs = 60
 "#;
 
 /// What the generated `AGENTS.md` says, so an agent does not invent a

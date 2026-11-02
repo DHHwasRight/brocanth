@@ -507,6 +507,9 @@ pub struct Dep {
     /// Features to turn on. Default features stay on; a module that needs
     /// them off says so with [`Dep::no_default_features`].
     pub features: Vec<&'static str>,
+    /// Features turned on only when another module is chosen, as
+    /// `(module key, feature)`. Set with [`Dep::feature_with`].
+    pub with: Vec<(&'static str, &'static str)>,
     /// Whether `default-features = false` is written.
     pub defaults: bool,
     /// A trailing comment on the dependency line. Short, and about why this
@@ -552,6 +555,7 @@ impl Dep {
             name,
             source,
             features: Vec::new(),
+            with: Vec::new(),
             defaults: true,
             note: None,
         }
@@ -560,6 +564,17 @@ impl Dep {
     /// Turn a feature on.
     pub fn feature(mut self, feature: &'static str) -> Self {
         self.features.push(feature);
+        self
+    }
+
+    /// Turn a feature on when the project also has the module `key`.
+    ///
+    /// A manifest is static, and some features exist only for another
+    /// module: `brocanth-middleware`'s `config` derives `Deserialize` on
+    /// its settings, which only the config file reads. Without `config`
+    /// the feature would put a parser in a project that asked for none.
+    pub fn feature_with(mut self, key: &'static str, feature: &'static str) -> Self {
+        self.with.push((key, feature));
         self
     }
 
@@ -1102,6 +1117,7 @@ pub struct Scaffold {
     slots: BTreeMap<Slot, Vec<Owned>>,
     bins: Vec<(String, Binary)>,
     settings: Vec<(String, String, Setting)>,
+    settings_types: BTreeMap<String, String>,
     problems: Vec<String>,
     writing: String,
 }
@@ -1209,6 +1225,29 @@ impl Scaffold {
         }
         self.settings
             .push((self.writing.clone(), section.to_string(), setting));
+    }
+
+    /// Name the type a section's settings deserialise into, when it is not
+    /// the generated `crate::plugins::<section>::Settings`.
+    ///
+    /// A plugin from a library crate has its own configuration type,
+    /// `brocanth_middleware::CsrfConfig`, and no generated settings struct.
+    /// The generated readers start from that type's `Default` and set its
+    /// fields, so the path must name a type with `Default` and public
+    /// fields.
+    pub fn settings_type(&mut self, section: &str, path: &str) {
+        self.settings_types
+            .insert(section.to_string(), path.to_string());
+    }
+
+    /// The type a section's settings deserialise into: the one
+    /// [`Scaffold::settings_type`] named, or the generated
+    /// `crate::plugins::<section>::Settings`.
+    pub fn settings_type_of(&self, section: &str) -> String {
+        self.settings_types
+            .get(section)
+            .cloned()
+            .unwrap_or_else(|| format!("crate::plugins::{section}::Settings"))
     }
 
     /// Every declared setting: the module that declared it, its section,
@@ -1535,6 +1574,106 @@ pub mod snippet {
             .line(format!("{key} crate::plugins::{key}::{ty}"));
         for setting in settings {
             s.setting(key, setting);
+        }
+    }
+
+    /// A plugin from a library crate that installs hooks, with declared
+    /// settings. See [`configurable_hooking`].
+    #[derive(Debug, Clone)]
+    pub struct Hooking<'a> {
+        /// The module's key, which names the provider alias.
+        pub key: &'a str,
+        /// The config section, which is also the plugin's instance name:
+        /// `csrf`, `security_headers`. Flags are `--<section>.<key>`.
+        pub section: &'a str,
+        /// The plugin type: `brocanth_middleware::Csrf`.
+        pub ty: &'a str,
+        /// Its configuration type: `brocanth_middleware::CsrfConfig`. The
+        /// generated readers start from its `Default` and set its public
+        /// fields, and the file deserialises into it.
+        pub config_ty: &'a str,
+        /// What comes before the registration statement, already indented
+        /// for `register!`: the comment that explains it, and any `let`
+        /// the adjustment needs. Empty for none.
+        pub prelude: String,
+        /// A method chain applied to the configuration before the plugin is
+        /// built, for a value only code can give: `.inline_script(TEXT)`.
+        /// The file and the flags still decide every key it leaves alone.
+        pub adjust: Option<String>,
+    }
+
+    /// Registers a hooking plugin whose settings are declared, and writes
+    /// everything that follows from the declaration.
+    ///
+    /// [`configurable`] for a plugin that installs hooks and whose
+    /// configuration type lives in its own crate:
+    ///
+    /// * With `config`: the `[section]` block and a registration through
+    ///   `plugin_hooking_from_config`, so the file, the environment and the
+    ///   flags reach the plugin.
+    /// * Without it: a registration that starts from the configuration
+    ///   type's `Default` and applies the environment and the flags.
+    ///
+    /// Also the provider line and the hook record line, as [`hooking`]
+    /// writes them, and the settings type, so the generated readers name
+    /// the plugin's own type.
+    pub fn configurable_hooking(
+        s: &mut Scaffold,
+        project: &Project,
+        hooking: Hooking<'_>,
+        settings: Vec<Setting>,
+    ) {
+        let Hooking {
+            key,
+            section,
+            ty,
+            config_ty,
+            prelude,
+            adjust,
+        } = hooking;
+        if project.has("config") {
+            s.at(Slot::ConfigSections)
+                .block(super::config_section(section, &settings));
+        }
+        let statement = if project.has("config") {
+            match &adjust {
+                None => format!(
+                    "        let builder = builder\n\
+                     \x20           .plugin_hooking_from_config::<{ty}>({section:?})\n\
+                     \x20           .map_err(|e| e.to_string())?;\n"
+                ),
+                Some(adjust) => format!(
+                    "        let builder = builder\n\
+                     \x20           .plugin_hooking_from_config_with::<{ty}>(\n\
+                     \x20               {section:?},\n\
+                     \x20               |config| config{adjust},\n\
+                     \x20           )\n\
+                     \x20           .map_err(|e| e.to_string())?;\n"
+                ),
+            }
+        } else {
+            let ident = section.replace('-', "_");
+            let value = match &adjust {
+                None => format!("                crate::plugins::{ident}_settings(&given)?,\n"),
+                Some(adjust) => {
+                    format!("                crate::plugins::{ident}_settings(&given)?{adjust},\n")
+                }
+            };
+            format!(
+                "        let builder = builder.plugin_hooking(\n\
+                 \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
+                 {value}\
+                 \x20           ),\n\
+                 \x20       );\n"
+            )
+        };
+        s.at(Slot::AppPlugins)
+            .block(format!("{prelude}{statement}"));
+        s.at(Slot::PluginsInstalled).line(format!("{key} {ty}"));
+        s.at(Slot::PluginsHooks).line(ty);
+        s.settings_type(section, config_ty);
+        for setting in settings {
+            s.setting(section, setting);
         }
     }
 

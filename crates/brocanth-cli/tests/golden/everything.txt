@@ -24,7 +24,7 @@ brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
@@ -1697,15 +1697,13 @@ macro_rules! register {
         // the only thing to decide is which paths are exempt -- a webhook,
         // or anything else whose caller is not a browser:
         //
-        //     CsrfConfig::default().exempt(["/webhooks"])
+        //     exempt = ["/webhooks"]    under [csrf] in config/<env>.toml
         //
         // The token for the request is `ctx.hooked::<CsrfToken>()`;
         // `token.hidden_field()` is the input a form carries.
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::CsrfConfig::default(),
-            ),
-        );
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::openapi::OpenApi>("openapi")
             .map_err(|e| e.to_string())?;
@@ -1722,42 +1720,34 @@ macro_rules! register {
         // DENY, a Content-Security-Policy and a Permissions-Policy. The
         // policy allows dp-swap's two inline scripts by their SHA-256, so
         // there is no `'unsafe-inline'`. A script you inline yourself needs
-        // `Csp::default().inline_script(TEXT)`.
+        // `.inline_script(TEXT)` on the configuration.
         //
         // HSTS goes out only when the request is known to be HTTPS. Behind
-        // a TLS terminator, say so: `SecurityHeadersConfig::default()
-        // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
-        //
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::SecurityHeadersConfig::default().csp(
-                    brocanth_middleware::Csp::default()
-                        .inline_script(brocanth_admin::INLINE_SCRIPT),
-                ),
-            ),
-        );
+        // a TLS terminator, say so: `behind_tls = true` under
+        // [security_headers] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config_with::<brocanth_middleware::SecurityHeaders>(
+                "security_headers",
+                |config| config.inline_script(brocanth_admin::INLINE_SCRIPT),
+            )
+            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: rate limit ------------------------------
         //
         // A fixed window per key. Each rule is a group of routes, a limit
-        // and a window. THE RULE BELOW IS AN EXAMPLE for a login form, not
-        // a recommendation: replace it with numbers from your own traffic.
+        // and a window. THE EXAMPLE RULE IS FOR A LOGIN FORM, not a
+        // recommendation: replace it with numbers from your own traffic.
+        // The rules are `[[rate_limit.rules]]` in config/<env>.toml.
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips: `.ip_header("fly-client-ip")`.
+        // strips in `ip_header`.
         //
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
-        //
-        let login = brocanth_middleware::Rule::new("login", 5, 60)
-            .paths(["/login"])
-            .methods(["POST"]);
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::RateLimitConfig::rules([login]),
-            ),
-        );
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::RateLimit>("rate_limit")
+            .map_err(|e| e.to_string())?;
         builder
     }};
 }
@@ -2118,6 +2108,34 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "openapi.title",
         help: "The name of the API.",
         flag: true,
@@ -2165,6 +2183,104 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "security_headers.behind_tls",
+        help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.nosniff",
+        help: "Send `X-Content-Type-Options: nosniff`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.referrer_policy",
+        help: "The `Referrer-Policy`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.permissions_policy",
+        help: "The `Permissions-Policy`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.hsts.enabled",
+        help: "Send `Strict-Transport-Security`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.max_age",
+        help: "How long the browser remembers HTTPS-only, in seconds.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.include_subdomains",
+        help: "The HSTS rule covers every subdomain too.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.preload",
+        help: "Ask to be on the browsers' built-in HSTS list.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.enabled",
+        help: "Send a `Content-Security-Policy`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_only",
+        help: "Send the policy as `Content-Security-Policy-Report-Only`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_uri",
+        help: "Where a browser reports what the policy blocked. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.ip_header",
+        help: "A header that holds the client address, set by your edge. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.session_cookie",
+        help: "The session cookie, for a rule keyed by session. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.fail_open",
+        help: "Let a request through when the counter store fails.",
+        flag: true,
+        none_as: None,
+        text: false,
     },
 ];
 
@@ -2365,9 +2481,12 @@ fn defaults() -> Vec<(&'static str, String)> {
     let auth = crate::plugins::auth::Settings::default();
     let policy = crate::plugins::policy::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
+    let csrf = brocanth_middleware::CsrfConfig::default();
     let openapi = crate::plugins::openapi::Settings::default();
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
+    let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
+    let rate_limit = brocanth_middleware::RateLimitConfig::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
@@ -2435,6 +2554,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("openapi.title", format!("{:?}", openapi.title)),
         ("openapi.version", format!("{:?}", openapi.version)),
         ("validation.report", format!("{:?}", validation.report)),
@@ -2448,6 +2571,62 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("realtime.queue", format!("{:?}", realtime.queue)),
         ("realtime.overflow", format!("{:?}", realtime.overflow)),
+        (
+            "security_headers.behind_tls",
+            format!("{:?}", security_headers.behind_tls),
+        ),
+        (
+            "security_headers.nosniff",
+            format!("{:?}", security_headers.nosniff),
+        ),
+        (
+            "security_headers.referrer_policy",
+            format!("{:?}", security_headers.referrer_policy),
+        ),
+        (
+            "security_headers.permissions_policy",
+            format!("{:?}", security_headers.permissions_policy),
+        ),
+        (
+            "security_headers.hsts.enabled",
+            format!("{:?}", security_headers.hsts.enabled),
+        ),
+        (
+            "security_headers.hsts.max_age",
+            format!("{:?}", security_headers.hsts.max_age),
+        ),
+        (
+            "security_headers.hsts.include_subdomains",
+            format!("{:?}", security_headers.hsts.include_subdomains),
+        ),
+        (
+            "security_headers.hsts.preload",
+            format!("{:?}", security_headers.hsts.preload),
+        ),
+        (
+            "security_headers.csp.enabled",
+            format!("{:?}", security_headers.csp.enabled),
+        ),
+        (
+            "security_headers.csp.report_only",
+            format!("{:?}", security_headers.csp.report_only),
+        ),
+        (
+            "security_headers.csp.report_uri",
+            format!("{:?}", security_headers.csp.report_uri),
+        ),
+        (
+            "rate_limit.ip_header",
+            format!("{:?}", rate_limit.ip_header),
+        ),
+        (
+            "rate_limit.session_cookie",
+            format!("{:?}", rate_limit.session_cookie),
+        ),
+        (
+            "rate_limit.fail_open",
+            format!("{:?}", rate_limit.fail_open),
+        ),
     ]
 }
 
@@ -2543,7 +2722,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4568135980c6b098
+// brocanth-digest: dace88d61d3779b9
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2713,6 +2892,20 @@ secret = "development only: replace before anything is uploaded in anger"
 # images and short enough to be dead before anyone clicks it.
 token_ttl = 120
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
 [openapi]
 # The name of the API.
 # Not the name of this binary: the document is read by somebody who never
@@ -2746,6 +2939,56 @@ queue = 32
 # The reader is told how many frames it missed either way, so a stale view
 # is a thing the client can see.
 overflow = "drop-oldest"
+
+[security_headers]
+# Every request arrives through a TLS terminator, so HSTS always goes out.
+# False in development: HSTS from localhost pins the name in the browser.
+behind_tls = false
+# Send `X-Content-Type-Options: nosniff`.
+nosniff = true
+# The `Referrer-Policy`. Empty means none.
+# referrer_policy = "strict-origin-when-cross-origin"
+# The `Permissions-Policy`. Empty means none.
+# permissions_policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+
+[security_headers.hsts]
+# Send `Strict-Transport-Security`.
+enabled = true
+# How long the browser remembers HTTPS-only, in seconds.
+max_age = 31536000
+# The HSTS rule covers every subdomain too.
+# Only when the person who owns the domain says so.
+include_subdomains = false
+# Ask to be on the browsers' built-in HSTS list.
+# Hard to undo: removal takes months to reach users.
+preload = false
+
+[security_headers.csp]
+# Send a `Content-Security-Policy`.
+enabled = true
+# Send the policy as `Content-Security-Policy-Report-Only`.
+report_only = false
+# Where a browser reports what the policy blocked. Empty means none.
+# report_uri = "/csp-reports"
+
+[rate_limit]
+# A header that holds the client address, set by your edge. Empty means none.
+# Only a header the edge overwrites. Never `X-Forwarded-For` as the client sent it.
+# ip_header = "fly-client-ip"
+# The session cookie, for a rule keyed by session. Empty means none.
+# session_cookie = "_my_blog_session"
+# Let a request through when the counter store fails.
+fail_open = true
+
+# THE RULE BELOW IS AN EXAMPLE for a login form, not a recommendation.
+# One table per group of routes; a request counts against each that matches.
+# `key` is a list of "ip", "session" and "user", first found wins.
+[[rate_limit.rules]]
+name = "login"
+paths = ["/login"]
+methods = ["POST"]
+limit = 5
+window_secs = 60
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own is a file beside this one; nothing lists it.
@@ -6504,23 +6747,23 @@ adapted_to = []
 [modules.middleware-csrf]
 kind = ["middleware"]
 files = []
-config = []
+config = ["csrf"]
 crates = []
-adapted_to = []
+adapted_to = ["config"]
 
 [modules.middleware-security-headers]
 kind = ["middleware"]
 files = []
-config = []
+config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
-adapted_to = ["admin"]
+adapted_to = ["admin", "config"]
 
 [modules.middleware-rate-limit]
 kind = ["middleware"]
 files = []
-config = []
+config = ["rate_limit"]
 crates = []
-adapted_to = []
+adapted_to = ["config"]
 
 [modules.openapi]
 kind = ["routes", "enhancer"]
@@ -6620,4 +6863,4 @@ config = []
 crates = []
 adapted_to = ["docker", "model", "jobs", "cache"]
 
-# brocanth-digest: 4457a0467442ad08
+# brocanth-digest: 96ca5f79334b9bcf

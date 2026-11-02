@@ -250,6 +250,13 @@ impl RateLimitConfig {
         }
     }
 
+    /// One more rule, after the ones already there.
+    #[must_use]
+    pub fn rule(mut self, rule: Rule) -> Self {
+        self.rules.push(rule);
+        self
+    }
+
     /// Read the address from this header. Only behind an edge that sets
     /// it and strips the client's copy.
     #[must_use]

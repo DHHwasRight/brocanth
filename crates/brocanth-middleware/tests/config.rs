@@ -104,3 +104,43 @@ fn a_misspelt_key_is_an_error() {
         .section::<SecurityHeadersConfig>("security_headers")
         .is_err());
 }
+
+#[test]
+fn a_hooking_plugin_registers_from_its_section_and_claims_it() {
+    use brocanth_middleware::{Csrf, CsrfConfig};
+
+    let toml = format!("{TOML}\n[csrf]\ncookie = \"xsrf_token\"\nexempt = [\"/webhooks\"]\n");
+    let config = Config::from_toml("shop", "production", &toml).expect("TOML");
+    let csrf: CsrfConfig = config.section("csrf").expect("a section");
+    assert_eq!(csrf.cookie, "xsrf_token");
+    assert_eq!(csrf.exempt, vec!["/webhooks".to_string()]);
+    // A key the file does not set keeps its default.
+    assert_eq!(csrf.field, "_csrf_token");
+
+    // The instance takes the section's name, so the unclaimed-section
+    // check passes with all three registered from the file.
+    AppBuilder::new()
+        .with_config(config)
+        .plugin_hooking_from_config::<Csrf>("csrf")
+        .expect("[csrf] fits CsrfConfig")
+        .plugin_hooking_from_config_with::<SecurityHeaders>("security_headers", |headers| {
+            headers.inline_script("console.log(1)")
+        })
+        .expect("[security_headers] fits")
+        .plugin_hooking_from_config::<RateLimit>("rate_limit")
+        .expect("[rate_limit] fits")
+        .build()
+        .expect("every section is claimed");
+}
+
+#[test]
+fn an_adjustment_keeps_what_the_file_set() {
+    let config = Config::from_toml("shop", "production", TOML).expect("TOML");
+    let headers: SecurityHeadersConfig = config.section("security_headers").unwrap();
+    let adjusted = headers.clone().inline_script("console.log(1)");
+    assert!(adjusted.csp.report_only, "the file's report_only survives");
+    assert_eq!(
+        adjusted.csp.script_hashes.len(),
+        headers.csp.script_hashes.len() + 1
+    );
+}

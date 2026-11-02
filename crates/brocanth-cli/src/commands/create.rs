@@ -1560,6 +1560,11 @@ fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
                             held.features.push(feature);
                         }
                     }
+                    for with in dep.with {
+                        if !held.with.contains(&with) {
+                            held.with.push(with);
+                        }
+                    }
                     held.defaults = held.defaults || dep.defaults;
                     held.note = held.note.or(dep.note);
                 }
@@ -1589,6 +1594,12 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
                 .any(|key| a.has(key))
         {
             dep = dep.feature("postgres");
+        }
+        // A feature that exists for another module, on when that module is.
+        for (key, feature) in dep.with.clone() {
+            if a.has(key) && !dep.features.contains(&feature) {
+                dep = dep.feature(feature);
+            }
         }
         deps.push(source_of(a, &dep));
     }
@@ -1705,14 +1716,23 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
 /// Read off the slot rather than listed here. A module that wrote a line
 /// into the builder chain has registered an instance, by definition, and a
 /// list in this file would be a second copy of that fact for somebody to
-/// forget. The instance is named after the module, which is also the
-/// config section it claims.
+/// forget. The instance is named after the module, or after the section
+/// its declared settings name.
 // Only a test asks, today. It is a function rather than a line inside that
 // test because the next thing to ask is the generated `main`, and the
 // question is about the project rather than about the assertion.
 #[cfg(test)]
 fn instances(built: &Built) -> Vec<&str> {
-    built.slot_owners(Slot::AppPlugins).collect()
+    // A plugin with declared settings is registered under its section,
+    // which for a library's hooking plugin is not the module key: `csrf`
+    // for `middleware-csrf`.
+    let mut out: Vec<&str> = built.slot_owners(Slot::AppPlugins).collect();
+    for (_, section, _) in built.settings() {
+        if !out.contains(&section) {
+            out.push(section);
+        }
+    }
+    out
 }
 
 /// Whether anything in this project deserialises.
@@ -4103,7 +4123,7 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
          fn defaults() -> Vec<(&'static str, String)> {\n",
     );
     out.push_str(&field_list(&declared, |section| {
-        format!("crate::plugins::{section}::Settings::default()")
+        format!("{}::default()", built.settings_type_of(section))
     }));
     out.push_str("}\n");
 
@@ -4115,7 +4135,11 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
             out.push_str(OPTIONAL);
         }
         for section in declared_sections(&declared) {
-            out.push_str(&section_settings(section, &declared));
+            out.push_str(&section_settings(
+                section,
+                &built.settings_type_of(section),
+                &declared,
+            ));
         }
         out.push_str(
             "\n/// Each setting as the plugin holds it, after every layer.\n\
@@ -4180,7 +4204,7 @@ fn field_list(declared: &[(&str, &Setting)], source: impl Fn(&str) -> String) ->
 
 /// `<section>_settings`: a section's defaults, with what this run was given
 /// applied in order.
-fn section_settings(section: &str, declared: &[(&str, &Setting)]) -> String {
+fn section_settings(section: &str, ty: &str, declared: &[(&str, &Setting)]) -> String {
     let ident = section.replace('-', "_");
     let mine: Vec<&Setting> = declared
         .iter()
@@ -4191,18 +4215,17 @@ fn section_settings(section: &str, declared: &[(&str, &Setting)]) -> String {
         "\n/// `[{section}]`, as this binary runs it without a file: the plugin's\n\
          /// defaults, then the environment, then the flags.\n"
     );
-    let signature = format!(
-        "pub fn {ident}_settings(given: &[Given]) -> Result<crate::plugins::{section}::Settings, String> {{\n"
-    );
+    let signature =
+        format!("pub fn {ident}_settings(given: &[Given]) -> Result<{ty}, String> {{\n");
     if signature.len() > 101 {
         out.push_str(&format!(
-            "pub fn {ident}_settings(\n    given: &[Given],\n) -> Result<crate::plugins::{section}::Settings, String> {{\n"
+            "pub fn {ident}_settings(\n    given: &[Given],\n) -> Result<{ty}, String> {{\n"
         ));
     } else {
         out.push_str(&signature);
     }
     out.push_str(&format!(
-        "    let mut settings = crate::plugins::{section}::Settings::default();\n\
+        "    let mut settings = {ty}::default();\n\
         \x20   for given in given {{\n"
     ));
     let reader = |setting: &Setting| {
@@ -6100,6 +6123,199 @@ mod tests {
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&configured);
+    }
+
+    /// The hooks from `brocanth-middleware` take their settings from the
+    /// file, the flags and the environment, and a request shows it.
+    ///
+    /// Two generated servers. One reads `config/development.toml`, edited
+    /// here the way a developer would: a renamed CSRF cookie, a report-only
+    /// policy, a referrer policy, and a rate-limit rule of one GET. The
+    /// other has no file, and gets the same values from flags and a
+    /// variable. Each answers a real request over a socket.
+    ///
+    /// `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    #[cfg(unix)]
+    fn hook_settings_reach_a_request_from_the_file_and_from_the_flags() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let build = |name: &str, picks: Vec<&'static str>| {
+            let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let a = Answers {
+                name: name.into(),
+                title: "Hooks Test".into(),
+                picks,
+                local: Some(brocanth.display().to_string()),
+                git: false,
+            };
+            for (path, contents) in scaffold(&a).expect("the modules agree") {
+                let full = root.join(&path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(&full, contents).unwrap();
+            }
+            root
+        };
+        let compile = |root: &Path| {
+            let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                .args(["build", "--quiet"])
+                .current_dir(root)
+                .output()
+                .expect("run cargo");
+            assert!(
+                output.status.success(),
+                "{} did not compile:\n{}",
+                root.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let hooks = vec![
+            "middleware",
+            "middleware-csrf",
+            "middleware-security-headers",
+            "middleware-rate-limit",
+            "commands",
+        ];
+
+        // The file, edited.
+        let mut picks = hooks.clone();
+        picks.push("config");
+        let filed = build("hooks-file", picks);
+        let path = filed.join("config/development.toml");
+        let toml = std::fs::read_to_string(&path).unwrap();
+        let edited = toml
+            .replace("cookie = \"csrf_token\"", "cookie = \"xsrf_token\"")
+            .replace(
+                "# referrer_policy = \"strict-origin-when-cross-origin\"",
+                "referrer_policy = \"no-referrer\"",
+            )
+            .replace("report_only = false", "report_only = true")
+            .replace("paths = [\"/login\"]", "paths = [\"/\"]")
+            .replace("methods = [\"POST\"]", "methods = [\"GET\"]")
+            .replace("limit = 5", "limit = 1");
+        for changed in [
+            "xsrf_token",
+            "no-referrer",
+            "report_only = true",
+            "limit = 1",
+        ] {
+            assert!(
+                edited.contains(changed),
+                "the file has no {changed}:\n{toml}"
+            );
+        }
+        std::fs::write(&path, edited).unwrap();
+        compile(&filed);
+        let answers = serve_and_get(&filed.join("target/debug/hooks-file"), &[], &[], 2);
+        let first = answers[0].to_ascii_lowercase();
+        assert!(first.starts_with("http/1.1 200"), "{first}");
+        assert!(first.contains("set-cookie: xsrf_token="), "{first}");
+        assert!(first.contains("referrer-policy: no-referrer"), "{first}");
+        assert!(
+            first.contains("content-security-policy-report-only:"),
+            "{first}"
+        );
+        assert!(
+            answers[1].starts_with("HTTP/1.1 429"),
+            "the second GET is over the file's limit of one:\n{}",
+            answers[1]
+        );
+        let _ = std::fs::remove_dir_all(&filed);
+
+        // No file: the same values from the flags, and one variable.
+        let flagged = build("hooks-flags", hooks);
+        compile(&flagged);
+        let answers = serve_and_get(
+            &flagged.join("target/debug/hooks-flags"),
+            &[
+                "--csrf.cookie=xsrf_token",
+                "--security_headers.csp.report_only=true",
+                "--security_headers.referrer_policy=",
+            ],
+            &[("HOOKS_FLAGS_SECURITY_HEADERS__NOSNIFF", "false")],
+            1,
+        );
+        let first = answers[0].to_ascii_lowercase();
+        assert!(first.starts_with("http/1.1 200"), "{first}");
+        assert!(first.contains("set-cookie: xsrf_token="), "{first}");
+        assert!(
+            first.contains("content-security-policy-report-only:"),
+            "{first}"
+        );
+        assert!(
+            !first.contains("referrer-policy:"),
+            "an empty flag is none: {first}"
+        );
+        assert!(
+            !first.contains("x-content-type-options:"),
+            "the variable turned nosniff off: {first}"
+        );
+        let _ = std::fs::remove_dir_all(&flagged);
+    }
+
+    /// Starts `binary serve` on a free port with `args` and `env`, sends
+    /// `count` GETs to `/`, stops the server and returns each response.
+    #[cfg(unix)]
+    fn serve_and_get(
+        binary: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        count: usize,
+    ) -> Vec<String> {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        // The project root, where `config/` is: `<root>/target/debug/<name>`.
+        let root = binary
+            .ancestors()
+            .nth(3)
+            .expect("a binary under target/debug");
+        let mut child = Command::new(binary)
+            .current_dir(root)
+            .args(["serve", "--addr", "127.0.0.1:0"])
+            .args(args)
+            .envs(env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server");
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut log = String::new();
+        let addr = loop {
+            let mut line = String::new();
+            if stderr.read_line(&mut line).unwrap() == 0 {
+                let _ = child.wait();
+                panic!("the server stopped before it listened:\n{log}");
+            }
+            log.push_str(&line);
+            if let Some(at) = line.trim().split("listening on http://").nth(1) {
+                break at.to_string();
+            }
+        };
+        let answers = (0..count)
+            .map(|_| {
+                let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+                write!(
+                    stream,
+                    "GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut response = Vec::new();
+                let _ = stream.read_to_end(&mut response);
+                String::from_utf8_lossy(&response).into_owned()
+            })
+            .collect();
+        let _ = child.kill();
+        let _ = child.wait();
+        answers
     }
 
     /// SIGTERM in the middle of a request, sent to a generated server.

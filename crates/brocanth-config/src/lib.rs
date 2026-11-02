@@ -233,7 +233,7 @@ pub use dump::Dump;
 pub use layers::Layers;
 pub use plugin::{
     config_of, effective_of, AppBuilderConfigExt, ConfigPlugin, ConfiguredPlugin, Effective,
-    SectionClaim, SharedConfig,
+    Hooked, SectionClaim, SharedConfig,
 };
 pub use redact::{Reason, Redaction, Shown};
 pub use value::{merge, merge_tables, Format, Provenance, Table, Value, ValueKind};

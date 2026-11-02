@@ -419,6 +419,16 @@ pub fn hooking(s: &mut Scaffold, key: &str, ty: &str, block: String)
 `block` is the full statement, and it must call `plugin_hooking` on
 `builder`. See the walkthrough for an example.
 
+A hooking plugin with settings uses `snippet::configurable_hooking`
+instead. It takes a `Hooking { key, section, ty, config_ty, prelude,
+adjust }` and the settings, and writes the `[section]` block, a
+registration through `plugin_hooking_from_config` (or the flags without
+`config`), the provider and hook record lines, and the settings type.
+`section` is the plugin's instance name; `config_ty` is its configuration
+type, which needs `Default` and public fields. `adjust` is a method chain
+for a value only code can give. `crates/brocanth-middleware/src/scaffold.rs`
+has three examples.
+
 The run-time half is `HookSource` (`crates/brocanth/src/plugin_hooks.rs:798`):
 
 ```rust
@@ -954,12 +964,12 @@ Found while writing this guide. Input for the module-design discussion.
 4. ~~**No category field.**~~ Closed: `Manifest::category`. A test holds
    each module to the slots its categories open, and `--with`'s help
    leads with the categories. The chooser does not group by it yet.
-5. **No config form for a hooking plugin.** `brocanth-config` has
-   `plugin_from_config` and no `plugin_hooking_from_config`. So every
-   hooking module writes a literal config, even when `config` is chosen,
-   and its `[section]` in TOML is never read. The comment in the security
-   headers registration mentions `[security_headers]`, but the generated
-   code does not read it.
+5. ~~**No config form for a hooking plugin.**~~ Closed:
+   `brocanth-config` has `plugin_hooking_from_config` and
+   `plugin_hooking_from_config_with`, and `snippet::configurable_hooking`
+   declares a hooking plugin's settings. `csrf`, `security-headers` and
+   `rate-limit` read `[csrf]`, `[security_headers]` and `[rate_limit]`.
+   See `docs/module-flags.md`.
 6. **The hooking registration is hand-formatted text.** `snippet::plugin`
    writes the statement for you. `snippet::hooking` takes the whole
    statement as a string, so each module repeats the rustfmt shape and the

@@ -286,14 +286,51 @@ A project with no declared setting gets none of this.
   builds three generated binaries and checks a flag, a variable, a secret,
   a rename, the refusal while the flags are off, and the report.
 
+## Hooking plugins from a library crate
+
+`csrf`, `security-headers` and `rate-limit` register plugins that install
+hooks, and their configuration types live in `brocanth-middleware`, not
+in the generated project. `snippet::configurable_hooking` declares their
+settings the same way `snippet::configurable` does, with three
+differences:
+
+- **The section is the plugin's instance name, not the module key.**
+  `[csrf]`, `[security_headers]`, `[rate_limit]`, so the flags are
+  `--csrf.secure`, `--security_headers.behind_tls`. `brocanth-config`
+  checks a section against the instance names, and these are the names
+  the plugins already had.
+- **The settings type is the library's.** `Scaffold::settings_type`
+  records `brocanth_middleware::CsrfConfig` for `csrf`, and the generated
+  readers start from its `Default` and set its public fields.
+- **The registration goes through `plugin_hooking_from_config`**, new in
+  `brocanth-config`. It is `plugin_from_config` for a `HookSource`: the
+  instance takes the section's name and the hook record is widened.
+  `plugin_hooking_from_config_with` also takes a closure for a value
+  only code can give. The admin's inline script hash is one: the file
+  decides the policy, and the closure adds one hash to it.
+
+`brocanth-middleware`'s `config` feature derives `Deserialize` on the
+configuration types. The module turns it on only when the project has
+`config`, through `Dep::feature_with("config", "config")`: without a file
+nothing deserialises, so nothing links a parser for it.
+
+**Lists stay in the file.** CSRF's `exempt` is a list, so it has no flag.
+A rate-limit rule is a record of six fields (name, paths, methods, limit,
+window, key), and a list of records is `[[rate_limit.rules]]` in TOML.
+That shape already deserialises into `Vec<Rule>`, needs no new syntax,
+and reads the same as the Rust builder. Without a file, the example rule
+is code beside the registration: `.rule(login)` on the settings the flags
+built.
+
+The ignored test
+`hook_settings_reach_a_request_from_the_file_and_from_the_flags` builds
+two generated servers and sends real requests: one edits
+`config/development.toml`, the other passes flags and a variable. Both
+change the CSRF cookie name, the policy header and the referrer policy
+that a response carries. The file's one-GET rule answers the second GET
+with 429.
+
 ## Open questions
 
-1. **Hooking modules.** `brocanth-config` has no config-file form for a
-   plugin registered with `plugin_hooking`. `csrf`, `security-headers` and
-   `rate-limit` therefore build a literal config even with `config` chosen,
-   and a `[security_headers]` section is never read, although a generated
-   comment says it is. A declaration cannot fix that alone: it needs
-   `plugin_hooking_from_config` in `brocanth-config`, and `Deserialize` on
-   the middleware config types.
-2. **The `[server]` section.** `shutdown_grace_secs` belongs to the
+1. **The `[server]` section.** `shutdown_grace_secs` belongs to the
    framework, not to a module, so it has no flag yet.

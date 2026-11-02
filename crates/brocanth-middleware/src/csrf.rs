@@ -147,6 +147,11 @@ impl CsrfToken {
 
 /// Where the token lives, and who does not have to send one.
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "config",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default, deny_unknown_fields)
+)]
 pub struct CsrfConfig {
     /// The cookie this hook owns. It is this hook's own cookie, not the
     /// session's: nothing else reads or writes it.

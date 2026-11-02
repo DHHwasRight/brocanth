@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::{NoContext, Provided};
-use brocanth::plugin_hooks::NoHooks;
+use brocanth::plugin_hooks::{Both, HookSource, NoHooks};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -263,6 +263,13 @@ fn defaults_layer(claims: &[SectionClaim]) -> Value {
 // The extension trait
 // ---------------------------------------------------------------------------
 
+/// The builder after a hooking plugin `P` is registered: `P`'s context
+/// item is on the provider list, and its hook families are on the record.
+pub type Hooked<P, E, H> = AppBuilder<
+    <<P as Plugin>::Provides as Provided>::Install<E>,
+    Both<<P as HookSource>::Families, H>,
+>;
+
 /// File configuration for [`AppBuilder`], in one `use`.
 ///
 /// ```no_run
@@ -338,6 +345,46 @@ pub trait AppBuilderConfigExt<E, H = NoHooks>: Sized {
         P: Plugin,
         P::Config: DeserializeOwned + Default;
 
+    /// Registers a plugin that installs hooks, built from the section named
+    /// `section`.
+    ///
+    /// [`AppBuilderConfigExt::plugin_from_config`] for a
+    /// [`HookSource`]: the instance takes the section's name, the provider
+    /// list is widened, and the hook record is widened by the plugin's
+    /// families, as `AppBuilder::plugin_hooking` does. A plain `plugin`
+    /// call would not install the hooks, and `build()` refuses it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when no configuration is installed or the section does
+    /// not fit `P::Config`.
+    fn plugin_hooking_from_config<P>(self, section: &str) -> Result<Hooked<P, E, H>, ConfigError>
+    where
+        P: HookSource,
+        P::Config: DeserializeOwned + Default,
+    {
+        self.plugin_hooking_from_config_with::<P>(section, |config| config)
+    }
+
+    /// [`AppBuilderConfigExt::plugin_hooking_from_config`], with `adjust`
+    /// applied to the section before the plugin is built.
+    ///
+    /// For a value only code can give, on top of what the file says: the
+    /// hash of a script the application inlines, a rule built from a
+    /// constant. The file still decides every key `adjust` leaves alone.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`AppBuilderConfigExt::plugin_hooking_from_config`].
+    fn plugin_hooking_from_config_with<P>(
+        self,
+        section: &str,
+        adjust: impl FnOnce(P::Config) -> P::Config,
+    ) -> Result<Hooked<P, E, H>, ConfigError>
+    where
+        P: HookSource,
+        P::Config: DeserializeOwned + Default;
+
     /// Registers `P` at the section named `section`, with `P`'s own defaults
     /// underneath it.
     ///
@@ -405,6 +452,19 @@ impl<E, H> AppBuilderConfigExt<E, H> for AppBuilder<E, H> {
     {
         let config = section_of::<P, E, H>(&self, name)?;
         Ok(self.plugin_as(name, P::new(config)))
+    }
+
+    fn plugin_hooking_from_config_with<P>(
+        self,
+        section: &str,
+        adjust: impl FnOnce(P::Config) -> P::Config,
+    ) -> Result<Hooked<P, E, H>, ConfigError>
+    where
+        P: HookSource,
+        P::Config: DeserializeOwned + Default,
+    {
+        let config = section_of::<P, E, H>(&self, section)?;
+        Ok(self.plugin_hooking_named(section, P::new(adjust(config))))
     }
 
     fn plugin_with_defaults<P>(

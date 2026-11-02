@@ -35,7 +35,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
@@ -1225,17 +1225,14 @@ macro_rules! register {
         // DENY, a Content-Security-Policy and a Permissions-Policy. The
         // policy allows dp-swap's two inline scripts by their SHA-256, so
         // there is no `'unsafe-inline'`. A script you inline yourself needs
-        // `Csp::default().inline_script(TEXT)`.
+        // `.inline_script(TEXT)` on the configuration.
         //
         // HSTS goes out only when the request is known to be HTTPS. Behind
-        // a TLS terminator, say so: `SecurityHeadersConfig::default()
-        // .behind_tls()`, or `behind_tls = true` in `[security_headers]`.
-        //
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::SecurityHeaders as brocanth::plugin_api::Plugin>::new(
-                brocanth_middleware::SecurityHeadersConfig::default(),
-            ),
-        );
+        // a TLS terminator, say so: `behind_tls = true` under
+        // [security_headers] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::SecurityHeaders>("security_headers")
+            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
             .map_err(|e| e.to_string())?;
@@ -1329,6 +1326,83 @@ pub struct Setting {
 /// Every setting the modules declared. `brocanth add` rewrites this list;
 /// `src/flags.rs` renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
+    Setting {
+        path: "security_headers.behind_tls",
+        help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.nosniff",
+        help: "Send `X-Content-Type-Options: nosniff`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.referrer_policy",
+        help: "The `Referrer-Policy`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.permissions_policy",
+        help: "The `Permissions-Policy`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.hsts.enabled",
+        help: "Send `Strict-Transport-Security`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.max_age",
+        help: "How long the browser remembers HTTPS-only, in seconds.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.include_subdomains",
+        help: "The HSTS rule covers every subdomain too.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.preload",
+        help: "Ask to be on the browsers' built-in HSTS list.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.enabled",
+        help: "Send a `Content-Security-Policy`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_only",
+        help: "Send the policy as `Content-Security-Policy-Report-Only`.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_uri",
+        help: "Where a browser reports what the policy blocked. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
     Setting {
         path: "observability.format",
         help: "json or text. Empty: json in production, text elsewhere.",
@@ -1575,8 +1649,53 @@ pub fn flag_args(
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
+    let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let observability = crate::plugins::observability::Settings::default();
     vec![
+        (
+            "security_headers.behind_tls",
+            format!("{:?}", security_headers.behind_tls),
+        ),
+        (
+            "security_headers.nosniff",
+            format!("{:?}", security_headers.nosniff),
+        ),
+        (
+            "security_headers.referrer_policy",
+            format!("{:?}", security_headers.referrer_policy),
+        ),
+        (
+            "security_headers.permissions_policy",
+            format!("{:?}", security_headers.permissions_policy),
+        ),
+        (
+            "security_headers.hsts.enabled",
+            format!("{:?}", security_headers.hsts.enabled),
+        ),
+        (
+            "security_headers.hsts.max_age",
+            format!("{:?}", security_headers.hsts.max_age),
+        ),
+        (
+            "security_headers.hsts.include_subdomains",
+            format!("{:?}", security_headers.hsts.include_subdomains),
+        ),
+        (
+            "security_headers.hsts.preload",
+            format!("{:?}", security_headers.hsts.preload),
+        ),
+        (
+            "security_headers.csp.enabled",
+            format!("{:?}", security_headers.csp.enabled),
+        ),
+        (
+            "security_headers.csp.report_only",
+            format!("{:?}", security_headers.csp.report_only),
+        ),
+        (
+            "security_headers.csp.report_uri",
+            format!("{:?}", security_headers.csp.report_uri),
+        ),
         (
             "observability.format",
             format!("{:?}", observability.format),
@@ -1701,7 +1820,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 77fa320a3ca5b791
+// brocanth-digest: 4aee7cf50a1aa424
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -1749,6 +1868,37 @@ name = "My Blog"
 # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
+
+[security_headers]
+# Every request arrives through a TLS terminator, so HSTS always goes out.
+# False in development: HSTS from localhost pins the name in the browser.
+behind_tls = false
+# Send `X-Content-Type-Options: nosniff`.
+nosniff = true
+# The `Referrer-Policy`. Empty means none.
+# referrer_policy = "strict-origin-when-cross-origin"
+# The `Permissions-Policy`. Empty means none.
+# permissions_policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+
+[security_headers.hsts]
+# Send `Strict-Transport-Security`.
+enabled = true
+# How long the browser remembers HTTPS-only, in seconds.
+max_age = 31536000
+# The HSTS rule covers every subdomain too.
+# Only when the person who owns the domain says so.
+include_subdomains = false
+# Ask to be on the browsers' built-in HSTS list.
+# Hard to undo: removal takes months to reach users.
+preload = false
+
+[security_headers.csp]
+# Send a `Content-Security-Policy`.
+enabled = true
+# Send the policy as `Content-Security-Policy-Report-Only`.
+report_only = false
+# Where a browser reports what the policy blocked. Empty means none.
+# report_uri = "/csp-reports"
 
 [observability]
 # json or text. Empty: json in production, text elsewhere.
@@ -2310,7 +2460,7 @@ enabled = ["observability", "observability-logs", "observability-health", "obser
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
-files = ["src/flags.rs", "src/commands/settings.rs", "src/plugins/observability/"]
+files = ["src/plugins/observability/"]
 config = ["observability"]
 crates = ["brocanth-observe"]
 adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics"]
@@ -2381,8 +2531,8 @@ adapted_to = []
 [modules.middleware-security-headers]
 kind = ["middleware"]
 files = []
-config = []
+config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
-adapted_to = []
+adapted_to = ["config"]
 
-# brocanth-digest: ff5e3a055d5dd544
+# brocanth-digest: c77a168b83b5a6da
