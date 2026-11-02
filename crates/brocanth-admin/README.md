@@ -36,9 +36,10 @@ anonymous principal, so `/admin` answers 403. The generated test asserts
 that. Two edits open it: a policy with `AdminConfig::with_policy`, and a
 `principal` function that reads your user off the request.
 
-`brocanth add admin` does not work in an existing project. The module
-changes `src/pages/mod.rs`, which is yours, so the command prints the change
-to apply by hand and writes nothing.
+`brocanth add admin` works in an existing project. The module changes
+`src/pages/mod.rs`: if you have not edited that file, the command rewrites
+it. If you have, it prints the change, writes nothing, and goes through
+once you have made the change by hand.
 
 `admin-model` is listed by the CLI and blocked: the generated `model` plugin
 opens no connection pool for it to read. Write the source by hand. See

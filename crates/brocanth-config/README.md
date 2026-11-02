@@ -35,8 +35,9 @@ module reads its settings: each declared setting gets a key under
 `[<module>]` in `config/<env>.toml`, and each plugin is built with
 `plugin_from_config`. A plugin that installs hooks is built with
 `plugin_hooking_from_config`, and its section is the plugin's instance
-name, such as `[security_headers]`. `brocanth add config` refuses when the change would
-rewrite a file you own, such as a plugin's settings struct. See
+name, such as `[security_headers]`. `brocanth add config` rewrites each plugin's settings struct to derive
+`Deserialize`. It refuses, and prints the change, only for a file you
+have edited. See
 [docs/module-flags.md](../../docs/module-flags.md).
 
 ### Layers and precedence

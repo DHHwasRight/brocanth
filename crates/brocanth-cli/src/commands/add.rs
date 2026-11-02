@@ -23,24 +23,32 @@
 //!   cannot prevent an edit, so it must never destroy one in silence.
 //! * **Shared** -- `Cargo.toml` and `config/<env>.toml`. Both sides write in
 //!   them, so this appends and leaves every other byte alone.
-//! * **The developer's** -- everything else. Written when it is absent and
-//!   never rewritten.
+//! * **The developer's** -- everything else. Written when it is absent.
+//!   Rewritten only while it still holds, byte for byte, what the
+//!   generator wrote for the modules recorded before this add: then
+//!   nobody has edited it, and rewriting it loses nothing.
+//!
+//! Every module is generated again, not only the new one. So a module
+//! that adapts to the one being added (`admin` to `commands`, `ci-github`
+//! to `jobs`) writes its adaptation too, as `create` would have.
 //!
 //! # When it refuses
 //!
-//! A module whose arrival would change a file the developer owns cannot be
-//! added by this command. `config` is the clearest case: it changes whether
-//! every *other* plugin's settings struct derives `Deserialize`, and those
-//! structs are in files that belong to the developer. So the command says
-//! which files would have had to change, prints what the generator would
-//! have written, and writes nothing.
+//! A module whose arrival would change a file the developer has edited.
+//! The change is a wiring line the new module needs (a `mod` line, a
+//! route, a derive), so a project without it does not compile or does not
+//! run the module, and half an add is worse than none. The command prints
+//! the change and writes nothing. When the developer has made the change
+//! by hand, around their own lines, the next run sees every added line in
+//! place and goes through.
 //!
 //! `src/app.rs` is the one exception, and it is the design rather than a
 //! hole in it. What lands there is a middleware mount, and a mount is a
 //! decision: the pattern is the application's to choose, which is why that
 //! file is the developer's in the first place. A project without the mount
-//! compiles and runs; it just does not run that layer. So the lines are
-//! printed for the developer to place, and the command carries on.
+//! compiles and runs; it just does not run that layer. So when the file
+//! was edited, the lines are printed for the developer to place, and the
+//! command carries on.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -196,7 +204,18 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
             },
             Kind::Theirs => match (&on_disk, before.get(path)) {
                 (None, _) => writes.push((full, text.clone(), "written")),
+                // Already what the generator writes: unchanged by this
+                // module, or changed by hand to match it.
+                (Some(current), _) if current == text => {}
                 (Some(_), Some(was)) if was == text => {}
+                // Byte for byte what the generator wrote before this add.
+                // Nobody has edited it, so rewriting it loses nothing.
+                (Some(current), Some(was)) if current == was => {
+                    writes.push((full, text.clone(), "rewritten"));
+                }
+                // Edited, and the developer has already made this module's
+                // change in it, around their own lines.
+                (Some(current), Some(was)) if applied(current, was, text) => {}
                 (Some(_), was) => {
                     let was = was.cloned().unwrap_or_default();
                     if path == "src/app.rs" {
@@ -502,12 +521,31 @@ fn unstamped(path: &str) -> Diagnostic {
         .help("check it reads the way brocanth wrote it, then pass --force")
 }
 
+/// Whether an edited file already holds the change from `was` to `now`:
+/// every line the generator adds is in it, and no line it removes is.
+///
+/// Lines, not a patch: the developer applied the change by hand, around
+/// lines of their own, so its position is theirs to choose.
+fn applied(current: &str, was: &str, now: &str) -> bool {
+    let has = |text: &str, line: &str| text.lines().any(|l| l == line);
+    now.lines()
+        .filter(|line| !has(was, line))
+        .all(|line| has(current, line))
+        && was
+            .lines()
+            .filter(|line| !has(now, line) && !line.trim().is_empty())
+            .all(|line| !has(current, line))
+}
+
 fn theirs(path: &str, was: &str, now: &str) -> Diagnostic {
-    Diagnostic::error("yours", format!("{path} would have to change, and it is yours"))
-        .at(path)
-        .note("`brocanth add` writes a file of yours once and never rewrites it")
-        .note(owned::diff(was, now))
-        .help("apply this by hand and run the command again, or scaffold a new project with `brocanth create`")
+    Diagnostic::error(
+        "yours",
+        format!("{path} would have to change, and it is yours"),
+    )
+    .at(path)
+    .note("you have edited it, and `brocanth add` never rewrites an edit of yours")
+    .note(owned::diff(was, now))
+    .help("make this change by hand, keeping your own lines, and run the command again")
 }
 
 fn toml_error(path: &str, e: &toml_edit::TomlError) -> Vec<Diagnostic> {
@@ -670,9 +708,12 @@ mod tests {
     fn a_module_that_would_rewrite_a_file_of_the_developers_is_refused() {
         // `config` changes whether every *other* plugin's settings struct
         // derives `Deserialize`, and those structs are in files that
-        // belong to the developer. The command says which, and shows the
-        // change it would have made.
+        // belong to the developer. Once the developer has edited one, the
+        // command says which, and shows the change it would have made.
         let root = project("worky", &["logging"]);
+        let logging = root.join("src/plugins/logging/mod.rs");
+        let edited = format!("{}// mine\n", read(&root, "src/plugins/logging/mod.rs"));
+        std::fs::write(&logging, &edited).expect("write");
         let refused = add(&root, "config", false).expect_err("logging would have to change");
         let said = refused
             .iter()
@@ -681,6 +722,20 @@ mod tests {
         assert!(said.contains("src/plugins/logging/mod.rs"), "{said}");
         assert!(said.contains("serde::Deserialize"), "{said}");
         assert!(!depends_on(&root, "brocanth-config"));
+        assert_eq!(read(&root, "src/plugins/logging/mod.rs"), edited);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_goes_into_a_project_whose_plugins_are_as_created() {
+        // The same change as above, into files nobody has touched: the
+        // generator wrote them, so it may write them again.
+        let root = project("worky", &["logging"]);
+        if let Err(e) = add(&root, "config", false) {
+            panic!("{}", said(&e));
+        }
+        assert!(read(&root, "src/plugins/logging/mod.rs").contains("serde::Deserialize"));
+        assert!(depends_on(&root, "brocanth-config"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -763,6 +818,125 @@ mod tests {
         let before = read(&root, "brocanth.toml");
         add(&root, "logging", false).expect("already there is not an error");
         assert_eq!(read(&root, "brocanth.toml"), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What `create` makes when nobody answers a question.
+    const DEFAULT: &[&str] = &[
+        "observability",
+        "observability-logs",
+        "observability-health",
+        "observability-metrics",
+        "config",
+        "commands",
+        "docker",
+        "ci",
+        "ci-github",
+        "middleware",
+        "middleware-security-headers",
+    ];
+
+    fn said(diagnostics: &[Diagnostic]) -> String {
+        diagnostics.iter().map(Diagnostic::render).collect()
+    }
+
+    /// What `create` would have written with these modules, for every file
+    /// `add` writes whole: the shared files are appended to instead, so
+    /// they hold the same facts in another order.
+    fn as_created(name: &str, picks: &[&'static str]) -> Vec<(String, String)> {
+        let answers = Answers {
+            name: name.to_string(),
+            title: crate::ui::title_case(name),
+            picks: create::all()
+                .into_iter()
+                .filter(|key| picks.contains(key))
+                .collect(),
+            local: None,
+            git: false,
+        };
+        create::scaffold(&answers)
+            .expect("the modules agree")
+            .into_iter()
+            .filter(|(path, _)| owned::kind(path) != Kind::Shared)
+            .collect()
+    }
+
+    fn with(picks: &[&'static str], more: &'static str) -> Vec<&'static str> {
+        let mut all = picks.to_vec();
+        all.push(more);
+        all
+    }
+
+    #[test]
+    fn a_page_module_goes_into_a_project_whose_pages_are_as_created() {
+        // `src/pages/mod.rs` is the developer's, but nobody has touched it:
+        // it holds what the generator wrote. Rewriting it loses nothing.
+        for module in ["admin", "openapi", "resource"] {
+            let name = format!("pages{module}");
+            let root = project(&name, DEFAULT);
+            if let Err(e) = add(&root, module, false) {
+                panic!("{module}: {}", said(&e));
+            }
+            for (path, want) in as_created(&name, &with(DEFAULT, module)) {
+                assert_eq!(read(&root, &path), want, "{module}: {path}");
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn jobs_goes_into_a_default_project_and_the_workflow_follows() {
+        let root = project("queue", DEFAULT);
+        if let Err(e) = add(&root, "jobs", false) {
+            panic!("{}", said(&e));
+        }
+        for (path, want) in as_created("queue", &with(DEFAULT, "jobs")) {
+            assert_eq!(read(&root, &path), want, "{path}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn adding_a_module_reapplies_what_the_others_adapt_to() {
+        // `admin` adapts to `commands`: with both, the project gets an
+        // `admin eject` subcommand. Adding `commands` later writes it, as
+        // `create` with both would have.
+        let root = project("later", &["config", "admin"]);
+        if let Err(e) = add(&root, "commands", false) {
+            panic!("{}", said(&e));
+        }
+        assert!(root.join("src/commands/admin.rs").exists());
+        for (path, want) in as_created("later", &["config", "admin", "commands"]) {
+            assert_eq!(read(&root, &path), want, "{path}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_edited_file_of_the_developers_stops_the_add_until_the_change_is_made() {
+        let root = project("touched", DEFAULT);
+        let pages = root.join("src/pages/mod.rs");
+        let edited = format!("{}// mine\n", read(&root, "src/pages/mod.rs"));
+        std::fs::write(&pages, &edited).expect("write");
+
+        let refused = said(&add(&root, "admin", false).expect_err("the edit is in the way"));
+        assert!(refused.contains("src/pages/mod.rs"), "{refused}");
+        assert!(refused.contains("help:"), "{refused}");
+        assert_eq!(read(&root, "src/pages/mod.rs"), edited, "an edit was lost");
+        assert!(!root.join("src/plugins/admin").exists(), "half an add");
+
+        // The developer makes the change the refusal showed, keeps their
+        // own line, and runs the command again.
+        let want = as_created("touched", &with(DEFAULT, "admin"))
+            .into_iter()
+            .find(|(path, _)| path == "src/pages/mod.rs")
+            .expect("the pages module")
+            .1;
+        std::fs::write(&pages, format!("{want}// mine\n")).expect("write");
+        if let Err(e) = add(&root, "admin", false) {
+            panic!("the change is in place: {}", said(&e));
+        }
+        assert!(read(&root, "src/pages/mod.rs").ends_with("// mine\n"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

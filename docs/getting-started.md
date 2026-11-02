@@ -200,28 +200,28 @@ Four kinds of file come out of a run, and which is which is fixed:
 |---|---|
 | `src/plugins/mod.rs`, `src/commands/mod.rs`, `src/main.rs`, `brocanth.toml`, `AGENTS.md` | Rewrites it. Each carries a digest, and an edited one stops the command. |
 | `Cargo.toml`, `config/<env>.toml` | Appends. Every other byte stays where it was, comments and all. |
-| `src/plugins/<name>/`, `src/pages/`, `src/app.rs` | Yours. Written when absent, never rewritten. |
+| `src/plugins/<name>/`, `src/pages/`, `src/app.rs`, `.github/` | Yours. Written when absent. Rewritten only while it still holds exactly what the generator wrote. |
 
 An owned file you have edited stops the run, with a diff of what would have
 gone. `--force` discards the edit, after you have seen it.
 
-A module whose arrival would change a file of yours is refused, and the
-command says which file and shows the change. `config` is the clear case: it
-decides whether every *other* plugin's settings struct derives `Deserialize`,
-and those structs are yours. Adding it to a project that already has plugins
-means making that change by hand, and the command prints it.
+A file of yours that you have not edited is still the generator's text, so
+`add` rewrites it. `ci-github` shows why that matters: its
+`.github/workflows/ci.yml` adapts to `model`, `jobs` and `cache` (with one
+of them CI starts a database for the tests). So in a project made with the
+default list, `brocanth add jobs` rewrites the workflow too.
 
-`ci-github` is another case. Its `.github/workflows/ci.yml` is yours, and
-it adapts to `model`, `jobs` and `cache`: with one of them CI starts a
-database for the tests. So in a project made with the default list,
-`brocanth add jobs` stops with `error[yours]: .github/workflows/ci.yml
-would have to change, and it is yours`, prints the diff and writes
-nothing. Apply the diff by hand, then run the command again.
+A module whose arrival would change a file of yours that you *have* edited
+is refused. The command says which file, shows the change, and writes
+nothing. `config` is the clear case: it decides whether every *other*
+plugin's settings struct derives `Deserialize`, and those structs are yours.
+Make the change by hand, keep your own lines, and run the command again.
+It sees every added line in place and goes through.
 
 `src/app.rs` is the exception. What lands there is a middleware mount, and a
 mount is a decision -- the pattern is the application's to choose, which is
-why that file is yours. So the line is printed for you to place, and the
-project compiles and runs without it:
+why that file is yours. When you have edited it, the line is printed for you
+to place, and the project compiles and runs without it:
 
 ```
 ! src/app.rs is yours, and one line belongs in it

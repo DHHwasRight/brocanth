@@ -36,10 +36,10 @@ document from `crate::pages::router()`), and two pages:
 (`--with openapi,input`), and the request and response bodies come from the
 handler signatures.
 
-`brocanth add openapi` refuses in an existing project, because the module
-changes `src/pages/mod.rs`, and that file is yours. The command prints the
-change and writes nothing. Apply the change by hand, or start from
-`brocanth create`.
+`brocanth add openapi` works in an existing project. The module changes
+`src/pages/mod.rs`: if you have not edited that file, the command rewrites
+it. If you have, it prints the change, writes nothing, and goes through
+once you have made the change by hand.
 
 The module declares two settings (see `docs/module-flags.md`):
 

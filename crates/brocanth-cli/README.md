@@ -108,15 +108,18 @@ It runs the same generator as `create`, with more entries in the module
 list of `brocanth.toml`. It rewrites the files it owns
 (`src/plugins/mod.rs`, `src/commands/mod.rs`, `src/main.rs`,
 `brocanth.toml`). It appends to `Cargo.toml` and `config/<env>.toml`, and
-leaves every other byte alone. It writes your files only when they are
-absent. It refuses when a module would change a file you own, and prints
-what it would have written. `--force` rewrites an owned file that you
-edited, and discards the edit.
+leaves every other byte alone. It writes your files when they are absent,
+and rewrites one only while it still holds exactly what the generator
+wrote: then nobody edited it. It refuses when a module would change a file
+of yours that you edited, prints the change, and writes nothing. Make the
+change by hand, keep your own lines, and run it again: it then goes
+through. `--force` rewrites an owned file that you edited, and discards
+the edit.
 
-`ci-github` writes `.github/workflows/ci.yml`, which is yours, and adapts
-to `model`, `jobs` and `cache`. So in a project made with the default
-modules, `brocanth add jobs` is refused until you apply the printed
-workflow change by hand.
+Every module is generated again, so a module that adapts to the new one
+writes its adaptation too. `ci-github` adapts to `jobs`: in a project made
+with the default modules, `brocanth add jobs` also rewrites
+`.github/workflows/ci.yml`, if you have not edited it.
 
 ### `brocanth migrate`
 

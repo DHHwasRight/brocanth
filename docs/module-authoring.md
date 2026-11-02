@@ -867,8 +867,9 @@ A module in `ALL` must pass these:
 - **`brocanth add`.**
   `adding_a_module_writes_what_creating_with_it_would_have_written`:
   `add` writes the same thing as `create`. A module that changes a file
-  the developer owns is refused by `add`. Keep writes in your own files
-  and in slots.
+  the developer owns goes through while that file is unedited, and is
+  refused once the developer has edited it. Keep writes in your own files
+  and in slots, so the refusal stays rare.
 
 Then generate a project and build it. A golden proves only the text:
 
