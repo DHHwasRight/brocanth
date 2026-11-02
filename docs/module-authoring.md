@@ -723,23 +723,53 @@ stages. Each one runs for every instance before the next stage starts:
 writes. A project without `commands` has no command line, so declare
 `needs("commands", "<what breaks>")`.
 
-#### `Slot::ConfigSections`
+#### Settings: `snippet::configurable`
 
-A TOML section in `config/<env>.toml`. Write it only when
-`project.has("config")`. The CLI reads the section name back from the
-text (`create.rs:1073`), so a module may claim several.
+Declare each setting once. `snippet::configurable` writes everything that
+follows from the declaration:
+
+- with `config`: the `[key]` section in `config/<env>.toml`, built from
+  the settings, and the configured registration;
+- without `config`: a registration that starts from `Settings::default()`
+  and applies the environment and the flags of this run;
+- either way: a `--key.setting` flag and a `$<APP>_<KEY>__<SETTING>` variable.
+
+It replaces `snippet::plugin` for a plugin with settings. Real use, from
+`crates/brocanth-cli/src/modules/sessions.rs`:
 
 ```rust
-if project.has("config") {
-    s.at(Slot::ConfigSections)
-        .block("\n[logging]\nlevel = \"debug\"\n".to_string());
-}
+configurable(
+    s,
+    project,
+    "sessions",
+    "Sessions",
+    vec![
+        Setting::text("cookie", &format!("_{}_session", project.ident()), "The session cookie's name."),
+        Setting::bool("secure", false, "Send the cookie over HTTPS only."),
+    ],
+);
 ```
+
+Kinds: `text`, `bool`, `integer`, `float`, `list` (file and environment
+only, no flag). Modifiers:
+
+- `.secret()`: no flag, because every user on the host can read a
+  process's arguments. Use it for any URL that can carry a password.
+- `.none_as("-1")`: one more value that means `None` for this setting.
+  An empty value means `None` for every setting.
+- `.commented()`: the key is written commented out in the file.
+
+Two modules that declare the same key fail `create` and name both. The
+flag layer, the renames in `src/flags.rs` and the precedence are in
+`docs/module-flags.md`.
 
 A settings struct that `plugin_from_config` reads must derive
 `Deserialize` only with config. `snippet::settings_derive(project,
 section)` returns the right derive lines and a doc sentence. Without
 config the project then has no parser in its tree.
+
+`Slot::ConfigSections` is still there for a section with no plugin
+behind it. Write it only when `project.has("config")`.
 
 #### `Scaffold::binary`
 
@@ -872,7 +902,8 @@ change to `create.rs`. See §5.
 4. `absent` that says what the project lacks without the module.
 5. Plugins in `src/plugins/<key>/mod.rs`, registered through
    `snippet::plugin` or `snippet::hooking`.
-6. `ConfigSections` and `Deserialize` only when `project.has("config")`.
+6. Settings through `snippet::configurable`; `Deserialize` only when
+   `project.has("config")`.
 7. A `PagesRoutes` line for each route the module adds.
 8. An `AgentsSections` block for each rule an agent must follow.
 9. `outside_runtime()` when the module does not run in the server.
@@ -911,10 +942,9 @@ Found while writing this guide. Input for the module-design discussion.
    statement as a string, so each module repeats the rustfmt shape and the
    `<T as Plugin>::new(..)` form. A `snippet::hooking_line(project, ty,
    config_expr)` would remove that.
-7. **A config section is parsed back from text.** The CLI finds a
-   module's sections by reading `[name]` lines out of its block
-   (`create.rs:1073`). A declared `Manifest::config_section` is more
-   reliable, and the module-flags work needs it to name flags.
+7. ~~**A config section is parsed back from text.**~~ Closed: a
+   declared setting names its section, and `snippet::configurable` writes
+   it. `docs/module-flags.md` has the design.
 8. **An out-of-tree module has no test harness.** The goldens and the
    formatting test live in the CLI crate. A third-party author must fork
    the CLI to run them. A `brocanth_scaffold::testing` helper (generate a

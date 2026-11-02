@@ -620,8 +620,10 @@ silence. That has already happened once, with a `.gitignore` line.
 A module declares each setting once. The declaration writes the
 `[section]` block with `config`, and a flag `--<section>.<key>` on the
 binary either way. With `config` the flags are off until `src/flags.rs`
-turns them on; `src/flags.rs` also renames and hides them. `sessions` and
-`storage` are converted. See `docs/module-flags.md`.
+turns them on; `src/flags.rs` also renames and hides them. Every module
+with settings is converted, the admin included. The hooking modules
+(`csrf`, `security-headers`, `rate-limit`) are not: their config is still
+a literal. See `docs/module-flags.md`.
 
 ### Static output — `outside_runtime` and `static_output`
 
