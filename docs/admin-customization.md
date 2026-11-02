@@ -9,7 +9,7 @@ in step with new versions of the admin.
 
 | Level | What you change | API | Django |
 |---|---|---|---|
-| 1. Settings | titles, "View site" link | `AdminConfig::{titled, headed, index_titled, site_url}` | `AdminSite.site_title`, `site_header`, `index_title`, `site_url` |
+| 1. Settings | titles, "View site" link | `AdminConfig::{titled, headed, index_titled, site_url}`, or `[admin]` and `--admin.*` in a generated project | `AdminSite.site_title`, `site_header`, `index_title`, `site_url` |
 | 2. Theme | colours, fonts, radii | `AdminConfig::stylesheet` | `extrastyle` block, CSS variables |
 | 3. Model assets | CSS for one model's screens | `ModelAdmin::stylesheet` | `ModelAdmin.Media` |
 | 4. Wrap a screen | add markup, keep the default | capture `Views::default().<screen>` and call it | `{{ block.super }}` |
@@ -97,6 +97,39 @@ AdminConfig::new()
 there is no link. Django draws "View site" to `/` by default; an admin
 here is often mounted beside an API with no front page, so the default is
 no link.
+
+### In a generated project, without code
+
+`brocanth create --with admin` declares these as settings, with the theme
+of level 2. Each one is therefore a key in `[admin]` (with `config`), an
+environment variable and a flag, like every declared setting. See
+`docs/module-flags.md`.
+
+| Key | Flag | Variable | `AdminConfig` |
+|---|---|---|---|
+| `title` | `--admin.title` | `$<APP>_ADMIN__TITLE` | `titled` |
+| `header` | `--admin.header` | `$<APP>_ADMIN__HEADER` | `headed` |
+| `index_title` | `--admin.index_title` | `$<APP>_ADMIN__INDEX_TITLE` | `index_titled` |
+| `site_url` | `--admin.site_url` | `$<APP>_ADMIN__SITE_URL` | `site_url` |
+| `stylesheet` | `--admin.stylesheet` | `$<APP>_ADMIN__STYLESHEET` | `stylesheet`, once |
+
+```toml
+[admin]
+title = "Acme admin"
+header = "Acme backoffice"
+site_url = "/"
+stylesheet = "/admin-theme.css"
+```
+
+All but `title` are optional: an empty value, such as `--admin.site_url=`,
+means none, whatever a lower layer said. `my-app settings` shows which
+layer set each one.
+
+The generated `src/plugins/admin/mod.rs` registers a small plugin,
+`AdminSettings`, that claims `[admin]` and keeps the values. `mount` reads
+them when the route table is built and calls the builder methods above. A
+second stylesheet, a per-model asset or a screen is code in that file, as
+in the levels below.
 
 ## Level 2: a theme
 

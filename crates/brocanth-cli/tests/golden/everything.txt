@@ -1667,6 +1667,9 @@ macro_rules! register {
         //     ),
         // );
         let builder = builder
+            .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -1772,7 +1775,8 @@ pub(crate) use register;
 /// plugins all provide nothing.
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithModel = After<crate::plugins::model::Model, WithSessions>;
-type WithObservability = After<crate::plugins::observability::Observe, WithModel>;
+type WithAdmin = After<crate::plugins::admin::AdminSettings, WithModel>;
+type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
 type WithCache = After<crate::plugins::cache::Cache, WithObservability>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
@@ -1895,6 +1899,41 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: false,
+    },
+    Setting {
+        path: "admin.title",
+        help: "The end of every <title>, and the header and index heading unless set.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "admin.header",
+        help: "What the top of the sidebar says. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "admin.index_title",
+        help: "The index page's heading. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "admin.site_url",
+        help: "Where the sidebar's \"View site\" link points. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "admin.stylesheet",
+        help: "A stylesheet every screen links after the shipped one: the theme. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
     },
     Setting {
         path: "storage.root",
@@ -2108,10 +2147,16 @@ pub fn flag_args(
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
+    let admin = crate::plugins::admin::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
+        ("admin.title", format!("{:?}", admin.title)),
+        ("admin.header", format!("{:?}", admin.header)),
+        ("admin.index_title", format!("{:?}", admin.index_title)),
+        ("admin.site_url", format!("{:?}", admin.site_url)),
+        ("admin.stylesheet", format!("{:?}", admin.stylesheet)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
@@ -2210,7 +2255,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 19d745cf12b347a5
+// brocanth-digest: baa8f2fd0d08097b
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2268,6 +2313,18 @@ secure = false
 
 [model]
 url = "sqlite://db/development.sqlite?mode=rwc"
+
+[admin]
+# The end of every <title>, and the header and index heading unless set.
+title = "My Blog admin"
+# What the top of the sidebar says. Empty means none.
+# header = "Acme backoffice"
+# The index page's heading. Empty means none.
+# index_title = "Site administration"
+# Where the sidebar's "View site" link points. Empty means none.
+# site_url = "/"
+# A stylesheet every screen links after the shipped one: the theme. Empty means none.
+# stylesheet = "/admin-theme.css"
 
 [observability]
 # "json" or "text". Unset: json when the environment is production.
@@ -3362,13 +3419,72 @@ pub fn Layout(layout: &str, children: Element) -> Element {
 //! therefore a build error, not a race.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use brocanth::plugin_api::Plugin;
+use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
 use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
+
+/// The admin's titles, its "View site" link and its theme: `[admin]` in
+/// the config file, `$<APP>_ADMIN__<KEY>`, or `--admin.<key>`.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[admin]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The end of every `<title>`, and the header and the index heading
+    /// when those are not set.
+    pub title: String,
+    /// What the top of the sidebar says.
+    pub header: Option<String>,
+    /// The index page's heading.
+    pub index_title: Option<String>,
+    /// Where the sidebar's "View site" link points. No link when unset.
+    pub site_url: Option<String>,
+    /// A stylesheet every screen links after the shipped one. More than one
+    /// is `AdminConfig::stylesheet` again, in [`mount`].
+    pub stylesheet: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            title: "My Blog admin".to_string(),
+            header: None,
+            index_title: None,
+            site_url: None,
+            stylesheet: None,
+        }
+    }
+}
+
+/// The settings this run chose, kept for [`mount`].
+///
+/// `mount` runs when the route table is built, after the plugins are, and
+/// takes no argument it could carry them in. A test that builds the table
+/// without the application gets the defaults.
+static CHOSEN: OnceLock<Settings> = OnceLock::new();
+
+/// Holds the admin's settings. It puts nothing on the context.
+pub struct AdminSettings;
+
+impl Plugin for AdminSettings {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "admin";
+
+    fn new(config: Settings) -> Self {
+        // The first application built in this process decides.
+        let _ = CHOSEN.set(config);
+        Self
+    }
+}
 
 /// Every screen of the admin, under `prefix`.
 ///
@@ -3376,12 +3492,27 @@ use crate::pages::{Ctx, Handler, Response};
 /// The admin parses its own paths, so the table gives it the whole path and
 /// does not split it into twelve routes.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let defaults = Settings::default();
+    let settings = CHOSEN.get().unwrap_or(&defaults);
+    let mut config = AdminConfig::new().titled(&settings.title).at(prefix);
+    if let Some(header) = &settings.header {
+        config = config.headed(header);
+    }
+    if let Some(heading) = &settings.index_title {
+        config = config.index_titled(heading);
+    }
+    if let Some(href) = &settings.site_url {
+        config = config.site_url(href);
+    }
+    if let Some(href) = &settings.stylesheet {
+        config = config.stylesheet(href);
+    }
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
         // over your database connection.
         Arc::new(Fixture::new()),
-        AdminConfig::new().titled("My Blog admin").at(prefix),
+        config,
     ));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
@@ -6055,7 +6186,7 @@ crates = ["brocanth-resource"]
 
 [modules.admin]
 files = ["src/plugins/admin/"]
-config = []
+config = ["admin"]
 crates = ["brocanth-admin"]
 
 [modules.realtime]
@@ -6108,4 +6239,4 @@ files = [".github/workflows/ci.yml"]
 config = []
 crates = []
 
-# brocanth-digest: aab1dff738bf2d43
+# brocanth-digest: 65c3beb74dd3f55c
