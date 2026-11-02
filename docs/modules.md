@@ -15,6 +15,11 @@ nowhere to say so.** `rsx` is not a module in brocanth; it is a special case
 written into the generator by hand, and the second renderer is the one that
 proves it.
 
+To write a module, read `docs/module-authoring.md`. It covers the
+contract, a walkthrough, every hook, and the tests a module must pass.
+`docs/module-map.md` lists the modules that exist and how they depend on
+each other.
+
 ---
 
 ## 1. The two planes brocanth already has
