@@ -141,9 +141,10 @@ impl fmt::Display for Format {
 
 /// Where one value came from.
 ///
-/// Four origins, and they are exhaustive: a value in a loaded configuration is
-/// a plugin's default, a line in a file, an environment variable, or a document
-/// the application embedded in its own source.
+/// Five origins, and they are exhaustive: a value in a loaded configuration is
+/// a plugin's default, a line in a file, an environment variable, a flag on
+/// the command line, or a document the application embedded in its own
+/// source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Provenance {
     /// A registered plugin's own default. The framework decided, and this says
@@ -166,6 +167,12 @@ pub enum Provenance {
         /// The variable's name, as spelled in the environment.
         var: Arc<str>,
     },
+    /// A flag on the command line, as the binary spells it. A renamed flag
+    /// carries its new name, because that is what the operator typed.
+    Flag {
+        /// The flag's name, without the leading `--`.
+        flag: Arc<str>,
+    },
     /// A document the application passed in, rather than one found on disk.
     Inline {
         /// What to call it in a dump.
@@ -187,6 +194,14 @@ impl Provenance {
     pub fn env(var: &str) -> Self {
         Provenance::EnvVar {
             var: Arc::from(var),
+        }
+    }
+
+    /// A flag on the command line, named without its leading `--`.
+    #[must_use]
+    pub fn flag(flag: &str) -> Self {
+        Provenance::Flag {
+            flag: Arc::from(flag),
         }
     }
 
@@ -223,6 +238,7 @@ impl fmt::Display for Provenance {
                 write!(f, "{}:{line}", file.path.display())
             }
             Provenance::EnvVar { var } => write!(f, "${var}"),
+            Provenance::Flag { flag } => write!(f, "--{flag}"),
             Provenance::Inline { label } => write!(f, "<{label}>"),
         }
     }

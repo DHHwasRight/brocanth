@@ -610,6 +610,14 @@ silence. That has already happened once, with a `.gitignore` line.
 | `RouteSource` + `mount_routes` | works; not generated, by decision: a generated project mounts page-shaped routes through `Slot::RouterMounts` (§4.6) |
 | A renderer registry | **does not exist** (§5) |
 
+### Settings and flags — `Setting`, `snippet::configurable`
+
+A module declares each setting once. The declaration writes the
+`[section]` block with `config`, and a flag `--<section>.<key>` on the
+binary either way. With `config` the flags are off until `src/flags.rs`
+turns them on; `src/flags.rs` also renames and hides them. `sessions` and
+`storage` are converted. See `docs/module-flags.md`.
+
 ### Static output — `outside_runtime` and `static_output`
 
 A first cut, to be redesigned. A manifest that says `static_output()`

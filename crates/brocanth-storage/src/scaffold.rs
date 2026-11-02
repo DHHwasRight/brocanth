@@ -35,8 +35,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// File storage, as a choice on the `brocanth create` menu.
 ///
@@ -78,7 +78,7 @@ impl Module for FileStorage {
             \x20   );"
                 .to_string(),
         );
-        plugin(s, project, "storage", "Files");
+        configurable(s, project, "storage", "Files", settings());
         // The one module so far that writes files into the working tree, so
         // the one that has to say they are not source. The path matches the
         // `root` below; change one and change the other.
@@ -89,30 +89,40 @@ impl Module for FileStorage {
             // same line, and `use` twice does not compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(SECTION.to_string());
-        }
     }
 }
 
-/// The `[storage]` section, with the two numbers and the one secret that
-/// decide what the store is.
-const SECTION: &str = "\n[storage]\n\
-# Below the working directory, so an upload is not source and `.gitignore`\n\
-# already says so. Move it off the deployment's disk and every instance stops\n\
-# seeing the same files: an object store is a separate crate behind the same\n\
-# trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.\n\
-root = \"var/uploads\"\n\
-# Development only, and the one line to change first. It signs file tokens and\n\
-# it keys the address an object is stored at. While it is this string, anybody\n\
-# who has read this repository can mint a token for any object, and anybody\n\
-# holding a copy of a file can compute whether somebody uploaded it.\n\
-secret = \"development only: replace before anything is uploaded in anger\"\n\
-# Seconds a file token lives. It cannot be revoked, so this number is the\n\
-# window in which a URL pasted into a chat still works. Two minutes is long\n\
-# enough for a page full of images and short enough to be dead before anyone\n\
-# clicks it.\n\
-token_ttl = 120\n";
+/// The `[storage]` settings: the root, the one secret, and the token's life.
+///
+/// The secret has no flag. A flag is in `ps` output for every user on the
+/// host, and this one mints download links for every object.
+fn settings() -> Vec<Setting> {
+    vec![
+        Setting::text("root", "var/uploads", "Where uploads are stored.").note(
+            "Below the working directory, so an upload is not source and `.gitignore`\n\
+             already says so. Move it off the deployment's disk and every instance stops\n\
+             seeing the same files: an object store is a separate crate behind the same\n\
+             trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.",
+        ),
+        Setting::text(
+            "secret",
+            "development only: replace before anything is uploaded in anger",
+            "Signs file tokens and keys object addresses.",
+        )
+        .note(
+            "Development only, and the one line to change first. While it is this\n\
+             string, anybody who has read this repository can mint a token for any\n\
+             object, and anybody holding a copy of a file can compute whether somebody\n\
+             uploaded it. No flag sets it: a flag is readable by every user on the host.",
+        )
+        .secret(),
+        Setting::integer("token_ttl", 120, "Seconds a file token lives.").note(
+            "It cannot be revoked, so this number is the window in which a URL pasted\n\
+             into a chat still works. Two minutes is long enough for a page full of\n\
+             images and short enough to be dead before anyone clicks it.",
+        ),
+    ]
+}
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "storage");

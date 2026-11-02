@@ -1,7 +1,7 @@
 //! `sessions` -- a cookie, and a `Session` on the context.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Cookie sessions.
 ///
@@ -22,7 +22,25 @@ impl Module for Sessions {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/sessions/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod sessions;");
-        plugin(s, project, "sessions", "Sessions");
+        // Declared once: the `[sessions]` section with the config module,
+        // and `--sessions.cookie` and `--sessions.secure` on the command
+        // line. The values are the file's, so `secure` is false here and
+        // true in `Settings::default`, which is what runs without a file.
+        configurable(
+            s,
+            project,
+            "sessions",
+            "Sessions",
+            vec![
+                Setting::text(
+                    "cookie",
+                    &format!("_{}_session", project.ident()),
+                    "The session cookie's name.",
+                ),
+                Setting::bool("secure", false, "Send the cookie over HTTPS only.")
+                    .note("Development only. Anywhere a browser reaches over HTTPS, this is true."),
+            ],
+        );
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin
@@ -42,14 +60,6 @@ impl Module for Sessions {
             \x20   eprintln!(\"session cookie: {}\", session.cookie);"
                 .to_string(),
         );
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(format!(
-                "\n[sessions]\ncookie = \"_{ident}_session\"\n\
-                 # Development only. Anywhere a browser reaches over HTTPS, this is true.\n\
-                 secure = false\n",
-                ident = project.ident()
-            ));
-        }
     }
 }
 

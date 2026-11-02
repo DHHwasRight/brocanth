@@ -244,7 +244,7 @@ impl Node {
 
 /// Types one variable's text. See the module documentation for the rule and
 /// the reason.
-fn infer(raw: &str) -> ValueKind {
+pub(crate) fn infer(raw: &str) -> ValueKind {
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return ValueKind::String(raw[1..raw.len() - 1].to_string());
     }

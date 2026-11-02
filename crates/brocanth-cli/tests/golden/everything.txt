@@ -86,16 +86,17 @@ run = "cargo run -- css --watch"
 mod app;
 mod assets;
 mod commands;
+mod flags;
 #[path = "../migrations/mod.rs"]
 mod migrations;
 mod pages;
 mod plugins;
 
 fn main() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main(brocanth_command::Context::boot()?)
+    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: 3a0eee27e55bc24e
+// brocanth-digest: 9aeccd8135311051
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1597,12 +1598,19 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth_config::{AppBuilderConfigExt, Loader};
 
+        // The flags this run was given, under the names `src/flags.rs`
+        // gives them. None unless that file turns them on: with a config
+        // file, the file is the source.
+        let flags = crate::plugins::given_flags()?;
         // The core takes already-built values; finding the files, layering
         // them and typing each section is `brocanth-config`'s job, and it is
-        // the only reason a TOML parser is in the tree.
-        let config = Loader::new(crate::app::APP)
-            .load()
-            .map_err(|e| e.to_string())?;
+        // the only reason a TOML parser is in the tree. A flag is the top
+        // layer, above the environment.
+        let mut loader = Loader::new(crate::app::APP);
+        for given in &flags {
+            loader = loader.flag(given.flag.path, given.name, &given.value, given.flag.text);
+        }
+        let config = loader.load().map_err(|e| e.to_string())?;
         let builder = $builder.with_config(config);
         let builder = builder
             .plugin_from_config::<crate::plugins::sessions::Sessions>("sessions")
@@ -1864,6 +1872,172 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
+/// One command-line flag a module declared, by the key it sets.
+pub struct Flag {
+    /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
+    /// unless `src/flags.rs` renames it.
+    pub path: &'static str,
+    /// The line `--help` prints.
+    pub help: &'static str,
+    /// Whether the value stays a string whatever it looks like.
+    pub text: bool,
+}
+
+/// Every flag the modules declared. `brocanth add` rewrites this list;
+/// `src/flags.rs` renames or hides an entry.
+pub const FLAGS: &[Flag] = &[
+    Flag {
+        path: "sessions.cookie",
+        help: "The session cookie's name.",
+        text: true,
+    },
+    Flag {
+        path: "sessions.secure",
+        help: "Send the cookie over HTTPS only.",
+        text: false,
+    },
+    Flag {
+        path: "storage.root",
+        help: "Where uploads are stored.",
+        text: true,
+    },
+    Flag {
+        path: "storage.token_ttl",
+        help: "Seconds a file token lives.",
+        text: false,
+    },
+];
+
+/// One flag on this run's command line.
+pub struct Given {
+    /// What it sets.
+    pub flag: &'static Flag,
+    /// The name it was given under, without `--`.
+    pub name: &'static str,
+    /// The value, as typed.
+    pub value: String,
+}
+
+/// The name each flag answers to on this run, after `src/flags.rs`.
+///
+/// A rename of a key no module declares, a name that is not spelled as a flag,
+/// and two flags under one name each stop the binary: each would otherwise be
+/// a flag that does nothing, or does something else.
+pub fn flag_names() -> Result<Vec<(&'static Flag, &'static str)>, String> {
+    // With a config file, the file is the source: a flag is read only when
+    // `src/flags.rs` says so.
+    if !crate::flags::WITH_CONFIG {
+        return Ok(Vec::new());
+    }
+    for (path, _) in crate::flags::RENAMES {
+        if !FLAGS.iter().any(|flag| flag.path == *path) {
+            let known: Vec<&str> = FLAGS.iter().map(|flag| flag.path).collect();
+            return Err(format!(
+                "src/flags.rs renames `{path}`, and no module declares it\nhelp: the flags are {}",
+                known.join(", ")
+            ));
+        }
+    }
+    let mut names: Vec<(&'static Flag, &'static str)> = Vec::new();
+    for flag in FLAGS {
+        let name = crate::flags::RENAMES
+            .iter()
+            .find(|(path, _)| *path == flag.path)
+            .map_or(flag.path, |(_, name)| *name);
+        if name.is_empty() {
+            continue;
+        }
+        let spelled = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        if !spelled || name.starts_with(['-', '.', '_']) || name == "help" || name == "version" {
+            return Err(format!(
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help` or `version`"
+            ));
+        }
+        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            return Err(format!(
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                other.path, flag.path
+            ));
+        }
+        names.push((flag, name));
+    }
+    Ok(names)
+}
+
+/// The flags on this run's command line, in the order they were given.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given_flags() -> Result<Vec<Given>, String> {
+    let names = flag_names()?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut given = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline) = match written.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (written, None),
+        };
+        let Some((flag, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => rest
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
+        };
+        given.push(Given { flag, name, value });
+    }
+    Ok(given)
+}
+
+/// The flags, as arguments every command takes.
+///
+/// A name a command already takes is refused here: `clap` panics on it in a
+/// debug build and lets one of the two win in a release one.
+pub fn flag_args(
+    command: brocanth_command::clap::Command,
+) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
+    use brocanth_command::{anyhow, clap};
+
+    let mut command = command;
+    for (flag, name) in flag_names().map_err(anyhow::Error::msg)? {
+        let taken = command
+            .get_subcommands()
+            .flat_map(|sub| sub.get_arguments())
+            .any(|arg| arg.get_long() == Some(name));
+        if taken {
+            anyhow::bail!(
+                "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in src/flags.rs",
+                flag.path
+            );
+        }
+        command = command.arg(
+            clap::Arg::new(name)
+                .long(name)
+                .value_name("VALUE")
+                .help(flag.help)
+                .global(true)
+                .action(clap::ArgAction::Append),
+        );
+    }
+    Ok(command)
+}
+
 /// `[server] shutdown_grace_secs`, or
 /// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
@@ -1945,7 +2119,34 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4446601884597bf1
+// brocanth-digest: 38f832b5237df89d
+===== src/flags.rs =====
+//! The command-line flags of this binary, and the one place to rename them.
+//!
+//! A module declares each of its settings once. From that the binary takes a
+//! flag, `--<module>.<key>=VALUE`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list of flags in
+//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
+//! and never again.
+
+/// Whether a project with a config file reads the flags too.
+///
+/// Off: with the `config` module, the file and the environment are the
+/// sources, and the binary takes no flag. On: a flag outranks both, for one
+/// run. Without the `config` module the flags are the only source, and this
+/// is not read.
+#[allow(dead_code)]
+pub const WITH_CONFIG: bool = false;
+
+/// Flags under another name: the key as the module declares it, and the flag
+/// this binary answers to instead, without `--`. An empty name hides the
+/// flag.
+///
+/// ```text
+/// ("sessions.cookie", "cookie"),
+/// ("storage.root", ""),
+/// ```
+pub const RENAMES: &[(&str, &str)] = &[];
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1967,7 +2168,9 @@ name = "My Blog"
 shutdown_grace_secs = 25
 
 [sessions]
+# The session cookie's name.
 cookie = "_my_blog_session"
+# Send the cookie over HTTPS only.
 # Development only. Anywhere a browser reaches over HTTPS, this is true.
 secure = false
 
@@ -2035,20 +2238,22 @@ absolute_timeout = 2592000
 dialect = "sqlite"
 
 [storage]
+# Where uploads are stored.
 # Below the working directory, so an upload is not source and `.gitignore`
 # already says so. Move it off the deployment's disk and every instance stops
 # seeing the same files: an object store is a separate crate behind the same
 # trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.
 root = "var/uploads"
-# Development only, and the one line to change first. It signs file tokens and
-# it keys the address an object is stored at. While it is this string, anybody
-# who has read this repository can mint a token for any object, and anybody
-# holding a copy of a file can compute whether somebody uploaded it.
+# Signs file tokens and keys object addresses.
+# Development only, and the one line to change first. While it is this
+# string, anybody who has read this repository can mint a token for any
+# object, and anybody holding a copy of a file can compute whether somebody
+# uploaded it. No flag sets it: a flag is readable by every user on the host.
 secret = "development only: replace before anything is uploaded in anger"
-# Seconds a file token lives. It cannot be revoked, so this number is the
-# window in which a URL pasted into a chat still works. Two minutes is long
-# enough for a page full of images and short enough to be dead before anyone
-# clicks it.
+# Seconds a file token lives.
+# It cannot be revoked, so this number is the window in which a URL pasted
+# into a chat still works. Two minutes is long enough for a page full of
+# images and short enough to be dead before anyone clicks it.
 token_ttl = 120
 
 [openapi]

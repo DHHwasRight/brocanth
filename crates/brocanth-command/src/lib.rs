@@ -197,7 +197,23 @@ pub const fn entry<T: Registered>() -> CommandEntry {
 /// and a command that vanished is far worse to debug than one that refused to
 /// start.
 pub fn main(ctx: Context) -> anyhow::Result<()> {
-    match run_with(&COMMANDS, ctx, std::env::args_os()) {
+    main_with(ctx, Ok)
+}
+
+/// Adds arguments every command accepts, before the line is parsed.
+///
+/// It is handed the whole command, with every subcommand on it, so it can
+/// refuse a name a subcommand already uses: clap's own answer to that is a
+/// panic in a debug build and a silent winner in a release one.
+pub type Global = fn(ClapCommand) -> anyhow::Result<ClapCommand>;
+
+/// [`main`], with arguments every command accepts.
+///
+/// A generated project passes the flags its modules declared. Mark each
+/// [`clap::Arg`] `global(true)`, so it may be written before or after the
+/// subcommand's name.
+pub fn main_with(ctx: Context, global: Global) -> anyhow::Result<()> {
+    match run_with_global(&COMMANDS, ctx, std::env::args_os(), global) {
         // clap reports `--help` and `--version` as errors so the caller can
         // decide what they mean. The decision here is clap's own: print to
         // the right stream and exit with the right code. Treating them as
@@ -215,8 +231,23 @@ pub fn main(ctx: Context) -> anyhow::Result<()> {
 #[doc(hidden)]
 pub fn run_with<I, T>(
     commands: &'static [CommandEntry],
+    ctx: Context,
+    args: I,
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_global(commands, ctx, args, Ok)
+}
+
+/// [`main_with`], with the slice and the arguments passed in.
+#[doc(hidden)]
+pub fn run_with_global<I, T>(
+    commands: &'static [CommandEntry],
     mut ctx: Context,
     args: I,
+    global: Global,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -231,6 +262,7 @@ where
     for entry in &sorted {
         command = command.subcommand((entry.augment)(ClapCommand::new(entry.name)));
     }
+    let command = global(command)?;
 
     let matches = command.try_get_matches_from(args)?;
     let (name, sub) = matches
@@ -433,6 +465,27 @@ mod tests {
             run: run_of::<ProvesRegistration>,
         }];
         assert!(run_with(&ONE, ctx(), ["app", "nope"]).is_err());
+    }
+
+    #[test]
+    fn a_global_flag_with_dots_is_accepted_after_the_subcommand() {
+        static ONE: [CommandEntry; 1] = [CommandEntry {
+            name: "proves_registration",
+            augment: augment_of::<ProvesRegistration>,
+            run: run_of::<ProvesRegistration>,
+        }];
+        fn sessions(command: ClapCommand) -> anyhow::Result<ClapCommand> {
+            Ok(command.arg(
+                clap::Arg::new("sessions.cookie")
+                    .long("sessions.cookie")
+                    .global(true),
+            ))
+        }
+        let line = ["app", "proves_registration", "--sessions.cookie=x"];
+        run_with_global(&ONE, ctx(), line, sessions).expect("clap took the flag");
+        // And without it, the same line is refused: a flag the binary did
+        // not declare is not quietly ignored.
+        assert!(run_with(&ONE, ctx(), line).is_err());
     }
 
     #[test]

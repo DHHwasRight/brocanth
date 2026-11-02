@@ -31,7 +31,7 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use brocanth_scaffold::{Dep, Scaffold as Built, Slot, Source};
+use brocanth_scaffold::{Dep, Kind, Scaffold as Built, Setting, Slot, Source};
 use clap::Args;
 
 use crate::tui::{Choice, Draft};
@@ -903,9 +903,9 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         (
             "src/main.rs".to_string(),
             if a.has("commands") {
-                main_with_commands_rs(a)
+                main_with_commands_rs(a, has_flags(&built))
             } else {
-                main_serve_only_rs(a)
+                main_serve_only_rs(a, has_flags(&built))
             },
         ),
         // Always: it is the one answer to what this application is, and both
@@ -920,6 +920,12 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     // this file the same four questions whatever the module list is, which
     // is what lets `brocanth add` leave `src/app.rs` alone.
     files.push(("src/plugins/mod.rs".to_string(), plugins_mod_rs(a, &built)));
+    // The developer's: written when it is missing, so `brocanth add` gives
+    // an older project one the first time a module declares a flag, and
+    // never touches a rename somebody wrote.
+    if has_flags(&built) {
+        files.push(("src/flags.rs".to_string(), FLAGS_RS.to_string()));
+    }
     if a.has("config") {
         files.push((
             format!("config/{}.toml", brocanth_config::DEFAULT_ENV),
@@ -1071,7 +1077,24 @@ fn attributed(a: &Answers, files: &[(String, String)], key: &str) -> Vec<String>
 /// module that claimed two sections or named one differently would
 /// otherwise be recorded wrongly and silently.
 fn sections_of(built: &Built, key: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    // A module that declared its settings named its sections: `[x]`, and
+    // `[x.sub]` for each subsection. That is the answer, not a parse.
+    let mut out: Vec<String> = Vec::new();
+    for (by, section, setting) in built.settings() {
+        if by != key {
+            continue;
+        }
+        let name = match setting.key.rsplit_once('.') {
+            Some((sub, _)) => format!("{section}.{sub}"),
+            None => section.to_string(),
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
     for (by, text) in built
         .slot_owners(Slot::ConfigSections)
         .zip(built.slot(Slot::ConfigSections))
@@ -2227,7 +2250,10 @@ impl Signals {
 /// `[commands.*]`, and mise answered `unknown field`.
 /// `src/main.rs` when the project has no command line: it serves, and that is
 /// all it does.
-fn main_serve_only_rs(a: &Answers) -> String {
+fn main_serve_only_rs(a: &Answers, flags: bool) -> String {
+    if flags {
+        return main_serve_only_with_flags_rs(a);
+    }
     format!(
         r##"//! {title} -- a brocanth application.
 //!
@@ -2260,8 +2286,53 @@ fn main() -> ExitCode {{
     )
 }
 
+/// `src/main.rs` with no command line, and flags a module declared: it reads
+/// them, refuses anything else, and serves.
+fn main_serve_only_with_flags_rs(a: &Answers) -> String {
+    format!(
+        r##"//! {title} -- a brocanth application.
+//!
+//! No command line was asked for, so this binary does one thing. It takes the
+//! flags its modules declared, which `--help` lists and `src/flags.rs`
+//! renames, and nothing else. Everything it contains is in `src/app.rs`;
+//! `brocanth add commands` turns this into a command line with `serve` as one
+//! of its commands.
+
+mod app;{assets}
+mod flags;
+mod pages;
+mod plugins;
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {{
+    let served = plugins::read_line().and_then(|helped| {{
+        if helped {{
+            Ok(())
+        }} else {{
+            app::serve(&app::default_addr())
+        }}
+    }});
+    match served {{
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {{
+            eprintln!("error: {{message}}");
+            ExitCode::FAILURE
+        }}
+    }}
+}}
+"##,
+        title = a.title,
+        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
+            "\nmod assets;"
+        } else {
+            ""
+        },
+    )
+}
+
 /// `src/main.rs` when the project has a command line: it is the command line.
-fn main_with_commands_rs(a: &Answers) -> String {
+fn main_with_commands_rs(a: &Answers, flags: bool) -> String {
     format!(
         r##"//! {title} -- a brocanth application.
 //!
@@ -2274,13 +2345,20 @@ fn main_with_commands_rs(a: &Answers) -> String {
 //! the router read the same thing.
 
 mod app;{assets}
-mod commands;{migrations}
+mod commands;{flags_mod}{migrations}
 mod pages;
 {plugins}
 fn main() -> brocanth_command::anyhow::Result<()> {{
-    brocanth_command::main(brocanth_command::Context::boot()?)
+{run}
 }}
 "##,
+        flags_mod = if flags { "\nmod flags;" } else { "" },
+        // The flags the modules declared, as arguments every command takes.
+        run = if flags {
+            "    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)"
+        } else {
+            "    brocanth_command::main(brocanth_command::Context::boot()?)"
+        },
         title = a.title,
         assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
             "\nmod assets;"
@@ -3499,7 +3577,34 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         "let builder = $builder"
     };
-    if a.has("config") {
+    if has_flags(built) {
+        out.push_str(if a.has("config") {
+            "        // The flags this run was given, under the names `src/flags.rs`\n\
+            \x20       // gives them. None unless that file turns them on: with a config\n\
+            \x20       // file, the file is the source.\n\
+            \x20       let flags = crate::plugins::given_flags()?;\n"
+        } else {
+            "        // The flags this run was given, under the names `src/flags.rs`\n\
+            \x20       // gives them. Each plugin below starts from its defaults and takes\n\
+            \x20       // these on top.\n\
+            \x20       let flags = crate::plugins::given_flags()?;\n"
+        });
+    }
+    if a.has("config") && has_flags(built) {
+        out.push_str(&format!(
+            "        // The core takes already-built values; finding the files, layering\n\
+            \x20       // them and typing each section is `brocanth-config`'s job, and it is\n\
+            \x20       // the only reason a TOML parser is in the tree. A flag is the top\n\
+            \x20       // layer, above the environment.\n\
+            \x20       let mut loader = Loader::new(crate::app::APP);\n\
+            \x20       for given in &flags {{\n\
+            \x20           loader = loader.flag(given.flag.path, given.name, &given.value, given.flag.text);\n\
+            \x20       }}\n\
+            \x20       let config = loader.load().map_err(|e| e.to_string())?;\n\
+            \x20       {head}.with_config(config){end}\n",
+            end = if registrations.is_empty() { "" } else { ";" },
+        ));
+    } else if a.has("config") {
         out.push_str(&format!(
             "        // The core takes already-built values; finding the files, layering\n\
             \x20       // them and typing each section is `brocanth-config`'s job, and it is\n\
@@ -3632,6 +3737,15 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         out.push_str("        _ => None,\n    }\n");
     }
     out.push_str("}\n");
+
+    // -- the flags ----------------------------------------------------
+    //
+    // Here and not in `src/flags.rs`, because the list follows from the
+    // module list. The renames are the developer's, so they are there.
+    if has_flags(built) {
+        out.push('\n');
+        out.push_str(&flags_rs(a, built));
+    }
 
     // -- the grace period ---------------------------------------------
     //
@@ -3801,6 +3915,357 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 }
 "#;
 
+/// Whether any module declared a setting the command line may set.
+fn has_flags(built: &Built) -> bool {
+    built.settings().any(|(_, _, setting)| setting.flag)
+}
+
+/// The settings a flag may set, as `(section, setting)`, in module order.
+fn flagged(built: &Built) -> Vec<(&str, &Setting)> {
+    built
+        .settings()
+        .filter(|(_, _, setting)| setting.flag)
+        .map(|(_, section, setting)| (section, setting))
+        .collect()
+}
+
+/// The flag half of `src/plugins/mod.rs`: the list, the names after
+/// `src/flags.rs`, the reader, and what hands them to the binary.
+fn flags_rs(a: &Answers, built: &Built) -> String {
+    let config = a.has("config");
+    let mut out = String::from(FLAG_STRUCT_HEAD);
+    if config {
+        out.push_str(
+            "    /// Whether the value stays a string whatever it looks like.\n\
+            \x20   pub text: bool,\n",
+        );
+    }
+    out.push_str(
+        "}\n\
+         \n\
+         /// Every flag the modules declared. `brocanth add` rewrites this list;\n\
+         /// `src/flags.rs` renames or hides an entry.\n\
+         pub const FLAGS: &[Flag] = &[\n",
+    );
+    for (section, setting) in flagged(built) {
+        out.push_str(&format!(
+            "    Flag {{\n\
+            \x20       path: \"{section}.{key}\",\n\
+            \x20       help: {help:?},\n",
+            key = setting.key,
+            help = setting.help,
+        ));
+        if config {
+            out.push_str(&format!("        text: {},\n", setting.kind == Kind::Text));
+        }
+        out.push_str("    },\n");
+    }
+    out.push_str("];\n\n");
+    out.push_str(FLAG_GIVEN);
+    out.push_str(if config {
+        FLAG_NAMES_CONFIG_GATE
+    } else {
+        FLAG_NAMES_NO_GATE
+    });
+    out.push_str(FLAG_NAMES_BODY);
+    out.push_str(FLAG_READER);
+    if a.has("commands") {
+        out.push_str(FLAG_ARGS);
+    } else {
+        out.push_str(FLAG_LINE);
+    }
+    if !config {
+        out.push_str(FLAG_PARSED);
+        // One function per section, in the order the sections were declared.
+        let mut sections: Vec<&str> = Vec::new();
+        for (section, _) in flagged(built) {
+            if !sections.contains(&section) {
+                sections.push(section);
+            }
+        }
+        for section in sections {
+            out.push_str(&flagged_section(section, &flagged(built)));
+        }
+    }
+    out
+}
+
+/// `flagged_<section>`: a section's defaults, with this run's flags applied.
+fn flagged_section(section: &str, flagged: &[(&str, &Setting)]) -> String {
+    let ident = section.replace('-', "_");
+    let mine: Vec<&Setting> = flagged
+        .iter()
+        .filter(|(s, _)| *s == section)
+        .map(|(_, setting)| *setting)
+        .collect();
+    let signature = format!(
+        "pub fn flagged_{ident}(given: &[Given]) -> Result<crate::plugins::{section}::Settings, String> {{\n"
+    );
+    let mut out = format!(
+        "\n/// `[{section}]`, as this binary runs it without a file: the plugin's\n\
+         /// defaults, and the flags this run was given.\n"
+    );
+    if signature.len() > 101 {
+        out.push_str(&format!(
+            "pub fn flagged_{ident}(\n    given: &[Given],\n) -> Result<crate::plugins::{section}::Settings, String> {{\n"
+        ));
+    } else {
+        out.push_str(&signature);
+    }
+    out.push_str(&format!(
+        "    let mut settings = crate::plugins::{section}::Settings::default();\n\
+        \x20   for given in given {{\n"
+    ));
+    // A match with one arm and a wildcard is clippy's `single_match`.
+    if let [only] = mine.as_slice() {
+        out.push_str(&format!(
+            "        if given.flag.path == \"{section}.{key}\" {{\n\
+            \x20           settings.{key} = parsed(given)?;\n\
+            \x20       }}\n",
+            key = only.key,
+        ));
+    } else {
+        out.push_str("        match given.flag.path {\n");
+        for setting in &mine {
+            out.push_str(&format!(
+                "            \"{section}.{key}\" => settings.{key} = parsed(given)?,\n",
+                key = setting.key,
+            ));
+        }
+        out.push_str("            _ => {}\n        }\n");
+    }
+    out.push_str("    }\n    Ok(settings)\n}\n");
+    out
+}
+
+/// `src/flags.rs`: the developer's half of the flags.
+const FLAGS_RS: &str = r#"//! The command-line flags of this binary, and the one place to rename them.
+//!
+//! A module declares each of its settings once. From that the binary takes a
+//! flag, `--<module>.<key>=VALUE`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list of flags in
+//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
+//! and never again.
+
+/// Whether a project with a config file reads the flags too.
+///
+/// Off: with the `config` module, the file and the environment are the
+/// sources, and the binary takes no flag. On: a flag outranks both, for one
+/// run. Without the `config` module the flags are the only source, and this
+/// is not read.
+#[allow(dead_code)]
+pub const WITH_CONFIG: bool = false;
+
+/// Flags under another name: the key as the module declares it, and the flag
+/// this binary answers to instead, without `--`. An empty name hides the
+/// flag.
+///
+/// ```text
+/// ("sessions.cookie", "cookie"),
+/// ("storage.root", ""),
+/// ```
+pub const RENAMES: &[(&str, &str)] = &[];
+"#;
+
+const FLAG_STRUCT_HEAD: &str = r#"/// One command-line flag a module declared, by the key it sets.
+pub struct Flag {
+    /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
+    /// unless `src/flags.rs` renames it.
+    pub path: &'static str,
+    /// The line `--help` prints.
+    pub help: &'static str,
+"#;
+
+const FLAG_GIVEN: &str = r#"/// One flag on this run's command line.
+pub struct Given {
+    /// What it sets.
+    pub flag: &'static Flag,
+    /// The name it was given under, without `--`.
+    pub name: &'static str,
+    /// The value, as typed.
+    pub value: String,
+}
+
+/// The name each flag answers to on this run, after `src/flags.rs`.
+///
+/// A rename of a key no module declares, a name that is not spelled as a flag,
+/// and two flags under one name each stop the binary: each would otherwise be
+/// a flag that does nothing, or does something else.
+pub fn flag_names() -> Result<Vec<(&'static Flag, &'static str)>, String> {
+"#;
+
+const FLAG_NAMES_CONFIG_GATE: &str = r#"    // With a config file, the file is the source: a flag is read only when
+    // `src/flags.rs` says so.
+    if !crate::flags::WITH_CONFIG {
+        return Ok(Vec::new());
+    }
+"#;
+
+const FLAG_NAMES_NO_GATE: &str = "";
+
+const FLAG_NAMES_BODY: &str = r#"    for (path, _) in crate::flags::RENAMES {
+        if !FLAGS.iter().any(|flag| flag.path == *path) {
+            let known: Vec<&str> = FLAGS.iter().map(|flag| flag.path).collect();
+            return Err(format!(
+                "src/flags.rs renames `{path}`, and no module declares it\nhelp: the flags are {}",
+                known.join(", ")
+            ));
+        }
+    }
+    let mut names: Vec<(&'static Flag, &'static str)> = Vec::new();
+    for flag in FLAGS {
+        let name = crate::flags::RENAMES
+            .iter()
+            .find(|(path, _)| *path == flag.path)
+            .map_or(flag.path, |(_, name)| *name);
+        if name.is_empty() {
+            continue;
+        }
+        let spelled = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        if !spelled || name.starts_with(['-', '.', '_']) || name == "help" || name == "version" {
+            return Err(format!(
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help` or `version`"
+            ));
+        }
+        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            return Err(format!(
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                other.path, flag.path
+            ));
+        }
+        names.push((flag, name));
+    }
+    Ok(names)
+}
+
+"#;
+
+const FLAG_READER: &str = r#"/// The flags on this run's command line, in the order they were given.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given_flags() -> Result<Vec<Given>, String> {
+    let names = flag_names()?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut given = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline) = match written.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (written, None),
+        };
+        let Some((flag, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => rest
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
+        };
+        given.push(Given { flag, name, value });
+    }
+    Ok(given)
+}
+"#;
+
+const FLAG_ARGS: &str = r#"
+/// The flags, as arguments every command takes.
+///
+/// A name a command already takes is refused here: `clap` panics on it in a
+/// debug build and lets one of the two win in a release one.
+pub fn flag_args(
+    command: brocanth_command::clap::Command,
+) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
+    use brocanth_command::{anyhow, clap};
+
+    let mut command = command;
+    for (flag, name) in flag_names().map_err(anyhow::Error::msg)? {
+        let taken = command
+            .get_subcommands()
+            .flat_map(|sub| sub.get_arguments())
+            .any(|arg| arg.get_long() == Some(name));
+        if taken {
+            anyhow::bail!(
+                "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in src/flags.rs",
+                flag.path
+            );
+        }
+        command = command.arg(
+            clap::Arg::new(name)
+                .long(name)
+                .value_name("VALUE")
+                .help(flag.help)
+                .global(true)
+                .action(clap::ArgAction::Append),
+        );
+    }
+    Ok(command)
+}
+"#;
+
+const FLAG_LINE: &str = r#"
+/// Refuses anything on the command line that is not a flag, and answers
+/// `--help`. `true` when it printed the help, so `main` stops there.
+///
+/// This binary has no command line of its own: `brocanth add commands` gives
+/// it one, and `clap` does this.
+pub fn read_line() -> Result<bool, String> {
+    let names = flag_names()?;
+    let mut rest = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = rest.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("Flags:");
+            for (flag, name) in &names {
+                println!("  --{name} <VALUE>  {}", flag.help);
+            }
+            return Ok(true);
+        }
+        let written = arg.strip_prefix("--").unwrap_or_default();
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if name.is_empty() || !names.iter().any(|(_, known)| *known == name) {
+            return Err(format!(
+                "unknown argument `{arg}`\nhelp: `--help` lists the flags"
+            ));
+        }
+        // `--name VALUE`: the next argument is the value, not a flag.
+        if !written.contains('=') {
+            rest.next();
+        }
+    }
+    Ok(false)
+}
+"#;
+
+const FLAG_PARSED: &str = r#"
+/// One flag's value, as the type of the field it sets.
+fn parsed<T>(given: &Given) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    given
+        .value
+        .parse()
+        .map_err(|e| format!("--{} is {:?}: {e}", given.name, given.value))
+}
+"#;
+
 fn config_toml(a: &Answers, built: &Built) -> String {
     let mut out = format!(
         "# The configuration of this environment.\n\
@@ -3858,6 +4323,11 @@ mod tests {
             // literal branch of every plugin module runs only here, and
             // for as long as it was unsnapshotted it did not compile.
             ("plugin-no-config", vec!["logging"]),
+            // Declared settings and no config file: the flags are the only
+            // source, read by `main` with no command line, and by `clap`
+            // with one.
+            ("flags", vec!["sessions", "storage"]),
+            ("flags-commands", vec!["sessions", "commands"]),
             ("default", DEFAULT.to_vec()),
             // Everything that can stand together: `logging` is the one
             // module `observe` replaces.
@@ -4617,7 +5087,7 @@ mod tests {
         // And the bridge is not in the source either, so there is no function
         // to call and no `rsx::` path to copy from.
         assert!(!pages_mod_rs(&a, &built_for(&a)).contains("pub fn html("));
-        assert!(!main_with_commands_rs(&a).contains("mod views;"));
+        assert!(!main_with_commands_rs(&a, false).contains("mod views;"));
     }
 
     #[test]
@@ -5012,6 +5482,116 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The flags a module declares, through a generated binary, both ways.
+    ///
+    /// Each run is a value the plugin refuses at startup, so the binary
+    /// stops before it binds a socket, and the error proves the flag reached
+    /// the plugin's settings. Without `config`, `main` reads the line itself.
+    /// With it, a renamed flag reaches the file's loader as its top layer
+    /// once `src/flags.rs` turns the flags on, and the canonical name is then
+    /// refused by `clap`.
+    ///
+    /// `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    fn declared_flags_reach_the_plugin_with_and_without_a_config_file() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let brocanth = crates
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let build = |name: &str, picks: Vec<&'static str>, flags_rs: Option<&str>| {
+            let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let a = Answers {
+                name: name.into(),
+                title: "Flags Test".into(),
+                picks,
+                local: Some(brocanth.display().to_string()),
+                git: false,
+            };
+            for (path, contents) in scaffold(&a).expect("the modules agree") {
+                let full = root.join(&path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(&full, contents).unwrap();
+            }
+            if let Some(text) = flags_rs {
+                std::fs::write(root.join("src/flags.rs"), text).unwrap();
+            }
+            let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                .args(["build", "--quiet"])
+                .current_dir(&root)
+                .output()
+                .expect("run cargo");
+            assert!(
+                output.status.success(),
+                "{name} did not compile:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            root
+        };
+        let run = |root: &Path, name: &str, args: &[&str]| {
+            let output = Command::new(root.join("target/debug").join(name))
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("run the binary");
+            (
+                output.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+        };
+
+        // No config file and no command line: `main` reads the flags.
+        let bare = build("flags-bare", vec!["sessions", "storage"], None);
+        let (ok, out) = run(&bare, "flags-bare", &["--sessions.cookie="]);
+        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
+        let (ok, out) = run(&bare, "flags-bare", &["--storage.token_ttl", "abc"]);
+        assert!(
+            !ok && out.contains("--storage.token_ttl is \"abc\""),
+            "{out}"
+        );
+        let (ok, out) = run(&bare, "flags-bare", &["--storage.secret=x"]);
+        assert!(
+            !ok && out.contains("unknown argument"),
+            "a secret has no flag: {out}"
+        );
+        let (ok, out) = run(&bare, "flags-bare", &["--help"]);
+        assert!(ok && out.contains("--sessions.cookie <VALUE>"), "{out}");
+        let _ = std::fs::remove_dir_all(&bare);
+
+        // A config file, the flags turned on, and one renamed.
+        let configured = build(
+            "flags-configured",
+            vec!["sessions", "config", "commands"],
+            Some(
+                "pub const WITH_CONFIG: bool = true;\n\
+                 pub const RENAMES: &[(&str, &str)] = &[(\"sessions.cookie\", \"cookie\")];\n",
+            ),
+        );
+        let (ok, out) = run(&configured, "flags-configured", &["serve", "--cookie="]);
+        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
+        let (ok, out) = run(
+            &configured,
+            "flags-configured",
+            &["serve", "--sessions.cookie=x"],
+        );
+        assert!(
+            !ok && out.contains("--sessions.cookie"),
+            "renamed away: {out}"
+        );
+        let (ok, out) = run(&configured, "flags-configured", &["serve", "--help"]);
+        assert!(ok && out.contains("--cookie <VALUE>"), "{out}");
+        let _ = std::fs::remove_dir_all(&configured);
     }
 
     /// SIGTERM in the middle of a request, sent to a generated server.

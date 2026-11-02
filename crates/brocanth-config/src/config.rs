@@ -262,6 +262,15 @@ pub enum ConfigError {
         source: EnvError,
     },
 
+    /// A command-line flag that cannot become a value.
+    #[error("--{flag}: {message}")]
+    Flag {
+        /// The flag, without its leading `--`.
+        flag: String,
+        /// What is wrong with it.
+        message: String,
+    },
+
     /// A top-level key holding something that is not a section.
     #[error("`{name}` is a top-level value, but only sections (tables) are allowed there")]
     NotASection {
@@ -422,6 +431,16 @@ pub struct Loader {
     cwd: PathBuf,
     env_lookup: EnvLookup,
     env_vars: Option<EnvVars>,
+    flags: Vec<Flag>,
+}
+
+/// One value given on the command line, for [`Loader::flag`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Flag {
+    path: Vec<String>,
+    name: String,
+    raw: String,
+    text: bool,
 }
 
 impl Loader {
@@ -434,7 +453,31 @@ impl Loader {
             cwd: PathBuf::from("."),
             env_lookup: Box::new(|k| std::env::var(k).ok()),
             env_vars: None,
+            flags: Vec::new(),
         }
+    }
+
+    /// Adds a value given on the command line, above every other source.
+    ///
+    /// `path` is the key as the file spells it, dotted: `sessions.cookie`.
+    /// `flag` is the name the operator typed, without `--`, which can differ
+    /// from the path when the application renamed the flag; the dump names
+    /// the flag, because that is what somebody will search their shell
+    /// history for. `text` keeps `raw` a string. Without it, `raw` is typed
+    /// as an environment variable is: see [`crate::env`].
+    ///
+    /// A flag outranks the environment because it is the narrower decision:
+    /// a variable is set for every process a shell starts, and a flag for one
+    /// run.
+    #[must_use]
+    pub fn flag(mut self, path: &str, flag: &str, raw: &str, text: bool) -> Self {
+        self.flags.push(Flag {
+            path: path.split('.').map(str::to_string).collect(),
+            name: flag.to_string(),
+            raw: raw.to_string(),
+            text,
+        });
+        self
     }
 
     /// Forces the environment, instead of reading `$<APP>_ENV`.
@@ -626,6 +669,7 @@ impl Loader {
         let (env_layer, used) =
             crate::env::layer(&self.app, &vars).map_err(|source| ConfigError::Env { source })?;
         value::merge(&mut root, env_layer);
+        value::merge(&mut root, self.flag_layer()?);
 
         Ok(Config {
             app: self.app.clone(),
@@ -634,6 +678,59 @@ impl Loader {
             sources: present,
             env_vars: used,
         })
+    }
+
+    /// The flags, as one layer. A later flag for the same path replaces an
+    /// earlier one, as a shell user expects of `--x=1 --x=2`.
+    fn flag_layer(&self) -> Result<Value, ConfigError> {
+        let mut root = Table::open();
+        for flag in &self.flags {
+            let wrong = |message: &str| ConfigError::Flag {
+                flag: flag.name.clone(),
+                message: message.to_string(),
+            };
+            let Some((key, parents)) = flag.path.split_last() else {
+                return Err(wrong("names no key"));
+            };
+            if flag.path.iter().any(String::is_empty) || parents.is_empty() {
+                return Err(wrong(
+                    "a flag names a section and a key, joined by dots: `section.key`",
+                ));
+            }
+            let mut table = &mut root;
+            for part in parents {
+                let next = table.get(part).is_some_and(|v| v.as_table().is_some());
+                if !next {
+                    if table.get(part).is_some() {
+                        return Err(wrong("another flag names this as a value, not a table"));
+                    }
+                    table.insert(
+                        part.clone(),
+                        Value::new(
+                            ValueKind::Table(Table::open()),
+                            Provenance::flag(&flag.name),
+                        ),
+                    );
+                }
+                table = table
+                    .get_mut(part)
+                    .and_then(Value::as_table_mut)
+                    .expect("inserted above");
+            }
+            let kind = if flag.text {
+                ValueKind::String(flag.raw.clone())
+            } else {
+                crate::env::infer(&flag.raw)
+            };
+            if table.get(key).is_some_and(|v| v.as_table().is_some()) {
+                return Err(wrong("another flag names keys under this one"));
+            }
+            table.insert(key.clone(), Value::new(kind, Provenance::flag(&flag.name)));
+        }
+        Ok(Value::new(
+            ValueKind::Table(root),
+            Provenance::inline("command line"),
+        ))
     }
 
     /// The files that exist, highest precedence first, at most one per slot.
@@ -1248,6 +1345,51 @@ mod toml_tests {
             db["hosts"].as_array().unwrap().len(),
             1,
             "arrays replace, they do not append"
+        );
+    }
+
+    // -- flags --------------------------------------------------------------
+
+    #[test]
+    fn a_flag_outranks_the_environment_and_names_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("config/test.toml"),
+            "[sessions]\ncookie = \"file\"\nsecure = false\n",
+        );
+        let cfg = Loader::new("my_app")
+            .env("test")
+            .root(root)
+            .cwd(root)
+            .env_lookup(lookup(&[]))
+            .env_vars(|| vec![("MY_APP_SESSIONS__COOKIE".into(), "env".into())])
+            .flag("sessions.cookie", "cookie", "123", true)
+            .flag("sessions.secure", "sessions.secure", "true", false)
+            .load()
+            .unwrap();
+        let sessions = cfg.raw_section("sessions").unwrap();
+        // `text` kept the digits a string; without it they are a number.
+        assert_eq!(sessions["cookie"].as_str(), Some("123"));
+        assert_eq!(sessions["secure"].as_bool(), Some(true));
+        // The renamed flag, as the operator typed it, and what it replaced.
+        let from = cfg.provenance("sessions.cookie").unwrap();
+        assert_eq!(from.to_string(), "--cookie");
+        assert_eq!(sessions["cookie"].shadowed().len(), 2, "env, then file");
+    }
+
+    #[test]
+    fn a_flag_without_a_section_is_refused_by_name() {
+        let err = Loader::new("my_app")
+            .env("test")
+            .cwd("/nonexistent")
+            .env_lookup(lookup(&[]))
+            .flag("cookie", "cookie", "x", true)
+            .load()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "--cookie: a flag names a section and a key, joined by dots: `section.key`"
         );
     }
 
