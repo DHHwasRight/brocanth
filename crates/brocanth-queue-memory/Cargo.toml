@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
+readme = "README.md"
 description = "An in-process queue backend: the reference implementation the conformance suite is checked against, and a backend for a test."
 
 [dependencies]

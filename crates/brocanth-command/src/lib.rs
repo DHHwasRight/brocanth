@@ -1,70 +1,6 @@
-//! Rails-style commands for a brocanth project.
-//!
-//! A command is a `clap::Args` struct with a `run` method. Write one anywhere in
-//! your project, put `#[brocanth_command::cmd]` on it, and it appears in your
-//! binary's `--help` with its arguments parsed. There is no list to add it to
-//! and nothing is loaded at run time: registration happens at link time,
-//! through a [`linkme`] distributed slice.
-//!
-//! # Defining a command
-//!
-//! ```
-//! use brocanth_command::{anyhow, clap, cmd, Context, Command};
-//!
-//! /// Seed the demo database.
-//! #[cmd]
-//! #[derive(clap::Args)]
-//! pub struct SeedDemo {
-//!     /// How many rows to write.
-//!     #[arg(long, default_value_t = 100)]
-//!     pub count: u32,
-//! }
-//!
-//! impl Command for SeedDemo {
-//!     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-//!         println!("seeding {} rows", self.count);
-//!         Ok(())
-//!     }
-//! }
-//! ```
-//!
-//! Your `main` is the whole CLI:
-//!
-//! ```no_run
-//! fn main() -> brocanth_command::anyhow::Result<()> {
-//!     brocanth_command::main(brocanth_command::Context::boot()?)
-//! }
-//! ```
-//!
-//! # Two traits, because an impl block has one author
-//!
-//! [`Task::run`] is yours. [`Registered::NAME`] is the macro's, derived from
-//! the struct name in `snake_case`. They are separate traits because a single
-//! one could not hold both halves: you would have to write the name the macro
-//! exists to work out for you.
-//!
-//! You never write `impl Registered` by hand. [`entry`] is bounded on it, so
-//! forgetting `#[cmd]` is a type error at the registration site rather than a
-//! command that silently never appears.
-//!
-//! # The linking gotcha
-//!
-//! **A crate that is never referenced is dropped by the linker, and its commands
-//! go with it.** The slice is populated by the linker from the object files it
-//! actually keeps. Your own crate is fine -- `main` is in it. A *third-party*
-//! crate whose only purpose is to contribute commands is not: nothing in your
-//! code mentions it, so nothing keeps it.
-//!
-//! Reference it explicitly:
-//!
-//! ```ignore
-//! // In main.rs. The `as _` imports nothing; it only tells the linker the
-//! // crate is wanted, which keeps the commands it registers.
-//! use some_task_pack as _;
-//! ```
-//!
-//! Without that line the crate compiles, the tests pass, and the commands are
-//! simply absent from `--help`. It is the one failure here that is silent.
+// The README is the crate documentation. It held the same text as the `//!`
+// lines that were here, so one copy is kept, and its examples run as doctests.
+#![doc = include_str!("../README.md")]
 
 // The macro emits absolute `::brocanth_command::...` paths, which is what makes
 // it work in other people's crates. For the built-in below to use the same
@@ -81,6 +17,14 @@ pub use linkme;
 
 /// Registers a `clap::Args` struct as a command. See the [crate docs](crate).
 pub use brocanth_command_macros::cmd;
+
+/// The examples in `brocanth-command-macros/README.md`, run as doctests here.
+///
+/// A proc-macro crate cannot use its own macro in a doctest, and this crate
+/// re-exports it. Compiled only by `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../../brocanth-command-macros/README.md")]
+pub struct MacrosReadme;
 
 // ---------------------------------------------------------------------------
 // Context
@@ -137,7 +81,7 @@ pub trait Command: clap::Args + 'static {
 
 /// What a command is called. Implemented by `#[cmd]`, never by hand.
 ///
-/// Separate from [`Task`] because the two halves have different authors and
+/// Separate from [`Command`] because the two halves have different authors and
 /// an `impl` block has only one.
 pub trait Registered: Command {
     /// The subcommand name.

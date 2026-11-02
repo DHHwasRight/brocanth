@@ -3,6 +3,7 @@ name = "brocanth-static"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Writes a brocanth application to files: every GET page, its partials per layout depth for dp-swap, the assets, under a base path."
 
 # Two dependencies, both brocanth: the router lists the routes, the server

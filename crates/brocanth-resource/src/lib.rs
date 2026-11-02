@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! Typed CRUD routes, from an entity and a policy.
 //!
 //! PLAN.md §12 item 5. The crate answers the records API of

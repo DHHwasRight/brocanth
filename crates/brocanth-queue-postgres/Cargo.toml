@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
+readme = "README.md"
 description = "The Postgres backend: a lease built on FOR UPDATE SKIP LOCKED, a promoter for delayed work, an outbox relay, and a partitioned archive."
 
 # `sqlx` 0.9 is the version brocanth's model layer already resolves, so an

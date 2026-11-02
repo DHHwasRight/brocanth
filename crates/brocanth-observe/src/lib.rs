@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Day-2 observability for a brocanth application.
 //!
 //! Four things a deployed service needs and the core does not assume:

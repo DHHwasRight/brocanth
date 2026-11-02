@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! An in-process backend.
 //!
 //! It exists for two reasons. A test needs a queue with no server, and the

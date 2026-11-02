@@ -3,6 +3,7 @@ name = "brocanth-schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "The brocanth validation vocabulary: schemas whose shape is checked by the compiler and whose data is checked at run time, with one introspectable description both an OpenAPI emitter and a form builder can read."
 
 # Dependencies are all optional and all gated. Turn every feature off and this

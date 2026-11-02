@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! The brocanth model layer.
 //!
 //! SeaORM 2.0.4 is the ORM, and **Postgres is the base**. The `postgres`

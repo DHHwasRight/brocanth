@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! The contract, as a suite any backend can be held to.
 //!
 //! Nothing here names Postgres, a connection, a transaction or SQL. A case

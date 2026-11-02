@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Static files, embedded while the crate compiles.
 //!
 //! ```ignore
@@ -21,8 +25,9 @@
 //! <link rel="stylesheet" href={assets::url("css/site.css")}>
 //! ```
 //!
-//! A name `assets/` does not hold is a compile error at that call, not a 404
-//! discovered in a browser.
+//! A name `assets/` does not hold panics at that call -- at startup, where a
+//! layout reaches it -- not a 404 discovered in a browser. It is not a
+//! compile error: `url` takes a runtime `&str`.
 //!
 //! # Embedded rather than read
 //!

@@ -1,17 +1,46 @@
 # brocanth-command
 
-Rails-style commands for a brocanth project. Define a struct in your own crate,
-put `#[cmd]` on it, and it is a subcommand of your project's CLI — with its
-arguments parsed and its `--help` written.
+`brocanth-command` gives a brocanth project its own command line, in the
+style of Rails tasks. You write a `clap::Args` struct, put `#[cmd]` on it,
+and implement `Command`. The struct is then a subcommand of the project's
+binary, with parsed arguments and a `--help`. There is no list to edit:
+the macro registers the command at link time through a
+[`linkme`](https://docs.rs/linkme) distributed slice. Nothing is loaded or
+scanned at run time. Use it for one-off and repeated jobs that need the
+project's types: seed data, a migration, a report. Do not use it for the
+global `brocanth` tool itself; that is `brocanth-cli`.
 
-There is no list to add it to. Registration happens at **link time**, through a
-[`linkme`](https://docs.rs/linkme) distributed slice, so nothing is loaded at
-run time and nothing is scanned at build time.
+## Getting started
 
-## Define a command
+```toml
+[dependencies]
+brocanth-command = { git = "https://github.com/DHHwasRight/brocanth", branch = "main" }
+```
+
+The crate re-exports `clap`, `linkme` and `anyhow`. Your `Cargo.toml` does
+not name them.
+
+In a generated project, the `commands` module adds this crate, a
+`src/commands/` directory with `serve`, and `main`:
+
+```text
+brocanth create my-app --with commands
+brocanth add commands
+```
+
+The `commands` module has no settings. With it, each setting another
+module declares is a global `clap` flag, `--<section>.<key>=VALUE`, which
+goes before or after the subcommand name. See
+[docs/module-flags.md](../../docs/module-flags.md).
+
+## Examples
+
+Define a command. The name is the struct name in `snake_case`:
+`seed_demo`. The doc comment is the help text, because
+`clap::Args::augment_args` copies it.
 
 ```rust
-use brocanth_command::{anyhow, clap, cmd, Context, Command};
+use brocanth_command::{anyhow, clap, cmd, Command, Context, Registered};
 
 /// Fill the demo database with sample rows.
 #[cmd]
@@ -28,141 +57,169 @@ impl Command for SeedDemo {
         Ok(())
     }
 }
+
+assert_eq!(<SeedDemo as Registered>::NAME, "seed_demo");
 ```
 
-That is the whole of it. The name comes from the struct in `snake_case`, so
-this is `seed_demo`. The help text comes from the doc comment, because
-`clap::Args::augment_args` copies it onto the command — there is no second
-description to keep in step.
-
-For a name no Rust identifier can spell:
+Give a name that no Rust identifier can spell:
 
 ```rust
+use brocanth_command::{anyhow, clap, cmd, Command, Context, Registered};
+
+/// Empty the cache.
 #[cmd(name = "cache:clear")]
+#[derive(clap::Args)]
+pub struct CacheClear {
+    #[arg(long)]
+    pub force: bool,
+}
+
+impl Command for CacheClear {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+assert_eq!(<CacheClear as Registered>::NAME, "cache:clear");
 ```
 
-Your project depends on `brocanth-command` alone. It re-exports `clap`, `linkme`
-and `anyhow`, so none of those appear in your own `Cargo.toml`.
+`main` is the whole command line. `main_with` adds arguments that every
+command accepts. Mark each one `global(true)`. A generated project passes
+its declared settings this way:
 
-### Two traits, and why
+```rust,no_run
+use brocanth_command::{anyhow, clap, main_with, Context};
 
-`Task::run` is yours. `Registered::NAME` is the macro's. They are separate
-traits because a single one could not hold both: an `impl` block has one
-author, so you would have to write the name the macro exists to derive.
+fn flags(command: clap::Command) -> anyhow::Result<clap::Command> {
+    Ok(command.arg(
+        clap::Arg::new("sessions.cookie")
+            .long("sessions.cookie")
+            .global(true),
+    ))
+}
 
-You never write `impl Registered` by hand. `entry` is bounded on it, so
-forgetting `#[cmd]` is a type error at the registration site rather than a
-command that quietly never appears.
-
-## How `brocanth` delegates
-
-`brocanth` is installed once, globally. The commands it can run are defined in a
-project and compiled into that project's binary, so it cannot know them. It
-hands off, the way `rails` hands off to `bin/rails`:
-
-```
-$ brocanth greet --name world
-/path/to/my-project (brocanth.toml)
-hello, world (env: development)
+fn main() -> anyhow::Result<()> {
+    main_with(Context::boot()?, flags)
+}
 ```
 
-Four steps, and the order matters:
+`no_run`: it parses the process arguments and exits.
 
-1. Walk up from the current directory for `brocanth.toml`. Without it there is
-   no project, and guessing would run the wrong one.
-2. `cargo build`, with cargo's stderr passed straight through. A command edited a
-   second ago must be the one that runs, and cargo's own errors are better than
-   any paraphrase.
-3. Ask `cargo metadata` where the binary is. Guessing `target/debug/<name>` is
-   wrong under `CARGO_TARGET_DIR`, inside a workspace, and on any profile but
-   the default.
-4. `exec` it on Unix, so the command owns the terminal, its exit code is the one
-   your shell sees, and Ctrl-C reaches the command rather than a wrapper holding
-   its hand. Elsewhere it is spawned and its exit code copied.
+`Context::boot()` reads `$BROCANTH_ENV` (default `development`) and finds
+the project root: the nearest directory with `brocanth.toml`, else the
+current directory. `Context::env()` and `Context::root()` return them.
 
-Subcommands `brocanth` knows itself — `create`, `routes`, `build`, `check`,
-`generate`, `dev` — are handled directly and never delegated.
+### Two traits
 
-## Running one
+`Command::run` is yours. `Registered::NAME` belongs to the macro. They are
+two traits because an `impl` block has one author. You never write
+`impl Registered`. `entry` is bounded on it, so a struct without `#[cmd]`
+is a type error, not a command that is silently absent.
 
-```
-$ brocanth --help
-Commands:
-  create  Scaffold an application
-  serve   Serve the application over HTTP
-  greet   Say hello, to prove the wiring works
+### The linking gotcha
 
-$ brocanth greet --name brocanth
-hello, brocanth (env: development)
-```
+The linker drops a crate that nothing references, and the commands it
+registers go with it. Your own crate is safe: `main` is in it. A
+third-party crate that only adds commands is not. Reference it:
 
-`brocanth` is installed once and knows one command of its own, `create`.
-Everything else it is given belongs to the project: it walks up for
-`brocanth.toml`, builds, and execs the project's binary. A built project also
-has its commands listed in that help, read out of the binary rather than
-guessed at.
-
-There is **no cargo alias**. A project's command line is a framework concern
-and cargo is the build tool; hooking one into the other conflates them. Run
-the binary directly if you would rather not go through `brocanth`.
-
-## The linking gotcha
-
-**A crate that is never referenced is dropped by the linker, and its commands go
-with it.**
-
-The slice is populated by the linker from the object files it actually keeps.
-Your own crate is fine — `main` is in it. A *third-party* crate whose only
-purpose is to contribute commands is not: nothing in your code mentions it, so
-nothing keeps it.
-
-Reference it explicitly:
-
-```rust
-// in src/bin/manage.rs. The `as _` imports no names; it only tells the
-// linker the crate is wanted, which keeps the commands it registers.
+```rust,ignore
+// In main.rs. `as _` imports no name. It tells the linker to keep the crate.
 use some_task_pack as _;
 ```
 
-Without that line the crate compiles, the tests pass, and the commands are simply
-absent from `--help`. It is the one failure here that is silent, which is why
-it has its own section.
+`ignore`: `some_task_pack` is a placeholder crate name. Without that line
+the crate compiles, the tests pass, and its commands are absent from
+`--help`.
 
-## Duplicate names
+### Duplicate names
 
-Two commands under one name is an error, reported before any command is built and
-naming **every** collision rather than only the first:
+Two commands with one name stop the binary before `clap` runs. The error
+names every collision, not only the first:
 
-```
+```text
 two or more commands share a name: migrate, seed.
 Every command name must be unique across this binary and every crate it links.
 Rename one with `#[cmd(name = "...")]`.
 ```
 
-clap's own behaviour for a duplicate subcommand is to keep one silently, and a
-command that vanished is far worse to debug than one that refused to start.
+`clap` keeps one of two duplicate subcommands and drops the other in
+silence. A refusal is easier to debug than a missing command.
+
+## How `brocanth` runs a project command
+
+`brocanth` is installed once. It knows its own subcommands: `create`,
+`add`, `migrate`, `dbshell` and `check`. It hands every other subcommand
+to the project, the way `rails` hands off to `bin/rails`:
+
+1. It walks up from the current directory to `brocanth.toml`. Without it
+   there is no project.
+2. It runs `cargo build`, and passes cargo's stderr through. The command
+   you edited a second ago is the one that runs.
+3. It asks `cargo metadata` where the binary is. `target/debug/<name>` is
+   wrong under `CARGO_TARGET_DIR`, in a workspace, and for other profiles.
+4. On Unix it `exec`s the binary, so the command owns the terminal, the
+   exit code, and Ctrl-C. Elsewhere it spawns the binary and copies the
+   exit code.
+
+```text
+$ brocanth seed_demo --count 3
+/path/to/my-app (brocanth.toml)
+seeding 3 rows into development
+```
+
+A project without the `commands` module has no command line. `brocanth`
+then refuses and says `brocanth add commands`.
+
+Inside a built project, `brocanth --help` lists the project's commands. It
+reads them from the binary. There is no cargo alias: you can also run the
+binary directly.
 
 ## Testing
 
+```text
+cargo test -p brocanth-command
 ```
-cargo test --workspace
+
+No database and no environment variable is needed.
+
+- Unit tests in `src/lib.rs` cover duplicate detection, the alphabetical
+  order of `--help`, the derived name, the runner, and a global flag with
+  dots after the subcommand.
+- `tests/trybuild.rs` compiles `tests/ui/*.rs` and compares the
+  compiler's output with the `.stderr` snapshots. It checks the macro's
+  errors: `#[cmd]` on an enum, and an unknown argument.
+- The README examples run as doctests of this crate. The examples of
+  `brocanth-command-macros/README.md` run here too, because a proc-macro
+  crate cannot use its own macro.
+
+To test a command in an application, call `run` on a value you build:
+
+```rust
+# use brocanth_command::{anyhow, clap, cmd, Command, Context};
+# #[cmd]
+# #[derive(clap::Args)]
+# pub struct SeedDemo {
+#     #[arg(long, default_value_t = 100)]
+#     pub count: u32,
+# }
+# impl Command for SeedDemo {
+#     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> { Ok(()) }
+# }
+let mut ctx = Context::boot()?;
+SeedDemo { count: 3 }.run(&mut ctx)?;
+# Ok::<(), anyhow::Error>(())
 ```
 
-- Unit tests cover duplicate detection, alphabetical ordering, and the derived
-  name.
-- `trybuild` snapshots cover the macro's errors — on an enum, and on an unknown
-  argument. A macro that merely *fails* is not enough: the failure is the only
-  thing the author sees.
-- `assert_cmd` tests run the real `demo-app` binary, which is the only way to
-  see what the linker produced. A unit test can call the runner with a slice
-  built by hand; only a built binary shows whether `#[cmd]` in two separate
-  modules actually reached the registry.
-- One `#[ignore]`d test scaffolds a project, compiles it, and runs its example
-  command. It is ignored because it takes minutes, not milliseconds.
+## Links
 
-## Next step, not done here
+- [docs/module-flags.md](../../docs/module-flags.md): the global flags a
+  generated project adds through `main_with`.
+- [docs/modules.md](../../docs/modules.md): the `commands` module and the
+  `CommandsMod` slot.
+- [brocanth-command-macros](../brocanth-command-macros/README.md): what
+  `#[cmd]` expands to.
 
-Shell completions. clap can generate them, and the command is already built
-from the registry, so the pieces are present — but a completion script is
-generated once and installed, while the command list changes whenever the project
-is rebuilt, so the two need a story before it is worth shipping.
+## Not done
+
+Shell completions. `clap` can write them, but a completion script is
+installed once and the command list changes with each build.

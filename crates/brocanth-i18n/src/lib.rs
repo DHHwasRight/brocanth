@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Translations, checked when the application builds.
 //!
 //! # The shape

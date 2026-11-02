@@ -3,6 +3,7 @@ name = "brocanth-config"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Configuration for brocanth: TOML, JSON, YAML and the environment, deep merge, plugin-contributed defaults, and a provenance on every value — a plugin, because an application configured from its environment should not link a TOML parser."
 
 # PLAN.md §8.2: "Feature flags gate compilation, not behaviour. A feature that

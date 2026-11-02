@@ -3,6 +3,7 @@ name = "brocanth-command"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Rails-style commands for a brocanth project: define one in your own crate and the CLI finds it."
 
 # These three are re-exported, so a project depends on this crate alone and

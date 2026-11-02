@@ -3,6 +3,7 @@ name = "brocanth-policy-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "The policy! macro. Not used directly; brocanth-policy re-exports it behind its `macro` feature."
 
 [lib]

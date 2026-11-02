@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! `routes!`: the whole route table, written in one file.
 //!
 //! brocanth's first answer to "where is a route" is a file under `src/pages`.

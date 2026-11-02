@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! JS and CSS bundles, built by `cargo build`.
 //!
 //! ```ignore

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Static files embedded at compile time: fingerprinted assets and a verbatim public directory."
+readme = "README.md"
 
 [lib]
 proc-macro = true

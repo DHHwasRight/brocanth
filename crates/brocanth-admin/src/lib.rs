@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! A Django-admin-shaped backoffice for brocanth, configured through rsx.
 //!
 //! Four screens, which is what an admin is: a list with pagination, search and
@@ -45,90 +49,6 @@
 //! PLAN §8.4 says the ORM is recommended and absent, and that applies to a
 //! plugin as much as to the core. An application that does not name this crate
 //! in `main` pays nothing for it, not even a template.
-//!
-//! # Getting started
-//!
-//! ```
-//! use std::sync::Arc;
-//!
-//! use brocanth_admin::policy::{policy_fn, Action, Principal};
-//! use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture};
-//!
-//! struct Staff;
-//!
-//! let data = Arc::new(Fixture::blog());
-//! let admin = Admin::new(
-//!     data,
-//!     AdminConfig::new()
-//!         .titled("Blog admin")
-//!         .at("/admin")
-//!         // The registry holds SeaORM's migration table too; this is what
-//!         // keeps it out.
-//!         .discovering(Discovery::new().under("blog::models"))
-//!         .with_policy(policy_fn(|principal: &Principal<'_>, request| {
-//!             principal.downcast::<Staff>().is_some() && request.action != Action::Delete
-//!         }))
-//!         // The in-memory fixture cannot run SQL, so it cannot take a row
-//!         // policy. A real application registers one per model with
-//!         // `.resource(..)` instead; see the `rows` module.
-//!         .unscoped_rows_unsafe_for_development()
-//!         .model("post", |m| {
-//!             m.list_columns(["id", "title", "author_id", "published"])
-//!                 .searchable(["title", "body"])
-//!                 .foreign_key("author_id", "user", "id")
-//!         })
-//!         .model("user", |m| {
-//!             m.display(|row| row.get("name").map(ToString::to_string).unwrap_or_default())
-//!         }),
-//! );
-//!
-//! assert_eq!(admin.model_keys(), ["post", "user"]);
-//!
-//! let staff = Staff;
-//! let response = brocanth_admin::rt::block_on(admin.dispatch(
-//!     Principal::new(&staff),
-//!     "GET",
-//!     "/admin/post",
-//!     "page=1",
-//!     &Default::default(),
-//! ))
-//! .unwrap();
-//!
-//! assert_eq!(response.status(), 200);
-//! // The list shows the author's name, not their id.
-//! assert!(response.html().unwrap().contains("Ada Lovelace"));
-//! ```
-//!
-//! # Replacing a screen
-//!
-//! ```ignore
-//! // src/views/admin.rsx — `Element` is implicit; never `use rsx::Element`.
-//! use brocanth_admin::view::ListCtx;
-//!
-//! pub fn PostList(ctx: &ListCtx) -> Element {
-//!     <h1>{&ctx.model.plural}</h1>
-//!     <ol>
-//!         for row in &ctx.rows {
-//!             <li><a href={&row.href}>{&row.label}</a></li>
-//!         }
-//!     </ol>
-//! }
-//! ```
-//!
-//! ```ignore
-//! use brocanth_admin::{AdminConfig, Views};
-//! use brocanth_admin::view::ListCtx;
-//! use rsx::Template;
-//!
-//! mod views { rsx::load_dir!("src/views"); }
-//!
-//! let config = AdminConfig::new().with_views(
-//!     Views::default()
-//!         .with_list(|ctx: &ListCtx, w: &mut rsx::Writer<'_>| {
-//!             views::admin::PostList { ctx }.render(w)
-//!         }),
-//! );
-//! ```
 //!
 //! # What was assumed, and what SeaORM cannot do
 //!

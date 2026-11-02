@@ -1,4 +1,8 @@
-//! Configuration for brocanth — and nothing in the core knows it exists.
+#![doc = include_str!("../README.md")]
+//!
+//! # Design
+//!
+//! Nothing in the core knows this crate exists.
 //!
 //! PLAN.md §8 is the governing constraint: *"The core is a router handing a
 //! request and a context to a controller… Config is a plugin too. The core

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Build-time JS and CSS bundles for assets/: rolldown and lightningcss, called from build.rs."
+readme = "README.md"
 
 [dependencies]
 rolldown = "1.2.15"

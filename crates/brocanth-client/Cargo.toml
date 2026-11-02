@@ -3,6 +3,7 @@ name = "brocanth-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "A command line that is a client for the application that generated it, built from the same table the document is."
 
 [dependencies]

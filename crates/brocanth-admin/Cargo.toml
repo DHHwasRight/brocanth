@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A Django-admin-shaped backoffice for brocanth, with every screen configured through rsx templates."
+readme = "README.md"
 
 # Four dependencies, and three of them are small. There is no SQL driver and no
 # ORM here: PLAN.md §8.4 says the ORM is recommended and absent, so this crate

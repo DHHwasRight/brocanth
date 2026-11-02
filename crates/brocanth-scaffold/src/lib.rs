@@ -1,3 +1,9 @@
+// The README comes first: what the crate is for, the contract in short, and
+// examples. The `//!` notes below keep the design reasons.
+#![doc = include_str!("../README.md")]
+//!
+//! # Design
+//!
 //! The contract a scaffold module implements.
 //!
 //! `brocanth create` writes a project. What goes in it is a list of choices,

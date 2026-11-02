@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
+readme = "README.md"
 description = "The job contract: two lanes, a lease, and a backend trait specified against the weakest backend it intends to support."
 
 # The core names no driver and no backend. It depends on serde because a
@@ -16,6 +17,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
+# The reference backend, so the README's examples run with no server. A
+# dev-dependency cycle is allowed: the memory crate links this same library.
+brocanth-queue-memory.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
 
 [lints.rust]

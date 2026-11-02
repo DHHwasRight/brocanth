@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! `src/pages`, read while the crate compiles.
 //!
 //! Two macros, one idea: **a route is a file**, so the directory tree is the

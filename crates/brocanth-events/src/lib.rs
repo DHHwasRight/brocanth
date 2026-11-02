@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! The seam between a layer that writes rows and a layer that reacts to them.
 //!
 //! PLAN.md §10: *"A tiny `brocanth-events` crate carries `Change` and

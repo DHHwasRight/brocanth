@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Brocanth: a server framework for HTML-first applications.
 //!
 //! The Crystal original is a 1,272-line prototype, so this is a build rather

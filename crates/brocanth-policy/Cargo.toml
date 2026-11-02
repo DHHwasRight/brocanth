@@ -3,6 +3,7 @@ name = "brocanth-policy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "A typed predicate over an entity's columns, with two interpretations: compiled to SQL for lists, evaluated for a row you already hold."
 
 [dependencies]

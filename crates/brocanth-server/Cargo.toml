@@ -3,6 +3,7 @@ name = "brocanth-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "An HTTP entrypoint for a brocanth application, on Tokio."
 
 # `bridge` connects this crate to the brocanth core: an `App` and a `Router`

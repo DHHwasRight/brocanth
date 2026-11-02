@@ -3,6 +3,7 @@ name = "brocanth-events"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Change and ChangeSink: the seam between a model layer that publishes and a realtime layer that subscribes, so neither depends on the other."
 
 # No dependencies, and PLAN.md §8 is why: "if turning a feature off leaves its

@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! The entrance: a request becomes the struct a handler asked for, or an
 //! answer that says why not.
 //!

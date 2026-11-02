@@ -3,6 +3,8 @@
 Four small tools from gap G9 (`docs/framework-gaps.md`). Each one says what it
 does, and what it does not do.
 
+The last section is about the build itself: how to keep `target/` small.
+
 ## 1. Fixtures (Django D27)
 
 A fixture is a JSON file of records under `fixtures/`. A record names a model
@@ -272,3 +274,62 @@ Tests: JavaScript has no test harness here. `tests/prefetch.rs` checks the
 script as text, runs `node --check` on it, and runs it in `node` over a stub
 document for the link rules. Without `node`, the last two say SKIPPED on
 stderr.
+
+## Build cache and disk
+
+`target/` grows past 70 GB on this workspace. Three things fill it:
+
+- **Test binaries with full debug info.** Each crate's tests, examples and
+  integration tests link to their own binary. With 38 crates that is
+  hundreds of binaries, and debug info is most of each one.
+- **Incremental caches.** `target/debug/incremental` is often a third of
+  the directory.
+- **Stale copies.** A crate built with a different feature set or a
+  different toolchain gets a new hash. Cargo never deletes the old copy.
+
+Set three variables:
+
+| Variable | Value | Reason |
+|---|---|---|
+| `RUSTC_WRAPPER` | `sccache` | One compile cache for every repository and worktree. A dependency built once is a cache hit everywhere else. |
+| `CARGO_INCREMENTAL` | `0` | sccache cannot cache an incremental crate. Off, the workspace crates hit the cache too, and the incremental directory is gone. |
+| `CARGO_PROFILE_DEV_DEBUG` | `line-tables-only` | A panic and a backtrace still name `file:line`. Variable info is dropped, and that is most of the size. Set `CARGO_PROFILE_TEST_DEBUG` the same way. |
+
+Set them in a `mise.toml` one directory above the repository, under
+`[env]`. mise merges that file with each repository's own `mise.toml`, so
+every Cargo project below it gets the same cache. A key that a repository
+sets wins.
+
+```toml
+# ~/Documents/Dev/rust/mise.toml
+[tools]
+sccache = "latest"
+
+[env]
+RUSTC_WRAPPER = "sccache"
+SCCACHE_CACHE_SIZE = "30G"
+CARGO_INCREMENTAL = "0"
+CARGO_PROFILE_DEV_DEBUG = "line-tables-only"
+CARGO_PROFILE_TEST_DEBUG = "line-tables-only"
+```
+
+**Why a parent file and not this repository's `mise.toml`:** the cache
+helps most when several repositories share it, and the choice is about one
+machine, not about brocanth. To step through a test with lldb, set
+`debug = true` in a profile for that session.
+
+To get the space back once, run `cargo clean`. `sccache --show-stats`
+shows the hit rate.
+
+### Worktrees
+
+The workspace takes `zod` from a path: `zod = { path = "../zod" }` in the
+root `Cargo.toml`. A worktree in `.claude/worktrees/<name>/` resolves that
+to `.claude/worktrees/zod`, which does not exist. Make the link once:
+
+```sh
+ln -s ../../../zod .claude/worktrees/zod
+```
+
+Every worktree in that directory then finds `zod`. Each worktree still has
+its own `target/`, so the shared sccache matters more there.

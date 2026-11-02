@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! A job runner whose storage is a choice, not an assumption.
 //!
 //! An application starts with its jobs in the database it already has, and

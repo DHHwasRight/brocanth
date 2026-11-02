@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! An HTTP test client for brocanth, shaped on Django's.
 //!
 //! # The gap this closes

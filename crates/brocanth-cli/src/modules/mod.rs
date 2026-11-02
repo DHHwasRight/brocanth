@@ -51,6 +51,8 @@ pub mod ci;
 pub mod commands;
 pub mod config;
 pub mod docker;
+#[cfg(test)]
+mod docs_check;
 pub mod jt;
 pub mod logging;
 pub mod model;

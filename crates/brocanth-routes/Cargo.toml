@@ -3,6 +3,7 @@ name = "brocanth-routes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "routes!: the whole route table written in one file, Rails-shaped, checked while the crate compiles."
 
 [lib]

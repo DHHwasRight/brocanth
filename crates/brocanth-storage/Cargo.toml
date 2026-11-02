@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "File storage for brocanth: one trait, a local-disk backend, content-addressed names and derived image variants."
+readme = "README.md"
 
 [dependencies]
 # No `brocanth` here. §8 points the arrow from a plugin to the core, and this

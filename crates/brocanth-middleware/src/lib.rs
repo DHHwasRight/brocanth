@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! The middleware every application rewrites.
 //!
 //! Six hooks, taken from the Gorilla toolkit because that set has been

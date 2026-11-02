@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Authorisation as a predicate and a witness, not one or the other.
 //!
 //! PLAN.md §9, in its own words:

@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! An HTTP entrypoint for a brocanth application, on Tokio and hyper.
 //!
 //! # What this crate does not know

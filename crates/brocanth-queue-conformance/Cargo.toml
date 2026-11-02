@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
+readme = "README.md"
 description = "The contract as an executable suite. It is written against the contract, so it passes for any compliant backend and catches a Postgres assumption before the second backend does."
 
 [dependencies]

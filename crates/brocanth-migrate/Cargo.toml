@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Stable field ids, a schema snapshot and a rename-aware migration diff for brocanth models."
+readme = "README.md"
 
 # No SeaORM here. This crate reads model source as text, compares two
 # snapshots and writes Rust source for a migration. The CLI links it, and the

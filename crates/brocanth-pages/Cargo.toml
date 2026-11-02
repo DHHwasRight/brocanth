@@ -3,6 +3,7 @@ name = "brocanth-pages"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "The src/pages directory read at compile time: the route table, and the layouts."
 
 [lib]

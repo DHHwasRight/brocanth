@@ -1048,6 +1048,7 @@ dependencies = [
 name = "brocanth-queue"
 version = "0.1.0"
 dependencies = [
+ "brocanth-queue-memory",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

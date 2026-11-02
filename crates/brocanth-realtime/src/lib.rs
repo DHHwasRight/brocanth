@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Realtime for brocanth: indexed by topic, addressed by audience, and
 //! stopping one layer short of the socket.
 //!

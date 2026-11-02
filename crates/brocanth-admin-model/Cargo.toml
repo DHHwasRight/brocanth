@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The admin's data source over SeaORM: one macro, one line per entity, every write through an ActiveModel."
+readme = "README.md"
 
 # A crate of its own, and that is the whole point of it.
 #

@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! An OpenAPI 3.1 document, derived from a brocanth route table.
 //!
 //! # The argument

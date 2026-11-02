@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design
+//!
 //! Validation for brocanth: a zod-shaped vocabulary whose *shape* the compiler
 //! checks and whose *data* it cannot.
 //!

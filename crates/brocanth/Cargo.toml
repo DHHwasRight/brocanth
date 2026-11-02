@@ -3,6 +3,7 @@ name = "brocanth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "The brocanth core: a router handing a request and a context to a controller, and the plugin seams around it."
 
 # Three dependencies, and `tests/no_hidden_dependencies.rs` fails the build if a

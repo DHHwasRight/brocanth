@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! A command line that is a client for the application that generated it.
 //!
 //! The table `brocanth_pages::pages!("src/pages", describe)` writes already

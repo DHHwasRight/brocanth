@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! The admin's data source over SeaORM.
 //!
 //! [`AdminData`](brocanth_admin::data::AdminData) is dynamic: a table name and a column name arrive as

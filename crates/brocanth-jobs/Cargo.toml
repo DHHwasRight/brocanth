@@ -3,6 +3,7 @@ name = "brocanth-jobs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Background jobs for brocanth: a database-backed queue with retries, a dead letter, scheduling and a worker pool — a plugin, because an application that enqueues nothing should pay nothing."
 
 # The core has three dependencies and a test that fails the build if a fourth

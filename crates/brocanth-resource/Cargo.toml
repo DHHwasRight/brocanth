@@ -3,6 +3,7 @@ name = "brocanth-resource"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Typed CRUD routes derived from an entity and its policy. A build with no policy registered does not compile."
 
 # Three dependencies, and the two that matter are the seams this crate joins.

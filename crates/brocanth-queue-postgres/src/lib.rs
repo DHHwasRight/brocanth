@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! The Postgres backend.
 //!
 //! Postgres can do things SQS and JetStream cannot: join against application

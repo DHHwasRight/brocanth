@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! # Design notes
+//!
 //! Background jobs for brocanth: a database-backed queue with retries, a dead
 //! letter, scheduling, recurring work and a worker pool.
 //!

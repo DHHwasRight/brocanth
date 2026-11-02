@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! A brocanth application, written to a directory any static host serves.
 //!
 //! The pages are the same pages. [`Export`] sends each path through the

@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! The `policy!` macro: PLAN.md §12 item 10.
 //!
 //! Not depended on directly. `brocanth-policy` re-exports it behind its

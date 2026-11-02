@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A cache for brocanth, kept in Postgres, so a small deployment has one moving part instead of two."
+readme = "README.md"
 
 # The arrow points from the plugin to the core, never back. An application that
 # does not write `CachePlugin` in its `main` links none of this.

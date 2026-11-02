@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! A cache kept in Postgres, so a deployment that already runs Postgres gets a
 //! cache without running Redis.
 //!

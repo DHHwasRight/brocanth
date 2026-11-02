@@ -3,6 +3,7 @@ name = "brocanth-auth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Authentication for brocanth: OAuth 2.0 and OIDC with mandatory PKCE, providers as data, argon2id local accounts, server-side sessions with an optional Postgres store, and explicit identity linking — a plugin, because an application with no accounts should link none of it."
 
 [dependencies]

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Stable field identity and a rename-aware migration diff (PLAN.md §11).
 //!
 //! A struct diff cannot tell a rename from a drop plus an add. So every model

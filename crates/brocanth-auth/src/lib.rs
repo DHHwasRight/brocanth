@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! Authentication for brocanth: one interface, many providers, and a local
 //! account path that does not leak who has one.
 //!

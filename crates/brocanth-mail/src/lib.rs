@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Mail for brocanth: one trait, a backend that records what it was given,
 //! an SMTP backend behind a feature that is off, and headers that cannot carry
 //! a newline.

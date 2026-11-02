@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! File storage for brocanth: one trait, one disk backend, addresses that
 //! cannot spell a path, and image variants that are absent unless asked for.
 //!

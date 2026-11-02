@@ -3,6 +3,7 @@ name = "brocanth-command-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "The #[cmd] attribute. Not used directly; brocanth-command re-exports it."
 
 [lib]

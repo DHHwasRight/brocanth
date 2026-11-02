@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Message catalogs checked at build time, locale negotiation, and CLDR plurals, numbers and dates."
+readme = "README.md"
 
 # An application takes this crate twice, and the two never share features:
 #
