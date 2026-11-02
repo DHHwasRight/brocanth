@@ -75,6 +75,12 @@ are refused too:
 - A child (`rsx-tailwind`) without its parent (`rsx`).
 - A module marked "not available yet".
 
+One function, `create::selection`, holds these rules. `create` (flags and
+chooser), `add` and the generator itself (`create::scaffold`) all call it,
+so no path writes a project that a refusal would stop. The `help:` line
+fits the command: `--with rsx,rsx-tailwind` for `create`,
+`brocanth add rsx rsx-tailwind` for `add`.
+
 #### The chooser
 
 The chooser has two tabs over one answer. **Expert** shows every module,

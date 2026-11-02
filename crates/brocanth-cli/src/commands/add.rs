@@ -119,10 +119,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         .into_iter()
         .filter(|key| project.enabled.contains(key) || adding.contains(key))
         .collect();
-    create::unavailable(&after_picks)?;
-    create::orphans(&after_picks)?;
-    create::unmet(&after_picks)?;
-    create::exclusive(&after_picks)?;
+    create::selection(&after_picks, create::Door::Add)?;
 
     // Where this project's brocanth comes from. Read back out of its own
     // manifest rather than recorded in `brocanth.toml`, because the answer

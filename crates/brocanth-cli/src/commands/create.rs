@@ -372,10 +372,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
 
 fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
     let local = local_checkout(args)?;
-    unavailable(&picked(args))?;
-    orphans(&picked(args))?;
-    unmet(&picked(args))?;
-    exclusive(&picked(args))?;
+    selection(&picked(args), Door::Create)?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -396,7 +393,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
             )]);
         }
         let answers = chooser(ui, args, local)?;
-        exclusive(&answers.picks)?;
+        selection(&answers.picks, Door::Create)?;
         return Ok(answers);
     }
 
@@ -445,6 +442,43 @@ fn picked(args: &CreateArgs) -> Vec<&'static str> {
     }
 }
 
+/// Which front door a selection came through, so a refusal can say what to
+/// type at that door: `--with a,b` to `create`, `brocanth add a` to `add`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Door {
+    Create,
+    Add,
+}
+
+impl Door {
+    /// The help line that brings `missing` into a selection of `picks`.
+    fn bring(self, picks: &[&str], missing: &str, pick: &str) -> String {
+        match self {
+            Door::Create => {
+                let mut with: Vec<&str> = picks.iter().copied().chain([missing]).collect();
+                with.sort_unstable();
+                with.dedup();
+                format!("--with {}", with.join(","))
+            }
+            Door::Add => format!("brocanth add {missing} {pick}"),
+        }
+    }
+}
+
+/// Every rule a selection of modules must keep, in one place.
+///
+/// `create` (flags and chooser), `add` and [`scaffold`] itself all call it,
+/// so no front door -- and no test that drives the generator directly --
+/// can write a project that a refusal would have stopped. A child without
+/// its parent and a module without what it needs are refused, never filled
+/// in: a flag that quietly adds a module is a flag nobody can read.
+pub fn selection(picks: &[&str], door: Door) -> Result<(), Vec<Diagnostic>> {
+    unavailable(picks)?;
+    orphans(picks, door)?;
+    unmet(picks, door)?;
+    exclusive(picks)
+}
+
 /// A choice this CLI lists and cannot make.
 ///
 /// Checked before [`orphans`], because a blocked child named without its
@@ -474,7 +508,7 @@ pub fn unavailable(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
 /// The chooser cannot produce this -- it hides a child whose parent is off --
 /// so it is only reachable from the flags, where it is nearly always a
 /// forgotten word rather than an intention.
-pub fn orphans(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
+pub fn orphans(picks: &[&str], door: Door) -> Result<(), Vec<Diagnostic>> {
     let bad: Vec<Diagnostic> = picks
         .iter()
         .filter_map(|pick| {
@@ -482,17 +516,10 @@ pub fn orphans(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
             if picks.contains(&parent) {
                 return None;
             }
-            let with: Vec<&str> = picks
-                .iter()
-                .copied()
-                .chain(std::iter::once(parent))
-                .collect();
-            let mut with = with;
-            with.sort_unstable();
             Some(
                 Diagnostic::error(*pick, format!("`{pick}` is part of `{parent}`"))
                     .note(about(pick).because)
-                    .help(format!("--with {}", with.join(","))),
+                    .help(door.bring(picks, parent, pick)),
             )
         })
         .collect();
@@ -508,7 +535,7 @@ pub fn orphans(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
 /// The flat command line's half of [`Manifest::needs`]. The chooser's half
 /// is a tick that brings what it requires, which a screen can do and a flag
 /// must not: a flag that quietly adds a module is a flag nobody can read.
-pub fn unmet(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
+pub fn unmet(picks: &[&str], door: Door) -> Result<(), Vec<Diagnostic>> {
     let bad: Vec<Diagnostic> = picks
         .iter()
         .flat_map(|pick| {
@@ -518,14 +545,12 @@ pub fn unmet(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
                 .filter(|(need, _)| !picks.contains(need))
                 .collect();
             missing.into_iter().map(move |(need, why)| {
-                let mut with: Vec<&str> = picks.iter().copied().chain([need]).collect();
-                with.sort_unstable();
                 Diagnostic::error(
                     *pick,
                     format!("`{pick}` cannot be written without `{need}`"),
                 )
                 .note(why)
-                .help(format!("--with {}", with.join(",")))
+                .help(door.bring(picks, need, pick))
             })
         })
         .collect();
@@ -830,6 +855,9 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
 /// the new module did not already have. One generator, two front doors --
 /// this repository has already paid twice for two of them drifting apart.
 pub fn scaffold(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
+    // The front doors check first, with their own help line. This is the
+    // floor under them: nothing reaches the generator that they would refuse.
+    selection(&a.picks, Door::Create)?;
     let built = contributions(a)?;
     let mut files = scaffold_files(a)?;
 
@@ -4750,6 +4778,17 @@ mod tests {
     /// Not every combination -- there are 256 and most differ in nothing --
     /// but every one that exercises a branch: the empty project, the full
     /// one, the default, and each way the rsx family can be asked for.
+    /// Every module that can stand together. `logging` is the one module
+    /// `observability-logs` replaces, and `static` refuses every module that
+    /// needs a server, so neither is in it. `available()` is not a project:
+    /// the generator refuses it.
+    fn everything() -> Vec<&'static str> {
+        available()
+            .into_iter()
+            .filter(|key| *key != "logging" && *key != "static")
+            .collect()
+    }
+
     fn shapes() -> Vec<(&'static str, Vec<&'static str>)> {
         vec![
             ("core-only", vec![]),
@@ -4765,14 +4804,7 @@ mod tests {
             ("default", DEFAULT.to_vec()),
             // Everything that can stand together: `logging` is the one
             // module `observe` replaces.
-            (
-                "everything",
-                available()
-                    .into_iter()
-                    // `static` refuses every module that needs a server.
-                    .filter(|key| *key != "logging" && *key != "static")
-                    .collect(),
-            ),
+            ("everything", everything()),
             // The pages as files, with only what runs outside a server.
             (
                 "static",
@@ -5296,7 +5328,7 @@ mod tests {
             core.contains("no sea-orm anywhere in the lock file"),
             "{core}"
         );
-        let everything = cargo_toml(&answers(&available()), &built(&available()));
+        let everything = cargo_toml(&answers(&everything()), &built(&everything()));
         assert!(
             !everything.contains("Not here, because"),
             "nothing is absent, so nothing is listed: {everything}"
@@ -5413,7 +5445,7 @@ mod tests {
         // `validate_sections` rejects a section nothing claims, so a scaffold
         // that wrote `[sessions]` without the sessions plugin would fail on its
         // own first run. The real crate is asked, not a reimplementation.
-        for picks in [vec!["config"], vec!["config", "logging"], available()] {
+        for picks in [vec!["config"], vec!["config", "logging"], everything()] {
             let a = answers(&picks);
             let toml = config_toml(&a, &built(&picks));
             let config = brocanth_config::Config::from_toml(a.name.as_str(), "development", &toml)
@@ -5496,18 +5528,16 @@ mod tests {
             );
         }
 
-        // And the opposite end: with everything chosen there is nothing to
-        // warn about, and the brief must not invent a gap.
-        let everything = written(&available());
+        // And the opposite end: with everything that can stand together
+        // chosen, the brief names only the two modules that cannot, and
+        // invents no other gap.
+        let everything = written(&everything());
         let full = &everything
             .iter()
             .find(|(p, _)| p == "AGENTS.md")
             .expect("an agent brief")
             .1;
-        assert!(
-            full.contains("Nothing. Every capability was chosen."),
-            "{full}"
-        );
+        assert!(full.contains("**Absent:** `logging`, `static` —"), "{full}");
     }
 
     #[test]
@@ -5515,7 +5545,7 @@ mod tests {
         // There is no list of routes to go out of step, because there is no
         // list: `pages!` reads the directory. So what this checks is that
         // nothing crept back in.
-        let a = answers(&available());
+        let a = answers(&everything());
         let table = pages_mod_rs(&a, &built_for(&a));
         // `mounts` too: `admin` and `resource` each offer a `mount`, so the
         // table has a second source and the macro is told to call it.
@@ -5679,7 +5709,8 @@ mod tests {
         // The chooser cannot produce an orphan -- it hides a child whose
         // parent is off -- so this is only reachable from the flags, where
         // it is nearly always a forgotten word.
-        let bad = orphans(&["rsx-tailwind"]).expect_err("tailwind alone is not a project");
+        let bad =
+            orphans(&["rsx-tailwind"], Door::Create).expect_err("tailwind alone is not a project");
         let text = format!("{bad:?}");
         assert!(text.contains("part of"), "{text}");
         assert!(
@@ -5687,8 +5718,59 @@ mod tests {
             "the fix is the message: {text}"
         );
 
-        orphans(&["rsx", "rsx-tailwind", "rsx-htmx"]).expect("together they are fine");
-        orphans(&DEFAULT).expect("the default set has no children in it");
+        orphans(&["rsx", "rsx-tailwind", "rsx-htmx"], Door::Create)
+            .expect("together they are fine");
+        orphans(&DEFAULT, Door::Create).expect("the default set has no children in it");
+    }
+
+    #[test]
+    fn every_child_alone_is_refused_at_every_door_and_the_generator() {
+        // A child without its parent wrote a project that did not build when
+        // a caller reached `scaffold` without the flag checks. Every door,
+        // and the generator itself, now refuses it and names the parent.
+        let children: Vec<_> = crate::modules::ALL
+            .iter()
+            .map(|m| m.manifest())
+            .filter(|m| m.parent.is_some() && m.blocked.is_none())
+            .collect();
+        assert!(!children.is_empty());
+        for child in &children {
+            let parent = child.parent.unwrap();
+            let alone = [child.key];
+            for door in [Door::Create, Door::Add] {
+                let bad = selection(&alone, door).expect_err(child.key);
+                let text = format!("{bad:?}");
+                assert!(
+                    text.contains(parent),
+                    "`{}` names its parent: {text}",
+                    child.key
+                );
+            }
+            let add = format!("{:?}", orphans(&alone, Door::Add).unwrap_err());
+            assert!(
+                add.contains(&format!("brocanth add {parent} {}", child.key)),
+                "`add` says what to type at `add`: {add}"
+            );
+            scaffold(&answers(&alone)).expect_err("the generator refuses an orphan too");
+
+            // With its parent and everything either needs, the selection
+            // holds. The cheap half of "builds": the generator accepts it.
+            // Close over needs and parents: a need can itself be a child.
+            let mut with: Vec<&'static str> = vec![child.key];
+            let mut i = 0;
+            while i < with.len() {
+                let m = about(with[i]);
+                for key in m.needs.iter().map(|(need, _)| *need).chain(m.parent) {
+                    if !with.contains(&key) {
+                        with.push(key);
+                    }
+                }
+                i += 1;
+            }
+            let with: Vec<&'static str> = all().into_iter().filter(|k| with.contains(k)).collect();
+            selection(&with, Door::Create)
+                .unwrap_or_else(|e| panic!("`{}` with {with:?}: {e:?}", child.key));
+        }
     }
 
     #[test]
@@ -5727,15 +5809,17 @@ mod tests {
         // `rsx-tailwind` writes `src/commands/css.rs`, so a project with no
         // command line has nowhere to put it. The flat command line has to
         // say that rather than write a project that does not compile.
-        let bad = unmet(&["rsx", "rsx-tailwind"]).expect_err("tailwind needs a command line");
+        let bad = unmet(&["rsx", "rsx-tailwind"], Door::Create)
+            .expect_err("tailwind needs a command line");
         let text = format!("{bad:?}");
         assert!(text.contains("rsx-tailwind"), "{text}");
         assert!(text.contains("commands"), "{text}");
 
-        unmet(&["rsx", "rsx-tailwind", "commands"]).expect("together they are fine");
-        unmet(&DEFAULT).expect("the default shape stands on its own");
+        unmet(&["rsx", "rsx-tailwind", "commands"], Door::Create).expect("together they are fine");
+        unmet(&DEFAULT, Door::Create).expect("the default shape stands on its own");
         for (name, picks) in shapes() {
-            unmet(&picks).unwrap_or_else(|_| panic!("the `{name}` shape is not a project"));
+            unmet(&picks, Door::Create)
+                .unwrap_or_else(|_| panic!("the `{name}` shape is not a project"));
         }
     }
 
