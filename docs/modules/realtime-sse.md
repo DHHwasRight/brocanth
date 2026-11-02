@@ -4,7 +4,7 @@ One long response per subscriber, frames written as they are made.
 
 | | |
 |---|---|
-| Categories | Routes |
+| Categories | **Routes** |
 | Wizard question | Behaviour |
 | Default | off |
 | Presets | none |

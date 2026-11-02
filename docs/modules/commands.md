@@ -13,7 +13,7 @@ The wizard calls it: *Your own command line: `serve`, and whatever you add*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`model`](model.md), [`input`](input.md) |
+| Adapts to | [`input`](input.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-command` |

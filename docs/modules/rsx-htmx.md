@@ -13,7 +13,7 @@ The wizard calls it: *A click swaps what changed, not the whole page*.
 | Part of | [`rsx`](rsx.md), ticked with its parent |
 | Needs | none |
 | After | none |
-| Adapts to | [`rsx-tailwind`](rsx-tailwind.md) |
+| Adapts to | none |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | none |

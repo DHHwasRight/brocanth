@@ -14,7 +14,7 @@ The wizard calls it: *Logs on stdout*.
 | Needs | none |
 | After | none |
 | Adapts to | none |
-| Conflicts | [`logging`](logging.md): both write a line per request; [`static`](static.md): this module needs a running server |
+| Conflicts | [`logging`](logging.md): both write a line per request; `observability-logs` writes JSON on stdout; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-observe` (features `logs`; no default features) |
 

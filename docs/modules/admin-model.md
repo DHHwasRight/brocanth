@@ -4,7 +4,7 @@ The admin's rows over SeaORM, one line per entity.
 
 | | |
 |---|---|
-| Categories | Routes |
+| Categories | **Routes** |
 | Wizard question | Doors |
 | Default | off |
 | Presets | none |

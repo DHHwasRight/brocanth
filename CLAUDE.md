@@ -1,7 +1,7 @@
 # brocanth
 
 A server framework for HTML-first applications in Rust. Cargo workspace of
-about 33 crates under `crates/`, two examples under `examples/`.
+38 crates under `crates/`, two examples under `examples/`.
 
 ## Read first
 
@@ -29,12 +29,27 @@ Also run `cargo fmt --check` before a commit.
 
 ## Tests
 
-- Postgres tests are skipped when no database is set. Set
-  `BROCANTH_TEST_DATABASE_URL` to run them all. Per-crate overrides exist:
-  `BROCANTH_QUEUE_TEST_DATABASE_URL`, `BROCANTH_MODEL_TEST_POSTGRES`,
-  `BROCANTH_JOBS_TEST_POSTGRES`, `BROCANTH_CACHE_TEST_POSTGRES`.
-  `BROCANTH_QUEUE_REQUIRE_POSTGRES=1` makes a missing database a failure.
-- A Postgres test creates its own schema. Never truncate a shared table.
+- Postgres tests are skipped when no database is set.
+  `BROCANTH_TEST_DATABASE_URL` runs most of them. Per-crate overrides
+  exist: `BROCANTH_MODEL_TEST_POSTGRES`, `BROCANTH_JOBS_TEST_POSTGRES`,
+  `BROCANTH_CACHE_TEST_POSTGRES`. `brocanth-queue-postgres` reads only
+  `BROCANTH_QUEUE_TEST_DATABASE_URL`, so set it too.
+  `BROCANTH_QUEUE_REQUIRE_POSTGRES=1` makes a missing database a failure
+  there.
+- Isolation differs per crate, and no rule covers them all:
+  - own schema: `brocanth-auth`, `brocanth-middleware` (rate limit), the
+    `brocanth-jobs` panel test and its migrate race test.
+  - a transaction that rolls back: `brocanth-model`.
+  - shared tables, isolated by name: `brocanth-cache` (a namespace per
+    test), `brocanth-storage` (unique bytes per test, feature `postgres`)
+    and most `brocanth-jobs` tests (a queue name and token per test). They run in parallel and truncate nothing. Run one
+    `cargo test` process per database: queue-wide jobs operations of one
+    process touch the other's rows.
+  - shared `queue_*` tables, serialised: `brocanth-queue-postgres`. A
+    process-wide lock (`SERIAL`) runs its tests one at a time. A test
+    deletes only its own queue's rows, or clears the outbox under the
+    lock.
+  In a new test, create a schema. Never truncate a shared table.
 - CLI golden files live in `crates/brocanth-cli/tests/golden/`. When the
   generator changes, run
   `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- generator_writes`

@@ -136,6 +136,7 @@ brocanth migrate make add_posts   # diff src/models, write a SeaORM migration
 brocanth migrate up               # apply, through the project's own command
 brocanth check --deploy           # secrets, cookies, CSRF, the database
 brocanth dbshell                  # psql or sqlite3 on this environment's database
+brocanth admin eject list         # copy a shipped admin screen into the project, as yours
 brocanth --help                   # also lists the project's own commands
 ```
 
@@ -185,7 +186,7 @@ puts the crate in a new project.
 | [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin` | `admin` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
-| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `migrate`, `dbshell`, `check` | |
+| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `migrate`, `dbshell`, `check`, `admin eject` | |
 | [`brocanth-scaffold`](crates/brocanth-scaffold/README.md) | The contract a scaffold module implements | |
 | [`brocanth-test`](crates/brocanth-test/README.md) | An HTTP test client and an HTML reader for a built `App` | |
 
@@ -196,16 +197,18 @@ The templates come from sibling repositories:
 ## Modules
 
 A module is a choice that `brocanth create` offers. It implements
-`brocanth_scaffold::Module`: a `Manifest` (key, gist, parent, needs, after)
-and a `contribute` that writes files and lines into named slots. The CLI
+`brocanth_scaffold::Module`: a `Manifest` (key, gist, parent, needs, after,
+categories, conflicts, adapts to) and a `contribute` that writes files and lines into named slots. The CLI
 lists every module in one array, `ALL` in
 `crates/brocanth-cli/src/modules/mod.rs`. A module lives beside the crate it
 writes, behind a `scaffold` feature that is off by default.
 
 [`docs/modules/`](docs/modules/README.md) has one page per module key.
 
-**Five categories.** No manifest declares one yet; the slots a module
-writes imply it ([`docs/module-map.md`](docs/module-map.md)):
+**Five categories.** Each manifest declares its own with
+`Manifest::category`; the first is the main one. A test fails when a
+module writes into a slot its categories do not open
+([`docs/module-map.md`](docs/module-map.md)):
 
 | Category | What it does | Examples |
 |---|---|---|
@@ -215,10 +218,17 @@ writes imply it ([`docs/module-map.md`](docs/module-map.md)):
 | Routes | Answers at a path | `admin` at `/admin`, `resource` at `/api`, `openapi` |
 | External | Does not touch the code: build, ship, check | `docker`, `ci-github`, `static` |
 
-**Three relations.** A child is *part of* a parent (`rsx-tailwind` is part
+**Five relations.** A child is *part of* a parent (`rsx-tailwind` is part
 of `rsx`). A module *needs* another and the flags refuse it alone
 (`client` needs `input` and `commands`). A module comes *after* another, so
-two modules that write one slot do not depend on array order.
+two modules that write one slot do not depend on array order. A module
+*conflicts* with another, and `create`, `add` and the chooser refuse the
+pair (`logging` and `observability-logs` both write a line per request).
+A module *adapts to* another when it writes different code beside it
+(`cache` reads its settings from the config file when `config` is
+chosen). The manifest declares each one, so a module from another
+repository needs no edit to the CLI.
+See "Manifest rules" in [`docs/modules.md`](docs/modules.md).
 
 **Settings.** A module declares each setting once, with a `Setting`. A
 generated project then reads it from three places, lowest precedence first:
@@ -257,8 +267,9 @@ to keep in step with new versions:
 | Model assets | CSS for one model's screens | `ModelAdmin::stylesheet` |
 | Wrap or replace a screen | one model, or every model | `ModelAdmin::{list_view, ...}`, `Views::with_<screen>` |
 | Replace the layout | the whole shell | `Views::with_layout` |
+| Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject list [--model invoice]` |
 
-[`docs/admin-customization.md`](docs/admin-customization.md) has all seven
+[`docs/admin-customization.md`](docs/admin-customization.md) has all eight
 levels, with Django's way beside each.
 [`docs/backoffice.md`](docs/backoffice.md) says what the admin contains and
 what is missing.

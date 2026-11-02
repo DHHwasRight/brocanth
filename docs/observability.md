@@ -203,28 +203,37 @@ double the tree.
 
 ## Config, in a generated project
 
-`brocanth_observe::scaffold::Observe` writes `src/plugins/observe/mod.rs` and
-this section:
+`brocanth_observe::scaffold::Observe` is the `observability` module. It
+writes `src/plugins/observability/mod.rs` and the `[observability]`
+section. Each child module adds its own keys. With every child chosen:
 
 ```toml
-[observe]
-# format = "json"        # unset: json in production
-level = "info"
-live_path = "/up"
-ready_path = "/readyz"
-metrics_path = "/metrics"
-# metrics_token = "a long random string"
-# metrics_bind = "127.0.0.1:9100"
-drain_delay_secs = 0
+[observability]
+# format = "json"                      # observability-logs; unset: json in production
+level = "info"                         # observability-logs
+live_path = "/up"                      # observability-health
+ready_path = "/readyz"                 # observability-health
+drain_delay_secs = 0                   # observability-health
+metrics_path = "/metrics"              # observability-metrics
+# metrics_token = "a long random string"   # observability-metrics; a secret, no flag
+# metrics_bind = "127.0.0.1:9100"      # observability-metrics
+# otlp_endpoint = "http://localhost:4318"  # observability-tracing
+sample_ratio = 1.0                     # observability-tracing
 ```
 
-An empty path turns that endpoint off.
+An empty path turns that endpoint off. An empty `otlp_endpoint` falls
+back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `localhost:4318`.
+`sample_ratio` is the share of new traces kept, from 0.0 to 1.0. Each key
+is also a flag (`--observability.<key>`) and an environment variable
+(`$<APP>_OBSERVABILITY__<KEY>`), except `metrics_token`, which has no
+flag. See `docs/modules/observability.md`.
 
 ## Not done yet
 
 - **The `logging` module is not retired.** It still writes plain lines to
-  stderr. `observe` is the default in `brocanth create`, and `create` and
-  `add` refuse the two together.
+  stderr. `observability` and `observability-logs` are in the default list
+  of `brocanth create`, and `create` and `add` refuse `logging` beside
+  `observability-logs`.
 - **The generated `serve` has one signal path, and it is not
   `stop_on_signal`.** `serve` watches SIGTERM on a thread of its own (a
   synchronous handler can stall the serving runtime's signal driver), then

@@ -67,6 +67,23 @@ guide. A summary:
   `krate(Dep)` (dependencies of the generated project), `absent` (what
   `brocanth.toml` says when the module is not chosen), `blocked`,
   `asked_in` (which wizard question), `outside_runtime`, `static_output`.
+- **Manifest rules.** Three relations a module declares itself, so a
+  module from another repository needs no edit to the CLI:
+  - `category(Category::X)`: the kinds of seam it hooks into, one call
+    per kind. The first is the main one. `Category` is `Middleware`,
+    `Renderer`, `External`, `Enhancer` or `Routes`.
+    `Slot::open_to` says which categories may write each slot, and a CLI
+    test fails when a module writes outside its categories.
+  - `conflicts(key, why)`: it cannot be chosen beside `key`. Declare it
+    on the side that gives way.
+  - `adapts_to(key, what_changes)`: it writes different code when `key`
+    is chosen. Declare one for each key `contribute` asks `Project::has`
+    about that is not a need or the parent. A CLI test fails on an
+    undeclared question and on a declaration nothing asks.
+- **`clash(a, b)`** returns a `Clash` when two manifests cannot both be
+  chosen: a `conflicts` entry on either side, or the static-site rule (a
+  `static_output` module takes only `outside_runtime` modules). `create`,
+  `add` and the chooser all ask it.
 - **`Project`** is read-only: `name`, `title`, `has(key)`, `ident()`.
   `has` on a key that no module declares returns `false` and is reported,
   so a typo never reads as "not chosen".
@@ -83,7 +100,13 @@ guide. A summary:
 - **Snippets** write lines that must agree, from one call:
   `snippet::plugin` (registration and provider list), `snippet::hooking`
   (plus the hook record), `snippet::configurable` (plus the declared
-  settings and, with `config`, the `[section]` block).
+  settings and, with `config`, the `[section]` block), and
+  `snippet::configurable_hooking` (a hooking plugin from a library crate
+  with declared settings). `configurable_hooking` takes a
+  `snippet::Hooking`: the section is the plugin's instance name, and
+  `config_ty` names the library's configuration type, which
+  `Scaffold::settings_type` records. With `config`, the registration goes
+  through `brocanth-config`'s `plugin_hooking_from_config`.
 - **Settings**: `Setting::text`, `bool`, `integer`, `float`, `list`, with
   `.note`, `.secret`, `.optional`, `.none_as(alias)`, `.commented`. Each
   setting gives a generated project a flag `--<section>.<key>`, a
@@ -179,6 +202,24 @@ s.file("src/plugins/thing/mod.rs", "// jobs\n");
 assert_eq!(s.problems(), ["`cache` and `jobs` both write src/plugins/thing/mod.rs"]);
 ```
 
+A module that does the same work as another declares a conflict. `clash`
+reads it from either side and says which one to drop:
+
+```rust
+use brocanth_scaffold::{clash, Category, Manifest};
+
+let logging = Manifest::new("logging", "one line per request, written into the project")
+    .category(Category::Middleware)
+    .conflicts("observability-logs", "both write one line per request");
+let logs = Manifest::new("observability-logs", "structured request logs")
+    .category(Category::Middleware);
+
+let found = clash(&logs, &logging).expect("they clash");
+assert_eq!(found.about, "logging");
+assert_eq!(found.help, "keep `observability-logs` and drop `logging`");
+assert!(clash(&logging, &Manifest::new("config", "a config file")).is_none());
+```
+
 The CLI orders the chosen modules by their `after` lists:
 
 ```rust
@@ -204,7 +245,8 @@ A module's real tests live in the CLI, because they need the generator:
 - `crates/brocanth-cli/src/modules/mod.rs` checks every manifest in `ALL`:
   unique keys, real parents and `after` names, a `because` for each child,
   a reason for each `needs`, a short `blocked` reason, a `gist` with no
-  full stop.
+  full stop, at least one category, writes only into slots its categories
+  may write, and an `adapts_to` for each `Project::has` question.
 - `crates/brocanth-cli/src/commands/create.rs` compares each shape with a
   golden file, runs rustfmt over every generated `.rs` file, and checks
   that `add` writes what `create` writes. Bless the goldens and read the

@@ -16,7 +16,7 @@ The wizard calls it: *Background jobs, with retries and a dead letter*.
 | Adapts to | [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-jobs` |
+| Crates | `brocanth-jobs`, `serde` (features `derive`) |
 | Without it | no queue; slow work happens inside the request that asked for it |
 
 ## What it writes
@@ -32,7 +32,7 @@ Slots:
 - src/plugins/mod.rs (the provider list): `jobs crate::plugins::jobs::Jobs`
 - config/<env>.toml: `[jobs]`
 
-docs/module-flags.md (open question 2) records that `jobs` without `config` does not compile: the generated job derives `serde`, and `serde` is a dependency only with `config`.
+The generated job derives `serde`, so the module declares `serde` itself. With `config` too, the project still gets one `serde` line, with both modules' features.
 
 ## Settings
 

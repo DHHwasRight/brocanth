@@ -33,7 +33,9 @@ brocanth add config
 The `config` module has no settings of its own. It changes how every other
 module reads its settings: each declared setting gets a key under
 `[<module>]` in `config/<env>.toml`, and each plugin is built with
-`plugin_from_config`. `brocanth add config` refuses when the change would
+`plugin_from_config`. A plugin that installs hooks is built with
+`plugin_hooking_from_config`, and its section is the plugin's instance
+name, such as `[security_headers]`. `brocanth add config` refuses when the change would
 rewrite a file you own, such as a plugin's settings struct. See
 [docs/module-flags.md](../../docs/module-flags.md).
 
@@ -219,6 +221,88 @@ println!("{}", effective_of(app.services()).unwrap().dump());
 ```
 
 `no_run`: it reads the real environment and the working directory.
+
+### A plugin that installs hooks
+
+`plugin_from_config` and `plugin_with_defaults` call `AppBuilder::plugin`,
+and `build()` refuses a plugin that installs hooks when it comes that way.
+For a `HookSource`, use `plugin_hooking_from_config::<P>(section)`. The
+instance takes the section's name, so the section is claimed, and the
+hook record grows by the plugin's families, as `plugin_hooking` does.
+
+`plugin_hooking_from_config_with::<P>(section, adjust)` also applies
+`adjust` to the section before it builds the plugin. Use it for a value
+only code can give, such as the hash of a script the application inlines.
+The file still decides every key that `adjust` leaves alone.
+
+```rust
+use brocanth::plugin_api::{Plugin, PluginError};
+use brocanth::plugin_app::AppBuilder;
+use brocanth::plugin_context::NoContext;
+use brocanth::plugin_hooks::{
+    BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
+    ResponseHook,
+};
+use brocanth::plugin_order::Order;
+use brocanth_config::{AppBuilderConfigExt, Config};
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct StampConfig {
+    header: String,
+    value: String,
+}
+
+struct Stamp(StampConfig);
+
+impl Plugin for Stamp {
+    type Config = StampConfig;
+    type Provides = NoContext;
+    const NAME: &'static str = "stamp";
+    const INSTALLS_HOOKS: bool = true;
+    fn new(config: StampConfig) -> Self {
+        Self(config)
+    }
+}
+
+impl HookSource for Stamp {
+    type Families = OnResponse;
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        registrar.response("stamp", Order::new(), Noop);
+        Ok(())
+    }
+}
+
+struct Noop;
+
+impl ResponseHook for Noop {
+    fn on_headers(
+        &self,
+        _request: &Request,
+        _head: &mut ResponseHead,
+        _body: BodyShape<'_>,
+        _state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+let config = Config::from_toml("my_app", "production", "[stamp]\nheader = \"x-app\"\n")?;
+let app = AppBuilder::new()
+    .with_config(config)
+    // The file sets `header`; code adds `value`.
+    .plugin_hooking_from_config_with::<Stamp>("stamp", |mut c| {
+        c.value = env!("CARGO_PKG_VERSION").to_string();
+        c
+    })?
+    .build()?;
+assert_eq!(app.plugin_named::<Stamp>("stamp").unwrap().0.header, "x-app");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`brocanth-middleware`'s CSRF, security headers and rate limit register
+this way in a generated project. See
+[docs/middleware.md](../../docs/middleware.md).
 
 `cargo run -p brocanth-config --all-features --example dump` prints a full
 dump.

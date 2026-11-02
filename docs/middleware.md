@@ -70,7 +70,7 @@ format strings over fields brocanth already has.
 | Repository | What it is | brocanth | State |
 |---|---|---|---|
 | `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | the route table knows this | open, and better here than in Gorilla: the table is complete at build time |
-| `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `Csrf`, in this crate | **written**: a double-submit cookie, and §5 says what is still between it and a generated project |
+| `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `Csrf`, in this crate | **written**: a double-submit cookie, live in a generated project with `middleware-csrf` (§5) |
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
 | `gorilla/schema` | fills a struct from form values | `brocanth-schema` validates, it does not decode a form | **done**: `brocanth-input`, and a form, a JSON body and a query string all read the same struct. See `docs/input.md` |
@@ -93,7 +93,7 @@ Here the route table is complete when the binary is built, so the allowed
 methods for a path are known before the first request — and so is the
 answer to a preflight for a path that exists with the wrong verb.
 
-## 5. CSRF, and what it is waiting for
+## 5. CSRF
 
 `brocanth_middleware::Csrf` is a `RequestHook` that refuses any verb that
 is not GET, HEAD, OPTIONS or TRACE without a token, and a `ResponseHook`
@@ -110,21 +110,26 @@ and compares the field against that cookie. What it does not stop is
 written in the module header -- chiefly somebody who can write a cookie on
 this site's domain.
 
-**What is between it and a generated project.** Two pieces of the
-generator, and neither is in this crate:
+**In a generated project.** The hooks run. Two pieces of the generator
+were missing, and both are in place now:
 
-1. `plugins::Hooks` is written as `NoHooks` whatever registered.
-   `plugin_hooking` widens that record, so the registration does not
-   compile until the alias is built the way `Installed` already is.
-2. `dispatch` in a generated `src/app.rs` goes from the route table to the
-   handler. The hook pipeline is `App::run`, which that file never calls,
-   so no hook in this crate runs in a generated project -- the five above
-   included. `brocanth_server::Bridge` is the piece that runs it.
+1. `plugins::Hooks` is built from the registrations: each hooking plugin
+   adds its type to the record (`Slot::PluginsHooks`), as `Installed` is
+   built from the provider list.
+2. A generated `src/app.rs` runs each request through
+   `App::begin_async` and `App::finish`, so the request hooks, the
+   handler and the response hooks all run. `begin_async` also runs an
+   `AsyncRequestHook`.
 
-Both were found by generating a project, serving it and posting to it, not
-by reading. The dp-swap gap G2 is closed: `dp::SCRIPT` sends the token in
-the `x-csrf-token` header this hook reads, from `CsrfToken::meta_tag`. See
-`src/dp.rs`.
+`middleware-csrf` registers `Csrf` from its `[csrf]` section, with
+`plugin_hooking_from_config` when the project has `config`. The five
+hooks of `middleware` are commented out: each one encodes a fact about the
+deployment, so you turn it on yourself.
+
+The two gaps above were found by generating a project, serving it and
+posting to it, not by reading. The dp-swap gap G2 is closed: `dp::SCRIPT`
+sends the token in the `x-csrf-token` header this hook reads, from
+`CsrfToken::meta_tag`. See `src/dp.rs`.
 
 ## 6. Security headers
 
@@ -288,7 +293,9 @@ an `AsyncRequestHook`, and an application with one must serve through
 `App::begin_async`. The core makes `App::run` a compile error for it.
 `brocanth_server::Bridge` calls `App::run` and `App::begin` today, never
 `begin_async`, so `SharedRateLimit` is served by a project that drives
-`begin_async` itself.
+`begin_async` itself. A generated `src/app.rs` does. The
+`middleware-rate-limit` module registers `RateLimit`; for
+`SharedRateLimit` and `PgStore`, replace that registration by hand.
 
 **The Postgres store.** `rate_limit::PgStore`, behind the `postgres`
 feature. One `UNLOGGED` table, because a counter is not worth a WAL

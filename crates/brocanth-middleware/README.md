@@ -71,7 +71,7 @@ after_dispatch    request hooks, reverse declared order   read-only
 [dependencies]
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git" }
 # Optional features:
-#   config    - SecurityHeadersConfig and RateLimitConfig deserialise from a brocanth-config section
+#   config    - CsrfConfig, SecurityHeadersConfig and RateLimitConfig deserialise from a brocanth-config section
 #   postgres  - rate_limit::PgStore, the shared counter store (one UNLOGGED table)
 #   scaffold  - the `brocanth create` modules; only the CLI turns it on
 ```
@@ -88,9 +88,9 @@ brocanth add middleware
 | Key | Default with `middleware` | Writes |
 |---|---|---|
 | `middleware` | | `brocanth-middleware` in `Cargo.toml`, and five commented registrations (`ProxyHeaders`, `MethodOverride`, `CanonicalHost`, `ContentTypes`, `Cors`). Each one encodes a fact about your deployment, so you turn it on yourself. |
-| `middleware-csrf` | on | A live `Csrf` registration with `CsrfConfig::default()`. |
-| `middleware-security-headers` | on | A live `SecurityHeaders` registration. With `admin`, the CSP allows the admin's inline script by hash. |
-| `middleware-rate-limit` | off | A live `RateLimit` registration with one example rule (`login`, 5 per 60 s). Replace the numbers. |
+| `middleware-csrf` | on | A live `Csrf` registration, built from its `[csrf]` settings. |
+| `middleware-security-headers` | on | A live `SecurityHeaders` registration, built from its `[security_headers]` settings. With `admin`, the CSP also allows the admin's inline script by hash. |
+| `middleware-rate-limit` | off | A live `RateLimit` registration, built from its `[rate_limit]` settings, with one example rule (`login`, 5 per 60 s). Replace the numbers. |
 
 To turn on one of the five commented hooks, copy its line to `build()` in
 `src/app.rs`, after `plugins::register!`, and widen `type Core` by the
@@ -98,21 +98,42 @@ plugin's hook families. The generated comment shows the type.
 
 ### Settings
 
-These modules declare no settings today. There is no `--middleware.*`
-flag, no `$<APP>_<SECTION>__<KEY>` variable and no config key for them.
-Each registration builds its configuration as a Rust literal in
-`src/plugins/mod.rs`, and you change it there.
+The three live modules declare their settings. Each setting is a key in
+the plugin's section of `config/<env>.toml` when the project has
+`config`, and a flag and an environment variable either way. The section
+is the plugin's instance name: `[csrf]`, `[security_headers]`,
+`[rate_limit]`.
 
-The generated security-headers comment mentions `behind_tls = true` in
-`[security_headers]`. A generated project does not read that section yet.
-`docs/module-flags.md`, "Open questions" item 1, has the reason: a plugin
-registered with `plugin_hooking` has no config-file form in
-`brocanth-config` yet.
+| Section | Keys | File only |
+|---|---|---|
+| `[csrf]` | `cookie`, `field`, `header`, `secure` | `exempt` |
+| `[security_headers]` | `behind_tls`, `nosniff`, `referrer_policy`, `permissions_policy`, `hsts.enabled`, `hsts.max_age`, `hsts.include_subdomains`, `hsts.preload`, `csp.enabled`, `csp.report_only`, `csp.report_uri` | `frames`, `csp.directives` |
+| `[rate_limit]` | `ip_header`, `session_cookie`, `fail_open` | `[[rate_limit.rules]]` |
 
-An application can read the section itself. With the `config` feature,
-`SecurityHeadersConfig` and `RateLimitConfig` deserialise, and the plugin's
-instance name is its section name. See the last example below. `CsrfConfig`,
-`CorsConfig` and the other four configuration types do not deserialise.
+```text
+cargo run -- --security_headers.behind_tls=true
+MY_APP_RATE_LIMIT__IP_HEADER=fly-client-ip cargo run
+```
+
+A list has no flag, so `exempt` and the rate-limit rules live in the file.
+Without `config`, the example rule is code beside the registration.
+
+The generated registration calls
+`plugin_hooking_from_config::<P>("<section>")` from `brocanth-config`.
+With `admin`, security headers use `plugin_hooking_from_config_with`,
+which adds the admin's script hash on top of what the file says. The
+module turns on this crate's `config` feature only when the project has
+`config`. See `docs/module-flags.md`, "Hooking plugins from a library
+crate".
+
+The five commented hooks of `middleware` declare no settings. You change
+their configuration in the Rust literal you copy into `src/app.rs`.
+
+An application without the generator can read a section itself. With the
+`config` feature, `CsrfConfig`, `SecurityHeadersConfig` and
+`RateLimitConfig` deserialise. See the last example below.
+`ProxyHeadersConfig`, `MethodOverrideConfig`, `CanonicalHostConfig`,
+`ContentTypesConfig` and `CorsConfig` do not deserialise.
 
 ## Examples
 
@@ -341,7 +362,9 @@ assert!(limits.check().is_ok());
 ```
 
 Then register them with `plugin_hooking(SecurityHeaders::new(headers))`
-and `plugin_hooking(RateLimit::new(limits))`.
+and `plugin_hooking(RateLimit::new(limits))`. With `brocanth-config`'s
+`AppBuilderConfigExt`, `plugin_hooking_from_config::<SecurityHeaders>("security_headers")`
+reads the section and registers the plugin in one call.
 
 ## Testing
 
@@ -365,8 +388,8 @@ use `TestClient::send_async`. See `crates/brocanth-test/README.md`.
 
 - `docs/middleware.md`: the Gorilla mapping, CSRF, security headers and
   rate limiting in depth, and what is still open.
-- `docs/module-flags.md`: module settings, and why hooking modules have
-  none yet.
+- `docs/module-flags.md`: module settings, and how the hooking modules
+  declare theirs.
 - `docs/module-map.md`: where each module writes.
 - `brocanth/src/plugin_hooks.rs` and `brocanth/src/plugin_order.rs`: the
   hook phases and the order rules.

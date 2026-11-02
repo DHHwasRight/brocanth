@@ -8,10 +8,10 @@ Each page has the same parts:
 | Part | Source |
 |---|---|
 | Gist, wizard question, part of, needs, after, crates, blocked | The module's `Manifest` |
-| Categories | [`../module-map.md`](../module-map.md). No manifest declares a category yet. |
+| Categories | `Manifest::category`. The first is the main one, in bold. |
 | Default, presets | `DEFAULT` in `commands/create.rs`, `PRESETS` in `wizard.rs` |
-| Adapts to | A run of `contribute` with and without each other module. A module adapts to a key when its own output changes. |
-| Conflicts | `EXCLUSIVE` in `commands/create.rs`, and the `static` rule (`outside_runtime`) |
+| Adapts to | `Manifest::adapts_to`: each module whose presence changes what this one writes |
+| Conflicts | `Manifest::conflicts` on either side, and the `static` rule (`outside_runtime`), both read by `brocanth_scaffold::clash` |
 | What it writes | The files and slots its `contribute` writes in a project with `config` |
 | Settings | The `Setting` declarations. The file value is what `config/<env>.toml` starts with; the plugin's `Default` can differ. |
 
@@ -27,8 +27,11 @@ Run it with:
 cargo test -p brocanth-cli --bin brocanth -- docs_check
 ```
 
-The check covers the set of pages, not their content. When you change a
-manifest or a `Setting`, update its page by hand.
+The check also compares each page's `Categories`, `Adapts to` and
+`Conflicts` rows with the manifest. To rewrite those three rows from the
+manifests, run it with `BROCANTH_BLESS=1` and read the diff. The rest of a
+page is not checked: when you change a manifest or a `Setting`, update the
+page by hand.
 
 ## Settings, in short
 
@@ -79,7 +82,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |
 | [`commands`](commands.md) | this project's own command line, `serve` plus whatever you add | Enhancer |  |
 | [`rsx`](rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String | Renderer |  |
-| [`jt`](jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Renderer |  |
+| [`jt`](jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Renderer, Routes |  |
 | [`rsx-tailwind`](rsx-tailwind.md) | a CSS build over the class names in your templates; needs node | External, Enhancer | rsx |
 | [`rsx-htmx`](rsx-htmx.md) | a click swaps what changed; the server renders from the shared layout down | Renderer | rsx |
 | [`static`](static.md) | `export` writes every GET page and every asset to dist/; no server, so no runtime modules | External, Enhancer |  |

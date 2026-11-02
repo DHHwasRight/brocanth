@@ -13,7 +13,7 @@ The wizard calls it: *Observability: logs, health probes, metrics (traces off)*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`observability-logs`](observability-logs.md), [`observability-health`](observability-health.md), [`observability-metrics`](observability-metrics.md), [`observability-tracing`](observability-tracing.md), [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`observability-logs`](observability-logs.md), [`observability-health`](observability-health.md), [`observability-metrics`](observability-metrics.md), [`observability-tracing`](observability-tracing.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-observe` (no default features) |

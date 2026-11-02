@@ -107,8 +107,14 @@ so the invalidation is spawned on the Tokio runtime and lands just after the
 write. `.only([...])` limits it to some collections, and `wants` tells the
 model layer to skip the rest.
 
-`brocanth-model` publishes no changes yet (G4), so today an application
-calls `publish` itself or invalidates tags directly.
+`brocanth-model` publishes its writes (G4, done). `brocanth_model::changes`
+has `insert_published`, `update_published`, `delete_published` (the
+`Publish` trait) and `Tracked::save_published`. Each takes a
+`ChangeSink`, so pass a `TagInvalidator`, or a `brocanth_events::FanOut`
+that holds it beside the realtime broker. A write inside a transaction
+goes through `Writing`, and the sink hears it only when the transaction
+commits. A write that does not go through these methods publishes
+nothing: call `publish` yourself or invalidate the tags directly.
 
 ## 5. Not done
 

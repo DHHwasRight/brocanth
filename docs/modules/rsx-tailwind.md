@@ -13,7 +13,7 @@ The wizard calls it: *Tailwind, built from the class names in your templates*.
 | Part of | [`rsx`](rsx.md), ticked with its parent |
 | Needs | [`commands`](commands.md): the CSS build is `brocanth css`, a subcommand, and a project with no command line has nowhere to put it |
 | After | [`commands`](commands.md) |
-| Adapts to | [`rsx-htmx`](rsx-htmx.md) |
+| Adapts to | none |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | none |

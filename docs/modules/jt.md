@@ -6,7 +6,7 @@ The wizard calls it: *JSON from templates, compiled into the binary*.
 
 | | |
 |---|---|
-| Categories | **Renderer** |
+| Categories | **Renderer**, Routes |
 | Wizard question | Pages |
 | Default | off |
 | Presets | none |

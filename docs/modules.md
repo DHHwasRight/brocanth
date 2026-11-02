@@ -235,14 +235,16 @@ Seams: `Slot::CommandsMod`, `Slot::MiseTasks`, `Slot::NodeDependencies`,
 
 ### What is hardcoded
 
-Four places, all naming `rsx` as a literal:
+Four places named `rsx` as a literal when this section was written. The
+line numbers were dropped: the first three moved (see "What was built"
+below), so a number would point at the wrong line.
 
-| Where | What it says |
-| --- | --- |
-| `brocanth-pages/src/lib.rs:223` | `root.join(current).join("layout.rsx")` |
-| `brocanth-pages/src/lib.rs:420` | `rsx::Template::render_to_string(..)` |
-| `brocanth-cli/src/commands/create.rs:2446` | `pub mod views { rsx::load_dir!("src/pages"); }` |
-| `brocanth-pages/src/table.rs` | which extensions are pages and which are views |
+| Where it was | What it said | Where it is now |
+| --- | --- | --- |
+| `brocanth-pages/src/lib.rs`, the layout walk | `root.join(current).join("layout.rsx")` | `layout_in(dir, LAYOUT_EXTENSIONS)`, with `LAYOUT_EXTENSIONS = ["rsx"]` |
+| `brocanth-pages/src/lib.rs`, the `html!` expansion | `rsx::Template::render_to_string(..)` | `crate::pages::render_oob(..)` |
+| `brocanth-cli/src/commands/create.rs` | `pub mod views { rsx::load_dir!("src/pages"); }` | `crates/brocanth-cli/src/modules/rsx.rs`, through `Slot::PagesRenderers` |
+| `brocanth-pages/src/table.rs` | which extensions are pages and which are views | still there: a page is a `.rs` file, and every other extension is ignored |
 
 `brocanth-pages/src/naming.rs` even reimplements rsx's `[id]` → `_id_` rule
 by hand, with a comment saying the two have to agree. That comment is the
@@ -300,11 +302,17 @@ Two renderers in one project is two blocks and not a conflict.
 
 **The two literals in `brocanth-pages` are gone.**
 
-`layout.rsx` became `layout_in(dir)`: the layout is the file named `layout`
-with any extension that is not `.rs`. `.rs` is excluded because `layout.rs`
-would be a page at `/layout`, and a file cannot be both. Two layouts in one
-directory is an error that names both, through the macro's own error path
-rather than a panic.
+`layout.rsx` became `layout_in(dir, LAYOUT_EXTENSIONS)`: the layout is the
+file named `layout` with an extension in `LAYOUT_EXTENSIONS`, which holds
+`rsx` alone. An early version took any extension that was not `.rs`. That
+was wrong twice: `layout.css` beside `layout.rsx` made every page in the
+directory fail with "holds two layouts", and so did an editor backup,
+`layout.rsx~`. `.rs` stays out because `layout.rs` would be a page at
+`/layout`. A second entry is not only an entry: `html!` resolves a layout
+under `views`, the module `rsx::load_dir!` writes, so another engine's
+layout needs `module_path_from` to learn which engine owns which
+extension. Two layouts in one directory is an error that names both,
+through the macro's own error path rather than a panic.
 
 `rsx::Template::render_to_string(..)` became `crate::pages::render_oob(..)`.
 The other two renders in the expansion already came back through the

@@ -16,7 +16,7 @@ The wizard calls it: *The edge hooks: proxies, CORS, a canonical host*.
 | Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-middleware` |
+| Crates | `brocanth-middleware` (feature `config` when the project has `config`) |
 | Without it | no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem |
 
 ## What it writes

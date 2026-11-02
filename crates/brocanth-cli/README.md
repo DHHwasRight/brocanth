@@ -2,8 +2,9 @@
 
 `brocanth-cli` builds `brocanth`, the command line of the framework. It
 writes a new project from a list of modules, adds a module to a project
-that exists, writes migrations, opens the database client, and checks a
-configuration before a deploy. Inside a project it also runs the
+that exists, writes migrations, opens the database client, checks a
+configuration before a deploy, and copies a shipped admin screen into a
+project. Inside a project it also runs the
 project's own commands. Use it to start and grow a brocanth application.
 It is a binary, not a library: an application never depends on it. A
 generated project's own binary (`my-app serve`, `my-app settings`) comes
@@ -24,7 +25,7 @@ To work on the CLI itself, use `cargo run -p brocanth-cli --` in place of
 brocanth create my-app                       # the default modules, no questions
 brocanth create my-app --with config,model,rsx
 brocanth create                              # no name on a terminal: the chooser
-cd my-app && brocanth add jobs
+cd my-app && brocanth add sessions
 brocanth check --deploy
 ```
 
@@ -106,6 +107,11 @@ absent. It refuses when a module would change a file you own, and prints
 what it would have written. `--force` rewrites an owned file that you
 edited, and discards the edit.
 
+`ci-github` writes `.github/workflows/ci.yml`, which is yours, and adapts
+to `model`, `jobs` and `cache`. So in a project made with the default
+modules, `brocanth add jobs` is refused until you apply the printed
+workflow change by hand.
+
 ### `brocanth migrate`
 
 Writes migrations from the models in `src/models/`.
@@ -147,6 +153,49 @@ when an error remains. The ids are `check/dialect` and `deploy/env`,
 `deploy/debug-logging`, `deploy/jobs-migrate`, `deploy/database`,
 `deploy/csrf-off`, `deploy/hooks-not-run`, `deploy/hsts`,
 `deploy/admin-unscoped`. See [docs/tooling.md](../../docs/tooling.md).
+
+### `brocanth admin`
+
+Works on the project's admin. It has one subcommand, `eject`. It needs the
+`admin` module.
+
+`brocanth admin eject <SCREEN>` copies a shipped admin screen into the
+project and installs it over the default. The copy renders the same HTML
+until you edit it. It is yours: an upgrade of `brocanth-admin` does not
+change it.
+
+```text
+brocanth admin eject list                  # every model's list
+brocanth admin eject list --model invoice  # the invoice list only
+brocanth admin eject layout                # the shell around every screen
+```
+
+| Argument | Meaning |
+|---|---|
+| `SCREEN` | One of `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`. |
+| `--model <KEY>` | Install the copy for this model only. Only `list`, `detail`, `form` and `delete` take it. |
+
+It writes `src/plugins/admin/screens/<screen>.rsx`, or
+`src/plugins/admin/screens/models/<model>/<screen>.rsx` with `--model`.
+It writes `src/plugins/admin/ejected.rs` again from the copies on disk.
+It adds `rsx` to `[dependencies]`, `mod ejected;` to
+`src/plugins/admin/mod.rs`, and `let config = ejected::apply(config);` in
+`mount`, each once and only when missing. To drop a copy, delete its file
+and run any eject again.
+
+It refuses:
+
+- a project without the `admin` module (`admin/no-admin`);
+- a screen that is already ejected (`admin/exists`). Edit that file, or
+  delete it to start again from the shipped screen;
+- `--model` on `layout`, `index` or `error` (`admin/not-per-model`);
+- a model key that is not a Rust module name, such as `blog-post`
+  (`admin/model-key`), because `rsx` turns each directory into a module.
+
+When `mount` no longer has the line `let admin = Arc::new(Admin::new(`,
+it writes the copy and warns (`admin/not-installed`): add the install line
+yourself. See level 8 of
+[docs/admin-customization.md](../../docs/admin-customization.md).
 
 ### A project's own commands
 
@@ -235,3 +284,5 @@ The binary crate has no doctests. Its examples are shell commands, and
   the settings report.
 - [docs/migrations.md](../../docs/migrations.md): `brocanth migrate`.
 - [docs/tooling.md](../../docs/tooling.md): `dbshell` and `check`.
+- [docs/admin-customization.md](../../docs/admin-customization.md):
+  `brocanth admin eject` (level 8).

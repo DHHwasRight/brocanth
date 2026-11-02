@@ -4,7 +4,7 @@ A duplex socket per subscriber, frames both ways.
 
 | | |
 |---|---|
-| Categories | Routes |
+| Categories | **Routes** |
 | Wizard question | Behaviour |
 | Default | off |
 | Presets | none |

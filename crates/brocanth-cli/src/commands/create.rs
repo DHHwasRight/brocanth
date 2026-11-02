@@ -5758,13 +5758,13 @@ mod tests {
         // itself refuses if it is somehow reached anyway, so nothing can
         // write half a project.
         let flagged = unavailable(&["realtime", "realtime-sse"])
-            .expect_err("a transport this build has no core support for");
+            .expect_err("a transport that is not written yet");
         assert_eq!(flagged.len(), 1);
 
         let reached = contributions(&answers(&["realtime", "realtime-sse"]))
             .expect_err("the module refuses even when it is called");
         assert!(
-            format!("{reached:?}").contains("hook contract"),
+            format!("{reached:?}").contains("not written yet"),
             "the refusal does not say why: {reached:?}"
         );
     }

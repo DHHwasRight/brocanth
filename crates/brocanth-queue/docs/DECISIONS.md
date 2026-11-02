@@ -400,16 +400,17 @@ The memory crate now has `MemoryOutbox`, so the outbox suite in
   not spent. It sits at the front of the claim's scan order indefinitely.
   The screens make it visible for the first time: it is a `Ready` row whose
   age never falls.
-- **Where the panel lives.** The screens exist as a trait; the HTML does
-  not. `brocanth-jobs` already ships six of them — a dashboard, running,
-  retries, scheduled, dead, every button a POST, locked behind a policy that
-  denies by default — against its own store. Pointing them at `Inspect`
-  makes one panel serve both queues, and costs `brocanth-jobs` a dependency
-  on this crate with no new transitive dependency at all: the core names
-  serde, serde_json, thiserror and tokio, which is the set it already has.
-  What has no answer yet is how the two repositories refer to each other.
-  Neither has a remote, so a git dependency is not available and a relative
-  path makes them one unit without making them one workspace.
+- ~~**Where the panel lives.**~~ **Settled** (`a18c1d1`). The six
+  screens in `brocanth-jobs` (a dashboard, running, retries, scheduled,
+  dead, every button a POST, locked behind a policy that denies by
+  default) are written against `Arc<dyn DynInspect>`. `brocanth-jobs`
+  implements `Inspect` for its own store and depends on this crate, so one
+  panel serves both queues. The cost was as predicted: no new transitive
+  dependency, because the contract names serde, serde_json, thiserror and
+  tokio. The question of how two repositories refer to each other went
+  away: both crates are members of one workspace, which has a remote
+  (`github.com/DHHwasRight/brocanth`), and the dependency is
+  `brocanth-queue.workspace = true`.
 - **The dead letter is one table for two lanes.** `queue_dead` has no column
   saying which of `queue_bulk` and `queue_tx` a row came from, so a
   transactional queue's screens list the bulk lane's corpses too. Splitting

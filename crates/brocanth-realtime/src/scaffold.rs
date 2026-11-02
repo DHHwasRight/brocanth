@@ -112,7 +112,8 @@ impl Module for Sse {
         // that a CLI which does not stops rather than writing a project
         // whose pages cannot compile.
         s.refuse(
-            "realtime-sse cannot be scaffolded: the core's response body is a complete              Vec<u8> and ResponseHook is specified to see one, so a streaming body is a              change to the hook contract rather than a change here",
+            "realtime-sse cannot be scaffolded: the core can stream a response body now, \
+             and the transport that writes the broker's frames to one is not written yet",
         );
     }
 }
@@ -208,7 +209,7 @@ fn plugin_rs(project: &Project) -> String {
 //! broker reads nothing:
 //!
 //! ```ignore
-//! // Not from a handler yet: `Ctx` has no extractor. See below.
+//! // In a page handler: `Ctx::provided` reads the plugin context.
 //! let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
 //! let row = Row::new().with("author_id", author);
 //! realtime
@@ -222,14 +223,12 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # Reading
 //!
-//! The broker stops one layer short of the socket, on purpose: this
-//! application's `Response` is a complete `Vec<u8>`, and every response hook
-//! is specified to see one. A streaming body would skip compression, the
-//! partial-navigation headers and `ETag` without saying so, so server-sent
-//! events are a change to the core's hook contract rather than a type change
-//! here.
+//! The broker stops one layer short of the socket. The core can stream a
+//! response body now: a response hook sees the headers of a stream and is
+//! never handed an unfinished body. The transport that writes the broker's
+//! frames to such a body, `realtime-sse`, is not written yet.
 //!
-//! Three things read a mailbox today, none of them needing that change:
+//! Three things read a mailbox today, none of them needing a transport:
 //!
 //! 1. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit

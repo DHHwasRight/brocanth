@@ -144,6 +144,7 @@ equivalent for each level, is
 | 5. Replace a screen, one model | one model's list, detail, form or delete | `ModelAdmin::{list_view, detail_view, form_view, confirm_delete_view}` |
 | 6. Replace a screen, every model | one screen for all models | `Views::with_<screen>` |
 | 7. Replace the layout | the whole shell | `Views::with_layout` |
+| 8. Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject <screen>` |
 
 ### Settings: titles, header, index title, site URL
 
@@ -422,11 +423,76 @@ Your layout must write `ctx.chrome.stylesheets` itself, or the theme and the
 model sheets stop working. Keep `dp-layout="admin"` around the body if you
 want dp-swap navigation.
 
+### Eject a screen
+
+Copying a shipped screen and editing it is often faster than writing one
+from an empty file. In a generated project with `admin`:
+
+```sh
+brocanth admin eject list                  # every model's list
+brocanth admin eject list --model invoice  # the invoice list only
+brocanth admin eject layout                # the shell around every screen
+```
+
+The screens are `layout`, `index`, `list`, `detail`, `form`, `delete` and
+`error`. Only `list`, `detail`, `form` and `delete` take `--model`.
+
+The command writes the shipped template to
+`src/plugins/admin/screens/<screen>.rsx` (or
+`screens/models/<model>/<screen>.rsx`). That file is yours. It also
+writes `src/plugins/admin/ejected.rs`, which installs every copy, and
+calls `ejected::apply(config)` in the generated `mount`. The copy renders
+the same HTML as the shipped screen until you edit it. The
+[CLI README](../brocanth-cli/README.md#brocanth-admin) lists what the
+command refuses.
+
+An ejected screen does not get the admin's fixes when you upgrade. A
+wrapped screen (level 4) does. A header line in the copy names the version
+it came from, so you can compare it with the new default.
+
+A copy names the crate through this public API:
+
+| Item | What it is |
+|---|---|
+| `brocanth_admin::parts` | The class strings the shipped screens use: `heading()`, `card()`, `button()`, `control()` and others. |
+| `brocanth_admin::STYLESHEET` | The shipped stylesheet. The layout inlines it in a `<style>`. |
+| `brocanth_admin::INLINE_SCRIPT` | The layout's own inline script. |
+| `brocanth_admin::MUTATE_SCRIPT` | dp-swap's mutating verbs, the layout's second script. |
+| `AdminConfig::map_views` | Changes the screens already installed. `with_views` replaces the whole set. |
+
+`ejected.rs` installs a copy for every model through `map_views`, so a
+`with_views` call of your own and an ejected screen both stay:
+
+```rust
+use brocanth_admin::view::ErrorCtx;
+use brocanth_admin::{AdminConfig, Views};
+
+let config = AdminConfig::new()
+    .with_views(Views::default())
+    .map_views(|views| {
+        views.with_error(|ctx: &ErrorCtx, w: &mut brocanth_admin::rsx::Writer<'_>| {
+            w.text(&ctx.message)
+        })
+    });
+# let _ = config;
+
+// The class strings exist for a copy to use. Their values follow the
+// stylesheet and are not stable; the names are.
+assert!(!brocanth_admin::parts::heading().is_empty());
+assert!(!brocanth_admin::STYLESHEET.is_empty());
+```
+
+A class that you add to a copy and that `STYLESHEET` does not contain has
+no effect. Put its rule in a stylesheet of your own (level 2).
+
 ### What is stable
 
 - The context types in `brocanth_admin::view` and their field names.
-- `View`, `Views` and its `with_*` methods, and the `ModelAdmin` view
-  methods.
+- `View`, `Views` and its `with_*` methods, `AdminConfig::map_views`, and
+  the `ModelAdmin` view methods.
+- For ejected screens: the function names in `brocanth_admin::parts`, and
+  the constants `STYLESHEET`, `INLINE_SCRIPT` and `MUTATE_SCRIPT`. Their
+  values are not stable.
 - The CSS custom properties listed above.
 - `aria-current="page"` on the current navigation item, and
   `dp-layout="admin"` on the main region.
@@ -442,7 +508,9 @@ cargo test -p brocanth-admin
 
 The tests need no database. They run against `Fixture`, the in-memory
 source. `tests/customization.rs` covers levels 1 to 5 above, and
-`tests/screens.rs` covers levels 6 and 7. `tests/ui` holds the compile-fail
+`tests/screens.rs` covers levels 6 and 7. `tests/eject.rs` compiles the
+copies in `tests/ejected/` as an outside crate does and compares each
+screen's HTML with the shipped screen's, byte for byte (level 8). `tests/ui` holds the compile-fail
 cases: an `AdminResource` with no policy does not compile.
 
 In an application, test a screen through the router with

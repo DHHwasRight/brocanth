@@ -64,7 +64,7 @@ flowchart LR
 
 **Bold** is the main category. *Needs* is a hard requirement (the flags
 refuse without it). *Optional* means the module writes different code
-when the other one is present (`after` or `project.has`). ★ means the
+when the other one is present (`Manifest::adapts_to`). ★ means the
 module also writes two shapes depending on `config`: a section read from
 the file, or a literal in code.
 
@@ -76,7 +76,7 @@ the file, or a literal in code.
 | `observability-health` | **Routes** | `/up`, `/readyz` via the observer, not RouterMounts | observability | | |
 | `observability-metrics` | **Routes** | `/metrics`, on a side listener | observability | | |
 | `observability-tracing` | **Middleware** | (parent's plugin) | observability (off) | | |
-| `config` | **Enhancer** | Cargo dep, `config/<env>.toml` | | | used by 13 modules ★ |
+| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 16 modules ★ |
 | `sessions` | **Middleware** | Layers, AppContext ★ | | | |
 | `model` | **Enhancer**, Middleware | AppContext, CommandsMod (`migrate`) ★ | | | `commands` |
 | `cache` | **Enhancer** | AppPlugins ★ | | | |
@@ -91,18 +91,18 @@ the file, or a literal in code.
 | `input` | **Enhancer**, Renderer | PagesItems (`describe`) | | | `rsx` |
 | `client` | **Enhancer** | CommandsMod (`api`) | | `input`, `commands` | |
 | `middleware` | **Middleware** | AppPlugins (5 hooks, commented) | | | |
-| `middleware-csrf` | **Middleware** | PluginsHooks | middleware | | |
-| `middleware-security-headers` | **Middleware** | PluginsHooks | middleware | | `admin` (CSP hash) |
-| `middleware-rate-limit` | **Middleware** | PluginsHooks | middleware (off) | | |
+| `middleware-csrf` | **Middleware** | PluginsHooks ★ | middleware | | |
+| `middleware-security-headers` | **Middleware** | PluginsHooks ★ | middleware | | `admin` (CSP hash) |
+| `middleware-rate-limit` | **Middleware** | PluginsHooks, ConfigSections (`[[rate_limit.rules]]`) ★ | middleware (off) | | |
 | `openapi` | **Routes**, Enhancer | PagesRoutes (`/openapi.json`, `.yaml`) ★ | | | `input` |
 | `resource` | **Routes** | RouterMounts (`/api`) | | | |
-| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes | | | `middleware-csrf` (stamped forms) |
+| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms) |
 | `admin-model` | Routes | blocked | admin | `model` | |
 | `commands` | **Enhancer** | CommandsMod (`routes`) | | | `input` |
 | `rsx` | **Renderer** | PagesRenderers (`.rsx`), assets | | | children below |
 | `rsx-tailwind` | **External**, Enhancer | CommandsMod (`css`), MiseTasks, package.json | rsx | `commands` | |
 | `rsx-htmx` | **Renderer** | `html!` depth, `public/dpswap.min.js` | rsx | | |
-| `jt` | **Renderer** | PagesRenderers (`.jt`), an example page | | | |
+| `jt` | **Renderer**, Routes | PagesRenderers (`.jt`), an example page | | | |
 | `static` | **External**, Enhancer | CommandsMod (`export`), MiseTasks | | `commands` | `rsx-tailwind`, `rsx-htmx` (assets) |
 | `docker` | **External** | Dockerfile | | | |
 | `docker-kubernetes` | **External** | `deploy/kubernetes.yaml` | docker (off) | `observability-health` | |
@@ -112,7 +112,7 @@ the file, or a literal in code.
 ## The dependency tree
 
 Thick arrow: part of. Solid: needs. Dashed: optional. Red: refused
-together. Colour: main category. `config` is left out of the graph: 13
+together. Colour: main category. `config` is left out of the graph: 16
 modules adapt to it (★).
 
 Colours are d3set's light series palette (`src/theme/theme.ts`):
@@ -219,6 +219,8 @@ flowchart LR
   ci_gh -.-> docker
   ci_gh -.-> static
   ci_gh -.-> model
+  ci_gh -.-> jobs
+  ci_gh -.-> cache
 
   linkStyle 20 stroke:#ef4444,stroke-width:1.5px
 ```
@@ -231,14 +233,16 @@ is not drawn.
 
 1. ~~**The category is implicit.**~~ Closed: every manifest declares
    `category(..)`, and a test holds it to the slots it writes
-   (`Slot::open_to`). Two readings changed against the table above: `jt`
-   is also Routes (it writes an example page), and every module that puts
-   a value on the context is also Middleware.
+   (`Slot::open_to`). Two readings changed against the first version of
+   this map, and the table shows both: `jt` is also Routes (it writes an
+   example page), and every module that puts a value on the context is
+   also Middleware. `docs/modules/<key>.md` states each module's
+   categories, and `modules::docs_check` holds the page to the manifest.
 2. ~~**Optional dependencies are not declared.**~~ Closed: every
-   `project.has` is an `adapts_to(key, what_changes)` in the manifest, 36
-   in all (13 of them `config`, through `snippet::configurable`). A test
-   fails on an undeclared one.
-3. **`config` is cross-cutting.** 13 modules write two shapes, one with
+   `project.has` is an `adapts_to(key, what_changes)` in the manifest, 39
+   in all (16 of them `config`, most through `snippet::configurable` and
+   `snippet::configurable_hooking`). A test fails on an undeclared one.
+3. **`config` is cross-cutting.** 16 modules write two shapes, one with
    it and one without. It behaves like a shared dependency, not a module
    on equal footing.
 4. **Routes do not share one seam.** `admin` and `resource` use

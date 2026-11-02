@@ -1,7 +1,8 @@
 # Getting started
 
 Every command here was run against this checkout on 2026-10-14, and the output
-is pasted rather than recalled. Where something is not built yet it says so
+is pasted rather than recalled. The file list, the module list,
+`brocanth.toml` and `brocanth --help` were run again on 2026-11-02. Where something is not built yet it says so
 instead of describing what it will do.
 
 ## Install the CLI
@@ -59,37 +60,49 @@ A flag may not do that, so `--with` refuses instead and names the fix.
 What it writes:
 
 ```
-  blog/Cargo.toml                   3219 bytes
-  blog/.gitignore                      8 bytes
-  blog/rust-toolchain.toml            29 bytes
-  blog/mise.toml                     492 bytes
-  blog/src/main.rs                   756 bytes
-  blog/src/app.rs                  16401 bytes
-  blog/src/pages/mod.rs            16366 bytes
-  blog/src/pages/index.rs            802 bytes
-  blog/src/pages/about.rs           1040 bytes
-  blog/src/pages/users/[id].rs      1656 bytes
-  blog/Dockerfile                   2146 bytes
-  blog/.dockerignore                  52 bytes
-  blog/deploy/kubernetes.yaml       1679 bytes
-  blog/src/plugins/mod.rs           7641 bytes
-  blog/config/development.toml      1071 bytes
-  blog/src/commands/mod.rs           598 bytes
-  blog/src/commands/serve.rs         604 bytes
-  blog/src/commands/routes.rs       3730 bytes
-  blog/src/plugins/observe/mod.rs   4430 bytes
-  blog/AGENTS.md                    3519 bytes
-  blog/brocanth.toml                 653 bytes
+  blog/Cargo.toml                         3328 bytes
+  blog/.gitignore                            8 bytes
+  blog/rust-toolchain.toml                  29 bytes
+  blog/mise.toml                           492 bytes
+  blog/src/main.rs                         792 bytes
+  blog/src/app.rs                        17706 bytes
+  blog/src/pages/mod.rs                  17400 bytes
+  blog/src/pages/index.rs                  802 bytes
+  blog/src/pages/about.rs                 1040 bytes
+  blog/src/pages/users/[id].rs            1656 bytes
+  blog/src/plugins/mod.rs                26133 bytes
+  blog/src/flags.rs                       1120 bytes
+  blog/config/development.toml            2519 bytes
+  blog/src/commands/mod.rs                 616 bytes
+  blog/src/commands/serve.rs               604 bytes
+  blog/src/commands/settings.rs            621 bytes
+  blog/.dockerignore                        52 bytes
+  blog/.github/workflows/ci.yml           1239 bytes
+  blog/Dockerfile                         2152 bytes
+  blog/src/commands/routes.rs             3730 bytes
+  blog/src/plugins/observability/mod.rs   4526 bytes
+  blog/AGENTS.md                          5523 bytes
+  blog/brocanth.toml                      1999 bytes
 
-    core             a router handing a request and a context to a handler
-    observe          JSON logs on stdout, /up and /readyz, Prometheus /metrics; the core assumes none
-    config           config/<env>.toml, merged; without it nothing links a TOML parser
-    commands         this project's own command line, `serve` plus whatever you add
-    logging          not asked for: absent from the source, the binary and the lock file
-    sessions         not asked for: absent from the source, the binary and the lock file
-    model            not asked for: absent from the source, the binary and the lock file
+    core                         a router handing a request and a context to a handler
+    observability                a request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below
+                                 with config: its settings are read from the config file, not written as a literal
+                                 with observability-logs: the request log is compiled in and switched on
+                                 with observability-health: `/up` and `/readyz` are answered, and shutdown drains
+                                 with observability-metrics: a side listener serves `/metrics`
+    observability-logs           a JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else
+    ...
+    middleware-security-headers  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
+                                 with config: its settings are read from the config file, not written as a literal
+    logging                      not asked for: absent from the source, the binary and the lock file
+    observability-tracing        not asked for: absent from the source, the binary and the lock file
+    sessions                     not asked for: absent from the source, the binary and the lock file
+    model                        not asked for: absent from the source, the binary and the lock file
     ...
 ```
+
+A `with <key>:` line is a manifest's `adapts_to`: what this module writes
+differently because the other one is in the project.
 
 Those last lines are the point of the whole design, not a progress
 message. A capability nobody asked for is not compiled, not linked, and has no
@@ -120,21 +133,28 @@ needs a test, and a map of the crates.
 ### Choosing what goes in
 
 ```
-brocanth create blog --with observe,config,commands,sessions,model,rsx
+brocanth create blog --with observability,observability-logs,config,commands,sessions,model,rsx
 brocanth create blog --core-only
 ```
 
-The default is `observe,config,commands`. `--core-only` gives a router, a context
-and nothing else.
+The default is `observability`, `observability-logs`,
+`observability-health`, `observability-metrics`, `config`, `commands`,
+`docker`, `ci`, `ci-github`, `middleware` and
+`middleware-security-headers` (`DEFAULT` in
+`crates/brocanth-cli/src/commands/create.rs`). `--core-only` gives a
+router, a context and nothing else.
 
 | `--with` | What it adds |
 |---|---|
-| `observe` | A log line per request on stdout (JSON in production), a request id, `/up`, `/readyz` and Prometheus `/metrics`. The core assumes no log layer at all. |
-| `logging` | A plain request logger on stderr. The older choice; `create` refuses it beside `observe`. |
+| `observability` | A request id on every request, and a SIGTERM that fails `/readyz` first. Its children add the rest. The core assumes no log layer at all. |
+| `observability-logs` | A log line per request on stdout: JSON in production, text elsewhere. |
+| `observability-health` | `/up` for liveness, and `/readyz`, which runs each plugin's check. |
+| `observability-metrics` | Prometheus text on `/metrics`. |
+| `logging` | A plain request logger written into the project. `create` refuses it beside `observability-logs`: both write a line per request. |
 | `config` | `config/<env>.toml`, four sources merged, typed per section. |
 | `sessions` | Cookie sessions, and a `Session` on the context. |
 | `model` | The model layer: SeaORM, validations and migrations. SQLite in development, Postgres in production. |
-| `commands` | A `manage` binary whose subcommands are your own structs. |
+| `commands` | The project's own command line: `serve`, `routes`, `settings`, and the subcommands you add. |
 | `rsx` | HTML from `.rsx` templates beside the pages, with layouts. See below. |
 | `rsx-tailwind` | A CSS build over the class names in your templates. Needs node. |
 | `rsx-htmx` | A click swaps what changed, instead of reloading the document. |
@@ -160,13 +180,19 @@ name = "blog"
 title = "Blog"
 
 [modules]
-enabled = ["observe", "config", "jobs", "commands"]
+enabled = ["observability", "config", "jobs", "commands"]
 
 [modules.jobs]
-files = ["src/plugins/jobs/"]
+kind = ["enhancer"]
+files = ["src/flags.rs", "src/commands/settings.rs", "src/plugins/jobs/"]
 config = ["jobs"]
-crates = ["brocanth-jobs"]
+crates = ["brocanth-jobs", "serde"]
+adapted_to = ["config"]
 ```
+
+`kind` is the manifest's categories. `adapted_to` lists the modules in
+this project whose presence changed what `jobs` wrote. That record is for
+the `remove` that will need to know which modules to rewrite.
 
 Four kinds of file come out of a run, and which is which is fixed:
 
@@ -184,6 +210,13 @@ command says which file and shows the change. `config` is the clear case: it
 decides whether every *other* plugin's settings struct derives `Deserialize`,
 and those structs are yours. Adding it to a project that already has plugins
 means making that change by hand, and the command prints it.
+
+`ci-github` is another case. Its `.github/workflows/ci.yml` is yours, and
+it adapts to `model`, `jobs` and `cache`: with one of them CI starts a
+database for the tests. So in a project made with the default list,
+`brocanth add jobs` stops with `error[yours]: .github/workflows/ci.yml
+would have to change, and it is yours`, prints the diff and writes
+nothing. Apply the diff by hand, then run the command again.
 
 `src/app.rs` is the exception. What lands there is a middleware mount, and a
 mount is a decision -- the pattern is the application's to choose, which is
@@ -211,7 +244,7 @@ brocanth serve
 ```
 
 ```
-blog: plugins: [config, observe]
+blog: plugins: [config, security_headers, observability]
 blog: listening on http://127.0.0.1:3000
 2026-10-30T18:56:36.637Z  INFO GET / -> 200 request_id=7adc3a51… method=GET path=/ route=/ status=200 duration_ms=0.06
 2026-10-30T18:56:36.650Z  INFO GET /users/7 -> 200 request_id=30a8f7b2… method=GET path=/users/7 route=/users/{id} status=200 duration_ms=0.037
@@ -246,12 +279,13 @@ Commands:
   migrate   Write migrations from the models, and the ids that make renames visible
   dbshell   Open psql or sqlite3 on this project's database
   check     Find what is wrong with the configuration and the source, before a deploy
+  admin     Work on the project's admin: `eject` copies a shipped screen into it
   routes    Every route this application answers
   serve     Serve the application over HTTP
   help      Print this message or the help of the given subcommand(s)
 ```
 
-The first five are `brocanth`'s own. Everything below them is **your
+The first six are `brocanth`'s own. Everything below them is **your
 project's**, read out of the built binary, so a command you add appears here
 once it has been compiled. `brocanth <command>` builds the project and runs
 it: `brocanth fixtures load blog` (see `docs/tooling.md`) is a project
@@ -266,7 +300,7 @@ same answers with nothing to ask:
 
 ```
 $ brocanth -D create
-debug: brocanth create blog --title Blog --with observe,config,commands --git
+debug: brocanth create blog --title Blog --with observability,observability-logs,config,commands --git
 ```
 
 Copy that into a script and the same project comes out. It is written in

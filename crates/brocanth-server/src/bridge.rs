@@ -81,8 +81,14 @@
 //! `RequestHook::before_dispatch` that blocks will block a worker when the
 //! route it precedes is async.** Response hooks are CPU by contract --
 //! compression and ETag over a `Vec<u8>` that is already in memory -- so they
-//! are safe there; a request hook that reaches a session store is not. Until
-//! the core has an async request hook family, such a hook wants a sync route.
+//! are safe there; a request hook that reaches a session store is not. The
+//! core has an async request hook family for that, `AsyncRequestHook`, and
+//! [`App::begin_async`] runs it. The bridge calls [`App::begin`] and
+//! [`App::run`] only, and for an application with an `AsyncRequestHook`
+//! those two are a compile error, so the bridge cannot serve one yet. A
+//! generated project runs its own dispatch inside [`App::begin_async`] and
+//! [`App::finish`] (see [`to_core`]). Behind the bridge, a request hook that
+//! waits still wants a sync route.
 //!
 //! The alternative was to run `begin` on a blocking thread and hop back to the
 //! worker to await. It keeps that guarantee and loses the headline: fifty
