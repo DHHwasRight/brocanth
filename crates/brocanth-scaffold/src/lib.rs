@@ -183,6 +183,34 @@ pub struct Manifest {
     /// [`outside_runtime`](Manifest::outside_runtime): there is no process
     /// to run the rest in.
     pub static_output: bool,
+    /// Which kinds of seam this module hooks into. Set with
+    /// [`Manifest::category`], once per category; the first is the main
+    /// one.
+    ///
+    /// A set, because a module can be two things: `observability` wraps
+    /// requests and owns probe routes. A test holds every module to the
+    /// slots its categories open ([`Slot::open_to`]), so the category is a
+    /// fact about the code and not a label somebody chose.
+    pub categories: Vec<Category>,
+    /// Modules this one cannot be chosen beside, each with the reason.
+    /// Set with [`Manifest::conflicts`].
+    ///
+    /// Declared on one side and read from both: `create`, `add` and the
+    /// chooser all ask [`clash`], which looks in either manifest. The rule
+    /// between a static site and a server module is the same question, so
+    /// [`clash`] answers it too.
+    pub conflicts: Vec<(&'static str, &'static str)>,
+    /// Modules this one writes different code beside, each with what
+    /// changes. Set with [`Manifest::adapts_to`].
+    ///
+    /// The optional dependency: neither required ([`needs`]) nor ordered
+    /// ([`after`]), but read. Every `project.has(key)` in
+    /// [`Module::contribute`] names a key declared here, in `needs`, or the
+    /// parent; a test in the CLI runs every module and holds it to that.
+    ///
+    /// [`needs`]: Manifest::needs
+    /// [`after`]: Manifest::after
+    pub adapts_to: Vec<(&'static str, &'static str)>,
 }
 
 impl Manifest {
@@ -203,7 +231,48 @@ impl Manifest {
             short: "",
             outside_runtime: false,
             static_output: false,
+            categories: Vec::new(),
+            conflicts: Vec::new(),
+            adapts_to: Vec::new(),
         }
+    }
+
+    /// One of the kinds of seam this module hooks into. Call it once per
+    /// category; the first is the main one, and lists show it first.
+    pub fn category(mut self, category: Category) -> Self {
+        if !self.categories.contains(&category) {
+            self.categories.push(category);
+        }
+        self
+    }
+
+    /// Refuse to be chosen beside another module, and say why.
+    ///
+    /// `why` is printed to whoever picked both, so it says what the two
+    /// would do twice. Declare it on one side, the side that gives way:
+    /// [`clash`] reads both manifests and tells the user to drop this one.
+    pub fn conflicts(mut self, key: &'static str, why: &'static str) -> Self {
+        self.conflicts.push((key, why));
+        self
+    }
+
+    /// Write different code when another module is chosen, and say what
+    /// changes. Declare one for every key `contribute` asks
+    /// [`Project::has`] about that is not a need or the parent.
+    pub fn adapts_to(mut self, key: &'static str, what_changes: &'static str) -> Self {
+        self.adapts_to.push((key, what_changes));
+        self
+    }
+
+    /// Every key this module may ask [`Project::has`] about: what it adapts
+    /// to, what it needs, and its parent.
+    pub fn may_ask(&self) -> Vec<&'static str> {
+        self.adapts_to
+            .iter()
+            .chain(&self.needs)
+            .map(|(key, _)| *key)
+            .chain(self.parent)
+            .collect()
     }
 
     /// This module adds nothing that only a running server uses, so a
@@ -301,6 +370,126 @@ impl Manifest {
         self.absent = Some((what, why));
         self
     }
+}
+
+/// The five kinds of seam a module hooks into. `docs/module-map.md` draws
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Category {
+    /// Runs around a request, and may put a value on the context.
+    Middleware,
+    /// Makes a response body: a file type in the page router, or a
+    /// function the pages call.
+    Renderer,
+    /// Touches no code: builds, ships or checks the project.
+    External,
+    /// Adds a capability to the codebase: a plugin with a lifecycle, a
+    /// subcommand.
+    Enhancer,
+    /// Answers at a path the application chooses.
+    Routes,
+}
+
+impl Category {
+    /// All five, in the order lists print them.
+    pub const ALL: [Category; 5] = [
+        Category::Middleware,
+        Category::Renderer,
+        Category::External,
+        Category::Enhancer,
+        Category::Routes,
+    ];
+
+    /// The word lists and `brocanth.toml` use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Category::Middleware => "middleware",
+            Category::Renderer => "renderer",
+            Category::External => "external",
+            Category::Enhancer => "enhancer",
+            Category::Routes => "routes",
+        }
+    }
+
+    /// Whether a module of this category may write into `slot`.
+    pub fn allows(self, slot: Slot) -> bool {
+        let open = slot.open_to();
+        open.is_empty() || open.contains(&self)
+    }
+}
+
+impl fmt::Display for Category {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Why two modules cannot both be chosen: what to print, and about which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clash {
+    /// The module the diagnostic is about: the one to drop.
+    pub about: &'static str,
+    /// One line, naming both.
+    pub message: String,
+    /// The reason, from a manifest or from the static-site rule.
+    pub why: String,
+    /// What to do, without the flag: the CLI adds where to do it.
+    pub help: String,
+}
+
+/// Why `a` and `b` cannot both be chosen, or `None` when they can.
+///
+/// The one rule `create`, `add` and the chooser all ask, so the three
+/// cannot disagree. Two sources:
+///
+/// * a [`Manifest::conflicts`] entry, in either manifest;
+/// * the static-site rule: a module that compiles the project to files
+///   ([`Manifest::static_output`]) takes only modules that run outside a
+///   server ([`Manifest::outside_runtime`]). It is a rule over two flags
+///   rather than a list, so a module from another repository follows it by
+///   saying what it is, without naming every module it excludes.
+pub fn clash(a: &Manifest, b: &Manifest) -> Option<Clash> {
+    let declared = a
+        .conflicts
+        .iter()
+        .find(|(key, _)| *key == b.key)
+        .map(|(_, why)| (a.key, b.key, *why))
+        .or_else(|| {
+            b.conflicts
+                .iter()
+                .find(|(key, _)| *key == a.key)
+                .map(|(_, why)| (b.key, a.key, *why))
+        });
+    if let Some((declarer, other, why)) = declared {
+        return Some(Clash {
+            about: declarer,
+            message: format!("`{declarer}` and `{other}` cannot both be chosen"),
+            why: why.to_string(),
+            help: format!("keep `{other}` and drop `{declarer}`"),
+        });
+    }
+    let needs_server = |m: &Manifest| !m.outside_runtime && !m.static_output;
+    let (site, server) = if a.static_output && needs_server(b) {
+        (a, b)
+    } else if b.static_output && needs_server(a) {
+        (b, a)
+    } else {
+        return None;
+    };
+    Some(Clash {
+        about: server.key,
+        message: format!(
+            "`{}` needs a running server, and `{}` compiles to files",
+            server.key, site.key
+        ),
+        why: "a static site takes only modules outside the runtime: templates, CSS, config, \
+              commands, CI"
+            .to_string(),
+        help: format!(
+            "drop `{}`, or drop `{}` to build a server",
+            server.key, site.key
+        ),
+    })
 }
 
 /// A dependency of the *generated* project, not of the CLI.
@@ -402,6 +591,9 @@ pub struct Project<'a> {
     /// answered `false`, because a typo that reads as "the user did not want
     /// it" is a bug that produces a working project with a piece missing.
     unknown: std::cell::RefCell<Vec<String>>,
+    /// Every key asked about, in order, for the test that holds a module
+    /// to its [`Manifest::may_ask`].
+    asked: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a> Project<'a> {
@@ -414,11 +606,13 @@ impl<'a> Project<'a> {
             on,
             known,
             unknown: std::cell::RefCell::new(Vec::new()),
+            asked: std::cell::RefCell::new(Vec::new()),
         }
     }
 
     /// Whether another choice is part of this project.
     pub fn has(&self, key: &str) -> bool {
+        self.asked.borrow_mut().push(key.to_string());
         if !self.known.contains(&key) {
             self.unknown.borrow_mut().push(key.to_string());
             return false;
@@ -430,6 +624,11 @@ impl<'a> Project<'a> {
     /// environment variable the generated binary reads.
     pub fn ident(&self) -> String {
         self.name.replace('-', "_")
+    }
+
+    /// Every key asked about through [`Project::has`], in order.
+    pub fn asked_keys(&self) -> Vec<String> {
+        self.asked.borrow().clone()
     }
 
     /// Every key asked about that no module declares, for the CLI to report.
@@ -592,6 +791,57 @@ pub enum Slot {
     /// `AGENTS.md`, one `##` section per module that has a rule a coding
     /// agent must follow.
     AgentsSections,
+}
+
+impl Slot {
+    /// Every slot, in declaration order.
+    pub const ALL: [Slot; 18] = [
+        Slot::AppUses,
+        Slot::AppPlugins,
+        Slot::AppSetup,
+        Slot::AppContext,
+        Slot::PluginsMod,
+        Slot::PluginsInstalled,
+        Slot::PluginsHooks,
+        Slot::PluginsLayers,
+        Slot::PagesRenderers,
+        Slot::RouterMounts,
+        Slot::PagesRoutes,
+        Slot::PagesItems,
+        Slot::CommandsMod,
+        Slot::ConfigSections,
+        Slot::GitIgnore,
+        Slot::MiseTasks,
+        Slot::NodeDependencies,
+        Slot::AgentsSections,
+    ];
+
+    /// The categories whose modules may write here. Empty means any
+    /// module: settings, `.gitignore` lines and agent rules are not a
+    /// kind of seam.
+    ///
+    /// Registering a plugin is open to every category that runs in the
+    /// server, because a middleware, a route source and a service are all
+    /// plugins. What is specific is the seam past registration: a hook, a
+    /// layer or a context value (middleware), a renderer or a page function
+    /// (renderer), a mount or a page route (routes), a subcommand
+    /// (enhancer), a build task (external).
+    pub fn open_to(self) -> &'static [Category] {
+        use Category::*;
+        match self {
+            Slot::AppUses | Slot::AppPlugins | Slot::PluginsMod | Slot::PluginsInstalled => {
+                &[Middleware, Renderer, Enhancer, Routes]
+            }
+            Slot::AppSetup | Slot::AppContext | Slot::PluginsHooks | Slot::PluginsLayers => {
+                &[Middleware]
+            }
+            Slot::PagesRenderers | Slot::PagesItems => &[Renderer],
+            Slot::RouterMounts | Slot::PagesRoutes => &[Routes],
+            Slot::CommandsMod => &[Enhancer],
+            Slot::MiseTasks | Slot::NodeDependencies => &[External],
+            Slot::ConfigSections | Slot::GitIgnore | Slot::AgentsSections => &[],
+        }
+    }
 }
 
 impl fmt::Display for Slot {

@@ -108,13 +108,33 @@ pub struct Choice {
     /// the row's own blurb, so it is the first thing read. The cursor steps
     /// over it, so nothing invites a key that would do nothing.
     pub blocked: Option<String>,
-    /// Whether this choice runs nothing in a server, so a static site may
-    /// keep it. See `Manifest::outside_runtime`.
-    pub outside_runtime: bool,
-    /// Whether this choice compiles the project to files. Ticking it takes
-    /// off every choice that needs a server; ticking one of those takes it
-    /// off. See `Manifest::static_output`.
-    pub static_output: bool,
+    /// Choices this one cannot stand beside, by index, each with the reason
+    /// shown when ticking this row takes that one off. Built by
+    /// [`clashes`] from `brocanth_scaffold::clash`, the rule the flags
+    /// refuse with, so the screen and the command line agree.
+    pub clashes: Vec<(usize, String)>,
+}
+
+/// For each key, the others it cannot stand beside, by index into `keys`,
+/// with the reason in words.
+pub fn clashes(keys: &[&str]) -> Vec<Vec<(usize, String)>> {
+    let manifests: Vec<_> = keys
+        .iter()
+        .map(|key| crate::modules::find(key).map(|m| m.manifest()))
+        .collect();
+    manifests
+        .iter()
+        .map(|a| {
+            manifests
+                .iter()
+                .enumerate()
+                .filter_map(|(at, b)| {
+                    let clash = brocanth_scaffold::clash(a.as_ref()?, b.as_ref()?)?;
+                    Some((at, clash.message.replace('`', "")))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Everything `create` needs, and nothing it does not.
@@ -250,7 +270,7 @@ impl Model {
     fn settle(&mut self, index: usize, on: bool) {
         self.draft.choices[index].on = on;
         if on {
-            self.no_server_beside_files(index);
+            self.no_clash(index);
         }
         if !on {
             // Anything that needed it goes too, rather than staying ticked
@@ -312,30 +332,16 @@ impl Model {
         }
     }
 
-    /// A static site and a choice that needs a server cannot both be on.
-    /// The later tick wins, and each row it took off says why.
-    fn no_server_beside_files(&mut self, index: usize) {
-        let ticked = &self.draft.choices[index];
-        let (label, site) = (ticked.label.clone(), ticked.static_output);
-        if !site && ticked.outside_runtime {
-            return;
-        }
-        for other in 0..self.draft.choices.len() {
-            let c = &self.draft.choices[other];
-            let clash = if site {
-                !c.outside_runtime && !c.static_output
-            } else {
-                c.static_output
-            };
-            if other == index || !c.on || !clash {
+    /// Two choices that clash cannot both be on: a static site beside a
+    /// server module, or a pair a manifest declares. The later tick wins,
+    /// and each row it took off says why.
+    fn no_clash(&mut self, index: usize) {
+        for (other, why) in self.draft.choices[index].clashes.clone() {
+            if other == index || !self.draft.choices[other].on {
                 continue;
             }
-            let name = c.label.clone();
-            self.notes.push(if site {
-                format!("{name} went off — {label} compiles to files, and {name} needs a server")
-            } else {
-                format!("{name} went off — {label} needs a server, and {name} compiles to files")
-            });
+            let name = self.draft.choices[other].label.clone();
+            self.notes.push(format!("{name} went off — {why}"));
             self.settle(other, false);
         }
     }
@@ -1155,8 +1161,7 @@ mod tests {
             under: None,
             needs: Vec::new(),
             blocked: None,
-            outside_runtime: false,
-            static_output: false,
+            clashes: Vec::new(),
         }
     }
 
@@ -1194,6 +1199,7 @@ mod tests {
     /// The real registry, as the chooser is given it.
     fn registry(tab: Tab) -> Model {
         let keys = crate::modules::keys();
+        let mut clashes = super::clashes(&keys).into_iter();
         let choices = keys
             .iter()
             .map(|key| {
@@ -1209,8 +1215,7 @@ mod tests {
                         .parent
                         .and_then(|parent| keys.iter().position(|k| *k == parent)),
                     blocked: m.blocked.map(str::to_string),
-                    outside_runtime: m.outside_runtime,
-                    static_output: m.static_output,
+                    clashes: clashes.next().unwrap_or_default(),
                     needs: m
                         .needs
                         .iter()
@@ -1408,6 +1413,31 @@ mod tests {
         m.set(sessions, true);
         assert!(!m.draft.choices[site].on, "the later tick wins");
         assert!(m.draft.taken(sessions));
+    }
+
+    #[test]
+    fn a_conflict_declared_in_a_manifest_takes_the_other_row_off() {
+        // `logging` declares the clash; the screen reads it from the
+        // manifest, as `create` does, and the later tick wins either way.
+        let mut m = registry(Tab::Expert);
+        let (logging, logs) = (
+            m.draft.at("logging").expect("logging"),
+            m.draft
+                .at("observability-logs")
+                .expect("observability-logs"),
+        );
+        m.set(logs, true);
+        m.set(logging, true);
+        assert!(!m.draft.choices[logs].on);
+        assert!(
+            m.notes
+                .iter()
+                .any(|n| n.starts_with("observability-logs went off")),
+            "{:?}",
+            m.notes
+        );
+        m.set(logs, true);
+        assert!(!m.draft.choices[logging].on, "the later tick wins");
     }
 
     #[test]

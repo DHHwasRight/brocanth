@@ -23,7 +23,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 const LOGS: &str = "observability-logs";
 const HEALTH: &str = "observability-health";
@@ -44,6 +44,14 @@ impl Module for Observe {
             "observability",
             "a request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below",
         )
+        .category(Category::Middleware)
+        .category(Category::Enhancer)
+        .category(Category::Routes)
+        .adapts_to("config", "its settings are read from the config file, not written as a literal")
+        .adapts_to("observability-logs", "the request log is compiled in and switched on")
+        .adapts_to("observability-health", "`/up` and `/readyz` are answered, and shutdown drains")
+        .adapts_to("observability-metrics", "a side listener serves `/metrics`")
+        .adapts_to("observability-tracing", "spans are exported to a collector")
         .asked_in("operations", "Observability: logs, health probes, metrics (traces off)")
         .krate(krate())
         .after("config")
@@ -72,6 +80,7 @@ impl Module for Logs {
             LOGS,
             "a JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else",
         )
+        .category(Category::Middleware)
         .asked_in("operations", "Logs on stdout")
         .part_of("observability")
         .because("the log layer is a feature of `brocanth-observe`, which the parent brings")
@@ -93,6 +102,7 @@ impl Module for Health {
             HEALTH,
             "/up for liveness, /readyz runs every plugin's check and fails first on SIGTERM",
         )
+        .category(Category::Routes)
         .asked_in("operations", "Health probes")
         .part_of("observability")
         .because("the probes are routes the `Observer` answers, which the parent brings")
@@ -111,6 +121,7 @@ impl Module for Metrics {
             METRICS,
             "Prometheus text on /metrics: requests by route and status, in-flight, job queues",
         )
+        .category(Category::Routes)
         .asked_in("operations", "Prometheus metrics")
         .part_of("observability")
         .because("the registry is a feature of `brocanth-observe`, which the parent brings")
@@ -129,6 +140,7 @@ impl Module for Tracing {
             TRACING,
             "an OTLP span per request and per job, W3C traceparent in and out; needs a collector",
         )
+        .category(Category::Middleware)
         .asked_in("operations", "Traces over OTLP (needs a collector)")
         .part_of_but_off("observability")
         .because("the exporter is a feature of `brocanth-observe`, which the parent brings")

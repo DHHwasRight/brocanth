@@ -1644,8 +1644,10 @@ title = "My Blog"
 enabled = ["rsx"]
 
 [modules.rsx]
+kind = ["renderer"]
 files = ["src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
 crates = ["rsx"]
+adapted_to = []
 
-# brocanth-digest: 5ad7f85696bd0f08
+# brocanth-digest: 6edd69a2ca53ba90

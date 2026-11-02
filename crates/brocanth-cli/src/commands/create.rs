@@ -103,6 +103,15 @@ pub fn offered() -> clap::builder::PossibleValuesParser {
                     Some(_) => format!("{} -- not available yet", m.gist),
                     None => m.gist.to_string(),
                 };
+                // The categories lead, so `--help` reads as the module map
+                // does: what kind of seam each one hooks into.
+                let kinds = m
+                    .categories
+                    .iter()
+                    .map(|c| c.name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let help = format!("[{kinds}] {help}");
                 clap::builder::PossibleValue::new(m.key).help(help)
             })
             .collect::<Vec<_>>(),
@@ -133,64 +142,35 @@ const DEFAULT: [&str; 11] = [
     "middleware-security-headers",
 ];
 
-/// Pairs of modules that do the same job, so a project has one of each
-/// pair at most. `logging` and `observability-logs` both log every request.
-const EXCLUSIVE: &[(&str, &str, &str)] = &[(
-    "logging",
-    "observability-logs",
-    "both write a line per request; `observability-logs` writes JSON on stdout",
-)];
-
-/// Picks that hold both halves of an [`EXCLUSIVE`] pair, or a module that
-/// needs a server beside one that compiles the project to files.
+/// One error per pair of picks that cannot stand together.
+///
+/// The rule is not here. It is [`brocanth_scaffold::clash`], over the two
+/// manifests: a `conflicts` entry in either, or a module that needs a
+/// server beside one that compiles the project to files. The chooser asks
+/// the same function, so the two front doors refuse the same pairs.
 pub fn exclusive(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
-    let mut bad: Vec<Diagnostic> = EXCLUSIVE
+    // A key this CLI does not have is somebody else's diagnostic.
+    let manifests: Vec<_> = picks
         .iter()
-        .filter(|(a, b, _)| picks.contains(a) && picks.contains(b))
-        .map(|(a, b, why)| {
-            Diagnostic::error(*b, format!("`{a}` and `{b}` cannot both be chosen"))
-                .note(*why)
-                .help(format!("keep `{b}` and drop `{a}` from --with"))
-        })
+        .filter_map(|key| crate::modules::find(key).map(|m| m.manifest()))
         .collect();
-    bad.extend(runtime_in_static(picks));
+    let mut bad = Vec::new();
+    for (i, a) in manifests.iter().enumerate() {
+        for b in &manifests[i + 1..] {
+            if let Some(clash) = brocanth_scaffold::clash(a, b) {
+                bad.push(
+                    Diagnostic::error(clash.about, clash.message)
+                        .note(clash.why)
+                        .help(clash.help),
+                );
+            }
+        }
+    }
     if bad.is_empty() {
         Ok(())
     } else {
         Err(bad)
     }
-}
-
-/// One error per pick that needs a running server, when another pick
-/// compiles the project to files.
-///
-/// A static site has no process to run a session, a probe or a queue in.
-/// The modules it may take say `outside_runtime` in their manifests.
-fn runtime_in_static(picks: &[&str]) -> Vec<Diagnostic> {
-    // A key this CLI does not have is somebody else's diagnostic.
-    let manifest = |key: &str| crate::modules::find(key).map(|m| m.manifest());
-    let Some(site) = picks
-        .iter()
-        .find(|key| manifest(key).is_some_and(|m| m.static_output))
-    else {
-        return Vec::new();
-    };
-    let needs_server: Vec<&str> = picks
-        .iter()
-        .copied()
-        .filter(|key| manifest(key).is_some_and(|m| !m.outside_runtime && !m.static_output))
-        .collect();
-    needs_server
-        .iter()
-        .map(|key| {
-            Diagnostic::error(
-                *key,
-                format!("`{key}` needs a running server, and `{site}` compiles to files"),
-            )
-            .note("a static site takes only modules outside the runtime: templates, CSS, config, commands, CI")
-            .help(format!("drop `{key}` from --with, or drop `{site}` to build a server"))
-        })
-        .collect()
 }
 
 /// Everything the CLI was compiled with, in listing order.
@@ -335,6 +315,16 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
             Cell::styled(*pick, ACCENT),
             Cell::styled(about(pick).gist, DIM),
         ]);
+        // The optional dependencies that were present: what this module
+        // wrote differently because of another choice.
+        for (other, what) in &about(pick).adapts_to {
+            if answers.has(other) {
+                contents.row(vec![
+                    Cell::styled("", DIM),
+                    Cell::styled(format!("with {other}: {what}"), DIM),
+                ]);
+            }
+        }
     }
     for pick in available().iter().filter(|p| !answers.has(p)) {
         contents.row(vec![
@@ -549,6 +539,7 @@ pub fn unmet(picks: &[&str]) -> Result<(), Vec<Diagnostic>> {
 /// The full-screen route. Returns the same [`Answers`] the flags produce.
 fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
     let preset = picked(args);
+    let mut clashes = crate::tui::clashes(&all()).into_iter();
     let draft = Draft {
         name: String::new(),
         title: args.title.clone().unwrap_or_default(),
@@ -573,8 +564,9 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                     .parent
                     .and_then(|parent| all().iter().position(|p| *p == parent)),
                 blocked: about(pick).blocked.map(str::to_string),
-                outside_runtime: about(pick).outside_runtime,
-                static_output: about(pick).static_output,
+                // Ticking a static site takes off what needs a server, and
+                // the other way round; so does a pair a manifest declares.
+                clashes: clashes.next().unwrap_or_default(),
                 // A tick brings what it requires, and an untick takes the
                 // ticks that required it. The screen can do that honestly
                 // because every row it changed is still on the screen.
@@ -1006,8 +998,26 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
             .join(", "),
     );
     for key in &a.picks {
+        // `adapted_to` is the optional dependencies that were present, so
+        // the file says which other choice shaped this one's code: removing
+        // that one changes what this one wrote.
+        let m = about(key);
         out.push_str(&format!(
-            "\n[modules.{key}]\nfiles = [{files}]\nconfig = [{sections}]\ncrates = [{crates}]\n",
+            "\n[modules.{key}]\nkind = [{kind}]\nfiles = [{files}]\nconfig = [{sections}]\n\
+             crates = [{crates}]\nadapted_to = [{adapted}]\n",
+            kind = quoted(
+                &m.categories
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect::<Vec<_>>()
+            ),
+            adapted = quoted(
+                &m.adapts_to
+                    .iter()
+                    .filter(|(other, _)| a.has(other))
+                    .map(|(other, _)| other.to_string())
+                    .collect::<Vec<_>>()
+            ),
             files = quoted(&attributed(a, files, key)),
             sections = quoted(&sections_of(built, key)),
             crates = quoted(

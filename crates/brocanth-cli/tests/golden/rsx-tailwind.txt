@@ -2030,18 +2030,24 @@ title = "My Blog"
 enabled = ["rsx", "rsx-tailwind", "commands"]
 
 [modules.rsx]
+kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
 crates = ["rsx"]
+adapted_to = ["rsx-tailwind"]
 
 [modules.rsx-tailwind]
+kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/assets.rs", "src/commands/css.rs"]
 config = []
 crates = []
+adapted_to = []
 
 [modules.commands]
+kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
+adapted_to = []
 
-# brocanth-digest: c9353de0aa197fd3
+# brocanth-digest: 97edcdb2a2f6066e

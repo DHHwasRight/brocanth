@@ -229,13 +229,15 @@ is not drawn.
 
 ## What the map shows
 
-1. **The category is implicit.** No manifest says "middleware" or
-   "routes"; the slots a module writes imply it. A `Manifest::kind(..)`
-   would let the chooser and the docs group modules without guessing.
-2. **Optional dependencies are not declared.** They are 19 `project.has`
-   calls inside `contribute`, plus `after` lists. A `Manifest::adapts_to`
-   (or `optional`) would put them beside `needs`, and the table above
-   could be generated.
+1. ~~**The category is implicit.**~~ Closed: every manifest declares
+   `category(..)`, and a test holds it to the slots it writes
+   (`Slot::open_to`). Two readings changed against the table above: `jt`
+   is also Routes (it writes an example page), and every module that puts
+   a value on the context is also Middleware.
+2. ~~**Optional dependencies are not declared.**~~ Closed: every
+   `project.has` is an `adapts_to(key, what_changes)` in the manifest, 36
+   in all (13 of them `config`, through `snippet::configurable`). A test
+   fails on an undeclared one.
 3. **`config` is cross-cutting.** 13 modules write two shapes, one with
    it and one without. It behaves like a shared dependency, not a module
    on equal footing.

@@ -269,6 +269,151 @@ mod tests {
         }
     }
 
+    /// Run one module against a project made of `on`, and hand back what it
+    /// asked and wrote.
+    fn run(module: &dyn Module, on: &[&str]) -> (Vec<String>, brocanth_scaffold::Scaffold) {
+        let known = keys();
+        let project = brocanth_scaffold::Project::new("my-blog", "My Blog", on, &known);
+        let mut s = brocanth_scaffold::Scaffold::new();
+        s.now_writing(module.manifest().key);
+        module.contribute(&project, &mut s);
+        (project.asked_keys(), s)
+    }
+
+    /// Two projects per module: every available module chosen, so each
+    /// `has` behind another `has` is reached; and the module with only what
+    /// it needs, so each `has` behind a `!has` is reached.
+    fn shapes(m: &brocanth_scaffold::Manifest) -> Vec<Vec<&'static str>> {
+        let everything: Vec<&str> = ALL
+            .iter()
+            .map(|module| module.manifest())
+            .filter(|other| other.blocked.is_none())
+            .map(|other| other.key)
+            .collect();
+        let mut alone = vec![m.key];
+        alone.extend(m.needs.iter().map(|(need, _)| *need));
+        alone.extend(m.parent);
+        vec![everything, alone]
+    }
+
+    #[test]
+    fn a_module_asks_only_about_what_its_manifest_declares() {
+        // The optional dependency was invisible: a `project.has` inside
+        // `contribute` changed the output and no manifest said so. Now it
+        // is declared with `adapts_to`, and this holds every module to it,
+        // in both directions: no undeclared question, and no declaration
+        // nothing asks.
+        let mut wrong = Vec::new();
+        for module in ALL {
+            let m = module.manifest();
+            if m.blocked.is_some() {
+                continue;
+            }
+            let mut asked: Vec<String> = Vec::new();
+            for on in shapes(&m) {
+                asked.extend(run(*module, &on).0);
+            }
+            asked.sort();
+            asked.dedup();
+            let may = m.may_ask();
+            for key in &asked {
+                if key != m.key && !may.contains(&key.as_str()) {
+                    wrong.push(format!(
+                        "`{}` asks `project.has(\"{key}\")` and does not declare it: \
+                         add `.adapts_to(\"{key}\", \"<what changes>\")` to its manifest",
+                        m.key
+                    ));
+                }
+            }
+            for (key, _) in &m.adapts_to {
+                if !asked.iter().any(|k| k == key) {
+                    wrong.push(format!(
+                        "`{}` declares `adapts_to(\"{key}\")` and never asks about it",
+                        m.key
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_module_writes_only_into_the_slots_its_categories_open() {
+        let mut wrong = Vec::new();
+        for module in ALL {
+            let m = module.manifest();
+            if m.categories.is_empty() {
+                wrong.push(format!(
+                    "`{}` has no category: add `.category(Category::..)` to its manifest",
+                    m.key
+                ));
+            }
+            if m.blocked.is_some() {
+                continue;
+            }
+            for on in shapes(&m) {
+                let (_, s) = run(*module, &on);
+                for slot in brocanth_scaffold::Slot::ALL {
+                    let writes = s.slot_owners(slot).any(|by| by == m.key);
+                    if writes && !m.categories.iter().any(|c| c.allows(slot)) {
+                        wrong.push(format!(
+                            "`{}` writes {slot}, which is open to {:?}, and is only {:?}",
+                            m.key,
+                            slot.open_to(),
+                            m.categories
+                        ));
+                    }
+                }
+            }
+        }
+        wrong.dedup();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_conflict_names_a_module_that_exists_and_says_why() {
+        for module in ALL {
+            let m = module.manifest();
+            for (other, why) in &m.conflicts {
+                assert!(
+                    find(other).is_some(),
+                    "`{}` conflicts with `{other}`, which no module declares",
+                    m.key
+                );
+                assert!(
+                    !why.is_empty(),
+                    "`{}` conflicts with `{other}` and does not say why",
+                    m.key
+                );
+            }
+            for (other, what) in &m.adapts_to {
+                assert!(
+                    find(other).is_some(),
+                    "`{}` adapts to `{other}`, which no module declares",
+                    m.key
+                );
+                assert!(
+                    !what.is_empty(),
+                    "`{}` adapts to `{other}` and does not say how",
+                    m.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logging_and_the_observer_logs_refuse_each_other_from_the_manifest() {
+        let a = find("logging").unwrap().manifest();
+        let b = find("observability-logs").unwrap().manifest();
+        let clash = brocanth_scaffold::clash(&b, &a).expect("they clash");
+        assert_eq!(
+            clash.about, "logging",
+            "the side that declared it gives way"
+        );
+        assert!(crate::commands::create::exclusive(&["logging", "observability-logs"]).is_err());
+        assert!(crate::commands::create::exclusive(&["logging", "config"]).is_ok());
+    }
+
     #[test]
     fn every_module_says_what_it_costs() {
         for module in ALL {

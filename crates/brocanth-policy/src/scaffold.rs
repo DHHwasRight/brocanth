@@ -54,7 +54,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Authorisation, as a choice on the `brocanth create` menu.
 ///
@@ -67,6 +67,19 @@ impl Module for Policy {
         Manifest::new(
             "policy",
             "typed predicates over an entity's columns; no ORM, no driver, no core",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .adapts_to(
+            "model",
+            "the database URL agrees with the model's SQLite file",
+        )
+        .adapts_to(
+            "realtime",
+            "the docs say where a rule joins a broadcast key",
         )
         .asked_in(
             "doors",

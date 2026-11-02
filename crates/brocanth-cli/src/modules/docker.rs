@@ -11,7 +11,7 @@
 //! there is none, and the health check accepts any HTTP answer, so a
 //! project without `observability-health` passes it with a 404 from `/up`.
 
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold};
 
 pub struct Docker;
 
@@ -21,6 +21,7 @@ impl Module for Docker {
             "docker",
             "a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up",
         )
+        .category(Category::External)
         .asked_in("operations", "A container image")
     }
 
@@ -38,6 +39,7 @@ impl Module for Kubernetes {
             "docker-kubernetes",
             "deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain",
         )
+        .category(Category::External)
         .asked_in("operations", "A Kubernetes deployment of the image")
         .part_of_but_off("docker")
         .because("it deploys the image the Dockerfile builds")

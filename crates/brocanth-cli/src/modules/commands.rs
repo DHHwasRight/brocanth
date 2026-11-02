@@ -1,6 +1,6 @@
 //! `commands` -- this project's own command line.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// A `manage` binary whose subcommands are the project's own structs.
 ///
@@ -14,6 +14,8 @@ impl Module for Commands {
             "commands",
             "this project's own command line, `serve` plus whatever you add",
         )
+        .category(Category::Enhancer)
+        .adapts_to("input", "`routes` prints the body each route takes")
         .outside_runtime()
         .asked_in(
             "foundations",

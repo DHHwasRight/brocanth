@@ -29,7 +29,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The broker, as a choice on the `brocanth create` menu.
 ///
@@ -42,6 +42,12 @@ impl Module for Realtime {
         Manifest::new(
             "realtime",
             "one write is a map lookup, not a query per subscriber; no transport yet",
+        )
+        .category(Category::Enhancer)
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in("behaviour", "A broadcast broker. No transport yet")
         .krate(Dep::brocanth("brocanth-realtime"))
@@ -94,6 +100,7 @@ impl Module for Sse {
             "realtime-sse",
             "one long response per subscriber, frames written as they are made",
         )
+        .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it writes the frames the broker makes, and the broker is realtime")
@@ -125,6 +132,7 @@ impl Module for WebSocket {
             "realtime-websocket",
             "a duplex socket per subscriber, frames both ways",
         )
+        .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it carries the frames the broker makes, and the broker is realtime")

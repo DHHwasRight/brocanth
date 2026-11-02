@@ -5,7 +5,7 @@
 //! skips the layouts they define. Each is a separate entry on the menu, and
 //! each can be left out.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// rsx lives in its own repository, so `--brocanth-path` does not reach it.
 /// That asymmetry is on purpose: brocanth is the thing being developed here
@@ -21,6 +21,9 @@ impl Module for Rsx {
             "rsx",
             "`.rsx` templates compiled into the binary; without it a page builds a String",
         )
+        .category(Category::Renderer)
+        .adapts_to("rsx-tailwind", "the layout links the stylesheet")
+        .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
         .outside_runtime()
         .asked_in("pages", "Templates compiled into the binary")
         .krate(Dep::git("rsx", REPOSITORY, "main").note("templates, compiled"))
@@ -71,6 +74,8 @@ impl Module for Tailwind {
             "rsx-tailwind",
             "a CSS build over the class names in your templates; needs node",
         )
+        .category(Category::External)
+        .category(Category::Enhancer)
         .outside_runtime()
         .asked_in(
             "pages",
@@ -122,6 +127,7 @@ impl Module for Htmx {
             "rsx-htmx",
             "a click swaps what changed; the server renders from the shared layout down",
         )
+        .category(Category::Renderer)
         .outside_runtime()
         .asked_in("pages", "A click swaps what changed, not the whole page")
         .part_of("rsx")

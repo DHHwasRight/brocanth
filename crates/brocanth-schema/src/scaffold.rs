@@ -38,7 +38,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The validation vocabulary, as a choice on the `brocanth create` menu.
 ///
@@ -51,6 +51,11 @@ impl Module for Validation {
         Manifest::new(
             "validation",
             "a zod-shaped vocabulary; a handler takes Valid<T> or does not compile",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in(
             "doors",

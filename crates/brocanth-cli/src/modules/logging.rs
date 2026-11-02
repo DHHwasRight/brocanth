@@ -1,7 +1,7 @@
 //! `logging` -- a line per request.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// A request logger, written out into the project rather than linked.
 ///
@@ -15,6 +15,15 @@ impl Module for Logging {
         Manifest::new(
             "logging",
             "a line per request; the core assumes no log layer",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .conflicts(
+            "observability-logs",
+            "both write a line per request; `observability-logs` writes JSON on stdout",
         )
         .asked_in("foundations", "A line per request")
     }

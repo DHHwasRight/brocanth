@@ -39,7 +39,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The backoffice, as a choice on the `brocanth create` menu.
 ///
@@ -55,6 +55,12 @@ impl Module for Backoffice {
             "admin",
             "a Django-shaped backoffice at /admin, locked until you say who may in",
         )
+        .category(Category::Routes)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .adapts_to("middleware-csrf", "every form carries the CSRF token")
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
         .krate(
             Dep::brocanth("brocanth-admin")
@@ -164,6 +170,7 @@ impl Module for BackofficeModels {
             "admin-model",
             "the admin's rows over SeaORM, one line per entity",
         )
+        .category(Category::Routes)
         .asked_in("doors", "")
         .part_of_but_off("admin")
         .because("it is the admin's data source, so there is nothing to read rows for without it")

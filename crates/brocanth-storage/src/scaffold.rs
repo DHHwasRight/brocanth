@@ -36,7 +36,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// File storage, as a choice on the `brocanth create` menu.
 ///
@@ -49,6 +49,12 @@ impl Module for FileStorage {
         Manifest::new(
             "storage",
             "uploads on a local disk, addressed by content hash; no object store and no S3",
+        )
+        .category(Category::Enhancer)
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in("data", "Uploads on disk, addressed by content hash")
         .krate(Dep::brocanth("brocanth-storage"))

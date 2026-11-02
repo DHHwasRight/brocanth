@@ -39,7 +39,7 @@
 //!
 //! [`snippet::hooking`]: brocanth_scaffold::snippet::hooking
 
-use brocanth_scaffold::{snippet, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{snippet, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
 pub struct Middleware;
@@ -50,6 +50,7 @@ impl Module for Middleware {
             "middleware",
             "proxy headers, method override, canonical host, content types, CORS",
         )
+        .category(Category::Middleware)
         .asked_in("doors", "The edge hooks: proxies, CORS, a canonical host")
         .krate(Dep::brocanth("brocanth-middleware"))
         .absent(
@@ -162,6 +163,7 @@ impl Module for Csrf {
             "middleware-csrf",
             "a double-submit cookie, checked on every verb that is not a read",
         )
+        .category(Category::Middleware)
         .asked_in(
             "doors",
             "Refuse a form post this application did not hand out",
@@ -243,6 +245,8 @@ impl Module for SecurityHeaders {
             "middleware-security-headers",
             "HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash",
         )
+        .category(Category::Middleware)
+        .adapts_to("admin", "the CSP allows the admin's inline script by hash")
         .asked_in("doors", "Send the headers a browser reads as policy")
         .part_of("middleware")
         .because(
@@ -327,6 +331,7 @@ impl Module for RateLimit {
             "middleware-rate-limit",
             "a fixed window per address, session or user, per group of routes; 429 with Retry-After",
         )
+        .category(Category::Middleware)
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")

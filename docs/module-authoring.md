@@ -47,7 +47,7 @@ and only after every module named in its `after` list.
 
 ### The manifest
 
-`Manifest` (`lib.rs:81`) has 14 fields. Build it with `Manifest::new(key,
+`Manifest` (`lib.rs:81`) has 17 fields. Build it with `Manifest::new(key,
 gist)` and the builder methods. Do not set the fields directly: some
 builders set two fields at once on purpose.
 
@@ -67,6 +67,9 @@ builders set two fields at once on purpose.
 | `short` | `asked_in(_, short)` | The shorter phrase the guided question uses. Empty falls back to `gist`. |
 | `outside_runtime` | `outside_runtime()` | It adds nothing that only a running server uses: a build step, templates, CI, config, the command line. A static site may take it. |
 | `static_output` | `static_output()` | It turns the project into files. Every other chosen module must be `outside_runtime`. |
+| `categories` | `category(Category::X)`, once per category | The kinds of seam it hooks into: `Middleware`, `Renderer`, `External`, `Enhancer`, `Routes`. The first is the main one. A test holds the module to the slots its categories open (`Slot::open_to`). |
+| `conflicts` | `conflicts(k, why)` | It cannot be chosen beside `k`. Declare it on the side that gives way. `create`, `add` and the chooser all read it through `brocanth_scaffold::clash`. |
+| `adapts_to` | `adapts_to(k, what_changes)` | It writes different code when `k` is chosen: the optional dependency. Every `project.has(k)` in `contribute` must be declared here, in `needs`, or be the parent. A test checks both directions. |
 
 `Dep` (`lib.rs:313`) names a crate and leaves the source to the CLI for
 brocanth's own crates:
@@ -826,6 +829,9 @@ A module in `ALL` must pass these:
 | `a_requirement_names_a_module_that_exists_and_says_what_breaks` | Each `needs` names a real key, not itself, with a reason. |
 | `a_module_nobody_can_choose_says_why_on_its_own_row` | `blocked` is at most 80 characters, one line, not `on_with_parent`, and has no `absent`. |
 | `every_module_says_what_it_costs` | `gist` is not empty and has no full stop. |
+| `a_module_asks_only_about_what_its_manifest_declares` | Each `project.has(k)` is declared (`adapts_to`, `needs`, parent), and each `adapts_to` is asked. The module runs twice: beside every module, and with only its needs. |
+| `a_module_writes_only_into_the_slots_its_categories_open` | The module has a category, and writes only into slots its categories open. |
+| `a_conflict_names_a_module_that_exists_and_says_why` | Each `conflicts` and `adapts_to` names a real key, with a reason. |
 
 ### The generator tests in `crates/brocanth-cli/src/commands/create.rs`
 
@@ -868,12 +874,21 @@ not the checkout.
 ### Optional behaviour: `project.has`
 
 A module adapts to another module with `project.has(key)` in
-`contribute`. `security-headers` adds the admin's inline script hash only
-when `admin` is chosen. 13 modules adapt to `config` this way.
+`contribute`, and declares it with `adapts_to(key, what_changes)`.
+`security-headers` adds the admin's inline script hash only when `admin`
+is chosen:
 
 ```rust
+// manifest
+.adapts_to("admin", "the CSP allows the admin's inline script by hash")
+// contribute
 let config = if project.has("admin") { WITH_ADMIN } else { DEFAULT };
 ```
+
+`snippet::configurable` asks `project.has("config")`, so every module with
+declared settings adapts to `config` (13 today). The generated
+`brocanth.toml` lists, per module, `adapted_to`: the declared keys that
+were chosen. `create` prints them under the module in its receipt.
 
 Add `after(key)` as well when you write into a slot the other module also
 writes, so the order is defined.
@@ -881,24 +896,36 @@ writes, so the order is defined.
 ### Static output
 
 A module that only builds, renders, configures or ships says
-`outside_runtime()`. Without it, `create` refuses the module beside
-`static` (`runtime_in_static`, `create.rs:169`), and the chooser unticks
-it. Do not add it to a module that registers a plugin, a hook or a route:
+`outside_runtime()`. Without it, `brocanth_scaffold::clash` refuses
+the module beside `static`: `create` and `add` say so, and the chooser
+unticks it. Do not add it to a module that registers a plugin, a hook or a route:
 a static export has no process to run them.
 
 ### Conflicts
 
-Two modules that cannot stand together are a pair in `EXCLUSIVE`
-(`create.rs:138`). Today the only pair is `logging` and
-`observability-logs`. A third-party module cannot add a pair without a
-change to `create.rs`. See §5.
+Two modules that cannot stand together say so in a manifest:
+
+```rust
+.conflicts(
+    "observability-logs",
+    "both write a line per request; `observability-logs` writes JSON on stdout",
+)
+```
+
+That is `logging`'s manifest, the only pair today. Declare it on one
+side, the side that gives way: `clash` reads both manifests and tells the
+user to drop the declaring module. A third-party module adds a pair
+without a change to the CLI.
 
 ### Checklist
 
 1. A crate with a `scaffold` feature, off by default.
 2. `Manifest::new(key, gist)`: a key with no hyphen, unless it has a
    parent; a gist with no full stop.
-3. `after` for order, `needs` for a requirement with its reason.
+3. `category` for each kind of seam it writes; `after` for order,
+   `needs` for a requirement with its reason, `adapts_to` for each other
+   module it asks `project.has` about, `conflicts` for a module it cannot
+   stand beside.
 4. `absent` that says what the project lacks without the module.
 5. Plugins in `src/plugins/<key>/mod.rs`, registered through
    `snippet::plugin` or `snippet::hooking`.
@@ -919,18 +946,14 @@ Found while writing this guide. Input for the module-design discussion.
    chosen (`create.rs:3653`). A second module that wants to wrap the server
    (a tracer, an access log with timing) cannot. A `Slot::ServerWrap` needs
    a composition rule: several wraps, in an order.
-2. **Conflicts are not in the manifest.** `EXCLUSIVE` is a list in
-   `create.rs:138`. A `Manifest::conflicts(key, why)` would let a
-   third-party module declare one, and let the chooser explain it.
-3. **Optional dependencies are invisible.** A `project.has` call inside
-   `contribute` changes the output, but no manifest field records it. The
-   chooser, the map and `brocanth add` cannot see it. There are 19 such
-   calls. A `Manifest::adapts_to(key)` would make them data, and a test
-   could then check that each `has` is declared.
-4. **No category field.** The five categories in `docs/module-map.md` are
-   a reading of the slots. A `Manifest::kind` would let the chooser group
-   by category and let a test check that a module writes only into its
-   category's slots.
+2. ~~**Conflicts are not in the manifest.**~~ Closed: `Manifest::conflicts`,
+   read by `brocanth_scaffold::clash` for `create`, `add` and the chooser.
+3. ~~**Optional dependencies are invisible.**~~ Closed:
+   `Manifest::adapts_to`, held to every `project.has` by a test, and
+   listed as `adapted_to` in `brocanth.toml`.
+4. ~~**No category field.**~~ Closed: `Manifest::category`. A test holds
+   each module to the slots its categories open, and `--with`'s help
+   leads with the categories. The chooser does not group by it yet.
 5. **No config form for a hooking plugin.** `brocanth-config` has
    `plugin_from_config` and no `plugin_hooking_from_config`. So every
    hooking module writes a literal config, even when `config` is chosen,
