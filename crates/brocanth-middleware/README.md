@@ -111,9 +111,13 @@ is the plugin's instance name: `[csrf]`, `[security_headers]`,
 | `[rate_limit]` | `ip_header`, `session_cookie`, `fail_open` | `[[rate_limit.rules]]` |
 
 ```text
-cargo run -- --security_headers.behind_tls=true
-MY_APP_RATE_LIMIT__IP_HEADER=fly-client-ip cargo run
+cargo run -- serve --security_headers.behind_tls=true
+MY_APP_RATE_LIMIT__IP_HEADER=fly-client-ip cargo run -- serve
 ```
+
+`serve` is the subcommand a project with `commands` starts the server
+with. Without `commands`, leave it out. With `config`, the flags are off
+until `WITH_CONFIG = true` in `src/flags.rs`.
 
 A list has no flag, so `exempt` and the rate-limit rules live in the file.
 Without `config`, the example rule is code beside the registration.

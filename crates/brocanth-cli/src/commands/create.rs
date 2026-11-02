@@ -890,7 +890,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
             "mise.toml".to_string(),
             // Raw, because the `\n\` form this file used here kept the source's
             // own indentation and wrote it into the TOML.
-            mise_toml(&built),
+            mise_toml(&built, a.has("commands")),
         ),
         (
             "src/main.rs".to_string(),
@@ -2467,8 +2467,16 @@ impl Command for Serve {
 }
 "#;
 
-fn mise_toml(built: &Built) -> String {
-    let mut out = String::from(MISE_TOML);
+fn mise_toml(built: &Built, commands: bool) -> String {
+    // With `commands` the binary is a command line, and one given no
+    // subcommand prints its help: the server is `serve`, as in the
+    // Dockerfile. Without it the binary only serves.
+    let serve = if commands {
+        "cargo run -- serve"
+    } else {
+        "cargo run"
+    };
+    let mut out = MISE_TOML.replace("@SERVE@", serve);
     // The tasks the modules asked for. The slot was declared with the rest
     // and never read, so `rsx-tailwind` wrote its two here by hand and a
     // module from anywhere else had nowhere to write one at all.
@@ -2490,7 +2498,7 @@ rust = "1.98"
 # called `default` when it is given no name.
 [tasks.serve]
 alias = ["default"]
-run = "cargo run"
+run = "@SERVE@"
 
 [tasks.test]
 run = "cargo test"
@@ -5740,12 +5748,36 @@ mod tests {
     }
 
     #[test]
+    fn the_serve_task_starts_the_server_with_or_without_a_command_line() {
+        // With `commands` the binary answers no subcommand with its help, so
+        // a task that ran a bare `cargo run` printed the help and served
+        // nothing. The task has to name the command the scaffold wrote.
+        for (name, picks) in shapes()
+            .into_iter()
+            .chain([("nothing", Vec::new()), ("commands", vec!["commands"])])
+        {
+            let a = answers(&picks);
+            let built = contributions(&a).expect("a project");
+            let mise = mise_toml(&built, a.has("commands"));
+            let task: toml_edit::DocumentMut = mise.parse().expect("mise.toml parses");
+            let run = task["tasks"]["serve"]["run"]
+                .as_str()
+                .expect("a serve task");
+            if a.has("commands") {
+                assert_eq!(run, "cargo run -- serve", "the `{name}` shape");
+            } else {
+                assert_eq!(run, "cargo run", "the `{name}` shape");
+            }
+        }
+    }
+
+    #[test]
     fn every_generated_toml_line_starts_in_the_first_column() {
         // A stray indent in an assembled string is valid TOML and still
         // wrong: the reader cannot tell a continuation from a mistake.
         for a in [answers(&["rsx", "rsx-tailwind", "commands"]), answers(&[])] {
             let built = contributions(&a).expect("a project");
-            for line in mise_toml(&built).lines() {
+            for line in mise_toml(&built, a.has("commands")).lines() {
                 assert_eq!(line, line.trim_start(), "indented: {line:?}");
             }
         }

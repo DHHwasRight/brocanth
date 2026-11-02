@@ -200,8 +200,12 @@ stylesheet = "/admin-theme.css"
 ```
 
 ```sh
-MY_APP_ADMIN__TITLE="Acme admin" cargo run
-cargo run -- --admin.site_url=/   # without `config`
+# With `commands`, the server is the `serve` subcommand.
+MY_APP_ADMIN__TITLE="Acme admin" cargo run -- serve
+cargo run -- serve --admin.site_url=/   # flags: on without `config`
+
+# Without `commands`, the binary only serves.
+cargo run -- --admin.site_url=/
 ```
 
 - Precedence, lowest first: `Settings::default()`, the config files, the

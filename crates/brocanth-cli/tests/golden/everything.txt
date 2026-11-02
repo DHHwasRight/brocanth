@@ -57,7 +57,7 @@ rust = "1.98"
 # called `default` when it is given no name.
 [tasks.serve]
 alias = ["default"]
-run = "cargo run"
+run = "cargo run -- serve"
 
 [tasks.test]
 run = "cargo test"
