@@ -903,9 +903,9 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         (
             "src/main.rs".to_string(),
             if a.has("commands") {
-                main_with_commands_rs(a, has_flags(&built))
+                main_with_commands_rs(a, has_settings(&built))
             } else {
-                main_serve_only_rs(a, has_flags(&built))
+                main_serve_only_rs(a, has_settings(&built))
             },
         ),
         // Always: it is the one answer to what this application is, and both
@@ -923,7 +923,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     // The developer's: written when it is missing, so `brocanth add` gives
     // an older project one the first time a module declares a flag, and
     // never touches a rename somebody wrote.
-    if has_flags(&built) {
+    if has_settings(&built) {
         files.push(("src/flags.rs".to_string(), FLAGS_RS.to_string()));
     }
     if a.has("config") {
@@ -939,6 +939,12 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // project, and the built binary itself.
         files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(&built)));
         files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
+        if has_settings(&built) {
+            files.push((
+                "src/commands/settings.rs".to_string(),
+                SETTINGS_COMMAND_RS.to_string(),
+            ));
+        }
     }
     // The modules' own files, after the ones every project has. A clash
     // with a path above is caught here rather than by whichever happened to
@@ -1407,6 +1413,7 @@ fn commands_mod_rs(built: &Built) -> String {
         // below both want it without one.
         .map(|line| line.trim_end().to_string())
         .chain(std::iter::once("pub mod serve;".to_string()))
+        .chain(has_settings(built).then(|| "pub mod settings;".to_string()))
         .collect();
     lines.sort();
     lines.dedup();
@@ -3557,7 +3564,11 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // the extern prelude, so they mean the same thing here and at the macro's
     // expansion site. Sorted, because rustfmt sorts them.
     let mut uses: Vec<String> = built.slot(Slot::AppUses).map(str::to_string).collect();
-    if a.has("config") {
+    if a.has("config") && has_settings(built) {
+        // `plugins::config` loads the file, so the chain needs only the
+        // extension.
+        uses.push("use brocanth_config::AppBuilderConfigExt;\n".to_string());
+    } else if a.has("config") {
         uses.push("use brocanth_config::{AppBuilderConfigExt, Loader};\n".to_string());
     }
     uses.sort();
@@ -3577,31 +3588,22 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         "let builder = $builder"
     };
-    if has_flags(built) {
-        out.push_str(if a.has("config") {
-            "        // The flags this run was given, under the names `src/flags.rs`\n\
-            \x20       // gives them. None unless that file turns them on: with a config\n\
-            \x20       // file, the file is the source.\n\
-            \x20       let flags = crate::plugins::given_flags()?;\n"
-        } else {
-            "        // The flags this run was given, under the names `src/flags.rs`\n\
-            \x20       // gives them. Each plugin below starts from its defaults and takes\n\
-            \x20       // these on top.\n\
-            \x20       let flags = crate::plugins::given_flags()?;\n"
-        });
-    }
-    if a.has("config") && has_flags(built) {
+    if a.has("config") && has_settings(built) {
         out.push_str(&format!(
-            "        // The core takes already-built values; finding the files, layering\n\
-            \x20       // them and typing each section is `brocanth-config`'s job, and it is\n\
-            \x20       // the only reason a TOML parser is in the tree. A flag is the top\n\
-            \x20       // layer, above the environment.\n\
-            \x20       let mut loader = Loader::new(crate::app::APP);\n\
-            \x20       for given in &flags {{\n\
-            \x20           loader = loader.flag(given.flag.path, given.name, &given.value, given.flag.text);\n\
-            \x20       }}\n\
-            \x20       let config = loader.load().map_err(|e| e.to_string())?;\n\
+            "        // The files, the environment and, once `src/flags.rs` turns them\n\
+            \x20       // on, the flags: `brocanth-config` layers them and types each\n\
+            \x20       // section, and it is the only reason a TOML parser is in the tree.\n\
+            \x20       let config = crate::plugins::config()?;\n\
             \x20       {head}.with_config(config){end}\n",
+            end = if registrations.is_empty() { "" } else { ";" },
+        ));
+    } else if !a.has("config") && has_settings(built) {
+        out.push_str(&format!(
+            "        // No file and no TOML parser. Each plugin below starts from its\n\
+            \x20       // defaults and takes what this run was given on top: the\n\
+            \x20       // environment, then the flags.\n\
+            \x20       let given = crate::plugins::given()?;\n\
+            \x20       {head}{end}\n",
             end = if registrations.is_empty() { "" } else { ";" },
         ));
     } else if a.has("config") {
@@ -3742,7 +3744,7 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     //
     // Here and not in `src/flags.rs`, because the list follows from the
     // module list. The renames are the developer's, so they are there.
-    if has_flags(built) {
+    if has_settings(built) {
         out.push('\n');
         out.push_str(&flags_rs(a, built));
     }
@@ -3915,99 +3917,219 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 }
 "#;
 
-/// Whether any module declared a setting the command line may set.
-fn has_flags(built: &Built) -> bool {
-    built.settings().any(|(_, _, setting)| setting.flag)
+/// Whether any module declared a setting.
+fn has_settings(built: &Built) -> bool {
+    built.settings().next().is_some()
 }
 
-/// The settings a flag may set, as `(section, setting)`, in module order.
-fn flagged(built: &Built) -> Vec<(&str, &Setting)> {
+/// Every declared setting, as `(section, setting)`, in module order.
+fn declared(built: &Built) -> Vec<(&str, &Setting)> {
     built
         .settings()
-        .filter(|(_, _, setting)| setting.flag)
         .map(|(_, section, setting)| (section, setting))
         .collect()
 }
 
-/// The flag half of `src/plugins/mod.rs`: the list, the names after
-/// `src/flags.rs`, the reader, and what hands them to the binary.
+/// The sections that declared settings, in the order they were declared.
+fn declared_sections<'a>(declared: &[(&'a str, &Setting)]) -> Vec<&'a str> {
+    let mut sections: Vec<&str> = Vec::new();
+    for (section, _) in declared {
+        if !sections.contains(section) {
+            sections.push(section);
+        }
+    }
+    sections
+}
+
+/// The settings half of `src/plugins/mod.rs`: the list, the flag names after
+/// `src/flags.rs`, the readers, and the report.
 fn flags_rs(a: &Answers, built: &Built) -> String {
     let config = a.has("config");
-    let mut out = String::from(FLAG_STRUCT_HEAD);
-    if config {
+    let declared = declared(built);
+    let optional = declared.iter().any(|(_, setting)| setting.optional);
+    let mut out = String::from(SETTING_STRUCT_HEAD);
+    if config || optional {
         out.push_str(
-            "    /// Whether the value stays a string whatever it looks like.\n\
-            \x20   pub text: bool,\n",
+            "    /// A value that means `None` as well as an empty one does.\n\
+            \x20   pub none_as: Option<&'static str>,\n",
         );
     }
+    out.push_str(if config {
+        "    /// Whether a flag's value stays a string whatever it looks like.\n\
+        \x20   pub text: bool,\n"
+    } else {
+        "    /// The environment variable that sets it.\n\
+        \x20   pub env: &'static str,\n"
+    });
     out.push_str(
         "}\n\
          \n\
-         /// Every flag the modules declared. `brocanth add` rewrites this list;\n\
-         /// `src/flags.rs` renames or hides an entry.\n\
-         pub const FLAGS: &[Flag] = &[\n",
+         /// Every setting the modules declared. `brocanth add` rewrites this list;\n\
+         /// `src/flags.rs` renames or hides a flag.\n\
+         pub const SETTINGS: &[Setting] = &[\n",
     );
-    for (section, setting) in flagged(built) {
+    for (section, setting) in &declared {
         out.push_str(&format!(
-            "    Flag {{\n\
+            "    Setting {{\n\
             \x20       path: \"{section}.{key}\",\n\
-            \x20       help: {help:?},\n",
+            \x20       help: {help:?},\n\
+            \x20       flag: {flag},\n",
             key = setting.key,
-            help = setting.help,
+            help = setting.full_help(),
+            flag = setting.flag,
         ));
+        if config || optional {
+            out.push_str(&match setting.none_as {
+                Some(alias) => format!("        none_as: Some({alias:?}),\n"),
+                None => "        none_as: None,\n".to_string(),
+            });
+        }
         if config {
-            out.push_str(&format!("        text: {},\n", setting.kind == Kind::Text));
+            let text = setting.kind == Kind::Text;
+            out.push_str(&format!("        text: {text},\n"));
+        } else {
+            out.push_str(&format!(
+                "        env: \"{}_{}__{}\",\n",
+                a.ident().to_uppercase(),
+                section.replace('-', "_").to_uppercase(),
+                setting.key.replace('.', "__").to_uppercase(),
+            ));
         }
         out.push_str("    },\n");
     }
     out.push_str("];\n\n");
-    out.push_str(FLAG_GIVEN);
+    out.push_str(SETTING_GIVEN);
+    out.push_str(SETTING_NAMES);
     out.push_str(if config {
-        FLAG_NAMES_CONFIG_GATE
+        FLAG_NAMES_CONFIG
     } else {
-        FLAG_NAMES_NO_GATE
+        FLAG_NAMES_PLAIN
     });
-    out.push_str(FLAG_NAMES_BODY);
-    out.push_str(FLAG_READER);
-    if a.has("commands") {
-        out.push_str(FLAG_ARGS);
-    } else {
-        out.push_str(FLAG_LINE);
+    if config {
+        out.push_str(REFUSE_OFF_FLAGS);
     }
-    if !config {
-        out.push_str(FLAG_PARSED);
-        // One function per section, in the order the sections were declared.
-        let mut sections: Vec<&str> = Vec::new();
-        for (section, _) in flagged(built) {
-            if !sections.contains(&section) {
-                sections.push(section);
-            }
+    out.push_str(if config {
+        GIVEN_HEAD_CONFIG
+    } else {
+        GIVEN_HEAD_PLAIN
+    });
+    out.push_str(GIVEN_FLAGS);
+    if config {
+        out.push_str(CONFIG_FN);
+    }
+    if a.has("commands") {
+        out.push_str(&FLAG_ARGS.replace(
+            "@REFUSE@",
+            if config {
+                "    refuse_off_flags().map_err(anyhow::Error::msg)?;\n"
+            } else {
+                ""
+            },
+        ));
+    } else {
+        out.push_str(&READ_LINE.replace(
+            "@REFUSE@",
+            if config {
+                "    refuse_off_flags()?;\n"
+            } else {
+                ""
+            },
+        ));
+    }
+
+    // Each setting's default, from the plugin's own `Default`.
+    out.push_str(
+        "\n/// Each setting as the plugin's `Default` says, before any layer.\n\
+         fn defaults() -> Vec<(&'static str, String)> {\n",
+    );
+    out.push_str(&field_list(&declared, |section| {
+        format!("crate::plugins::{section}::Settings::default()")
+    }));
+    out.push_str("}\n");
+
+    if config {
+        out.push_str(CONFIG_REPORT);
+    } else {
+        out.push_str(PARSED);
+        if optional {
+            out.push_str(OPTIONAL);
         }
-        for section in sections {
-            out.push_str(&flagged_section(section, &flagged(built)));
+        for section in declared_sections(&declared) {
+            out.push_str(&section_settings(section, &declared));
         }
+        out.push_str(
+            "\n/// Each setting as the plugin holds it, after every layer.\n\
+             fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {\n",
+        );
+        let list = field_list(&declared, |section| {
+            format!("{}_settings(given)?", section.replace('-', "_"))
+        });
+        // The same list, handed back in an `Ok`.
+        out.push_str(&list.replacen("    vec![", "    Ok(vec![", 1).replacen(
+            "]\n",
+            "])\n",
+            list.matches("]\n").count().min(1),
+        ));
+        out.push_str("}\n");
+        out.push_str(PLAIN_REPORT);
     }
     out
 }
 
-/// `flagged_<section>`: a section's defaults, with this run's flags applied.
-fn flagged_section(section: &str, flagged: &[(&str, &Setting)]) -> String {
+/// The body of `defaults` or `merged`: one binding per section, built by
+/// `source`, and a `vec!` of `(path, Debug of the field)`.
+fn field_list(declared: &[(&str, &Setting)], source: impl Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    for section in declared_sections(declared) {
+        out.push_str(&format!(
+            "    let {} = {};\n",
+            section.replace('-', "_"),
+            source(section)
+        ));
+    }
+    let entries: Vec<String> = declared
+        .iter()
+        .map(|(section, setting)| {
+            format!(
+                "(\"{section}.{key}\", format!(\"{{:?}}\", {ident}.{key}))",
+                key = setting.key,
+                ident = section.replace('-', "_"),
+            )
+        })
+        .collect();
+    // rustfmt keeps a short one-element list on one line.
+    let single = format!("    vec![{}]\n", entries.join(", "));
+    if entries.len() == 1 && single.len() <= 4 + 60 + 7 {
+        out.push_str(&single);
+    } else {
+        out.push_str("    vec![\n");
+        for entry in entries {
+            out.push_str(&format!("        {entry},\n"));
+        }
+        out.push_str("    ]\n");
+    }
+    out
+}
+
+/// `<section>_settings`: a section's defaults, with what this run was given
+/// applied in order.
+fn section_settings(section: &str, declared: &[(&str, &Setting)]) -> String {
     let ident = section.replace('-', "_");
-    let mine: Vec<&Setting> = flagged
+    let mine: Vec<&Setting> = declared
         .iter()
         .filter(|(s, _)| *s == section)
         .map(|(_, setting)| *setting)
         .collect();
-    let signature = format!(
-        "pub fn flagged_{ident}(given: &[Given]) -> Result<crate::plugins::{section}::Settings, String> {{\n"
-    );
     let mut out = format!(
         "\n/// `[{section}]`, as this binary runs it without a file: the plugin's\n\
-         /// defaults, and the flags this run was given.\n"
+         /// defaults, then the environment, then the flags.\n"
+    );
+    let signature = format!(
+        "pub fn {ident}_settings(given: &[Given]) -> Result<crate::plugins::{section}::Settings, String> {{\n"
     );
     if signature.len() > 101 {
         out.push_str(&format!(
-            "pub fn flagged_{ident}(\n    given: &[Given],\n) -> Result<crate::plugins::{section}::Settings, String> {{\n"
+            "pub fn {ident}_settings(\n    given: &[Given],\n) -> Result<crate::plugins::{section}::Settings, String> {{\n"
         ));
     } else {
         out.push_str(&signature);
@@ -4016,20 +4138,29 @@ fn flagged_section(section: &str, flagged: &[(&str, &Setting)]) -> String {
         "    let mut settings = crate::plugins::{section}::Settings::default();\n\
         \x20   for given in given {{\n"
     ));
+    let reader = |setting: &Setting| {
+        if setting.optional {
+            "optional"
+        } else {
+            "parsed"
+        }
+    };
     // A match with one arm and a wildcard is clippy's `single_match`.
     if let [only] = mine.as_slice() {
         out.push_str(&format!(
-            "        if given.flag.path == \"{section}.{key}\" {{\n\
-            \x20           settings.{key} = parsed(given)?;\n\
+            "        if given.setting.path == \"{section}.{key}\" {{\n\
+            \x20           settings.{key} = {read}(given)?;\n\
             \x20       }}\n",
             key = only.key,
+            read = reader(only),
         ));
     } else {
-        out.push_str("        match given.flag.path {\n");
+        out.push_str("        match given.setting.path {\n");
         for setting in &mine {
             out.push_str(&format!(
-                "            \"{section}.{key}\" => settings.{key} = parsed(given)?,\n",
+                "            \"{section}.{key}\" => settings.{key} = {read}(given)?,\n",
                 key = setting.key,
+                read = reader(setting),
             ));
         }
         out.push_str("            _ => {}\n        }\n");
@@ -4042,17 +4173,18 @@ fn flagged_section(section: &str, flagged: &[(&str, &Setting)]) -> String {
 const FLAGS_RS: &str = r#"//! The command-line flags of this binary, and the one place to rename them.
 //!
 //! A module declares each of its settings once. From that the binary takes a
-//! flag, `--<module>.<key>=VALUE`, and, with the `config` module, a key in
-//! `config/<env>.toml`. `brocanth add` rewrites the list of flags in
+//! flag, `--<module>.<key>=VALUE`, an environment variable,
+//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list in
 //! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
 //! and never again.
 
 /// Whether a project with a config file reads the flags too.
 ///
 /// Off: with the `config` module, the file and the environment are the
-/// sources, and the binary takes no flag. On: a flag outranks both, for one
-/// run. Without the `config` module the flags are the only source, and this
-/// is not read.
+/// sources, and a flag is refused with a pointer to this line. On: a flag
+/// outranks both, for one run. Without the `config` module the flags are
+/// always read, and this is not.
 #[allow(dead_code)]
 pub const WITH_CONFIG: bool = false;
 
@@ -4067,93 +4199,183 @@ pub const WITH_CONFIG: bool = false;
 pub const RENAMES: &[(&str, &str)] = &[];
 "#;
 
-const FLAG_STRUCT_HEAD: &str = r#"/// One command-line flag a module declared, by the key it sets.
-pub struct Flag {
+/// `src/commands/settings.rs`: the report, as a command.
+const SETTINGS_COMMAND_RS: &str = r#"//! `settings` -- every settings layer on its own, then the merged values.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Show each settings layer, lowest precedence first, then the merged values.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Settings {}
+
+impl Command for Settings {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        print!(
+            "{}",
+            crate::plugins::settings_report().map_err(anyhow::Error::msg)?
+        );
+        Ok(())
+    }
+}
+"#;
+
+const SETTING_STRUCT_HEAD: &str = r#"/// One setting a module declared, by the key it sets.
+pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
     /// unless `src/flags.rs` renames it.
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
+    /// Whether a flag may set it. A secret has none: every user on the host
+    /// can read a process's arguments.
+    pub flag: bool,
 "#;
 
-const FLAG_GIVEN: &str = r#"/// One flag on this run's command line.
+const SETTING_GIVEN: &str = r#"/// One value this run was given, above the defaults.
 pub struct Given {
     /// What it sets.
-    pub flag: &'static Flag,
-    /// The name it was given under, without `--`.
-    pub name: &'static str,
-    /// The value, as typed.
+    pub setting: &'static Setting,
+    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    pub from: String,
+    /// The value, as typed. Empty is `None` for an `Option` setting.
     pub value: String,
 }
 
-/// The name each flag answers to on this run, after `src/flags.rs`.
+/// The name each flag answers to after `src/flags.rs`, whether the flags are
+/// read or not.
 ///
-/// A rename of a key no module declares, a name that is not spelled as a flag,
-/// and two flags under one name each stop the binary: each would otherwise be
-/// a flag that does nothing, or does something else.
-pub fn flag_names() -> Result<Vec<(&'static Flag, &'static str)>, String> {
-"#;
-
-const FLAG_NAMES_CONFIG_GATE: &str = r#"    // With a config file, the file is the source: a flag is read only when
-    // `src/flags.rs` says so.
-    if !crate::flags::WITH_CONFIG {
-        return Ok(Vec::new());
-    }
-"#;
-
-const FLAG_NAMES_NO_GATE: &str = "";
-
-const FLAG_NAMES_BODY: &str = r#"    for (path, _) in crate::flags::RENAMES {
-        if !FLAGS.iter().any(|flag| flag.path == *path) {
-            let known: Vec<&str> = FLAGS.iter().map(|flag| flag.path).collect();
+/// A rename of a key no flag sets, a name that is not spelled as a flag, and
+/// two flags under one name each stop the binary: each would otherwise be a
+/// flag that does nothing, or does something else.
+fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
+    for (path, _) in crate::flags::RENAMES {
+        if !flags().any(|setting| setting.path == *path) {
+            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
             return Err(format!(
-                "src/flags.rs renames `{path}`, and no module declares it\nhelp: the flags are {}",
+                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
                 known.join(", ")
             ));
         }
     }
-    let mut names: Vec<(&'static Flag, &'static str)> = Vec::new();
-    for flag in FLAGS {
+    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
+    for setting in flags() {
         let name = crate::flags::RENAMES
             .iter()
-            .find(|(path, _)| *path == flag.path)
-            .map_or(flag.path, |(_, name)| *name);
+            .find(|(path, _)| *path == setting.path)
+            .map_or(setting.path, |(_, name)| *name);
         if name.is_empty() {
             continue;
         }
         let spelled = name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
-        if !spelled || name.starts_with(['-', '.', '_']) || name == "help" || name == "version" {
+        let taken = ["help", "version", "settings"].contains(&name);
+        if !spelled || name.starts_with(['-', '.', '_']) || taken {
             return Err(format!(
-                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help` or `version`"
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
             ));
         }
         if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
             return Err(format!(
                 "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
-                other.path, flag.path
+                other.path, setting.path
             ));
         }
-        names.push((flag, name));
+        names.push((setting, name));
     }
     Ok(names)
 }
 
 "#;
 
-const FLAG_READER: &str = r#"/// The flags on this run's command line, in the order they were given.
+const SETTING_NAMES: &str = "";
+
+const FLAG_NAMES_CONFIG: &str = r#"/// The flags this run reads: none unless `src/flags.rs` turns them on,
+/// because with a config file the file is the source.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    if !crate::flags::WITH_CONFIG {
+        return Ok(Vec::new());
+    }
+    names()
+}
+
+"#;
+
+const FLAG_NAMES_PLAIN: &str = r#"/// The flags this run reads: every one, because there is no file.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    names()
+}
+
+"#;
+
+const REFUSE_OFF_FLAGS: &str = r#"/// A flag given while the flags are off, refused by name with what to do
+/// instead. Silently ignoring it would run with a value nobody chose.
+pub fn refuse_off_flags() -> Result<(), String> {
+    if crate::flags::WITH_CONFIG {
+        return Ok(());
+    }
+    let names = names()?;
+    for arg in std::env::args_os().skip(1) {
+        let arg = arg.to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) {
+            let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
+            return Err(format!(
+                "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set WITH_CONFIG = true in src/flags.rs, or set `{key}` under [{section}] in config/<env>.toml"
+            ));
+        }
+    }
+    Ok(())
+}
+
+"#;
+
+const GIVEN_HEAD_CONFIG: &str = r#"/// The flags this run was given, in the order typed. The environment is not
+/// here: `brocanth-config` reads it, under the file and over the flags.
 ///
 /// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
 /// is a command's, and the command line's own parser has already refused what
 /// nobody declared.
-pub fn given_flags() -> Result<Vec<Given>, String> {
-    let names = flag_names()?;
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
+"#;
+
+const GIVEN_HEAD_PLAIN: &str = r#"/// What this run was given above the defaults, lowest first: each variable
+/// that is set, then each flag in the order typed. A later value for one key
+/// replaces an earlier one.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
+    for setting in SETTINGS {
+        if let Some(value) = std::env::var_os(setting.env) {
+            given.push(Given {
+                setting,
+                from: format!("${}", setting.env),
+                value: value.to_string_lossy().into_owned(),
+            });
+        }
+    }
+"#;
+
+const GIVEN_FLAGS: &str = r#"    let names = flag_names()?;
     let args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let mut given = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--" {
@@ -4166,7 +4388,7 @@ pub fn given_flags() -> Result<Vec<Given>, String> {
             Some((name, value)) => (name, Some(value.to_string())),
             None => (written, None),
         };
-        let Some((flag, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
             continue;
         };
         let value = match inline {
@@ -4176,9 +4398,32 @@ pub fn given_flags() -> Result<Vec<Given>, String> {
                 .cloned()
                 .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
         };
-        given.push(Given { flag, name, value });
+        given.push(Given {
+            setting,
+            from: format!("--{name}"),
+            value,
+        });
     }
     Ok(given)
+}
+"#;
+
+const CONFIG_FN: &str = r#"
+/// The configuration this run reads: the files, the environment, and the
+/// flags on top once `src/flags.rs` turns them on.
+pub fn config() -> Result<brocanth_config::Config, String> {
+    refuse_off_flags()?;
+    let mut loader = brocanth_config::Loader::new(crate::app::APP);
+    for setting in SETTINGS {
+        if let Some(alias) = setting.none_as {
+            loader = loader.none_as(setting.path, alias);
+        }
+    }
+    for given in given()? {
+        let flag = given.from.trim_start_matches('-');
+        loader = loader.flag(given.setting.path, flag, &given.value, given.setting.text);
+    }
+    loader.load().map_err(|e| e.to_string())
 }
 "#;
 
@@ -4192,8 +4437,8 @@ pub fn flag_args(
 ) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
     use brocanth_command::{anyhow, clap};
 
-    let mut command = command;
-    for (flag, name) in flag_names().map_err(anyhow::Error::msg)? {
+@REFUSE@    let mut command = command;
+    for (setting, name) in flag_names().map_err(anyhow::Error::msg)? {
         let taken = command
             .get_subcommands()
             .flat_map(|sub| sub.get_arguments())
@@ -4201,14 +4446,14 @@ pub fn flag_args(
         if taken {
             anyhow::bail!(
                 "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in src/flags.rs",
-                flag.path
+                setting.path
             );
         }
         command = command.arg(
             clap::Arg::new(name)
                 .long(name)
                 .value_name("VALUE")
-                .help(flag.help)
+                .help(setting.help)
                 .global(true)
                 .action(clap::ArgAction::Append),
         );
@@ -4217,23 +4462,29 @@ pub fn flag_args(
 }
 "#;
 
-const FLAG_LINE: &str = r#"
+const READ_LINE: &str = r#"
 /// Refuses anything on the command line that is not a flag, and answers
-/// `--help`. `true` when it printed the help, so `main` stops there.
+/// `--help` and `--settings`. `true` when it printed one of those, so `main`
+/// stops there.
 ///
 /// This binary has no command line of its own: `brocanth add commands` gives
 /// it one, and `clap` does this.
 pub fn read_line() -> Result<bool, String> {
-    let names = flag_names()?;
+@REFUSE@    let names = flag_names()?;
     let mut rest = std::env::args_os()
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = rest.next() {
         if arg == "--help" || arg == "-h" {
             println!("Flags:");
-            for (flag, name) in &names {
-                println!("  --{name} <VALUE>  {}", flag.help);
+            for (setting, name) in &names {
+                println!("  --{name} <VALUE>  {}", setting.help);
             }
+            println!("  --settings  every settings layer, then the merged values");
+            return Ok(true);
+        }
+        if arg == "--settings" {
+            print!("{}", settings_report()?);
             return Ok(true);
         }
         let written = arg.strip_prefix("--").unwrap_or_default();
@@ -4252,8 +4503,21 @@ pub fn read_line() -> Result<bool, String> {
 }
 "#;
 
-const FLAG_PARSED: &str = r#"
-/// One flag's value, as the type of the field it sets.
+const CONFIG_REPORT: &str = r#"
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let config = config()?;
+    let mut layers = config.layers().defaults(defaults());
+    for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
+        layers = layers.secret(setting.path);
+    }
+    Ok(layers.to_string())
+}
+"#;
+
+const PARSED: &str = r#"
+/// One value, as the type of the field it sets.
 fn parsed<T>(given: &Given) -> Result<T, String>
 where
     T: std::str::FromStr,
@@ -4262,7 +4526,76 @@ where
     given
         .value
         .parse()
-        .map_err(|e| format!("--{} is {:?}: {e}", given.name, given.value))
+        .map_err(|e| format!("{} is {:?}: {e}", given.from, given.value))
+}
+"#;
+
+const OPTIONAL: &str = r#"
+/// One value for an `Option` field: empty, or the setting's declared alias,
+/// is `None`, decided at this layer.
+fn optional<T>(given: &Given) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    if given.value.is_empty() || given.setting.none_as == Some(given.value.as_str()) {
+        Ok(None)
+    } else {
+        parsed(given).map(Some)
+    }
+}
+"#;
+
+const PLAIN_REPORT: &str = r#"
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let given = given()?;
+    let secret = |path: &str| SETTINGS.iter().any(|s| s.path == path && !s.flag);
+    let shown = |path: &str, value: String| {
+        if secret(path) {
+            "(secret)".to_string()
+        } else {
+            value
+        }
+    };
+    let width = SETTINGS.iter().map(|s| s.path.len()).max().unwrap_or(0);
+    let mut out = String::from("layers, lowest precedence first\n\n   1  defaults\n");
+    for (path, value) in defaults() {
+        out.push_str(&format!(
+            "        {path:<width$}  = {}\n",
+            shown(path, value)
+        ));
+    }
+    for (n, label, prefix) in [(2, "environment", "$"), (3, "flags", "--")] {
+        out.push_str(&format!("\n  {n:>2}  {label}\n"));
+        let mine: Vec<&Given> = given
+            .iter()
+            .filter(|g| g.from.starts_with(prefix))
+            .collect();
+        if mine.is_empty() {
+            out.push_str("        (sets nothing)\n");
+        }
+        for g in mine {
+            let value = shown(g.setting.path, format!("{:?}", g.value));
+            let path = g.setting.path;
+            out.push_str(&format!("        {path:<width$}  = {value}  {}\n", g.from));
+        }
+    }
+    out.push_str("\nmerged\n");
+    for (path, value) in merged(&given)? {
+        let layer = match given.iter().rev().find(|g| g.setting.path == path) {
+            Some(g) if g.from.starts_with('$') => "2 environment",
+            Some(_) => "3 flags",
+            None => "1 defaults",
+        };
+        let value = shown(path, value);
+        out.push_str(&format!(
+            "  {path:<w$}  = {value}  {layer}\n",
+            w = width + 6
+        ));
+    }
+    Ok(out)
 }
 "#;
 
@@ -5535,9 +5868,10 @@ mod tests {
             );
             root
         };
-        let run = |root: &Path, name: &str, args: &[&str]| {
+        let run = |root: &Path, name: &str, args: &[&str], env: &[(&str, &str)]| {
             let output = Command::new(root.join("target/debug").join(name))
                 .args(args)
+                .envs(env.iter().copied())
                 .current_dir(root)
                 .output()
                 .expect("run the binary");
@@ -5551,23 +5885,58 @@ mod tests {
             )
         };
 
-        // No config file and no command line: `main` reads the flags.
+        // No config file and no command line: `main` reads the flags, and
+        // the plugins read the environment under them.
         let bare = build("flags-bare", vec!["sessions", "storage"], None);
-        let (ok, out) = run(&bare, "flags-bare", &["--sessions.cookie="]);
+        let (ok, out) = run(&bare, "flags-bare", &["--sessions.cookie="], &[]);
         assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        let (ok, out) = run(&bare, "flags-bare", &["--storage.token_ttl", "abc"]);
+        let (ok, out) = run(&bare, "flags-bare", &["--storage.token_ttl", "abc"], &[]);
         assert!(
             !ok && out.contains("--storage.token_ttl is \"abc\""),
             "{out}"
         );
-        let (ok, out) = run(&bare, "flags-bare", &["--storage.secret=x"]);
+        let (ok, out) = run(&bare, "flags-bare", &["--storage.secret=x"], &[]);
         assert!(
             !ok && out.contains("unknown argument"),
             "a secret has no flag: {out}"
         );
-        let (ok, out) = run(&bare, "flags-bare", &["--help"]);
+        let (ok, out) = run(&bare, "flags-bare", &["--help"], &[]);
         assert!(ok && out.contains("--sessions.cookie <VALUE>"), "{out}");
+        // A variable reaches the plugin; a secret has one even with no flag.
+        let env = [("FLAGS_BARE_SESSIONS__COOKIE", "")];
+        let (ok, out) = run(&bare, "flags-bare", &[], &env);
+        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
+        // Each layer on its own, then the merge. The flag wins over the
+        // variable, and the secret is masked everywhere.
+        let env = [
+            ("FLAGS_BARE_SESSIONS__COOKIE", "from-env"),
+            ("FLAGS_BARE_STORAGE__SECRET", "hush"),
+        ];
+        let line = ["--sessions.cookie=from-flag", "--settings"];
+        let (ok, out) = run(&bare, "flags-bare", &line, &env);
+        assert!(ok, "{out}");
+        assert!(out.contains("   2  environment\n"), "{out}");
+        assert!(
+            out.contains("\"from-env\"  $FLAGS_BARE_SESSIONS__COOKIE"),
+            "{out}"
+        );
+        assert!(out.contains("\"from-flag\"  3 flags"), "{out}");
+        assert!(
+            out.contains("storage.secret") && !out.contains("hush"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&bare);
+
+        // A config file and the flags left off: a flag is refused by name,
+        // with the two ways to do what was meant.
+        let off = build("flags-off", vec!["sessions", "config"], None);
+        let (ok, out) = run(&off, "flags-off", &["--sessions.cookie=x"], &[]);
+        assert!(
+            !ok && out.contains("`--sessions.cookie` is off")
+                && out.contains("help: set WITH_CONFIG = true in src/flags.rs"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&off);
 
         // A config file, the flags turned on, and one renamed.
         let configured = build(
@@ -5578,19 +5947,21 @@ mod tests {
                  pub const RENAMES: &[(&str, &str)] = &[(\"sessions.cookie\", \"cookie\")];\n",
             ),
         );
-        let (ok, out) = run(&configured, "flags-configured", &["serve", "--cookie="]);
+        let name = "flags-configured";
+        let (ok, out) = run(&configured, name, &["serve", "--cookie="], &[]);
         assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        let (ok, out) = run(
-            &configured,
-            "flags-configured",
-            &["serve", "--sessions.cookie=x"],
-        );
+        let (ok, out) = run(&configured, name, &["serve", "--sessions.cookie=x"], &[]);
         assert!(
             !ok && out.contains("--sessions.cookie"),
             "renamed away: {out}"
         );
-        let (ok, out) = run(&configured, "flags-configured", &["serve", "--help"]);
+        let (ok, out) = run(&configured, name, &["serve", "--help"], &[]);
         assert!(ok && out.contains("--cookie <VALUE>"), "{out}");
+        let (ok, out) = run(&configured, name, &["settings", "--cookie=x"], &[]);
+        assert!(
+            ok && out.contains("--cookie") && out.contains("4 flags"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&configured);
     }
 

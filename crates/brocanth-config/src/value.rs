@@ -381,6 +381,15 @@ pub enum ValueKind {
     /// can write `level: null` to drop back to the plugin's default rather than
     /// having to know what that default is.
     Unset,
+    /// Given, and empty: `--key=` on the command line, or a variable set to
+    /// the empty string.
+    ///
+    /// Unlike [`ValueKind::Unset`] it survives a merge, because somebody
+    /// decided it. It reads as `None` into an `Option` and as `""` into a
+    /// string; into a number or a boolean it is a type error that names the
+    /// source. That is what lets an empty flag say "no value" for an optional
+    /// setting without guessing which settings are optional.
+    Empty,
 }
 
 impl ValueKind {
@@ -396,6 +405,7 @@ impl ValueKind {
             ValueKind::Array(_) => "array",
             ValueKind::Table(_) => "table",
             ValueKind::Unset => "unset",
+            ValueKind::Empty => "empty",
         }
     }
 }
@@ -550,6 +560,34 @@ impl Value {
         Some(here)
     }
 
+    /// The value at a dotted path, to change it.
+    pub(crate) fn at_mut(&mut self, path: &str) -> Option<&mut Value> {
+        let mut here = self;
+        for segment in path.split('.').filter(|s| !s.is_empty()) {
+            here = match &mut here.kind {
+                ValueKind::Table(t) => t.get_mut(segment)?,
+                _ => return None,
+            };
+        }
+        Some(here)
+    }
+
+    /// A scalar as an operator would type it, unquoted: `-1`, `unlimited`.
+    pub(crate) fn plain(&self) -> Option<String> {
+        match &self.kind {
+            ValueKind::String(s) | ValueKind::Datetime(s) => Some(s.clone()),
+            ValueKind::Integer(i) => Some(i.to_string()),
+            ValueKind::Float(f) => Some(f.to_string()),
+            ValueKind::Boolean(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Replaces what the value is, and keeps where it came from.
+    pub(crate) fn set_kind(&mut self, kind: ValueKind) {
+        self.kind = kind;
+    }
+
     /// A one-line rendering for a dump: `"warn"`, `8080`, `["a", "b"]`.
     #[must_use]
     pub fn display(&self) -> String {
@@ -565,6 +603,7 @@ impl Value {
             }
             ValueKind::Table(t) => format!("{{ {} keys }}", t.len()),
             ValueKind::Unset => "(unset)".to_string(),
+            ValueKind::Empty => "(empty)".to_string(),
         }
     }
 

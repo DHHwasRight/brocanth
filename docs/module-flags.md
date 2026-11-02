@@ -1,13 +1,15 @@
-# Module flags
+# Module settings and flags
 
 A module declares each of its settings once. From that one declaration a
-generated project gets two things:
+generated project gets:
 
 - a flag on the binary: `--<module>.<key>=VALUE`;
-- with the `config` module, a key in `config/<env>.toml`, under `[<module>]`.
+- an environment variable: `$<APP>_<MODULE>__<KEY>`;
+- with the `config` module, a key in `config/<env>.toml`, under `[<module>]`;
+- a line in the settings report, which shows every layer on its own.
 
-The flag and the key cannot disagree about the name or the type, because
-nobody writes either by hand.
+The flag, the variable and the key cannot disagree about the name or the
+type, because nobody writes them by hand.
 
 ## The request, and how this reads it
 
@@ -19,14 +21,20 @@ Max asked for this:
 > config is present the flags switch to false. Find a way for the user to
 > rename those flags if needed and plug them to the main executable.
 
-This design reads it as follows. Each point is a choice, and each can be
-changed.
+And then decided the open questions:
+
+1. A project without `config` reads the environment too.
+2. A flag passed while the flags are off is refused with a `help:` line.
+3. An `Option` setting gets a flag. Empty means `None`. A module may
+   declare one more value that means `None`, such as `-1`.
+4. A report shows each layer on its own, then the merge, with and without
+   `config`.
 
 | Request | Reading |
 |---|---|
 | flags per module | One flag per declared setting. The name is the setting's path: `--sessions.cookie`, `--db.pool.max_size`. |
 | config registers the module and its sections | The declaration writes `[sessions]`, and `[db.pool]` for a dotted key. |
-| with config, the flags switch to false | With `config`, the binary takes no flag. The file and the environment are the sources. `WITH_CONFIG = true` in `src/flags.rs` turns the flags back on. |
+| with config, the flags switch to false | With `config`, the binary refuses a flag and says why. `WITH_CONFIG = true` in `src/flags.rs` turns the flags on. |
 | rename | `RENAMES` in `src/flags.rs`. The project owns that file. |
 | plug into the main executable | With `commands`, the flags are global `clap` arguments. Without `commands`, `main` reads them. |
 
@@ -55,7 +63,9 @@ configurable(
 | value | The value the file starts with. `Settings::default()` stays the value without a file. The two can differ on purpose: `sessions.secure` is `false` in the development file and `true` by default. |
 | `help` | One line. `--help` prints it, and it is the first comment line in the file. |
 | `.note(...)` | More comment lines for the file only. |
-| `.secret()` | No flag. Every user on the host can read a process's arguments in `ps`, and the shell keeps them in its history. `storage.secret` is one. |
+| `.secret()` | No flag. Every user on the host can read a process's arguments in `ps`, and the shell keeps them in its history. The variable and the file still set it, and the report masks it. `storage.secret` is one. |
+| `.optional()` | The field is an `Option`. See [Optional settings](#optional-settings). |
+| `.none_as("-1")` | Optional, and `-1` means `None` too. |
 
 `configurable` writes, in one call:
 
@@ -63,14 +73,11 @@ configurable(
 - the provider line, as `snippet::plugin` does;
 - with `config`, the `[section]` block, made from the declarations;
 - without `config`, a registration that starts from `Settings::default()`
-  and applies the flags.
+  and applies the environment, then the flags.
 
 `Scaffold::settings` records the declarations. The CLI reads them to write
-the flag list, and to record which config sections a module owns. It no
-longer parses `[name]` lines back out of the text for such a module.
-
-Converted so far: `sessions` and `storage`. Every other module still writes
-its section by hand and has no flag.
+the settings list and to record which config sections a module owns. It
+does not parse `[name]` lines back out of the text for such a module.
 
 ## Precedence
 
@@ -78,22 +85,19 @@ Lowest to highest:
 
 1. the plugin's `Settings::default()`;
 2. the config files, in their own order (`./config/<env>.toml` lowest,
-   `$<APP>_CONFIG` highest);
+   `$<APP>_CONFIG` highest), with `config` only;
 3. the environment, `$<APP>_<SECTION>__<KEY>`;
 4. a flag.
 
 **Reason:** the narrower decision wins. A file is shared by every
-deployment. A variable applies to every process one shell or one container
-starts. A flag applies to one run. This is the order the environment layer
-already used against the files, extended by one step.
+deployment. A variable applies to every process that one shell or one
+container starts. A flag applies to one run.
 
-Without `config` there are no files and no environment layer. The order is
-then the default, then the flag.
-
-A flag is a real layer in `brocanth-config`: `Loader::flag(path, flag, raw,
-text)`. Its values carry `Provenance::Flag`. The dump names the flag as
-typed, for example `--cookie` for a renamed flag, because that is what an
-operator searches the shell history for.
+With `config`, `brocanth-config` does the layering. A flag is a real layer
+there: `Loader::flag(path, flag, raw, text)`, with `Provenance::Flag`.
+Without `config`, the generated `given()` collects the variables, then the
+flags, and `<section>_settings` applies them in that order to the default.
+A later value for one key replaces an earlier one.
 
 ## Typing
 
@@ -105,12 +109,50 @@ operator searches the shell history for.
   field's own type with `FromStr`. A bad value stops the binary:
   `--storage.token_ttl is "abc": invalid digit found in string`.
 
+## Optional settings
+
+A field typed `Option<T>` is declared with `.optional()` or
+`.none_as(alias)`.
+
+| Given | Means |
+|---|---|
+| nothing | Not decided at this layer. The layer below decides. |
+| `--x=` or `X=` (empty) | `None`, decided here. It does not fall back to the default. |
+| the declared alias, for example `--x=-1` | `None`, decided here. |
+| anything else | `Some(value)`. |
+
+The empty rule holds for every type, so an operator learns one rule. An
+alias is per setting and never global: `-1` is invalid for an unsigned
+field and a real value for some signed ones. `--help` and the file's
+comment say what means `None`: "Empty or `-1` means none."
+
+The file writes an optional key commented out, because TOML has no `None`.
+
+In `brocanth-config` an empty flag or variable is `ValueKind::Empty`. It
+survives a merge, unlike `Unset` (JSON and YAML `null`), which removes the
+key. `Empty` reads as `None` into an `Option` and as `""` into a string.
+Into a number or a boolean it is a type error. `Loader::none_as(path,
+alias)` turns the alias into `Empty` after the merge, whatever layer it
+came from, so `limit = -1` in a file works too.
+
+## Flags off, with `config`
+
+With `config` and `WITH_CONFIG = false`, a declared flag is refused by
+name before anything starts:
+
+```text
+error: `--sessions.cookie` is off: this project reads its settings from config/<env>.toml
+help: set WITH_CONFIG = true in src/flags.rs, or set `cookie` under [sessions] in config/<env>.toml
+```
+
+A flag nobody declared is still `clap`'s error.
+
 ## Renaming and hiding
 
 `src/flags.rs` belongs to the project. The generator writes it when it is
 missing and never again. That is why `brocanth add` keeps the renames, and
 why a project that predates this file gets one the first time it adds a
-module with a flag.
+module with a setting.
 
 ```rust
 pub const WITH_CONFIG: bool = false;
@@ -121,7 +163,10 @@ pub const RENAMES: &[(&str, &str)] = &[
 ];
 ```
 
-The list of flags is in `src/plugins/mod.rs`, which `brocanth add`
+A rename changes the flag only. The variable and the file key keep the
+canonical name, because they are shared with every other deployment.
+
+The list of settings is in `src/plugins/mod.rs`, which `brocanth add`
 rewrites. It holds the canonical names only.
 
 **Why a Rust file, and not `brocanth.toml`:** `brocanth.toml` is generated
@@ -134,10 +179,10 @@ after a regeneration. A constant in `src/flags.rs` takes effect on the next
 The binary checks these at startup, before it binds a socket. Each failure
 prints an error with a `help:` line.
 
-- Rename a key that no module declares. Such a rename would do nothing.
+- Rename a key that no flag sets. Such a rename would do nothing.
 - Use a character other than a lower-case letter, a digit, `.`, `_` or
   `-`, or start with `-`, `.` or `_`.
-- Take `help` or `version`.
+- Take `help`, `version` or `settings`.
 - Give two flags one name.
 - With `commands`, take a name that a command already uses, such as
   `serve --addr`. `clap` panics on that in a debug build and picks one
@@ -150,43 +195,80 @@ a rename can collide.
 
 Two modules that declare the same `section.key` are a generator problem.
 `Scaffold::setting` names both modules, and `brocanth create` writes
-nothing. A section is the module's key, so this happens only when a module
-writes into another module's section.
+nothing.
+
+## The settings report
+
+`my-app settings` with `commands`, `my-app --settings` without. Each layer
+is printed alone, lowest first, with only the keys it sets. An empty layer
+says `(sets nothing)`. The merged view follows and names the layer of each
+value.
+
+```text
+layers, lowest precedence first
+
+   1  defaults
+        sessions.cookie  = "_my_app_session"
+        sessions.secure  = true
+   2  ./config/development.toml
+        sessions.cookie  = "_my_app_session"  line 9
+        sessions.secure  = false              line 12
+   3  environment
+        (sets nothing)
+   4  flags
+        sessions.cookie  = "x"                --cookie
+
+merged
+  sessions.cookie        = "x"                4 flags
+  sessions.secure        = false              2 ./config/development.toml
+```
+
+- The defaults layer is the plugin's `Default`, formatted with `Debug`. An
+  optional default prints `Some(..)` or `None`.
+- With `config`, the report is `Config::layers()` in `brocanth-config`,
+  so a project that calls the crate directly has it too. The defaults are
+  passed in, because only the application can build its settings types.
+- Without `config` there are three layers: defaults, environment, flags.
+- A secret prints `(secret)` in every layer. So does any key the standard
+  redaction masks by name.
 
 ## How the binary reads the flags
 
 | Project | Reader |
 |---|---|
-| `commands` | `main` calls `brocanth_command::main_with(ctx, plugins::flag_args)`. Each flag is a global `clap` argument, so it may come before or after the subcommand, and `--help` lists it. `clap` refuses a flag that is not declared or is turned off. |
-| no `commands` | `main` calls `plugins::read_line()`. It accepts only the declared flags, answers `--help` with the list, and refuses every other argument. |
+| `commands` | `main` calls `brocanth_command::main_with(ctx, plugins::flag_args)`. Each flag is a global `clap` argument, so it may come before or after the subcommand, and `--help` lists it. |
+| no `commands` | `main` calls `plugins::read_line()`. It accepts only the declared flags, answers `--help` and `--settings`, and refuses every other argument. |
 
-In both cases `register!` calls `plugins::given_flags()`. It reads
-`--name=VALUE` and `--name VALUE` from the process arguments and stops at
-`--`.
+In both cases `plugins::given()` reads `--name=VALUE` and `--name VALUE`
+from the process arguments and stops at `--`.
 
 ## Files a generated project gets
 
 | File | Owner | Holds |
 |---|---|---|
-| `src/plugins/mod.rs` | generator | `FLAGS`, `flag_names`, `given_flags`, `flag_args` or `read_line`, and without config one `flagged_<section>` per section |
+| `src/plugins/mod.rs` | generator | `SETTINGS`, `given`, `flag_args` or `read_line`, `settings_report`; with config `config()` and `refuse_off_flags`; without config one `<section>_settings` per section |
 | `src/flags.rs` | project | `WITH_CONFIG`, `RENAMES` |
+| `src/commands/settings.rs` | project | the `settings` command, with `commands` |
 | `src/main.rs` | generator | `mod flags;` and the reader call |
 | `config/<env>.toml` | shared | the declared sections, with config |
 
-A project with no declared flag gets none of this.
+A project with no declared setting gets none of this.
 
 ## Tests
 
 - `brocanth-config`: `a_flag_outranks_the_environment_and_names_itself`,
-  `a_flag_without_a_section_is_refused_by_name`.
+  `a_flag_without_a_section_is_refused_by_name`,
+  `an_empty_flag_or_variable_is_none_for_an_option_and_empty_for_a_string`,
+  `each_layer_alone_then_the_merge`.
 - `brocanth-command`: `a_global_flag_with_dots_is_accepted_after_the_subcommand`.
+- `brocanth-scaffold`: `a_dotted_key_is_a_subsection_after_the_plain_keys`,
+  `one_key_declared_twice_names_both_modules`.
 - `brocanth-cli` goldens: `flags` (no config, no command line),
   `flags-commands` (no config, `clap`), `everything` (config).
 - `brocanth-cli`, ignored because it runs cargo:
   `declared_flags_reach_the_plugin_with_and_without_a_config_file`. It
-  builds two generated binaries and checks that a flag reaches the plugin,
-  that a renamed flag works and its old name is refused, and that a secret
-  has no flag.
+  builds three generated binaries and checks a flag, a variable, a secret,
+  a rename, the refusal while the flags are off, and the report.
 
 ## Open questions
 
@@ -197,17 +279,5 @@ A project with no declared flag gets none of this.
    comment says it is. A declaration cannot fix that alone: it needs
    `plugin_hooking_from_config` in `brocanth-config`, and `Deserialize` on
    the middleware config types.
-2. **Env without config.** Should a project without `config` read
-   `$<APP>_<SECTION>__<KEY>` too? Today it does not, because the
-   environment layer lives in `brocanth-config`.
-3. **A flag that is off.** With `config` and `WITH_CONFIG = false`, `clap`
-   answers `unexpected argument '--sessions.cookie'`. A hint that names
-   `src/flags.rs` would be kinder.
-4. **The dump.** `Config::dump` lists files and the environment as sources.
-   It does not list the command line as a source yet, although each value
-   names its flag.
-5. **Remaining modules.** `cache`, `jobs`, `auth`, `policy`, `openapi`,
-   `schema`, `realtime`, `model`, `logging` and `observability` still write
-   their sections by hand. Each conversion is mechanical, but one detail
-   needs care: a field typed `Option<T>` does not parse with `FromStr`, so
-   it needs a kind of its own or stays without a flag.
+2. **The `[server]` section.** `shutdown_grace_secs` belongs to the
+   framework, not to a module, so it has no flag yet.

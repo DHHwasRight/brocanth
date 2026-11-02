@@ -1596,21 +1596,12 @@ use crate::pages::{Ctx, Response};
 /// Each registration is still one line, and a line a reader can delete.
 macro_rules! register {
     ($builder:expr) => {{
-        use brocanth_config::{AppBuilderConfigExt, Loader};
+        use brocanth_config::AppBuilderConfigExt;
 
-        // The flags this run was given, under the names `src/flags.rs`
-        // gives them. None unless that file turns them on: with a config
-        // file, the file is the source.
-        let flags = crate::plugins::given_flags()?;
-        // The core takes already-built values; finding the files, layering
-        // them and typing each section is `brocanth-config`'s job, and it is
-        // the only reason a TOML parser is in the tree. A flag is the top
-        // layer, above the environment.
-        let mut loader = Loader::new(crate::app::APP);
-        for given in &flags {
-            loader = loader.flag(given.flag.path, given.name, &given.value, given.flag.text);
-        }
-        let config = loader.load().map_err(|e| e.to_string())?;
+        // The files, the environment and, once `src/flags.rs` turns them
+        // on, the flags: `brocanth-config` layers them and types each
+        // section, and it is the only reason a TOML parser is in the tree.
+        let config = crate::plugins::config()?;
         let builder = $builder.with_config(config);
         let builder = builder
             .plugin_from_config::<crate::plugins::sessions::Sessions>("sessions")
@@ -1872,112 +1863,166 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-/// One command-line flag a module declared, by the key it sets.
-pub struct Flag {
+/// One setting a module declared, by the key it sets.
+pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
     /// unless `src/flags.rs` renames it.
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
-    /// Whether the value stays a string whatever it looks like.
+    /// Whether a flag may set it. A secret has none: every user on the host
+    /// can read a process's arguments.
+    pub flag: bool,
+    /// A value that means `None` as well as an empty one does.
+    pub none_as: Option<&'static str>,
+    /// Whether a flag's value stays a string whatever it looks like.
     pub text: bool,
 }
 
-/// Every flag the modules declared. `brocanth add` rewrites this list;
-/// `src/flags.rs` renames or hides an entry.
-pub const FLAGS: &[Flag] = &[
-    Flag {
+/// Every setting the modules declared. `brocanth add` rewrites this list;
+/// `src/flags.rs` renames or hides a flag.
+pub const SETTINGS: &[Setting] = &[
+    Setting {
         path: "sessions.cookie",
         help: "The session cookie's name.",
+        flag: true,
+        none_as: None,
         text: true,
     },
-    Flag {
+    Setting {
         path: "sessions.secure",
         help: "Send the cookie over HTTPS only.",
+        flag: true,
+        none_as: None,
         text: false,
     },
-    Flag {
+    Setting {
         path: "storage.root",
         help: "Where uploads are stored.",
+        flag: true,
+        none_as: None,
         text: true,
     },
-    Flag {
+    Setting {
+        path: "storage.secret",
+        help: "Signs file tokens and keys object addresses.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "storage.token_ttl",
         help: "Seconds a file token lives.",
+        flag: true,
+        none_as: None,
         text: false,
     },
 ];
 
-/// One flag on this run's command line.
+/// One value this run was given, above the defaults.
 pub struct Given {
     /// What it sets.
-    pub flag: &'static Flag,
-    /// The name it was given under, without `--`.
-    pub name: &'static str,
-    /// The value, as typed.
+    pub setting: &'static Setting,
+    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    pub from: String,
+    /// The value, as typed. Empty is `None` for an `Option` setting.
     pub value: String,
 }
 
-/// The name each flag answers to on this run, after `src/flags.rs`.
+/// The name each flag answers to after `src/flags.rs`, whether the flags are
+/// read or not.
 ///
-/// A rename of a key no module declares, a name that is not spelled as a flag,
-/// and two flags under one name each stop the binary: each would otherwise be
-/// a flag that does nothing, or does something else.
-pub fn flag_names() -> Result<Vec<(&'static Flag, &'static str)>, String> {
-    // With a config file, the file is the source: a flag is read only when
-    // `src/flags.rs` says so.
-    if !crate::flags::WITH_CONFIG {
-        return Ok(Vec::new());
-    }
+/// A rename of a key no flag sets, a name that is not spelled as a flag, and
+/// two flags under one name each stop the binary: each would otherwise be a
+/// flag that does nothing, or does something else.
+fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
     for (path, _) in crate::flags::RENAMES {
-        if !FLAGS.iter().any(|flag| flag.path == *path) {
-            let known: Vec<&str> = FLAGS.iter().map(|flag| flag.path).collect();
+        if !flags().any(|setting| setting.path == *path) {
+            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
             return Err(format!(
-                "src/flags.rs renames `{path}`, and no module declares it\nhelp: the flags are {}",
+                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
                 known.join(", ")
             ));
         }
     }
-    let mut names: Vec<(&'static Flag, &'static str)> = Vec::new();
-    for flag in FLAGS {
+    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
+    for setting in flags() {
         let name = crate::flags::RENAMES
             .iter()
-            .find(|(path, _)| *path == flag.path)
-            .map_or(flag.path, |(_, name)| *name);
+            .find(|(path, _)| *path == setting.path)
+            .map_or(setting.path, |(_, name)| *name);
         if name.is_empty() {
             continue;
         }
         let spelled = name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
-        if !spelled || name.starts_with(['-', '.', '_']) || name == "help" || name == "version" {
+        let taken = ["help", "version", "settings"].contains(&name);
+        if !spelled || name.starts_with(['-', '.', '_']) || taken {
             return Err(format!(
-                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help` or `version`"
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
             ));
         }
         if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
             return Err(format!(
                 "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
-                other.path, flag.path
+                other.path, setting.path
             ));
         }
-        names.push((flag, name));
+        names.push((setting, name));
     }
     Ok(names)
 }
 
-/// The flags on this run's command line, in the order they were given.
+/// The flags this run reads: none unless `src/flags.rs` turns them on,
+/// because with a config file the file is the source.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    if !crate::flags::WITH_CONFIG {
+        return Ok(Vec::new());
+    }
+    names()
+}
+
+/// A flag given while the flags are off, refused by name with what to do
+/// instead. Silently ignoring it would run with a value nobody chose.
+pub fn refuse_off_flags() -> Result<(), String> {
+    if crate::flags::WITH_CONFIG {
+        return Ok(());
+    }
+    let names = names()?;
+    for arg in std::env::args_os().skip(1) {
+        let arg = arg.to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) {
+            let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
+            return Err(format!(
+                "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set WITH_CONFIG = true in src/flags.rs, or set `{key}` under [{section}] in config/<env>.toml"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The flags this run was given, in the order typed. The environment is not
+/// here: `brocanth-config` reads it, under the file and over the flags.
 ///
 /// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
 /// is a command's, and the command line's own parser has already refused what
 /// nobody declared.
-pub fn given_flags() -> Result<Vec<Given>, String> {
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
     let names = flag_names()?;
     let args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let mut given = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--" {
@@ -1990,7 +2035,7 @@ pub fn given_flags() -> Result<Vec<Given>, String> {
             Some((name, value)) => (name, Some(value.to_string())),
             None => (written, None),
         };
-        let Some((flag, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
             continue;
         };
         let value = match inline {
@@ -2000,9 +2045,30 @@ pub fn given_flags() -> Result<Vec<Given>, String> {
                 .cloned()
                 .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
         };
-        given.push(Given { flag, name, value });
+        given.push(Given {
+            setting,
+            from: format!("--{name}"),
+            value,
+        });
     }
     Ok(given)
+}
+
+/// The configuration this run reads: the files, the environment, and the
+/// flags on top once `src/flags.rs` turns them on.
+pub fn config() -> Result<brocanth_config::Config, String> {
+    refuse_off_flags()?;
+    let mut loader = brocanth_config::Loader::new(crate::app::APP);
+    for setting in SETTINGS {
+        if let Some(alias) = setting.none_as {
+            loader = loader.none_as(setting.path, alias);
+        }
+    }
+    for given in given()? {
+        let flag = given.from.trim_start_matches('-');
+        loader = loader.flag(given.setting.path, flag, &given.value, given.setting.text);
+    }
+    loader.load().map_err(|e| e.to_string())
 }
 
 /// The flags, as arguments every command takes.
@@ -2014,8 +2080,9 @@ pub fn flag_args(
 ) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
     use brocanth_command::{anyhow, clap};
 
+    refuse_off_flags().map_err(anyhow::Error::msg)?;
     let mut command = command;
-    for (flag, name) in flag_names().map_err(anyhow::Error::msg)? {
+    for (setting, name) in flag_names().map_err(anyhow::Error::msg)? {
         let taken = command
             .get_subcommands()
             .flat_map(|sub| sub.get_arguments())
@@ -2023,19 +2090,43 @@ pub fn flag_args(
         if taken {
             anyhow::bail!(
                 "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in src/flags.rs",
-                flag.path
+                setting.path
             );
         }
         command = command.arg(
             clap::Arg::new(name)
                 .long(name)
                 .value_name("VALUE")
-                .help(flag.help)
+                .help(setting.help)
                 .global(true)
                 .action(clap::ArgAction::Append),
         );
     }
     Ok(command)
+}
+
+/// Each setting as the plugin's `Default` says, before any layer.
+fn defaults() -> Vec<(&'static str, String)> {
+    let sessions = crate::plugins::sessions::Settings::default();
+    let storage = crate::plugins::storage::Settings::default();
+    vec![
+        ("sessions.cookie", format!("{:?}", sessions.cookie)),
+        ("sessions.secure", format!("{:?}", sessions.secure)),
+        ("storage.root", format!("{:?}", storage.root)),
+        ("storage.secret", format!("{:?}", storage.secret)),
+        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
+    ]
+}
+
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let config = config()?;
+    let mut layers = config.layers().defaults(defaults());
+    for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
+        layers = layers.secret(setting.path);
+    }
+    Ok(layers.to_string())
 }
 
 /// `[server] shutdown_grace_secs`, or
@@ -2119,22 +2210,23 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 38f832b5237df89d
+// brocanth-digest: 19d745cf12b347a5
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
 //! A module declares each of its settings once. From that the binary takes a
-//! flag, `--<module>.<key>=VALUE`, and, with the `config` module, a key in
-//! `config/<env>.toml`. `brocanth add` rewrites the list of flags in
+//! flag, `--<module>.<key>=VALUE`, an environment variable,
+//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list in
 //! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
 //! and never again.
 
 /// Whether a project with a config file reads the flags too.
 ///
 /// Off: with the `config` module, the file and the environment are the
-/// sources, and the binary takes no flag. On: a flag outranks both, for one
-/// run. Without the `config` module the flags are the only source, and this
-/// is not read.
+/// sources, and a flag is refused with a pointer to this line. On: a flag
+/// outranks both, for one run. Without the `config` module the flags are
+/// always read, and this is not.
 #[allow(dead_code)]
 pub const WITH_CONFIG: bool = false;
 
@@ -2300,8 +2392,9 @@ pub mod css;
 pub mod migrate;
 pub mod routes;
 pub mod serve;
+pub mod settings;
 
-// brocanth-digest: f23dbd82b2a8f35e
+// brocanth-digest: 0609091c6a908d73
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
 //!
@@ -2322,6 +2415,28 @@ pub struct Serve {
 impl Command for Serve {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
         crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+===== src/commands/settings.rs =====
+//! `settings` -- every settings layer on its own, then the merged values.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Show each settings layer, lowest precedence first, then the merged values.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Settings {}
+
+impl Command for Settings {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        print!(
+            "{}",
+            crate::plugins::settings_report().map_err(anyhow::Error::msg)?
+        );
+        Ok(())
     }
 }
 ===== .dockerignore =====

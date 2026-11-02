@@ -432,6 +432,7 @@ pub struct Loader {
     env_lookup: EnvLookup,
     env_vars: Option<EnvVars>,
     flags: Vec<Flag>,
+    none_as: Vec<(String, String)>,
 }
 
 /// One value given on the command line, for [`Loader::flag`].
@@ -454,7 +455,21 @@ impl Loader {
             env_lookup: Box::new(|k| std::env::var(k).ok()),
             env_vars: None,
             flags: Vec::new(),
+            none_as: Vec::new(),
         }
+    }
+
+    /// Reads `alias` at `path` as no value, from whichever layer it came.
+    ///
+    /// For an `Option` setting whose operators write a sentinel: `-1` for
+    /// "no limit". The merged value becomes [`ValueKind::Empty`], which
+    /// deserialises as `None`, and keeps its provenance. A sentinel is
+    /// declared per key and never global: `-1` is invalid for an unsigned
+    /// field and a real value for some signed ones.
+    #[must_use]
+    pub fn none_as(mut self, path: &str, alias: &str) -> Self {
+        self.none_as.push((path.to_string(), alias.to_string()));
+        self
     }
 
     /// Adds a value given on the command line, above every other source.
@@ -464,7 +479,8 @@ impl Loader {
     /// from the path when the application renamed the flag; the dump names
     /// the flag, because that is what somebody will search their shell
     /// history for. `text` keeps `raw` a string. Without it, `raw` is typed
-    /// as an environment variable is: see [`crate::env`].
+    /// as an environment variable is: see [`crate::env`]. An empty `raw` is
+    /// [`ValueKind::Empty`] either way: `None` for an optional setting.
     ///
     /// A flag outranks the environment because it is the narrower decision:
     /// a variable is set for every process a shell starts, and a flag for one
@@ -670,6 +686,13 @@ impl Loader {
             crate::env::layer(&self.app, &vars).map_err(|source| ConfigError::Env { source })?;
         value::merge(&mut root, env_layer);
         value::merge(&mut root, self.flag_layer()?);
+        for (path, alias) in &self.none_as {
+            if let Some(value) = root.at_mut(path) {
+                if value.plain().as_deref() == Some(alias.as_str()) {
+                    value.set_kind(ValueKind::Empty);
+                }
+            }
+        }
 
         Ok(Config {
             app: self.app.clone(),
@@ -717,7 +740,7 @@ impl Loader {
                     .and_then(Value::as_table_mut)
                     .expect("inserted above");
             }
-            let kind = if flag.text {
+            let kind = if flag.text && !flag.raw.is_empty() {
                 ValueKind::String(flag.raw.clone())
             } else {
                 crate::env::infer(&flag.raw)
@@ -1376,6 +1399,58 @@ mod toml_tests {
         let from = cfg.provenance("sessions.cookie").unwrap();
         assert_eq!(from.to_string(), "--cookie");
         assert_eq!(sessions["cookie"].shadowed().len(), 2, "env, then file");
+    }
+
+    #[test]
+    fn an_empty_flag_or_variable_is_none_for_an_option_and_empty_for_a_string() {
+        #[derive(Debug, Deserialize)]
+        #[serde(default)]
+        struct Observe {
+            format: Option<String>,
+            token: Option<String>,
+            name: String,
+            bind: Option<String>,
+            limit: Option<u32>,
+        }
+        impl Default for Observe {
+            fn default() -> Self {
+                Self {
+                    format: Some("json".into()),
+                    token: Some("t".into()),
+                    name: "n".into(),
+                    bind: None,
+                    limit: Some(5),
+                }
+            }
+        }
+        let cfg = Loader::new("my_app")
+            .env("test")
+            .cwd("/nonexistent")
+            .env_lookup(lookup(&[]))
+            .env_vars(|| {
+                vec![
+                    ("MY_APP_OBS__TOKEN".into(), String::new()),
+                    ("MY_APP_OBS__LIMIT".into(), "-1".into()),
+                ]
+            })
+            .none_as("obs.limit", "-1")
+            .flag("obs.format", "obs.format", "", true)
+            .flag("obs.name", "obs.name", "", true)
+            .flag("obs.bind", "obs.bind", "0.0.0.0:9", true)
+            .load()
+            .unwrap();
+        let obs: Observe = cfg.section("obs").unwrap();
+        // Decided at a layer, and decided empty: `None`, not the default.
+        assert_eq!(obs.format, None);
+        assert_eq!(obs.token, None);
+        assert_eq!(obs.name, "");
+        assert_eq!(obs.bind.as_deref(), Some("0.0.0.0:9"));
+        // The declared sentinel, and only for the key that declared it.
+        assert_eq!(obs.limit, None);
+        assert!(matches!(
+            cfg.provenance("obs.limit"),
+            Some(Provenance::EnvVar { .. })
+        ));
     }
 
     #[test]

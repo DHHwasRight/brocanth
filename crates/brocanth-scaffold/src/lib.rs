@@ -654,6 +654,15 @@ pub struct Setting {
     /// Whether the command line may set it. Off for a secret: every user on
     /// the machine can read another process's arguments.
     pub flag: bool,
+    /// Whether the field is an `Option`. An empty value, `--x=` or `X=`,
+    /// sets `None`; an absent one leaves the layer below in charge. The file
+    /// writes the key commented out, because `None` has no TOML spelling.
+    pub optional: bool,
+    /// A value that also means `None`, for an optional setting whose
+    /// operators think in a sentinel: `-1` for "no limit". Set with
+    /// [`Setting::none_as`]. Not a global rule: `-1` is invalid for an
+    /// unsigned field and a real value for some signed ones.
+    pub none_as: Option<&'static str>,
 }
 
 /// What a [`Setting`] holds.
@@ -696,7 +705,32 @@ impl Setting {
             help,
             note: "",
             flag: true,
+            optional: false,
+            none_as: None,
         }
+    }
+
+    /// The field is an `Option`, and `alias` means `None` as well as an
+    /// empty value does. `--help` and the file's comment say so.
+    pub fn none_as(mut self, alias: &'static str) -> Self {
+        self.optional = true;
+        self.none_as = Some(alias);
+        self
+    }
+
+    /// The help, with what means `None` for an optional setting.
+    pub fn full_help(&self) -> String {
+        match (self.optional, self.none_as) {
+            (false, _) => self.help.to_string(),
+            (true, None) => format!("{} Empty means none.", self.help),
+            (true, Some(alias)) => format!("{} Empty or `{alias}` means none.", self.help),
+        }
+    }
+
+    /// The field is an `Option`: an empty value sets `None`.
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
     }
 
     /// More for the file's comment, under the help.
@@ -747,11 +781,12 @@ pub fn config_section(section: &str, settings: &[Setting]) -> String {
 }
 
 fn config_line(key: &str, setting: &Setting) -> String {
-    let mut out = format!("# {}\n", setting.help);
+    let mut out = format!("# {}\n", setting.full_help());
     for line in setting.note.split('\n').filter(|l| !l.is_empty()) {
         out.push_str(&format!("# {line}\n"));
     }
-    out.push_str(&format!("{key} = {}\n", setting.value));
+    let comment = if setting.optional { "# " } else { "" };
+    out.push_str(&format!("{comment}{key} = {}\n", setting.value));
     out
 }
 
@@ -1193,17 +1228,18 @@ pub mod snippet {
         ty: &str,
         settings: Vec<Setting>,
     ) {
-        let flagged = settings.iter().any(|setting| setting.flag);
         if project.has("config") {
             s.at(Slot::ConfigSections)
                 .block(super::config_section(key, &settings));
         }
-        if project.has("config") || !flagged {
+        // Without a file, a declared setting still has the environment
+        // and, unless it is a secret, a flag.
+        if project.has("config") || settings.is_empty() {
             s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
         } else {
             s.at(Slot::AppPlugins).block(format!(
                 "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
-                 \x20           crate::plugins::flagged_{ident}(&flags)?,\n\
+                 \x20           crate::plugins::{ident}_settings(&given)?,\n\
                  \x20       ));\n",
                 ident = key.replace('-', "_"),
             ));

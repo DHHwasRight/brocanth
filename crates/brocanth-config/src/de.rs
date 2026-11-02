@@ -109,12 +109,13 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer {
                 value: None,
             }),
             ValueKind::Unset => visitor.visit_unit(),
+            ValueKind::Empty => visitor.visit_str(""),
         };
         result.map_err(|e| e.at(&from))
     }
 
     fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        if self.value.is_unset() {
+        if self.value.is_unset() || matches!(self.value.kind(), ValueKind::Empty) {
             visitor.visit_none()
         } else {
             visitor.visit_some(self)
