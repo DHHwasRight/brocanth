@@ -41,8 +41,8 @@
 //!
 //! [`OpenApiPlugin::configure`]: crate::OpenApiPlugin
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// What the plugin does with `pages::described()`.
 ///
@@ -125,31 +125,28 @@ impl Module for OpenApi {
         s.at(Slot::PagesRoutes).line("/openapi.json");
         s.at(Slot::PagesRoutes).line("/openapi.yaml");
         s.at(Slot::PluginsMod).line("pub mod openapi;");
-        plugin(s, project, "openapi", "OpenApi");
+        configurable(s, project, "openapi", "OpenApi", settings(project));
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait method,
             // so the trait has to be in scope. Every plugin module needs the
             // same line, and `use` twice does not compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(section(project));
-        }
     }
 }
 
 /// The `[openapi]` section of `config/development.toml`.
-fn section(project: &Project) -> String {
-    format!(
-        "\n[openapi]\n\
-         # The name of the API, which is not the name of this binary: the\n\
-         # document is read by somebody who never sees the source.\n\
-         title = {title:?}\n\
-         # The version of the contract, not of the crate. It moves when an\n\
-         # operation changes and stays still when the code does.\n\
-         version = \"0.1.0\"\n",
-        title = project.title
-    )
+fn settings(project: &Project) -> Vec<Setting> {
+    vec![
+        Setting::text("title", project.title, "The name of the API.").note(
+            "Not the name of this binary: the document is read by somebody who never\n\
+             sees the source.",
+        ),
+        Setting::text("version", "0.1.0", "The version of the contract.").note(
+            "Not of the crate. It moves when an operation changes and stays still\n\
+             when the code does.",
+        ),
+    ]
 }
 
 /// `src/pages/openapi.json.rs`: the one route that serves the document.

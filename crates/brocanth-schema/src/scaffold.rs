@@ -37,8 +37,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The validation vocabulary, as a choice on the `brocanth create` menu.
 ///
@@ -70,7 +70,7 @@ impl Module for Validation {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/validation/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod validation;");
-        plugin(s, project, "validation", "Validation");
+        configurable(s, project, "validation", "Validation", settings());
         // The context item, read once at startup. It is a demonstration and
         // it is load-bearing: the installed provider set lives in the
         // application's type, so this line stops compiling the moment the
@@ -86,18 +86,22 @@ impl Module for Validation {
             // same line, and `use` twice does not compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(SECTION.to_string());
-        }
     }
 }
 
 /// The `[validation]` section of `config/development.toml`.
-const SECTION: &str = "\n[validation]\n\
-                       # json for an API client, form for re-rendering a form with the\n\
-                       # messages grouped by field. A third spelling stops the\n\
-                       # application at startup rather than reporting the wrong way.\n\
-                       report = \"json\"\n";
+fn settings() -> Vec<Setting> {
+    vec![Setting::text(
+        "report",
+        "json",
+        "How a failed check is reported: json or form.",
+    )
+    .note(
+        "json for an API client, form for re-rendering a form with the\n\
+         messages grouped by field. A third spelling stops the\n\
+         application at startup rather than reporting the wrong way.",
+    )]
+}
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "validation");

@@ -66,6 +66,11 @@ configurable(
 | `.secret()` | No flag. Every user on the host can read a process's arguments in `ps`, and the shell keeps them in its history. The variable and the file still set it, and the report masks it. `storage.secret` is one. |
 | `.optional()` | The field is an `Option`. See [Optional settings](#optional-settings). |
 | `.none_as("-1")` | Optional, and `-1` means `None` too. |
+| `.commented()` | The file writes the key commented out, as an example. For a string whose empty default turns a feature off, such as `observability.metrics_bind`. |
+
+Kinds: `text`, `bool`, `integer`, `float`, and `list`. A list is in the file
+only, and in the environment by index with `config`. It has no flag, and
+without `config` only its default applies.
 
 `configurable` writes, in one call:
 
@@ -78,6 +83,17 @@ configurable(
 `Scaffold::settings` records the declarations. The CLI reads them to write
 the settings list and to record which config sections a module owns. It
 does not parse `[name]` lines back out of the text for such a module.
+
+## Which modules declare settings
+
+Every module with a section: `admin`, `auth`, `cache`, `jobs`, `logging`,
+`model`, `observability` (each child adds its keys), `openapi`, `policy`,
+`realtime`, `sessions`, `storage`, `validation`.
+
+Every URL setting (`model.url`, `cache.url`, `jobs.url`, `auth.url`) is a
+secret: a database URL can carry a password. So are `storage.secret` and
+`observability.metrics_token`. They have a variable and a file key, and no
+flag.
 
 ## Precedence
 
@@ -279,5 +295,8 @@ A project with no declared setting gets none of this.
    comment says it is. A declaration cannot fix that alone: it needs
    `plugin_hooking_from_config` in `brocanth-config`, and `Deserialize` on
    the middleware config types.
-2. **The `[server]` section.** `shutdown_grace_secs` belongs to the
+2. **`jobs` without `config` does not compile.** The generated job derives
+   `serde`, and `serde` is a dependency only with `config`. This predates
+   the settings work; found while building every module without `config`.
+3. **The `[server]` section.** `shutdown_grace_secs` belongs to the
    framework, not to a module, so it has no flag yet.

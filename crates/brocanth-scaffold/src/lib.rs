@@ -650,7 +650,7 @@ pub struct Setting {
     /// More for the file's comment, under the help: what a reader editing
     /// the file needs and a `--help` line has no room for. A `\n` starts
     /// another comment line. Empty for none.
-    pub note: &'static str,
+    pub note: String,
     /// Whether the command line may set it. Off for a secret: every user on
     /// the machine can read another process's arguments.
     pub flag: bool,
@@ -658,6 +658,10 @@ pub struct Setting {
     /// sets `None`; an absent one leaves the layer below in charge. The file
     /// writes the key commented out, because `None` has no TOML spelling.
     pub optional: bool,
+    /// Whether the file writes the key commented out: an example, and the
+    /// plugin's default until somebody removes the `#`. Implied by
+    /// `optional`.
+    pub commented: bool,
     /// A value that also means `None`, for an optional setting whose
     /// operators think in a sentinel: `-1` for "no limit". Set with
     /// [`Setting::none_as`]. Not a global rule: `-1` is invalid for an
@@ -679,6 +683,12 @@ pub enum Kind {
     Bool,
     /// A whole number.
     Integer,
+    /// A number with a fractional part.
+    Float,
+    /// A list of strings. In the file only, and in the environment by index
+    /// when the project has `config`: a flag has no spelling for a list that
+    /// would not also be a way to get one wrong.
+    List,
 }
 
 impl Setting {
@@ -697,17 +707,37 @@ impl Setting {
         Self::new(key, Kind::Integer, value.to_string(), help)
     }
 
+    /// A number with a fractional part.
+    pub fn float(key: &'static str, value: f64, help: &'static str) -> Self {
+        Self::new(key, Kind::Float, format!("{value:?}"), help)
+    }
+
+    /// A list of strings. No flag; see [`Kind::List`].
+    pub fn list(key: &'static str, value: &[&str], help: &'static str) -> Self {
+        let items: Vec<String> = value.iter().map(|item| format!("{item:?}")).collect();
+        let mut setting = Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help);
+        setting.flag = false;
+        setting
+    }
+
     fn new(key: &'static str, kind: Kind, value: String, help: &'static str) -> Self {
         Self {
             key,
             kind,
             value,
             help,
-            note: "",
+            note: String::new(),
             flag: true,
             optional: false,
+            commented: false,
             none_as: None,
         }
+    }
+
+    /// The file writes this key commented out, as an example.
+    pub fn commented(mut self) -> Self {
+        self.commented = true;
+        self
     }
 
     /// The field is an `Option`, and `alias` means `None` as well as an
@@ -734,8 +764,8 @@ impl Setting {
     }
 
     /// More for the file's comment, under the help.
-    pub fn note(mut self, note: &'static str) -> Self {
-        self.note = note;
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = note.into();
         self
     }
 
@@ -782,10 +812,17 @@ pub fn config_section(section: &str, settings: &[Setting]) -> String {
 
 fn config_line(key: &str, setting: &Setting) -> String {
     let mut out = format!("# {}\n", setting.full_help());
-    for line in setting.note.split('\n').filter(|l| !l.is_empty()) {
-        out.push_str(&format!("# {line}\n"));
+    if !setting.note.is_empty() {
+        for line in setting.note.split('\n') {
+            out.push_str(format!("# {line}").trim_end());
+            out.push('\n');
+        }
     }
-    let comment = if setting.optional { "# " } else { "" };
+    let comment = if setting.optional || setting.commented {
+        "# "
+    } else {
+        ""
+    };
     out.push_str(&format!("{comment}{key} = {}\n", setting.value));
     out
 }
@@ -1207,7 +1244,7 @@ mod tests {
 /// Not sugar: each one is a place where two modules must agree, and the
 /// agreement belongs in one function rather than in each of them.
 pub mod snippet {
-    use super::{Project, Scaffold, Setting, Slot};
+    use super::{Kind, Project, Scaffold, Setting, Slot};
 
     /// Registers a plugin whose settings are declared, and writes everything
     /// that follows from the declaration.
@@ -1234,7 +1271,7 @@ pub mod snippet {
         }
         // Without a file, a declared setting still has the environment
         // and, unless it is a secret, a flag.
-        if project.has("config") || settings.is_empty() {
+        if project.has("config") || settings.iter().all(|setting| setting.kind == Kind::List) {
             s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
         } else {
             s.at(Slot::AppPlugins).block(format!(

@@ -3917,15 +3917,18 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 }
 "#;
 
-/// Whether any module declared a setting.
+/// Whether any module declared a setting the binary reads itself: one that
+/// is not a list, which only the file holds.
 fn has_settings(built: &Built) -> bool {
-    built.settings().next().is_some()
+    !declared(built).is_empty()
 }
 
-/// Every declared setting, as `(section, setting)`, in module order.
+/// Every declared setting but the lists, as `(section, setting)`, in module
+/// order.
 fn declared(built: &Built) -> Vec<(&str, &Setting)> {
     built
         .settings()
+        .filter(|(_, _, setting)| setting.kind != Kind::List)
         .map(|(_, section, setting)| (section, setting))
         .collect()
 }
@@ -3966,38 +3969,59 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
          \n\
          /// Every setting the modules declared. `brocanth add` rewrites this list;\n\
          /// `src/flags.rs` renames or hides a flag.\n\
-         pub const SETTINGS: &[Setting] = &[\n",
+         pub const SETTINGS: &[Setting] = &[",
     );
+    // rustfmt folds a list of one struct onto the `&[`, one level shallower.
+    let one = declared.len() == 1;
+    let pad = if one { "" } else { "    " };
+    if !one {
+        out.push('\n');
+    }
     for (section, setting) in &declared {
-        out.push_str(&format!(
-            "    Setting {{\n\
-            \x20       path: \"{section}.{key}\",\n\
-            \x20       help: {help:?},\n\
-            \x20       flag: {flag},\n",
+        let mut entry = format!(
+            "Setting {{\n\
+            \x20   path: \"{section}.{key}\",\n\
+            \x20   help: {help:?},\n\
+            \x20   flag: {flag},\n",
             key = setting.key,
             help = setting.full_help(),
             flag = setting.flag,
-        ));
+        );
         if config || optional {
-            out.push_str(&match setting.none_as {
-                Some(alias) => format!("        none_as: Some({alias:?}),\n"),
-                None => "        none_as: None,\n".to_string(),
+            entry.push_str(&match setting.none_as {
+                Some(alias) => format!("    none_as: Some({alias:?}),\n"),
+                None => "    none_as: None,\n".to_string(),
             });
         }
         if config {
             let text = setting.kind == Kind::Text;
-            out.push_str(&format!("        text: {text},\n"));
+            entry.push_str(&format!("    text: {text},\n"));
         } else {
-            out.push_str(&format!(
-                "        env: \"{}_{}__{}\",\n",
+            entry.push_str(&format!(
+                "    env: \"{}_{}__{}\",\n",
                 a.ident().to_uppercase(),
                 section.replace('-', "_").to_uppercase(),
                 setting.key.replace('.', "__").to_uppercase(),
             ));
         }
-        out.push_str("    },\n");
+        entry.push('}');
+        for line in entry.lines() {
+            out.push_str(pad);
+            out.push_str(line);
+            out.push('\n');
+        }
+        // The last line pushed is the `}`; a list of many ends it with `,`.
+        if !one {
+            out.pop();
+            out.push_str(",\n");
+        }
     }
-    out.push_str("];\n\n");
+    if one {
+        out.pop();
+        out.push_str("];\n\n");
+    } else {
+        out.push_str("];\n\n");
+    }
     out.push_str(SETTING_GIVEN);
     out.push_str(SETTING_NAMES);
     out.push_str(if config {
@@ -4090,11 +4114,18 @@ fn field_list(declared: &[(&str, &Setting)], source: impl Fn(&str) -> String) ->
     let entries: Vec<String> = declared
         .iter()
         .map(|(section, setting)| {
-            format!(
-                "(\"{section}.{key}\", format!(\"{{:?}}\", {ident}.{key}))",
-                key = setting.key,
-                ident = section.replace('-', "_"),
-            )
+            let path = format!("\"{section}.{}\"", setting.key);
+            let value = format!(
+                "format!(\"{{:?}}\", {}.{})",
+                section.replace('-', "_"),
+                setting.key
+            );
+            // rustfmt's `fn_call_width` is 60, and a tuple obeys it.
+            if path.len() + 2 + value.len() > 60 {
+                format!("(\n            {path},\n            {value},\n        )")
+            } else {
+                format!("({path}, {value})")
+            }
         })
         .collect();
     // rustfmt keeps a short one-element list on one line.
@@ -4157,11 +4188,22 @@ fn section_settings(section: &str, declared: &[(&str, &Setting)]) -> String {
     } else {
         out.push_str("        match given.setting.path {\n");
         for setting in &mine {
-            out.push_str(&format!(
+            let arm = format!(
                 "            \"{section}.{key}\" => settings.{key} = {read}(given)?,\n",
                 key = setting.key,
                 read = reader(setting),
-            ));
+            );
+            if arm.trim_end().len() > 100 {
+                out.push_str(&format!(
+                    "            \"{section}.{key}\" => {{\n\
+                    \x20               settings.{key} = {read}(given)?\n\
+                    \x20           }}\n",
+                    key = setting.key,
+                    read = reader(setting),
+                ));
+            } else {
+                out.push_str(&arm);
+            }
         }
         out.push_str("            _ => {}\n        }\n");
     }
@@ -5233,10 +5275,12 @@ mod tests {
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
         let registry = plugins_mod_rs(&answers(&["logging"]), &built(&["logging"]));
         // Already wrapped, because it is longer than rustfmt's chain_width
-        // and a project must survive its own first `cargo fmt`.
+        // and a project must survive its own first `cargo fmt`. The literal
+        // is the default, with the environment and the flags on top.
         assert!(
             registry.contains(".plugin(crate::plugins::logging::Logging::new(\n")
-                && registry.contains("crate::plugins::logging::Settings::default(),"),
+                && registry.contains("crate::plugins::logging_settings(&given)?,")
+                && registry.contains("crate::plugins::logging::Settings::default();"),
             "{registry}"
         );
         assert!(!registry.contains("plugin_from_config"), "{registry}");

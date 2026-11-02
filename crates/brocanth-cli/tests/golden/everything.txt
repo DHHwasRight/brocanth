@@ -1901,6 +1901,13 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "model.url",
+        help: "The database: a SQLite file, or a Postgres URL.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "admin.title",
         help: "The end of every <title>, and the header and index heading unless set.",
         flag: true,
@@ -1936,6 +1943,160 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "observability.format",
+        help: "json or text. Empty: json in production, text elsewhere.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.level",
+        help: "A level, or per-target levels: info,sqlx=warn. RUST_LOG wins when set.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.live_path",
+        help: "Liveness. Empty turns it off.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.ready_path",
+        help: "Readiness: every plugin's check. Empty turns it off.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.drain_delay_secs",
+        help: "Seconds to answer \"not ready\" after SIGTERM, before the listener stops.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "observability.metrics_path",
+        help: "Prometheus text. Empty turns it off.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.metrics_token",
+        help: "When set, /metrics needs `Authorization: Bearer <token>`.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.metrics_bind",
+        help: "When set, /metrics is served on this address, not the main listener.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.otlp_endpoint",
+        help: "The collector. Empty: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "observability.sample_ratio",
+        help: "The share of new traces kept, from 0.0 to 1.0.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "cache.url",
+        help: "The Postgres URL the cache lives in.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "jobs.url",
+        help: "The database the queue lives in.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "jobs.migrate",
+        help: "Create the three tables at startup if they are absent.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "jobs.worker",
+        help: "Run a worker in this process.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "jobs.concurrency",
+        help: "How many jobs the worker runs at once.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "auth.url",
+        help: "The Postgres database for accounts and sessions.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth.signing_key_env",
+        help: "The name of the variable that holds the session signing key.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth.cookie_name",
+        help: "The session cookie's name.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "auth.idle_timeout",
+        help: "Seconds of inactivity before a session is dead.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "auth.absolute_timeout",
+        help: "Seconds from creation before a session is dead, however much it was used.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "policy.dialect",
+        help: "The SQL a condition compiles to: postgres or sqlite.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "storage.root",
         help: "Where uploads are stored.",
         flag: true,
@@ -1955,6 +2116,55 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: false,
+    },
+    Setting {
+        path: "openapi.title",
+        help: "The name of the API.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "openapi.version",
+        help: "The version of the contract.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "validation.report",
+        help: "How a failed check is reported: json or form.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "realtime.max_clients",
+        help: "How many connections the broker holds.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "realtime.max_subscriptions_per_client",
+        help: "How many topics one client may hold.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "realtime.queue",
+        help: "How many frames a mailbox holds before the overflow policy fires.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "realtime.overflow",
+        help: "What a full mailbox does: drop-oldest, drop-newest or disconnect.",
+        flag: true,
+        none_as: None,
+        text: true,
     },
 ];
 
@@ -2147,19 +2357,97 @@ pub fn flag_args(
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
+    let model = crate::plugins::model::Settings::default();
     let admin = crate::plugins::admin::Settings::default();
+    let observability = crate::plugins::observability::Settings::default();
+    let cache = crate::plugins::cache::Settings::default();
+    let jobs = crate::plugins::jobs::Settings::default();
+    let auth = crate::plugins::auth::Settings::default();
+    let policy = crate::plugins::policy::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
+    let openapi = crate::plugins::openapi::Settings::default();
+    let validation = crate::plugins::validation::Settings::default();
+    let realtime = crate::plugins::realtime::Settings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
+        ("model.url", format!("{:?}", model.url)),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
         ("admin.site_url", format!("{:?}", admin.site_url)),
         ("admin.stylesheet", format!("{:?}", admin.stylesheet)),
+        (
+            "observability.format",
+            format!("{:?}", observability.format),
+        ),
+        ("observability.level", format!("{:?}", observability.level)),
+        (
+            "observability.live_path",
+            format!("{:?}", observability.live_path),
+        ),
+        (
+            "observability.ready_path",
+            format!("{:?}", observability.ready_path),
+        ),
+        (
+            "observability.drain_delay_secs",
+            format!("{:?}", observability.drain_delay_secs),
+        ),
+        (
+            "observability.metrics_path",
+            format!("{:?}", observability.metrics_path),
+        ),
+        (
+            "observability.metrics_token",
+            format!("{:?}", observability.metrics_token),
+        ),
+        (
+            "observability.metrics_bind",
+            format!("{:?}", observability.metrics_bind),
+        ),
+        (
+            "observability.otlp_endpoint",
+            format!("{:?}", observability.otlp_endpoint),
+        ),
+        (
+            "observability.sample_ratio",
+            format!("{:?}", observability.sample_ratio),
+        ),
+        ("cache.url", format!("{:?}", cache.url)),
+        ("jobs.url", format!("{:?}", jobs.url)),
+        ("jobs.migrate", format!("{:?}", jobs.migrate)),
+        ("jobs.worker", format!("{:?}", jobs.worker)),
+        ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
+        ("auth.url", format!("{:?}", auth.url)),
+        (
+            "auth.signing_key_env",
+            format!("{:?}", auth.signing_key_env),
+        ),
+        ("auth.cookie_name", format!("{:?}", auth.cookie_name)),
+        ("auth.secure", format!("{:?}", auth.secure)),
+        ("auth.idle_timeout", format!("{:?}", auth.idle_timeout)),
+        (
+            "auth.absolute_timeout",
+            format!("{:?}", auth.absolute_timeout),
+        ),
+        ("policy.dialect", format!("{:?}", policy.dialect)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
+        ("openapi.title", format!("{:?}", openapi.title)),
+        ("openapi.version", format!("{:?}", openapi.version)),
+        ("validation.report", format!("{:?}", validation.report)),
+        (
+            "realtime.max_clients",
+            format!("{:?}", realtime.max_clients),
+        ),
+        (
+            "realtime.max_subscriptions_per_client",
+            format!("{:?}", realtime.max_subscriptions_per_client),
+        ),
+        ("realtime.queue", format!("{:?}", realtime.queue)),
+        ("realtime.overflow", format!("{:?}", realtime.overflow)),
     ]
 }
 
@@ -2255,7 +2543,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: baa8f2fd0d08097b
+// brocanth-digest: 4568135980c6b098
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2312,6 +2600,8 @@ cookie = "_my_blog_session"
 secure = false
 
 [model]
+# The database: a SQLite file, or a Postgres URL.
+# A URL can carry a password, so no flag sets it.
 url = "sqlite://db/development.sqlite?mode=rwc"
 
 [admin]
@@ -2327,59 +2617,77 @@ title = "My Blog admin"
 # stylesheet = "/admin-theme.css"
 
 [observability]
-# "json" or "text". Unset: json when the environment is production.
+# json or text. Empty: json in production, text elsewhere.
 # format = "json"
+# A level, or per-target levels: info,sqlx=warn. RUST_LOG wins when set.
 level = "info"
+# Liveness. Empty turns it off.
 live_path = "/up"
+# Readiness: every plugin's check. Empty turns it off.
 ready_path = "/readyz"
 # Seconds to answer "not ready" after SIGTERM, before the listener stops.
 drain_delay_secs = 0
+# Prometheus text. Empty turns it off.
 metrics_path = "/metrics"
+# When set, /metrics needs `Authorization: Bearer <token>`.
 # metrics_token = "a long random string"
+# When set, /metrics is served on this address, not the main listener.
 # metrics_bind = "127.0.0.1:9100"
-# The collector. Unset: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.
+# The collector. Empty: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.
 # otlp_endpoint = "http://localhost:4318"
+# The share of new traces kept, from 0.0 to 1.0.
 sample_ratio = 1.0
 
 [cache]
+# The Postgres URL the cache lives in.
+# A URL can carry a password, so no flag sets it.
 url = "postgres://localhost/development"
 
 [jobs]
+# The database the queue lives in.
+# A URL can carry a password, so no flag sets it.
 url = "postgres://localhost/development"
-# Create the three tables at startup if they are absent. Development
-# only: see `Queue::schema_sql` for the statements to put in a
+# Create the three tables at startup if they are absent.
+# Development only: see `Queue::schema_sql` for the statements to put in a
 # migration instead.
 migrate = true
-# Run a worker in this process. A busy application moves this to a
-# separate deployment, so that a job pegging a core is not pegging
-# the core answering requests.
+# Run a worker in this process.
+# A busy application moves this to a separate deployment, so that a job
+# pegging a core is not pegging the core answering requests.
 worker = true
+# Which queues the worker claims from.
 queues = ["default"]
+# How many jobs the worker runs at once.
 concurrency = 5
 
 [auth]
-# The Postgres database for accounts and sessions. The tables are
-# created at startup, named brocanth_auth_*.
+# The Postgres database for accounts and sessions.
+# The tables are created at startup, named brocanth_auth_*. A URL can
+# carry a password, so no flag sets it.
 url = "postgres://localhost/development"
-# The *name* of the variable that holds the session signing key, not the
-# key. 32 bytes, base64url. `brocanth` will not invent one: a key minted at
-# startup logs every session out on each restart and differs between the
-# instances of a fleet, so a missing key stops the application instead.
+# The name of the variable that holds the session signing key.
+# Not the key. 32 bytes, base64url. `brocanth` will not invent one: a key
+# minted at startup logs every session out on each restart and differs
+# between the instances of a fleet, so a missing key stops the application.
 #
 #   export MY_BLOG_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
 signing_key_env = "MY_BLOG_SESSION_KEY"
+# The session cookie's name.
 # Development, over plain HTTP on localhost. In production this is
 # "__Host-session" with secure = true, and the two move together: a
 # __Host- cookie that is not Secure is a cookie no browser stores.
 cookie_name = "session"
+# Send the cookie over HTTPS only.
 secure = false
-# Eight hours unattended, thirty days total. They answer different
-# questions: idle bounds a browser nobody is sitting at, absolute bounds a
-# stolen cookie that is being kept warm.
+# Seconds of inactivity before a session is dead.
+# Eight hours unattended, thirty days total. Idle bounds a browser nobody is
+# sitting at; absolute bounds a stolen cookie that is being kept warm.
 idle_timeout = 28800
+# Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
 
 [policy]
+# The SQL a condition compiles to: postgres or sqlite.
 # This follows `[model] url`, which the scaffold pointed at SQLite. Move the
 # two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and
 # only one of them parses, so a condition compiled for the wrong dialect is
@@ -2406,30 +2714,37 @@ secret = "development only: replace before anything is uploaded in anger"
 token_ttl = 120
 
 [openapi]
-# The name of the API, which is not the name of this binary: the
-# document is read by somebody who never sees the source.
+# The name of the API.
+# Not the name of this binary: the document is read by somebody who never
+# sees the source.
 title = "My Blog"
-# The version of the contract, not of the crate. It moves when an
-# operation changes and stays still when the code does.
+# The version of the contract.
+# Not of the crate. It moves when an operation changes and stays still
+# when the code does.
 version = "0.1.0"
 
 [validation]
+# How a failed check is reported: json or form.
 # json for an API client, form for re-rendering a form with the
 # messages grouped by field. A third spelling stops the
 # application at startup rather than reporting the wrong way.
 report = "json"
 
 [realtime]
+# How many connections the broker holds.
 # Refused at the limit, not traded for an existing connection: evicting a
 # subscriber to admit a new one lets anyone holding a socket knock everybody
 # else off. The memory is max_clients * queue * the size of a frame.
 max_clients = 1000
+# How many topics one client may hold.
 # A page asking for more than this is almost certainly asking row by row for
 # something the collection wildcard covers.
 max_subscriptions_per_client = 64
+# How many frames a mailbox holds before the overflow policy fires.
 queue = 32
-# drop-oldest, drop-newest or disconnect. The reader is told how many frames
-# it missed either way, so a stale view is a thing the client can see.
+# What a full mailbox does: drop-oldest, drop-newest or disconnect.
+# The reader is told how many frames it missed either way, so a stale view
+# is a thing the client can see.
 overflow = "drop-oldest"
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.

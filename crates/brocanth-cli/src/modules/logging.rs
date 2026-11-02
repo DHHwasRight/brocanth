@@ -1,7 +1,7 @@
 //! `logging` -- a line per request.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// A request logger, written out into the project rather than linked.
 ///
@@ -22,7 +22,18 @@ impl Module for Logging {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/logging/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod logging;");
-        plugin(s, project, "logging", "Logging");
+        // `debug` in the development file; `info` without one.
+        configurable(
+            s,
+            project,
+            "logging",
+            "Logging",
+            vec![Setting::text(
+                "level",
+                "debug",
+                "The least severe line written: error, warn, info or debug.",
+            )],
+        );
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin
@@ -40,10 +51,6 @@ impl Module for Logging {
         // the name is not, so it is written here and not there.
         s.at(Slot::PluginsLayers)
             .line(r#"        "request_log" => Some(logging::layer),"#);
-        if project.has("config") {
-            s.at(Slot::ConfigSections)
-                .block("\n[logging]\nlevel = \"debug\"\n".to_string());
-        }
     }
 }
 
