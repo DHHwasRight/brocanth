@@ -2285,43 +2285,59 @@ title = "My Blog"
 enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github"]
 
 [modules.static]
+kind = ["external", "enhancer"]
 files = ["src/commands/export.rs"]
 config = []
 crates = ["brocanth-static"]
+adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.config]
+kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
 crates = ["brocanth-config"]
+adapted_to = []
 
 [modules.commands]
+kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
+adapted_to = []
 
 [modules.rsx]
+kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
 crates = ["rsx"]
+adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.rsx-tailwind]
+kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
 config = []
 crates = []
+adapted_to = []
 
 [modules.rsx-htmx]
+kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
 crates = []
+adapted_to = []
 
 [modules.ci]
+kind = ["external"]
 files = []
 config = []
 crates = []
+adapted_to = []
 
 [modules.ci-github]
+kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
 crates = []
+adapted_to = ["static"]
 
-# brocanth-digest: 162f7ab5b8bf3862
+# brocanth-digest: c4d83b56ec3d901c

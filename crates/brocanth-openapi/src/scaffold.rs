@@ -42,7 +42,7 @@
 //! [`OpenApiPlugin::configure`]: crate::OpenApiPlugin
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// What the plugin does with `pages::described()`.
 ///
@@ -89,6 +89,13 @@ impl Module for OpenApi {
             "openapi",
             "an OpenAPI 3.1 document derived from src/pages, served at /openapi.json",
         )
+        .category(Category::Routes)
+        .category(Category::Enhancer)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .adapts_to("input", "the document lists the declared bodies")
         .asked_in("doors", "An OpenAPI document, derived from your routes")
         .krate(
             Dep::brocanth("brocanth-openapi")

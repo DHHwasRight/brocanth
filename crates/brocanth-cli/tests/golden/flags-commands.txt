@@ -1935,13 +1935,17 @@ title = "My Blog"
 enabled = ["sessions", "commands"]
 
 [modules.sessions]
+kind = ["middleware"]
 files = ["src/flags.rs", "src/commands/settings.rs", "src/plugins/sessions/"]
 config = ["sessions"]
 crates = []
+adapted_to = []
 
 [modules.commands]
+kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
+adapted_to = []
 
-# brocanth-digest: c210402261dbfe52
+# brocanth-digest: 75ec20b092929156

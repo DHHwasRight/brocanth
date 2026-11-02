@@ -80,7 +80,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Accounts, as a choice on the `brocanth create` menu.
 ///
@@ -93,6 +93,20 @@ impl Module for Auth {
         Manifest::new(
             "auth",
             "argon2id accounts and signed sessions; no provider, so no HTTP client",
+        )
+        .category(Category::Middleware)
+        .category(Category::Enhancer)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .adapts_to(
+            "jobs",
+            "accounts live in the queue's Postgres, not in memory",
+        )
+        .adapts_to(
+            "cache",
+            "accounts live in the cache's Postgres, not in memory",
         )
         .asked_in("doors", "Accounts and passwords. No OAuth provider")
         .krate(Dep::brocanth("brocanth-auth"))

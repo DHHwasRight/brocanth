@@ -1741,13 +1741,17 @@ title = "My Blog"
 enabled = ["jt", "rsx"]
 
 [modules.jt]
+kind = ["renderer", "routes"]
 files = ["src/pages/status.jt", "src/pages/status.rs"]
 config = []
 crates = ["jt"]
+adapted_to = []
 
 [modules.rsx]
+kind = ["renderer"]
 files = ["src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
 crates = ["rsx"]
+adapted_to = []
 
-# brocanth-digest: c3d89758f60ee0e6
+# brocanth-digest: ec58996ad08d8a38

@@ -29,7 +29,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Background jobs, as a choice on the `brocanth create` menu.
 pub struct Jobs;
@@ -39,6 +39,11 @@ impl Module for Jobs {
         Manifest::new(
             "jobs",
             "a queue in Postgres with retries and a dead letter; a worker in this process",
+        )
+        .category(Category::Enhancer)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in(
             "behaviour",

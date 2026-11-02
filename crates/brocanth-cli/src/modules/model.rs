@@ -1,7 +1,7 @@
 //! `model` -- SeaORM, validations and migrations.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The model layer.
 ///
@@ -15,6 +15,13 @@ impl Module for Model {
             "model",
             "SeaORM, validations, migrations; without it no SQL driver at all",
         )
+        .category(Category::Enhancer)
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .adapts_to("commands", "a `migrate` subcommand is written")
         .asked_in("data", "An ORM with validations and migrations")
         // Both drivers: the development database is a SQLite file, and the
         // default features are Postgres, which production uses.

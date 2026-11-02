@@ -633,12 +633,39 @@ choice must say `outside_runtime()`: it adds nothing that only a running
 server uses. Today that is `config`, `commands`, `rsx`, `rsx-tailwind`,
 `rsx-htmx`, `jt`, `ci` and `ci-github`. `create::exclusive` enforces the
 rule for the flags and for `brocanth add`; the chooser takes the other
-side off and says so.
+side off and says so. Both ask `brocanth_scaffold::clash`, the same
+function that answers declared conflicts (below).
 
 The module writes a thin `export` command and depends on
 `brocanth-static`, which does the work. The rule lives in the module, not
 in the crate: an application that calls the crate directly decides for
 itself. See `docs/static-export.md`.
+
+### Manifest rules — `category`, `conflicts`, `adapts_to`
+
+Three relations that were implicit are now declared, each for the same
+reason: a module from another repository must be able to state it
+without editing the CLI.
+
+- **`category(Category::X)`.** The five kinds in `docs/module-map.md`.
+  A set, because `observability` is middleware, enhancer and routes.
+  `Slot::open_to` says which categories may write each slot; a test runs
+  every module and fails when it writes outside its categories. So the
+  category is checked against the code, not chosen as a label. Plugin
+  registration is open to every runtime category, because a middleware, a
+  route source and a service are all plugins; settings, `.gitignore` and
+  `AGENTS.md` are open to all.
+- **`conflicts(key, why)`.** Replaces the `EXCLUSIVE` list in
+  `create.rs`. Declared on one side, read from both by
+  `brocanth_scaffold::clash`. The static-site rule stays a rule over two
+  flags, not a list, and `clash` answers it too: `create`, `add` and the
+  chooser therefore ask one function and cannot disagree.
+- **`adapts_to(key, what_changes)`.** The optional dependency, beside
+  `needs` (required) and `after` (order). `Project` records every `has`;
+  a test runs each module beside every module and with only its needs,
+  and fails on a question the manifest does not declare, or a declaration
+  nothing asks. `brocanth.toml` lists the present ones as `adapted_to`,
+  for the `remove` that will need to know which modules to rewrite.
 
 ---
 

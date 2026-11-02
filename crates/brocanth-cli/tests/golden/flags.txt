@@ -2021,13 +2021,17 @@ title = "My Blog"
 enabled = ["sessions", "storage"]
 
 [modules.sessions]
+kind = ["middleware"]
 files = ["src/plugins/sessions/"]
 config = ["sessions"]
 crates = []
+adapted_to = []
 
 [modules.storage]
+kind = ["enhancer", "middleware"]
 files = ["src/plugins/storage/"]
 config = ["storage"]
 crates = ["brocanth-storage"]
+adapted_to = []
 
-# brocanth-digest: aad3cdc9e61a677a
+# brocanth-digest: de694496e7eca58c

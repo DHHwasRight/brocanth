@@ -39,7 +39,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The records API, as a choice on the `brocanth create` menu.
 ///
@@ -60,6 +60,7 @@ impl Module for Records {
             "resource",
             "typed CRUD routes over one table, with the policy in the WHERE clause",
         )
+        .category(Category::Routes)
         .asked_in("doors", "")
         .krate(
             Dep::brocanth("brocanth-resource")

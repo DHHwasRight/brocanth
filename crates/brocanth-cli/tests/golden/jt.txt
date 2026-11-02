@@ -1443,8 +1443,10 @@ title = "My Blog"
 enabled = ["jt"]
 
 [modules.jt]
+kind = ["renderer", "routes"]
 files = ["src/pages/status.jt", "src/pages/status.rs"]
 config = []
 crates = ["jt"]
+adapted_to = []
 
-# brocanth-digest: 1a2ee0e4bfa7ccb9
+# brocanth-digest: 5c5d5dc3febb047f

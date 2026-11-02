@@ -1884,8 +1884,10 @@ title = "My Blog"
 enabled = ["realtime"]
 
 [modules.realtime]
+kind = ["enhancer", "middleware"]
 files = ["src/flags.rs", "src/plugins/realtime/"]
 config = ["realtime"]
 crates = ["brocanth-realtime"]
+adapted_to = []
 
-# brocanth-digest: 4fdc41338123cd7d
+# brocanth-digest: 07fe4e21f0c690e2

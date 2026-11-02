@@ -9,7 +9,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The client, as a choice on the `brocanth create` menu.
 pub struct Client;
@@ -20,6 +20,7 @@ impl Module for Client {
             "client",
             "a subcommand that calls this application's own API, built from its routes",
         )
+        .category(Category::Enhancer)
         .asked_in("doors", "A command line that talks to this application")
         .krate(Dep::brocanth("brocanth-client"))
         .needs(

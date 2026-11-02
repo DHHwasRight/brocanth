@@ -1731,8 +1731,10 @@ title = "My Blog"
 enabled = ["logging"]
 
 [modules.logging]
+kind = ["middleware"]
 files = ["src/flags.rs", "src/plugins/logging/"]
 config = ["logging"]
 crates = []
+adapted_to = []
 
-# brocanth-digest: 6eedcb32c133ef92
+# brocanth-digest: 142c3ce2b75be95b

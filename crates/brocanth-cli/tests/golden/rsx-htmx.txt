@@ -1796,13 +1796,17 @@ title = "My Blog"
 enabled = ["rsx", "rsx-htmx"]
 
 [modules.rsx]
+kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
 crates = ["rsx"]
+adapted_to = ["rsx-htmx"]
 
 [modules.rsx-htmx]
+kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/assets.rs", "src/pages/link.rsx"]
 config = []
 crates = []
+adapted_to = []
 
-# brocanth-digest: a42cde5552551736
+# brocanth-digest: 291823045b7c9531

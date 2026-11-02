@@ -10,7 +10,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The cache, as a choice on the `brocanth create` menu.
 ///
@@ -23,6 +23,11 @@ impl Module for Cache {
         Manifest::new(
             "cache",
             "a cache on an unlogged Postgres table, not Redis; without it no cache at all",
+        )
+        .category(Category::Enhancer)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in("data", "A cache, in the database you already have")
         .krate(Dep::brocanth("brocanth-cache"))

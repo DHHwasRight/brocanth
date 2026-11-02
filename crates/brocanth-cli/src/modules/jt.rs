@@ -29,7 +29,7 @@
 //! so it appears in the document with no response schema. Closing that is
 //! worth its own change; see `docs/modules.md` §5.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// `jt` lives in its own repository, like `rsx`: brocanth is the thing
 /// being developed here and wants a path, a template engine is an ordinary
@@ -45,6 +45,8 @@ impl Module for Jt {
             "jt",
             "`.jt` templates compiled into the binary; a JSON answer without a struct per shape",
         )
+        .category(Category::Renderer)
+        .category(Category::Routes)
         .outside_runtime()
         .asked_in("pages", "JSON from templates, compiled into the binary")
         .krate(Dep::git("jt", REPOSITORY, "main").note("JSON templates, compiled"))

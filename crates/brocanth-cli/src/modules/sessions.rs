@@ -1,7 +1,7 @@
 //! `sessions` -- a cookie, and a `Session` on the context.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Cookie sessions.
 ///
@@ -15,6 +15,11 @@ impl Module for Sessions {
         Manifest::new(
             "sessions",
             "a cookie, and a `Session` the context hands a handler",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
         )
         .asked_in("doors", "A signed cookie, and a session on the context")
     }

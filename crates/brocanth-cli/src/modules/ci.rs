@@ -8,7 +8,7 @@
 //! The parent writes nothing on its own. It is the line in the chooser that
 //! says "check every push"; the provider under it writes the file.
 
-use brocanth_scaffold::{Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold};
 
 pub struct Ci;
 
@@ -18,6 +18,7 @@ impl Module for Ci {
             "ci",
             "fmt, clippy and the tests on every push; pick the provider below",
         )
+        .category(Category::External)
         .outside_runtime()
         .asked_in("operations", "Continuous integration")
     }
@@ -33,6 +34,12 @@ impl Module for GitHub {
             "ci-github",
             ".github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image",
         )
+        .category(Category::External)
+        .adapts_to("static", "CI keeps the exported site as an artifact")
+        .adapts_to("docker", "CI builds the image")
+        .adapts_to("model", "CI starts a database for the tests")
+        .adapts_to("jobs", "CI starts a database for the tests")
+        .adapts_to("cache", "CI starts a database for the tests")
         .outside_runtime()
         .asked_in("operations", "GitHub Actions")
         .part_of("ci")

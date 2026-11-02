@@ -1,6 +1,6 @@
 //! `config` -- TOML configuration, four sources, merged.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold};
 
 /// The config plugin.
 ///
@@ -16,6 +16,7 @@ impl Module for Config {
             "config",
             "config/<env>.toml, merged; without it nothing links a TOML parser",
         )
+        .category(Category::Enhancer)
         .outside_runtime()
         .asked_in(
             "foundations",

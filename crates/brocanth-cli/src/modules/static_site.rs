@@ -24,7 +24,7 @@
 //! runtime is one builder call on each manifest, so the list can change
 //! without a change here.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 pub struct StaticSite;
 
@@ -34,6 +34,10 @@ impl Module for StaticSite {
             "static",
             "`export` writes every GET page and every asset to dist/; no server, so no runtime modules",
         )
+        .category(Category::External)
+        .category(Category::Enhancer)
+        .adapts_to("rsx-tailwind", "the export writes the compiled stylesheet")
+        .adapts_to("rsx-htmx", "the export writes dp-swap and the partials")
         .asked_in("pages", "Compile the pages to files any static host serves")
         .needs("commands", "`export` is a subcommand of this binary")
         .krate(Dep::brocanth("brocanth-static"))

@@ -1953,13 +1953,17 @@ title = "My Blog"
 enabled = ["config", "jobs"]
 
 [modules.config]
+kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
 crates = ["brocanth-config"]
+adapted_to = []
 
 [modules.jobs]
+kind = ["enhancer"]
 files = ["src/flags.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
+adapted_to = ["config"]
 
-# brocanth-digest: 0c2c3122b4ffc08a
+# brocanth-digest: 5539ba7cc56b03ce
