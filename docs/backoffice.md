@@ -12,7 +12,10 @@ example.
 The four model screens go through the entity's row policy. §2a says how.
 
 To change how the admin looks — titles, a theme, one screen for one
-model, the whole layout — see `docs/admin-customization.md`.
+model, the whole layout — see `docs/admin-customization.md`. To start
+from the shipped screen instead of an empty file,
+`brocanth admin eject <screen> [--model <key>]` copies it into the
+project and installs it (level 8 there).
 
 Measured by reading each crate's public surface at `54ff827`. Where this
 says a tab cannot be built, somebody read the trait.

@@ -7,6 +7,10 @@
 //
 // Nothing here renders. It is the vocabulary the six screens are written in,
 // and the one place to change how a button or a table looks.
+//
+// Public as `brocanth_admin::parts`, because an ejected screen is written
+// in the same vocabulary and compiles in the application. The function
+// names are stable API; the class strings they return are not.
 
 /// A page's `<h1>`.
 pub fn heading() -> &'static str {
@@ -28,15 +32,18 @@ pub fn bar() -> &'static str {
     "flex items-center gap-3 flex-wrap mb-4"
 }
 
+/// A table inside a card.
 pub fn table() -> &'static str {
     "w-full border-collapse text-sm"
 }
 
+/// A column header cell.
 pub fn th() -> &'static str {
     "text-left px-3.5 py-2.5 bg-stage/70 text-[11px] font-semibold uppercase \
      tracking-wider text-ink-faint border-b border-line"
 }
 
+/// A body cell.
 pub fn td() -> &'static str {
     "text-left px-3.5 py-2.5 border-b border-line align-top text-ink"
 }
@@ -46,10 +53,12 @@ pub fn empty() -> &'static str {
     "px-7 py-10 text-center text-ink-soft bg-white"
 }
 
+/// Secondary text.
 pub fn muted() -> &'static str {
     "text-ink-soft"
 }
 
+/// A value shown in a fixed-width face: a key, a JSON blob.
 pub fn mono() -> &'static str {
     "font-mono text-xs"
 }
@@ -66,12 +75,14 @@ pub fn button() -> &'static str {
      text-ink hover:bg-stage"
 }
 
+/// The one primary action of a screen: save, add.
 pub fn button_primary() -> &'static str {
     "inline-flex items-center justify-center rounded-control border px-3 py-1.5 \
      text-sm font-medium no-underline cursor-pointer border-accent bg-accent \
      text-white hover:bg-accent-dark shadow-card"
 }
 
+/// A destructive action: delete.
 pub fn button_danger() -> &'static str {
     "inline-flex items-center justify-center rounded-control border px-3 py-1.5 \
      text-sm font-medium no-underline cursor-pointer border-danger bg-danger \
@@ -84,6 +95,7 @@ pub fn control() -> &'static str {
      text-ink focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
 }
 
+/// A control whose value the form refused.
 pub fn control_error() -> &'static str {
     "w-full rounded-control border border-danger bg-white px-2.5 py-2 text-sm \
      text-ink focus:outline-none focus:ring-2 focus:ring-danger/20"

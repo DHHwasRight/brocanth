@@ -112,6 +112,13 @@ enum Command {
     /// production checks. Each finding has an id, a location and a help
     /// line; the exit code is 1 when an error remains.
     Check(commands::check::CheckArgs),
+    /// Work on the project's admin: `eject` copies a shipped screen into it
+    ///
+    /// `brocanth admin eject list` writes the shipped list screen to
+    /// src/plugins/admin/screens/list.rsx and installs it over the default.
+    /// The copy renders the same page until you edit it, and it is yours:
+    /// an upgrade does not change it. See docs/admin-customization.md.
+    Admin(commands::admin::AdminArgs),
     /// A command defined in this project, run by the project's own binary
     ///
     /// Everything this tool does not recognise is one. `brocanth` is
@@ -220,6 +227,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::check::CheckArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("admin", m)) => commands::admin::run(
+            &ui,
+            dir,
+            commands::admin::AdminArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         // Everything else belongs to the project: the ones listed in the help
         // and the ones added since it was last built take the same path.

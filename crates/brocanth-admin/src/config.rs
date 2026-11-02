@@ -675,6 +675,29 @@ impl AdminConfig {
         self
     }
 
+    /// Changes the screens this config already holds.
+    ///
+    /// [`with_views`](Self::with_views) replaces the whole set. This keeps
+    /// what an earlier call installed and changes one screen, so two pieces
+    /// of code can each replace a screen without undoing the other. The
+    /// file `brocanth admin eject` writes uses it.
+    ///
+    /// ```
+    /// use brocanth_admin::view::ErrorCtx;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().map_views(|views| {
+    ///     views.with_error(|ctx: &ErrorCtx, w: &mut brocanth_admin::rsx::Writer<'_>| {
+    ///         w.text(&ctx.message)
+    ///     })
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn map_views(mut self, change: impl FnOnce(Views) -> Views) -> Self {
+        self.views = change(std::mem::take(&mut self.views));
+        self
+    }
+
     /// Configures one model.
     ///
     /// ```

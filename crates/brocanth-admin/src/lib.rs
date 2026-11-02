@@ -169,6 +169,13 @@ pub mod view;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
+/// The shipped screens as source, for `brocanth admin eject`.
+///
+/// Behind the same off-by-default feature as [`scaffold`]: it embeds the
+/// template text, which no application needs at run time.
+#[cfg(feature = "scaffold")]
+pub mod eject;
+
 /// The shipped screens.
 ///
 /// Compiled into the binary by rsx at macro expansion: nothing is read from
@@ -184,6 +191,28 @@ pub use admin::{Admin, AdminError, Response, Route};
 /// partial script. A Content-Security-Policy allows it by its hash:
 /// `Csp::default().inline_script(brocanth_admin::INLINE_SCRIPT)`.
 pub const INLINE_SCRIPT: &str = assets::SCRIPT;
+
+/// The shipped stylesheet, which the layout inlines in a `<style>`.
+///
+/// Public for an ejected layout, which inlines it the same way. Its
+/// content changes with every release; the custom properties listed in
+/// `docs/admin-customization.md` are the stable part.
+pub const STYLESHEET: &str = assets::STYLE;
+
+/// dp-swap's mutating verbs, the layout's second script.
+///
+/// Re-exported from `brocanth_middleware::dp::SCRIPT` so an ejected layout
+/// needs no dependency of its own on the middleware crate.
+pub const MUTATE_SCRIPT: &str = brocanth_middleware::dp::SCRIPT;
+
+/// The class strings the shipped screens are written in.
+///
+/// Public so an ejected screen compiles in the application with the same
+/// vocabulary. **Stable:** the function names. **Not stable:** the class
+/// strings they return, which follow the stylesheet.
+pub mod parts {
+    pub use crate::templates::parts::*;
+}
 pub use config::{AdminConfig, ModelAdmin};
 pub use data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search, SharedData};
 pub use rows::{AdminResource, RowAction};

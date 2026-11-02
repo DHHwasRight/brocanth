@@ -16,10 +16,12 @@ in step with new versions of the admin.
 | 5. Replace a screen, one model | one model's list, detail, form or delete | `ModelAdmin::{list_view, detail_view, form_view, confirm_delete_view}` | `admin/<app>/<model>/change_list.html`, `ModelAdmin.change_list_template` |
 | 6. Replace a screen, every model | a screen for all models | `Views::with_<screen>` | `admin/change_list.html` in `DIRS` |
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
+| 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]` | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
 
 The tests for levels 1 to 5 are in
 `crates/brocanth-admin/tests/customization.rs`. Levels 6 and 7 are in
-`tests/screens.rs`.
+`tests/screens.rs`. Level 8 is in `tests/eject.rs` and in
+`crates/brocanth-cli/src/commands/admin.rs`.
 
 ## How Django does it
 
@@ -246,38 +248,86 @@ in `body`. A layout of your own must write `ctx.chrome.stylesheets` itself
 if it wants levels 2 and 3 to keep working, and must keep
 `dp-layout="admin"` around the body if it wants dp-swap navigation.
 
-## Ejecting a screen (planned)
+## Level 8: eject a screen
 
 Copying a default and editing it is often faster than writing one from an
-empty file. That is Laravel's `vendor:publish`. The planned command:
+empty file. That is Laravel's `vendor:publish`. In a generated project:
 
 ```
-brocanth admin eject list            # writes src/views/admin/list.rsx
-brocanth admin eject list --model invoice
+brocanth admin eject list                  # every model's list
+brocanth admin eject list --model invoice  # the invoice list only
+brocanth admin eject layout                # the shell around every screen
 ```
 
-It writes the shipped template into the project and prints the one line
-that installs it (`Views::with_list` or `ModelAdmin::list_view`). It does
-not edit `main.rs`: the line is yours to place.
+Screens: `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`.
+`list`, `detail`, `form` and `delete` take `--model`; the other three show
+no one model.
 
-It is not built yet, for one reason. The shipped templates use the
-crate's private vocabulary: `crate::templates::parts` for class strings
-and `crate::assets` for the inline sheet. An ejected copy must compile in
-the application, so those must first become public and stable:
-`brocanth_admin::parts` and `brocanth_admin::STYLESHEET` beside
-`INLINE_SCRIPT`. Once they are, the command is a copy and a path rewrite.
+The command writes the shipped template into the project and installs it.
+The copy renders the same HTML as the shipped screen until you edit it.
+`tests/eject.rs` holds the crate to that, byte for byte, on every screen.
+
+| Path | Owner |
+|---|---|
+| `src/plugins/admin/screens/list.rsx` | you, from the moment it is written |
+| `src/plugins/admin/screens/models/invoice/list.rsx` | you |
+| `src/plugins/admin/ejected.rs` | the command: written again on every eject |
+
+It also makes three edits, each once and only when missing:
+
+- `rsx` in `[dependencies]`, because the copy is a template the project
+  compiles;
+- `mod ejected;` in `src/plugins/admin/mod.rs`;
+- `let config = ejected::apply(config);` in `mount`, before
+  `Admin::new`. If you rewrote `mount` and that line is gone, the command
+  writes the copy, warns, and tells you where the line goes.
+
+`ejected.rs` installs each copy through the same API as levels 5 to 7:
+`Views::with_<screen>` through `AdminConfig::map_views`, or
+`ModelAdmin::<screen>_view` through `AdminConfig::model`. `map_views`
+changes the screens already installed instead of replacing the set, so an
+ejected screen and a `with_views` call of your own both survive.
+
+`ejected.rs` is rebuilt from the `.rsx` files on disk. To drop an ejected
+screen, delete its file and run any eject again, or remove its lines from
+`ejected.rs` by hand.
+
+**What it refuses.** It never overwrites a copy that exists: edit that
+file, or delete it to start again from the shipped screen. It refuses
+`--model` on `layout`, `index` and `error`, and a model key that is not a
+Rust module name (`blog-post`), because `rsx` turns each directory into a
+module.
+
+**What changes in the copy.** The paths only. The shipped template names
+the crate as `crate::`; the copy names its public API: `brocanth_admin::parts`,
+`brocanth_admin::view`, `brocanth_admin::form`, `brocanth_admin::paging`,
+and the layout's inlined assets as `brocanth_admin::STYLESHEET`,
+`INLINE_SCRIPT` and `MUTATE_SCRIPT`. A header line names the version it
+came from.
+
+**Classes.** The shipped stylesheet holds only the utility classes the
+shipped screens use. A class you add to a copy that the sheet does not
+contain does nothing. Put the rules for it in a stylesheet of your own
+(level 2).
 
 Ejecting and wrapping are different trades. A wrapped screen (level 4)
 gets the admin's fixes for free. An ejected screen does not: after an
-upgrade you compare your copy with the new default yourself.
+upgrade you compare your copy with the new default yourself. The header
+line in the copy says which version to compare with.
 
 ## What is stable API
 
 - The context types in `brocanth_admin::view` and their field names. A
   new field is a minor change; a renamed or removed field is breaking.
-- `View`, `Views` and its `with_*` methods, and the `ModelAdmin` view
-  methods.
+- `View`, `Views` and its `with_*` methods, `AdminConfig::map_views`, and
+  the `ModelAdmin` view methods.
 - The CSS custom properties listed under level 2.
+- For ejected screens: the function names in `brocanth_admin::parts`
+  (`heading`, `card`, `button`, `control`, ...), and the constants
+  `STYLESHEET`, `INLINE_SCRIPT` and `MUTATE_SCRIPT`. Their *values* are
+  not stable: a class string or the inlined sheet changes with the
+  stylesheet. A copy keeps compiling across an upgrade; it does not keep
+  looking identical.
 - `aria-current="page"` on the current nav item, and `dp-layout="admin"`
   on the main region.
 
@@ -296,4 +346,9 @@ targets `.bg-white` breaks on the next stylesheet build.
 - **Extra pages on the admin.** Django's `get_urls()`. A `Panel` is the
   closest thing: a tab with the admin's chrome. See `docs/backoffice.md`.
 - **Per-model JavaScript.** See level 3.
-- **The eject command.** See above.
+- **Ejecting a panel.** `brocanth admin eject` copies the seven shipped
+  screens. A `Panel` renders its own body in the crate that owns it, so
+  there is no shipped panel template to copy.
+- **A diff after an upgrade.** The command does not compare a copy with
+  the new shipped screen. The header line names the version; the shipped
+  templates are in `crates/brocanth-admin/src/templates/`.
