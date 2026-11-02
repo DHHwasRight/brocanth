@@ -53,6 +53,9 @@ brocanth-scaffold = { workspace = true, optional = true }
 # For the compile-fail cases under tests/ui: an admin resource with no
 # policy must not compile. `brocanth-resource` set the precedent.
 trybuild = "1"
+# The HTML reader, so the customisation tests find a `<link>` or a heading
+# by tag rather than by a class name the stylesheet owns.
+brocanth-test.workspace = true
 
 [lints.rust]
 missing_docs = "warn"

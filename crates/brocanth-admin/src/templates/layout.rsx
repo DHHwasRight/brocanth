@@ -19,13 +19,18 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
             <meta name="viewport" content="width=device-width, initial-scale=1" />
             <title>{page_title(ctx)}</title>
             <style>{! STYLE }</style>
+            // After the shipped sheet, so an equal selector here wins, and
+            // a `:root` rule wins over the theme layer whatever its order.
+            for href in &ctx.chrome.stylesheets {
+                <link rel="stylesheet" href={href} />
+            }
         </head>
         <body class="h-full m-0 font-sans text-[15px] leading-normal text-ink bg-stage antialiased">
             <div class="flex min-h-full">
                 <aside class="w-60 shrink-0 bg-white border-r border-line flex flex-col gap-6 py-6">
                     <a class="px-6 text-[15px] font-semibold text-ink no-underline"
                        href={&ctx.chrome.base_path} dp-boost>
-                        {&ctx.chrome.title}
+                        {&ctx.chrome.header}
                     </a>
                     <nav class="flex flex-col gap-0.5 px-3" aria-label="Sections">
                         for item in &ctx.chrome.nav {
@@ -43,6 +48,11 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
                             }
                         }
                     </nav>
+                    // No `dp-boost`: the front page is not an admin screen,
+                    // and a swap into `dp-layout="admin"` would be wrong.
+                    if let Some(href) = &ctx.chrome.site_url {
+                        <a class={nav_class(false)} href={href}>View site</a>
+                    }
                 </aside>
                 // `dp-layout` marks what a swap may replace. The rail is
                 // outside it, so moving between screens does not rebuild
@@ -58,7 +68,7 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
 }
 
 fn page_title(ctx: &LayoutCtx) -> String {
-    if ctx.heading.is_empty() {
+    if ctx.heading.is_empty() || ctx.heading == ctx.chrome.title {
         ctx.chrome.title.clone()
     } else {
         format!("{} · {}", ctx.heading, ctx.chrome.title)

@@ -76,7 +76,29 @@ pub fn render<C: ?Sized + 'static>(view: &dyn View<C>, context: &C) -> RsxResult
 /// The six screens, each replaceable.
 ///
 /// [`Views::default`] is the shipped set. Replace one and the rest stay as
-/// they are.
+/// they are. A model can replace its own four screens on top of these, with
+/// [`ModelAdmin::list_view`](crate::ModelAdmin::list_view) and its siblings:
+/// the model's view wins, then this set.
+///
+/// An override that only adds to a shipped screen keeps the shipped one and
+/// calls it. That is Django's `{{ block.super }}`:
+///
+/// ```
+/// use brocanth_admin::view::ListCtx;
+/// use brocanth_admin::{AdminConfig, Views};
+///
+/// let shipped = Views::default().list;
+/// let config = AdminConfig::new().with_views(Views::default().with_list(
+///     move |ctx: &ListCtx, w: &mut brocanth_admin::rsx::Writer<'_>| {
+///         w.raw("<p role=\"note\">Edits here reach customers.</p>")?;
+///         shipped.render(ctx, w)
+///     },
+/// ));
+/// # let _ = config;
+/// ```
+///
+/// See `docs/admin-customization.md` for every level, from a title to a
+/// whole screen.
 pub struct Views {
     /// Wraps every screen. Receives the inner HTML already rendered.
     pub layout: Box<dyn View<LayoutCtx>>,
@@ -186,15 +208,26 @@ pub struct NavItem {
     pub current: bool,
 }
 
-/// What every screen shares: the title, the mount path and the sidebar.
+/// What every screen shares: the titles, the mount path, the sidebar and the
+/// stylesheets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chrome {
-    /// The admin's title.
+    /// The admin's title, at the end of every `<title>`. Django's
+    /// `site_title`.
     pub title: String,
+    /// What the top of the sidebar says. Django's `site_header`. The title
+    /// when nothing else was set.
+    pub header: String,
+    /// The application's front page, for a "View site" link. Django's
+    /// `site_url`. `None` draws no link.
+    pub site_url: Option<String>,
     /// Where the admin is mounted.
     pub base_path: String,
     /// The sidebar.
     pub nav: Vec<NavItem>,
+    /// Stylesheets linked after the shipped one, in order: the admin's own,
+    /// then the shown model's. Each is an `href` the application serves.
+    pub stylesheets: Vec<String>,
 }
 
 /// The layout's context: the chrome, and the screen already rendered.
@@ -233,6 +266,9 @@ pub struct IndexEntry {
 pub struct IndexCtx {
     /// The chrome.
     pub chrome: Chrome,
+    /// The index's `<h1>`. Django's `index_title`. The title when nothing
+    /// else was set.
+    pub heading: String,
     /// The models.
     pub models: Vec<IndexEntry>,
 }

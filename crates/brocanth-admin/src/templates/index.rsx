@@ -3,7 +3,7 @@ use crate::view::IndexCtx;
 
 /// The front page: every model the admin discovered, as a card each.
 pub fn Index(ctx: &IndexCtx) -> Element {
-    <h1 class={parts::heading()}>{&ctx.chrome.title}</h1>
+    <h1 class={parts::heading()}>{&ctx.heading}</h1>
     <p class="mt-1 mb-6 text-sm text-ink-soft">{summary(ctx)}</p>
 
     if ctx.models.is_empty() {

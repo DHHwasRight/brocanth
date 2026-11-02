@@ -111,6 +111,10 @@ struct Entry {
 pub struct Admin {
     data: SharedData,
     title: String,
+    header: String,
+    index_title: String,
+    site_url: Option<String>,
+    stylesheets: Vec<String>,
     base_path: String,
     policy: Box<dyn crate::policy::Policy>,
     views: Views,
@@ -197,7 +201,11 @@ impl Admin {
         Admin {
             unscoped_rows,
             data,
+            header: config.header.unwrap_or_else(|| config.title.clone()),
+            index_title: config.index_title.unwrap_or_else(|| config.title.clone()),
             title: config.title,
+            site_url: config.site_url,
+            stylesheets: config.stylesheets,
             base_path: config.base_path,
             policy: config.policy,
             views: config.views,
@@ -257,10 +265,11 @@ impl Admin {
             .collect();
         let context = IndexCtx {
             chrome: self.chrome(principal, ""),
+            heading: self.index_title.clone(),
             models,
         };
         let body = view::render(self.views.index.as_ref(), &context)?;
-        self.page(200, principal, "", self.title.clone(), body)
+        self.page(200, principal, "", self.index_title.clone(), body)
     }
 
     /// One model's records.
@@ -359,7 +368,15 @@ impl Admin {
             query,
         };
         let heading = admin.plural(descriptor);
-        let body = view::render(self.views.list.as_ref(), &context)?;
+        let body = view::render(
+            entry
+                .admin
+                .views()
+                .list
+                .as_deref()
+                .unwrap_or(self.views.list.as_ref()),
+            &context,
+        )?;
         self.page(200, principal, model, heading, body)
     }
 
@@ -421,7 +438,15 @@ impl Admin {
             rows,
             label: label.clone(),
         };
-        let body = view::render(self.views.detail.as_ref(), &context)?;
+        let body = view::render(
+            entry
+                .admin
+                .views()
+                .detail
+                .as_deref()
+                .unwrap_or(self.views.detail.as_ref()),
+            &context,
+        )?;
         self.page(200, principal, model, label, body)
     }
 
@@ -640,7 +665,15 @@ impl Admin {
             cancel_href: self.detail_url(model, &record),
             label: label.clone(),
         };
-        let body = view::render(self.views.confirm_delete.as_ref(), &context)?;
+        let body = view::render(
+            entry
+                .admin
+                .views()
+                .confirm_delete
+                .as_deref()
+                .unwrap_or(self.views.confirm_delete.as_ref()),
+            &context,
+        )?;
         self.page(200, principal, model, format!("Delete {label}"), body)
     }
 
@@ -923,8 +956,23 @@ impl Admin {
     }
 
     fn chrome(&self, principal: Principal<'_>, current: &str) -> Chrome {
+        // The admin's stylesheets, then the shown model's, so a model's rule
+        // wins over the admin's when both set one property.
+        let stylesheets = self
+            .stylesheets
+            .iter()
+            .chain(
+                self.entry(current)
+                    .map(|e| e.admin.stylesheets())
+                    .unwrap_or_default(),
+            )
+            .cloned()
+            .collect();
         Chrome {
             title: self.title.clone(),
+            header: self.header.clone(),
+            site_url: self.site_url.clone(),
+            stylesheets,
             base_path: self.index_url(),
             nav: self
                 .entries
@@ -1075,7 +1123,15 @@ impl Admin {
             true => format!("Add {}", name.to_lowercase()),
             false => format!("Edit {}", name.to_lowercase()),
         };
-        let body = view::render(self.views.form.as_ref(), &context)?;
+        let body = view::render(
+            entry
+                .admin
+                .views()
+                .form
+                .as_deref()
+                .unwrap_or(self.views.form.as_ref()),
+            &context,
+        )?;
         self.page(status, principal, model, heading, body)
     }
 

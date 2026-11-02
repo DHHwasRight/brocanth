@@ -17,7 +17,7 @@ use crate::discovery::Discovery;
 use crate::form::Widget;
 use crate::model::{humanise, ColumnDescriptor, ColumnKind, ModelDescriptor, Relation, Row};
 use crate::policy::{DenyAll, Policy};
-use crate::view::Views;
+use crate::view::{DeleteCtx, DetailCtx, FormCtx, ListCtx, View, Views};
 
 /// How many rows a list screen shows when nothing says otherwise.
 pub const DEFAULT_PER_PAGE: usize = 25;
@@ -48,6 +48,17 @@ pub struct ModelAdmin {
     can_create: bool,
     can_update: bool,
     can_delete: bool,
+    stylesheets: Vec<String>,
+    views: ModelViews,
+}
+
+/// The screens one model replaces. `None` is the admin's own view.
+#[derive(Default)]
+pub(crate) struct ModelViews {
+    pub(crate) list: Option<Box<dyn View<ListCtx>>>,
+    pub(crate) detail: Option<Box<dyn View<DetailCtx>>>,
+    pub(crate) form: Option<Box<dyn View<FormCtx>>>,
+    pub(crate) confirm_delete: Option<Box<dyn View<DeleteCtx>>>,
 }
 
 impl std::fmt::Debug for ModelAdmin {
@@ -85,6 +96,8 @@ impl ModelAdmin {
             can_create: true,
             can_update: true,
             can_delete: true,
+            stylesheets: Vec::new(),
+            views: ModelViews::default(),
         }
     }
 
@@ -235,6 +248,55 @@ impl ModelAdmin {
     pub fn no_delete(mut self) -> Self {
         self.can_delete = false;
         self
+    }
+
+    /// Links a stylesheet on this model's screens only, after the admin's
+    /// own. Django's `ModelAdmin.Media.css`.
+    ///
+    /// `href` is a URL the application serves; the admin mounts no asset
+    /// route.
+    pub fn stylesheet(mut self, href: impl Into<String>) -> Self {
+        self.stylesheets.push(href.into());
+        self
+    }
+
+    /// The stylesheets this model's screens link, in order.
+    pub fn stylesheets(&self) -> &[String] {
+        &self.stylesheets
+    }
+
+    /// Replaces the list screen for this model only. Django's
+    /// `change_list_template`. It wins over
+    /// [`Views::with_list`](crate::Views::with_list).
+    pub fn list_view(mut self, view: impl View<ListCtx>) -> Self {
+        self.views.list = Some(Box::new(view));
+        self
+    }
+
+    /// Replaces the detail screen for this model only.
+    pub fn detail_view(mut self, view: impl View<DetailCtx>) -> Self {
+        self.views.detail = Some(Box::new(view));
+        self
+    }
+
+    /// Replaces the create and edit form for this model only. Django's
+    /// `change_form_template` and `add_form_template` in one, because here
+    /// one screen serves both: [`FormCtx::is_new`] tells them apart.
+    pub fn form_view(mut self, view: impl View<FormCtx>) -> Self {
+        self.views.form = Some(Box::new(view));
+        self
+    }
+
+    /// Replaces the delete confirmation for this model only. Django's
+    /// `delete_confirmation_template`.
+    pub fn confirm_delete_view(mut self, view: impl View<DeleteCtx>) -> Self {
+        self.views.confirm_delete = Some(Box::new(view));
+        self
+    }
+
+    /// The screens this model replaced.
+    pub(crate) fn views(&self) -> &ModelViews {
+        &self.views
     }
 
     /// Whether this configuration permits creating. The policy is asked as
@@ -414,8 +476,18 @@ impl ModelAdmin {
 
 /// The admin as a whole.
 pub struct AdminConfig {
-    /// The heading, the page title, and what the index calls itself.
+    /// The end of every `<title>`, and the sidebar header and the index
+    /// heading when those were not set. Django's `site_title`.
     pub title: String,
+    /// What the top of the sidebar says. Django's `site_header`.
+    pub header: Option<String>,
+    /// The index's `<h1>`. Django's `index_title`.
+    pub index_title: Option<String>,
+    /// The application's front page, for a "View site" link. Django's
+    /// `site_url`, except that the default here is no link.
+    pub site_url: Option<String>,
+    /// Stylesheets every screen links after the shipped one.
+    pub stylesheets: Vec<String>,
     /// The path the admin is mounted at, without a trailing slash.
     pub base_path: String,
     /// How the model list is narrowed.
@@ -467,6 +539,10 @@ impl AdminConfig {
     pub fn new() -> Self {
         AdminConfig {
             title: "Admin".to_string(),
+            header: None,
+            index_title: None,
+            site_url: None,
+            stylesheets: Vec::new(),
             base_path: "/admin".to_string(),
             discovery: Discovery::new(),
             policy: Box::new(DenyAll),
@@ -536,6 +612,41 @@ impl AdminConfig {
     /// Sets the title.
     pub fn titled(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
+        self
+    }
+
+    /// Sets what the top of the sidebar says, when it is not the title.
+    pub fn headed(mut self, header: impl Into<String>) -> Self {
+        self.header = Some(header.into());
+        self
+    }
+
+    /// Sets the index's heading, when it is not the title.
+    pub fn index_titled(mut self, heading: impl Into<String>) -> Self {
+        self.index_title = Some(heading.into());
+        self
+    }
+
+    /// Adds a "View site" link to the sidebar, pointing at `href`.
+    pub fn site_url(mut self, href: impl Into<String>) -> Self {
+        self.site_url = Some(href.into());
+        self
+    }
+
+    /// Links a stylesheet on every screen, after the shipped one.
+    ///
+    /// The shipped stylesheet reads its colours, fonts and radii from CSS
+    /// custom properties (`--color-accent`, `--font-sans`, ...), so a
+    /// stylesheet of a few lines rethemes the admin:
+    ///
+    /// ```css
+    /// :root { --color-accent: #0f766e; --color-accent-dark: #115e59; }
+    /// ```
+    ///
+    /// `href` is a URL the application serves; the admin mounts no asset
+    /// route. A same-origin file passes the default Content-Security-Policy.
+    pub fn stylesheet(mut self, href: impl Into<String>) -> Self {
+        self.stylesheets.push(href.into());
         self
     }
 
