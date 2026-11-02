@@ -3002,6 +3002,7 @@ window_secs = 60
 //! `serve` arrived with the scaffold and is ordinary code here: rename it,
 //! give it flags, or delete it. The framework does not own this command line.
 
+pub mod admin;
 pub mod api;
 pub mod css;
 pub mod migrate;
@@ -3009,7 +3010,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 0609091c6a908d73
+// brocanth-digest: efc26dfe6927dc98
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
 //!
@@ -3331,6 +3332,127 @@ impl MigratorTrait for Migrator {
 //! referenced it yet.
 
 brocanth_assets::assets!("assets", "public");
+===== src/commands/admin.rs =====
+//! `admin eject` -- a shipped admin screen, copied into this project.
+//!
+//! The work is the `brocanth` CLI's. This command runs
+//! `brocanth admin eject <screen> [--model <key>]` in the project root and
+//! exits with its status, so `cargo run -- admin eject list` and
+//! `brocanth admin eject list` do the same thing. The application does not
+//! link the code that writes source.
+//!
+//! This file is yours. See `docs/admin-customization.md`, level 8.
+
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Work on the admin: `eject` copies a shipped screen into this project.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Admin {
+    #[command(subcommand)]
+    pub action: Action,
+}
+
+#[derive(clap::Subcommand)]
+pub enum Action {
+    /// Copy a shipped screen into this project and install it over the
+    /// default. `brocanth admin eject --help` lists the screens.
+    Eject {
+        /// The screen to copy, such as `list` or `layout`.
+        screen: String,
+        /// Install the copy for this model only. list, detail, form and
+        /// delete take one.
+        #[arg(long, value_name = "KEY")]
+        model: Option<String>,
+    },
+}
+
+impl Command for Admin {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let status = brocanth(OsStr::new("brocanth"), ctx.root(), &self.action.args())?;
+        if !status.success() {
+            // `brocanth` printed the error and its help line.
+            process::exit(status.code().unwrap_or(1));
+        }
+        Ok(())
+    }
+}
+
+impl Action {
+    /// The `brocanth` arguments this action stands for.
+    fn args(&self) -> Vec<String> {
+        match self {
+            Action::Eject { screen, model } => {
+                let mut args = vec!["admin".to_string(), "eject".to_string(), screen.clone()];
+                if let Some(model) = model {
+                    args.extend(["--model".to_string(), model.clone()]);
+                }
+                args
+            }
+        }
+    }
+}
+
+/// Runs `program` with `args` in `root`. A program that is not installed
+/// is an error that says how to install it.
+fn brocanth(program: &OsStr, root: &Path, args: &[String]) -> anyhow::Result<process::ExitStatus> {
+    let name = program.to_string_lossy();
+    process::Command::new(program)
+        .args(args)
+        .current_dir(root)
+        .status()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => anyhow::anyhow!(
+                "`{name}` is not installed or not on PATH\n\
+                 help: install the brocanth CLI: `cargo install --git \
+                 https://github.com/DHHwasRight/brocanth brocanth-cli`, or \
+                 `cargo install --path crates/brocanth-cli` in a brocanth checkout"
+            ),
+            _ => anyhow::anyhow!("could not run `{name}`: {e}"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eject_passes_the_screen_and_the_model_through() {
+        let action = Action::Eject {
+            screen: "list".to_string(),
+            model: Some("post".to_string()),
+        };
+        assert_eq!(action.args(), ["admin", "eject", "list", "--model", "post"]);
+        let action = Action::Eject {
+            screen: "layout".to_string(),
+            model: None,
+        };
+        assert_eq!(action.args(), ["admin", "eject", "layout"]);
+    }
+
+    #[test]
+    fn a_missing_cli_says_how_to_install_it() {
+        let error = brocanth(
+            OsStr::new("brocanth-that-is-not-installed"),
+            Path::new("."),
+            &[],
+        )
+        .expect_err("no such program");
+        let message = error.to_string();
+        assert!(
+            message.contains("not installed or not on PATH"),
+            "{message}"
+        );
+        assert!(
+            message.contains("help: install the brocanth CLI"),
+            "{message}"
+        );
+    }
+}
 ===== src/commands/api.rs =====
 //! This application, from the outside.
 //!
@@ -6785,11 +6907,11 @@ crates = ["brocanth-resource"]
 adapted_to = []
 
 [modules.admin]
-kind = ["routes"]
-files = ["src/plugins/admin/"]
+kind = ["routes", "enhancer"]
+files = ["src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "middleware-csrf"]
+adapted_to = ["config", "middleware-csrf", "commands"]
 
 [modules.realtime]
 kind = ["enhancer", "middleware"]
@@ -6861,4 +6983,4 @@ config = []
 crates = []
 adapted_to = ["docker", "model", "jobs", "cache"]
 
-# brocanth-digest: 96ca5f79334b9bcf
+# brocanth-digest: 913ac646e5df6669

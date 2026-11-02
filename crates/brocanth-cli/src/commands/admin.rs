@@ -339,6 +339,31 @@ mod tests {
         Ui::new(crate::ui::Face::Plain, true, false)
     }
 
+    #[test]
+    fn the_project_command_passes_arguments_this_command_accepts() {
+        // `src/commands/admin.rs` in a project with `commands` hands these
+        // exact vectors to `brocanth`. A renamed flag here breaks it there.
+        use clap::{Args, FromArgMatches};
+        let parse = |argv: &[&str]| {
+            let cli = clap::Command::new("brocanth")
+                .subcommand(AdminArgs::augment_args(clap::Command::new("admin")));
+            let matches = cli.try_get_matches_from(argv).expect("brocanth accepts it");
+            let (_, admin) = matches.subcommand().expect("the admin subcommand");
+            let AdminCommand::Eject(eject) = AdminArgs::from_arg_matches(admin)
+                .expect("admin arguments")
+                .command;
+            (eject.screen, eject.model)
+        };
+        assert_eq!(
+            parse(&["brocanth", "admin", "eject", "list", "--model", "post"]),
+            ("list".to_string(), Some("post".to_string()))
+        );
+        assert_eq!(
+            parse(&["brocanth", "admin", "eject", "layout"]),
+            ("layout".to_string(), None)
+        );
+    }
+
     fn project(name: &str, picks: &[&'static str]) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "brocanth-eject-{}-{name}-{:?}",
@@ -544,7 +569,15 @@ mod tests {
         let answers = Answers {
             name: "ejected-test".into(),
             title: "Ejected Test".into(),
-            picks: vec!["config", "admin", "middleware", "middleware-csrf"],
+            // `commands` too, so the project's own `admin eject`, which
+            // hands its arguments to this CLI, compiles and runs its tests.
+            picks: vec![
+                "config",
+                "commands",
+                "admin",
+                "middleware",
+                "middleware-csrf",
+            ],
             local: Some(brocanth.display().to_string()),
             git: false,
         };

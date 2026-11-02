@@ -2035,7 +2035,7 @@ title = "My Blog"
 enabled = ["admin", "resource"]
 
 [modules.admin]
-kind = ["routes"]
+kind = ["routes", "enhancer"]
 files = ["src/flags.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
@@ -2048,4 +2048,4 @@ config = []
 crates = ["brocanth-resource"]
 adapted_to = []
 
-# brocanth-digest: c82011c564542f59
+# brocanth-digest: 17ed828690717ab9

@@ -194,7 +194,9 @@ It refuses:
 
 When `mount` no longer has the line `let admin = Arc::new(Admin::new(`,
 it writes the copy and warns (`admin/not-installed`): add the install line
-yourself. See level 8 of
+yourself. With the `commands` module, the generated project
+has `admin eject` too (`src/commands/admin.rs`). It runs this command in
+the project root with the same arguments and exits with its status. See level 8 of
 [docs/admin-customization.md](../../docs/admin-customization.md).
 
 ### A project's own commands

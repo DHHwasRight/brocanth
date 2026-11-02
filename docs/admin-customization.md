@@ -259,6 +259,16 @@ brocanth admin eject list --model invoice  # the invoice list only
 brocanth admin eject layout                # the shell around every screen
 ```
 
+**From the project's own command line.** With the `commands` module, the
+project binary has the same command: `cargo run -- admin eject list` (or
+`my-app admin eject list`). It runs `brocanth admin eject` with the same
+arguments in the project root (the nearest directory with
+`brocanth.toml`) and exits with its status. The work stays in the
+`brocanth` CLI, so the application never links the code that writes
+source. Without the CLI on `PATH`, it stops with a `help:` line that says
+how to install it. The command is `src/commands/admin.rs`, and it is
+yours.
+
 Screens: `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`.
 `list`, `detail`, `form` and `delete` take `--model`; the other three show
 no one model.

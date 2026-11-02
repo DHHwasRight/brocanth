@@ -6,14 +6,14 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 
 | | |
 |---|---|
-| Categories | **Routes** |
+| Categories | **Routes**, Enhancer |
 | Wizard question | Doors |
 | Default | off |
 | Presets | none |
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md) |
+| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-admin` (no default features) |
@@ -24,11 +24,14 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 Files:
 
 - `src/plugins/admin/mod.rs`
+- `src/commands/admin.rs`, with `commands`: `admin eject`, which runs
+  `brocanth admin eject` in the project root
 
 Slots:
 
 - src/plugins/mod.rs (the builder chain)
 - src/plugins/mod.rs: `pub mod admin;`
+- src/commands/mod.rs, with `commands`: `pub mod admin;`
 - src/plugins/mod.rs (the provider list): `admin crate::plugins::admin::AdminSettings`
 - src/pages/mod.rs (the mounted routes): `crate::plugins::admin::mount(routes, "/admin")?;`
 - src/pages/mod.rs (the route table test): `/admin` (2 entries)

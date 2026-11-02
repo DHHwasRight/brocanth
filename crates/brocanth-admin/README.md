@@ -437,6 +437,10 @@ brocanth admin eject layout                # the shell around every screen
 The screens are `layout`, `index`, `list`, `detail`, `form`, `delete` and
 `error`. Only `list`, `detail`, `form` and `delete` take `--model`.
 
+With the `commands` module, the project binary has the same command,
+`cargo run -- admin eject list`. It hands the arguments to the installed
+`brocanth` CLI, so the application never links the eject code.
+
 The command writes the shipped template to
 `src/plugins/admin/screens/<screen>.rsx` (or
 `screens/models/<model>/<screen>.rsx`). That file is yours. It also

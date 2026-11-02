@@ -56,11 +56,16 @@ impl Module for Backoffice {
             "a Django-shaped backoffice at /admin, locked until you say who may in",
         )
         .category(Category::Routes)
+        .category(Category::Enhancer)
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
         )
         .adapts_to("middleware-csrf", "every form carries the CSRF token")
+        .adapts_to(
+            "commands",
+            "the binary gets `admin eject`, which runs `brocanth admin eject` in the project",
+        )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
         .krate(
             Dep::brocanth("brocanth-admin")
@@ -121,9 +126,147 @@ impl Module for Backoffice {
         // Two patterns, and the table's own test lists every route.
         s.at(Slot::PagesRoutes).line("/admin");
         s.at(Slot::PagesRoutes).line("/admin/{*rest}");
+        // `admin eject` belongs to the `brocanth` CLI, which writes source.
+        // With a command line, the binary offers it too and hands it to the
+        // CLI, so the app never links the code that writes code.
+        if project.has("commands") {
+            s.file("src/commands/admin.rs", ADMIN_COMMAND_RS.to_string());
+            s.at(Slot::CommandsMod).line("pub mod admin;");
+        }
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
+
+/// `src/commands/admin.rs`: `admin eject`, handed to the `brocanth` CLI.
+///
+/// Root: `brocanth_command::Context::root`, the nearest
+/// directory with `brocanth.toml` above the current one. That is the rule
+/// the CLI applies to itself, so both agree on the project, and it holds
+/// for a binary run from anywhere inside the tree. `CARGO_MANIFEST_DIR`
+/// would name the directory the binary was compiled in, which is wrong for
+/// a binary copied elsewhere and for a second checkout that shares a
+/// target directory.
+const ADMIN_COMMAND_RS: &str = r##"//! `admin eject` -- a shipped admin screen, copied into this project.
+//!
+//! The work is the `brocanth` CLI's. This command runs
+//! `brocanth admin eject <screen> [--model <key>]` in the project root and
+//! exits with its status, so `cargo run -- admin eject list` and
+//! `brocanth admin eject list` do the same thing. The application does not
+//! link the code that writes source.
+//!
+//! This file is yours. See `docs/admin-customization.md`, level 8.
+
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Work on the admin: `eject` copies a shipped screen into this project.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Admin {
+    #[command(subcommand)]
+    pub action: Action,
+}
+
+#[derive(clap::Subcommand)]
+pub enum Action {
+    /// Copy a shipped screen into this project and install it over the
+    /// default. `brocanth admin eject --help` lists the screens.
+    Eject {
+        /// The screen to copy, such as `list` or `layout`.
+        screen: String,
+        /// Install the copy for this model only. list, detail, form and
+        /// delete take one.
+        #[arg(long, value_name = "KEY")]
+        model: Option<String>,
+    },
+}
+
+impl Command for Admin {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let status = brocanth(OsStr::new("brocanth"), ctx.root(), &self.action.args())?;
+        if !status.success() {
+            // `brocanth` printed the error and its help line.
+            process::exit(status.code().unwrap_or(1));
+        }
+        Ok(())
+    }
+}
+
+impl Action {
+    /// The `brocanth` arguments this action stands for.
+    fn args(&self) -> Vec<String> {
+        match self {
+            Action::Eject { screen, model } => {
+                let mut args = vec!["admin".to_string(), "eject".to_string(), screen.clone()];
+                if let Some(model) = model {
+                    args.extend(["--model".to_string(), model.clone()]);
+                }
+                args
+            }
+        }
+    }
+}
+
+/// Runs `program` with `args` in `root`. A program that is not installed
+/// is an error that says how to install it.
+fn brocanth(program: &OsStr, root: &Path, args: &[String]) -> anyhow::Result<process::ExitStatus> {
+    let name = program.to_string_lossy();
+    process::Command::new(program)
+        .args(args)
+        .current_dir(root)
+        .status()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => anyhow::anyhow!(
+                "`{name}` is not installed or not on PATH\n\
+                 help: install the brocanth CLI: `cargo install --git \
+                 https://github.com/DHHwasRight/brocanth brocanth-cli`, or \
+                 `cargo install --path crates/brocanth-cli` in a brocanth checkout"
+            ),
+            _ => anyhow::anyhow!("could not run `{name}`: {e}"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eject_passes_the_screen_and_the_model_through() {
+        let action = Action::Eject {
+            screen: "list".to_string(),
+            model: Some("post".to_string()),
+        };
+        assert_eq!(action.args(), ["admin", "eject", "list", "--model", "post"]);
+        let action = Action::Eject {
+            screen: "layout".to_string(),
+            model: None,
+        };
+        assert_eq!(action.args(), ["admin", "eject", "layout"]);
+    }
+
+    #[test]
+    fn a_missing_cli_says_how_to_install_it() {
+        let error = brocanth(
+            OsStr::new("brocanth-that-is-not-installed"),
+            Path::new("."),
+            &[],
+        )
+        .expect_err("no such program");
+        let message = error.to_string();
+        assert!(
+            message.contains("not installed or not on PATH"),
+            "{message}"
+        );
+        assert!(
+            message.contains("help: install the brocanth CLI"),
+            "{message}"
+        );
+    }
+}
+"##;
 
 /// The admin's level-1 and level-2 customisation, as declared settings. See
 /// `docs/admin-customization.md`.
