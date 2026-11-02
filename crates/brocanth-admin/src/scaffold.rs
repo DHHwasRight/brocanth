@@ -38,7 +38,8 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The backoffice, as a choice on the `brocanth create` menu.
 ///
@@ -69,13 +70,14 @@ impl Module for Backoffice {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let title = format!("{} admin", project.title);
+        let (derive, note) = settings_derive(project, "admin");
         s.file(
             "src/plugins/admin/mod.rs",
             ADMIN_RS
-                .replace(
-                    "@TITLE@",
-                    &format!("{:?}", format!("{} admin", project.title)),
-                )
+                .replace("@TITLE@", &format!("{title:?}"))
+                .replace("@DERIVE@", &derive)
+                .replace("@NOTE@", &note)
                 // With CSRF on, every form the admin posts carries the
                 // token, or the hook refuses the admin's own forms.
                 .replace(
@@ -98,6 +100,14 @@ impl Module for Backoffice {
                 ),
         );
         s.at(Slot::PluginsMod).line("pub mod admin;");
+        // The titles, the "View site" link and the theme are declared, so
+        // each is a key in `[admin]`, a variable and a flag. A plugin holds
+        // them, because the settings arrive when the application is built
+        // and `mount` runs after that, when the route table is.
+        configurable(s, project, "admin", "AdminSettings", settings(&title));
+        if !project.has("config") {
+            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
+        }
         // The prefix is the application's decision, so it is written at the
         // call and not inside `mount`.
         s.at(Slot::RouterMounts)
@@ -107,6 +117,42 @@ impl Module for Backoffice {
         s.at(Slot::PagesRoutes).line("/admin/{*rest}");
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
+}
+
+/// The admin's level-1 and level-2 customisation, as declared settings. See
+/// `docs/admin-customization.md`.
+fn settings(title: &str) -> Vec<Setting> {
+    vec![
+        Setting::text(
+            "title",
+            title,
+            "The end of every <title>, and the header and index heading unless set.",
+        ),
+        Setting::text(
+            "header",
+            "Acme backoffice",
+            "What the top of the sidebar says.",
+        )
+        .optional(),
+        Setting::text(
+            "index_title",
+            "Site administration",
+            "The index page's heading.",
+        )
+        .optional(),
+        Setting::text(
+            "site_url",
+            "/",
+            "Where the sidebar's \"View site\" link points.",
+        )
+        .optional(),
+        Setting::text(
+            "stylesheet",
+            "/admin-theme.css",
+            "A stylesheet every screen links after the shipped one: the theme.",
+        )
+        .optional(),
+    ]
 }
 
 /// The admin over SeaORM, listed and not available.
@@ -162,13 +208,69 @@ const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
 //! therefore a build error, not a race.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use brocanth::plugin_api::Plugin;
+use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
 use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
+
+/// The admin's titles, its "View site" link and its theme: `[admin]` in
+/// the config file, `$<APP>_ADMIN__<KEY>`, or `--admin.<key>`.
+///
+/// @NOTE@
+@DERIVE@
+pub struct Settings {
+    /// The end of every `<title>`, and the header and the index heading
+    /// when those are not set.
+    pub title: String,
+    /// What the top of the sidebar says.
+    pub header: Option<String>,
+    /// The index page's heading.
+    pub index_title: Option<String>,
+    /// Where the sidebar's "View site" link points. No link when unset.
+    pub site_url: Option<String>,
+    /// A stylesheet every screen links after the shipped one. More than one
+    /// is `AdminConfig::stylesheet` again, in [`mount`].
+    pub stylesheet: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            title: @TITLE@.to_string(),
+            header: None,
+            index_title: None,
+            site_url: None,
+            stylesheet: None,
+        }
+    }
+}
+
+/// The settings this run chose, kept for [`mount`].
+///
+/// `mount` runs when the route table is built, after the plugins are, and
+/// takes no argument it could carry them in. A test that builds the table
+/// without the application gets the defaults.
+static CHOSEN: OnceLock<Settings> = OnceLock::new();
+
+/// Holds the admin's settings. It puts nothing on the context.
+pub struct AdminSettings;
+
+impl Plugin for AdminSettings {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "admin";
+
+    fn new(config: Settings) -> Self {
+        // The first application built in this process decides.
+        let _ = CHOSEN.set(config);
+        Self
+    }
+}
 
 /// Every screen of the admin, under `prefix`.
 ///
@@ -176,12 +278,27 @@ use crate::pages::{Ctx, Handler, Response};
 /// The admin parses its own paths, so the table gives it the whole path and
 /// does not split it into twelve routes.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let defaults = Settings::default();
+    let settings = CHOSEN.get().unwrap_or(&defaults);
+    let mut config = AdminConfig::new().titled(&settings.title).at(prefix);
+    if let Some(header) = &settings.header {
+        config = config.headed(header);
+    }
+    if let Some(heading) = &settings.index_title {
+        config = config.index_titled(heading);
+    }
+    if let Some(href) = &settings.site_url {
+        config = config.site_url(href);
+    }
+    if let Some(href) = &settings.stylesheet {
+        config = config.stylesheet(href);
+    }
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
         // over your database connection.
         Arc::new(Fixture::new()),
-        AdminConfig::new().titled(@TITLE@).at(prefix),
+        config,
     ));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {

@@ -79,8 +79,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Accounts, as a choice on the `brocanth create` menu.
 ///
@@ -118,7 +118,7 @@ impl Module for Auth {
             },
         );
         s.at(Slot::PluginsMod).line("pub mod auth;");
-        plugin(s, project, "auth", "Auth");
+        configurable(s, project, "auth", "Auth", settings(project));
         // The services are read at startup, so a brand-new project uses the
         // value it was given rather than warning that nothing does. It also
         // prints the provider count, which is zero, because the number a
@@ -138,9 +138,6 @@ impl Module for Auth {
             // module needs the same line, and `use` twice does not
             // compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(section(project));
         }
     }
 }
@@ -351,35 +348,66 @@ pub type Store = PgStore;",
 /// moves with it: `__Host-` is the only prefix a browser enforces, and what it
 /// enforces is `Secure`, a path of `/` and no `Domain`. The two cannot
 /// disagree, so the generated plugin stops the application when they do.
-fn section(project: &Project) -> String {
+fn settings(project: &Project) -> Vec<Setting> {
     let var = env_var(project);
-    let url = if uses_postgres(project) {
-        "# The Postgres database for accounts and sessions. The tables are\n\
-         # created at startup, named brocanth_auth_*.\n\
-         url = \"postgres://localhost/development\"\n"
-    } else {
-        ""
-    };
-    format!(
-        "\n[auth]\n{url}\
-         # The *name* of the variable that holds the session signing key, not the\n\
-         # key. 32 bytes, base64url. `brocanth` will not invent one: a key minted at\n\
-         # startup logs every session out on each restart and differs between the\n\
-         # instances of a fleet, so a missing key stops the application instead.\n\
-         #\n\
-         #   export {var}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
-         signing_key_env = \"{var}\"\n\
-         # Development, over plain HTTP on localhost. In production this is\n\
-         # \"__Host-session\" with secure = true, and the two move together: a\n\
-         # __Host- cookie that is not Secure is a cookie no browser stores.\n\
-         cookie_name = \"session\"\n\
-         secure = false\n\
-         # Eight hours unattended, thirty days total. They answer different\n\
-         # questions: idle bounds a browser nobody is sitting at, absolute bounds a\n\
-         # stolen cookie that is being kept warm.\n\
-         idle_timeout = 28800\n\
-         absolute_timeout = 2592000\n"
-    )
+    let mut out = Vec::new();
+    if uses_postgres(project) {
+        out.push(
+            Setting::text(
+                "url",
+                "postgres://localhost/development",
+                "The Postgres database for accounts and sessions.",
+            )
+            .note(
+                "The tables are created at startup, named brocanth_auth_*. A URL can\n\
+                 carry a password, so no flag sets it.",
+            )
+            .secret(),
+        );
+    }
+    out.push(
+        Setting::text(
+            "signing_key_env",
+            &var,
+            "The name of the variable that holds the session signing key.",
+        )
+        .note(format!(
+            "Not the key. 32 bytes, base64url. `brocanth` will not invent one: a key\n\
+             minted at startup logs every session out on each restart and differs\n\
+             between the instances of a fleet, so a missing key stops the application.\n\
+             \n\
+             \x20 export {var}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+        )),
+    );
+    out.push(
+        Setting::text("cookie_name", "session", "The session cookie's name.").note(
+            "Development, over plain HTTP on localhost. In production this is\n\
+             \"__Host-session\" with secure = true, and the two move together: a\n\
+             __Host- cookie that is not Secure is a cookie no browser stores.",
+        ),
+    );
+    out.push(Setting::bool(
+        "secure",
+        false,
+        "Send the cookie over HTTPS only.",
+    ));
+    out.push(
+        Setting::integer(
+            "idle_timeout",
+            28800,
+            "Seconds of inactivity before a session is dead.",
+        )
+        .note(
+            "Eight hours unattended, thirty days total. Idle bounds a browser nobody is\n\
+                 sitting at; absolute bounds a stolen cookie that is being kept warm.",
+        ),
+    );
+    out.push(Setting::integer(
+        "absolute_timeout",
+        2592000,
+        "Seconds from creation before a session is dead, however much it was used.",
+    ));
+    out
 }
 
 /// The environment variable the generated project reads its key from.

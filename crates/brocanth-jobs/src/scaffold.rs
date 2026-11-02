@@ -28,8 +28,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Background jobs, as a choice on the `brocanth create` menu.
 pub struct Jobs;
@@ -57,12 +57,9 @@ impl Module for Jobs {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/jobs/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod jobs;");
-        plugin(s, project, "jobs", "Jobs");
+        configurable(s, project, "jobs", "Jobs", settings());
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(SECTION.to_string());
         }
     }
 }
@@ -73,18 +70,36 @@ impl Module for Jobs {
 /// proposes and the developer commits: a new project should run, and a
 /// project with reviewers should turn this off and keep the statements
 /// `Queue::schema_sql` hands out in a migration somebody read.
-const SECTION: &str = "\n[jobs]\n\
-                       url = \"postgres://localhost/development\"\n\
-                       # Create the three tables at startup if they are absent. Development\n\
-                       # only: see `Queue::schema_sql` for the statements to put in a\n\
-                       # migration instead.\n\
-                       migrate = true\n\
-                       # Run a worker in this process. A busy application moves this to a\n\
-                       # separate deployment, so that a job pegging a core is not pegging\n\
-                       # the core answering requests.\n\
-                       worker = true\n\
-                       queues = [\"default\"]\n\
-                       concurrency = 5\n";
+fn settings() -> Vec<Setting> {
+    vec![
+        Setting::text(
+            "url",
+            "postgres://localhost/development",
+            "The database the queue lives in.",
+        )
+        .note("A URL can carry a password, so no flag sets it.")
+        .secret(),
+        Setting::bool(
+            "migrate",
+            true,
+            "Create the three tables at startup if they are absent.",
+        )
+        .note(
+            "Development only: see `Queue::schema_sql` for the statements to put in a\n\
+             migration instead.",
+        ),
+        Setting::bool("worker", true, "Run a worker in this process.").note(
+            "A busy application moves this to a separate deployment, so that a job\n\
+             pegging a core is not pegging the core answering requests.",
+        ),
+        Setting::list(
+            "queues",
+            &["default"],
+            "Which queues the worker claims from.",
+        ),
+        Setting::integer("concurrency", 5, "How many jobs the worker runs at once."),
+    ]
+}
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "jobs");

@@ -22,8 +22,8 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 const LOGS: &str = "observability-logs";
 const HEALTH: &str = "observability-health";
@@ -56,10 +56,8 @@ impl Module for Observe {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/observability/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod observability;");
-        plugin(s, project, "observability", "Observe");
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(config_section(project));
-        } else {
+        configurable(s, project, "observability", "Observe", settings(project));
+        if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
     }
@@ -140,36 +138,80 @@ impl Module for Tracing {
     fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
 }
 
-fn config_section(project: &Project) -> String {
-    let mut out = String::from("\n[observability]\n");
+/// The settings each chosen child adds. A string that is empty turns its
+/// feature off, which is why the file writes some of them commented out.
+fn settings(project: &Project) -> Vec<Setting> {
+    let mut out = Vec::new();
     if project.has(LOGS) {
-        out.push_str(
-            "# \"json\" or \"text\". Unset: json when the environment is production.\n\
-             # format = \"json\"\n\
-             level = \"info\"\n",
+        out.push(
+            Setting::text(
+                "format",
+                "json",
+                "json or text. Empty: json in production, text elsewhere.",
+            )
+            .commented(),
         );
+        out.push(Setting::text(
+            "level",
+            "info",
+            "A level, or per-target levels: info,sqlx=warn. RUST_LOG wins when set.",
+        ));
     }
     if project.has(HEALTH) {
-        out.push_str(
-            "live_path = \"/up\"\n\
-             ready_path = \"/readyz\"\n\
-             # Seconds to answer \"not ready\" after SIGTERM, before the listener stops.\n\
-             drain_delay_secs = 0\n",
-        );
+        out.push(Setting::text(
+            "live_path",
+            "/up",
+            "Liveness. Empty turns it off.",
+        ));
+        out.push(Setting::text(
+            "ready_path",
+            "/readyz",
+            "Readiness: every plugin's check. Empty turns it off.",
+        ));
+        out.push(Setting::integer(
+            "drain_delay_secs",
+            0,
+            "Seconds to answer \"not ready\" after SIGTERM, before the listener stops.",
+        ));
     }
     if project.has(METRICS) {
-        out.push_str(
-            "metrics_path = \"/metrics\"\n\
-             # metrics_token = \"a long random string\"\n\
-             # metrics_bind = \"127.0.0.1:9100\"\n",
+        out.push(Setting::text(
+            "metrics_path",
+            "/metrics",
+            "Prometheus text. Empty turns it off.",
+        ));
+        out.push(
+            Setting::text(
+                "metrics_token",
+                "a long random string",
+                "When set, /metrics needs `Authorization: Bearer <token>`.",
+            )
+            .commented()
+            .secret(),
+        );
+        out.push(
+            Setting::text(
+                "metrics_bind",
+                "127.0.0.1:9100",
+                "When set, /metrics is served on this address, not the main listener.",
+            )
+            .commented(),
         );
     }
     if project.has(TRACING) {
-        out.push_str(
-            "# The collector. Unset: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.\n\
-             # otlp_endpoint = \"http://localhost:4318\"\n\
-             sample_ratio = 1.0\n",
+        out.push(
+            Setting::text(
+                "otlp_endpoint",
+                "http://localhost:4318",
+                "The collector. Empty: OTEL_EXPORTER_OTLP_ENDPOINT, then localhost:4318.",
+            )
+            .commented(),
         );
+        out.push(Setting::float(
+            "sample_ratio",
+            1.0,
+            "The share of new traces kept, from 0.0 to 1.0.",
+        ));
     }
     out
 }

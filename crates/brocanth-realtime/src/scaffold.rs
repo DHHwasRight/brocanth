@@ -28,8 +28,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The broker, as a choice on the `brocanth create` menu.
 ///
@@ -58,7 +58,7 @@ impl Module for Realtime {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/realtime/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod realtime;");
-        plugin(s, project, "realtime", "Realtime");
+        configurable(s, project, "realtime", "Realtime", settings());
         // Also what makes the broker a thing the project reads rather than
         // a field nothing touches: a generated application that warns on
         // its first build is a bad first minute.
@@ -76,9 +76,6 @@ impl Module for Realtime {
             // module needs the same line, and `use` twice does not
             // compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(SECTION.to_string());
         }
     }
 }
@@ -143,18 +140,43 @@ impl Module for WebSocket {
 
 /// The `[realtime]` section, with the numbers the crate defaults to and the
 /// arithmetic that decides whether they are right here.
-const SECTION: &str = "\n[realtime]\n\
-# Refused at the limit, not traded for an existing connection: evicting a\n\
-# subscriber to admit a new one lets anyone holding a socket knock everybody\n\
-# else off. The memory is max_clients * queue * the size of a frame.\n\
-max_clients = 1000\n\
-# A page asking for more than this is almost certainly asking row by row for\n\
-# something the collection wildcard covers.\n\
-max_subscriptions_per_client = 64\n\
-queue = 32\n\
-# drop-oldest, drop-newest or disconnect. The reader is told how many frames\n\
-# it missed either way, so a stale view is a thing the client can see.\n\
-overflow = \"drop-oldest\"\n";
+fn settings() -> Vec<Setting> {
+    vec![
+        Setting::integer(
+            "max_clients",
+            1000,
+            "How many connections the broker holds.",
+        )
+        .note(
+            "Refused at the limit, not traded for an existing connection: evicting a\n\
+             subscriber to admit a new one lets anyone holding a socket knock everybody\n\
+             else off. The memory is max_clients * queue * the size of a frame.",
+        ),
+        Setting::integer(
+            "max_subscriptions_per_client",
+            64,
+            "How many topics one client may hold.",
+        )
+        .note(
+            "A page asking for more than this is almost certainly asking row by row for\n\
+             something the collection wildcard covers.",
+        ),
+        Setting::integer(
+            "queue",
+            32,
+            "How many frames a mailbox holds before the overflow policy fires.",
+        ),
+        Setting::text(
+            "overflow",
+            "drop-oldest",
+            "What a full mailbox does: drop-oldest, drop-newest or disconnect.",
+        )
+        .note(
+            "The reader is told how many frames it missed either way, so a stale view\n\
+             is a thing the client can see.",
+        ),
+    ]
+}
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "realtime");

@@ -620,6 +620,213 @@ impl fmt::Display for Slot {
     }
 }
 
+/// One value a module can be configured with, declared once.
+///
+/// From one declaration the generated project takes two things: a key in
+/// `config/<env>.toml` when the project has the `config` module, and a flag
+/// on the binary's command line, `--<section>.<key>=VALUE`. The two cannot
+/// disagree about the name or the type, because neither is written by hand.
+///
+/// The settings struct in the module's generated plugin still holds the
+/// field, and its `Default` still says the value a project without a file
+/// starts from. A key here is a path into that struct: `pool.max_size` is
+/// `settings.pool.max_size`, which is also what the file's `[x.pool]`
+/// deserialises into.
+///
+/// See `docs/module-flags.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// The key inside the section, dotted for a subsection: `cookie`,
+    /// `pool.max_size`. Lower case, digits and `_`, as a TOML key and a
+    /// Rust field are both spelled.
+    pub key: &'static str,
+    /// What the value is.
+    pub kind: Kind,
+    /// The value `config/<env>.toml` is written with, as a TOML literal.
+    pub value: String,
+    /// What it does, in one line: the flag's `--help`, and the first line
+    /// of the file's comment.
+    pub help: &'static str,
+    /// More for the file's comment, under the help: what a reader editing
+    /// the file needs and a `--help` line has no room for. A `\n` starts
+    /// another comment line. Empty for none.
+    pub note: String,
+    /// Whether the command line may set it. Off for a secret: every user on
+    /// the machine can read another process's arguments.
+    pub flag: bool,
+    /// Whether the field is an `Option`. An empty value, `--x=` or `X=`,
+    /// sets `None`; an absent one leaves the layer below in charge. The file
+    /// writes the key commented out, because `None` has no TOML spelling.
+    pub optional: bool,
+    /// Whether the file writes the key commented out: an example, and the
+    /// plugin's default until somebody removes the `#`. Implied by
+    /// `optional`.
+    pub commented: bool,
+    /// A value that also means `None`, for an optional setting whose
+    /// operators think in a sentinel: `-1` for "no limit". Set with
+    /// [`Setting::none_as`]. Not a global rule: `-1` is invalid for an
+    /// unsigned field and a real value for some signed ones.
+    pub none_as: Option<&'static str>,
+}
+
+/// What a [`Setting`] holds.
+///
+/// Three kinds, because a flag arrives as text and the file needs to know
+/// whether to quote it. The generated code parses a flag into the field's
+/// own type, so any field that parses from a string can be declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A string, quoted in the file and never typed on the command line:
+    /// `--sessions.cookie=123` is the string `123`.
+    Text,
+    /// `true` or `false`.
+    Bool,
+    /// A whole number.
+    Integer,
+    /// A number with a fractional part.
+    Float,
+    /// A list of strings. In the file only, and in the environment by index
+    /// when the project has `config`: a flag has no spelling for a list that
+    /// would not also be a way to get one wrong.
+    List,
+}
+
+impl Setting {
+    /// A string.
+    pub fn text(key: &'static str, value: &str, help: &'static str) -> Self {
+        Self::new(key, Kind::Text, format!("{value:?}"), help)
+    }
+
+    /// A boolean.
+    pub fn bool(key: &'static str, value: bool, help: &'static str) -> Self {
+        Self::new(key, Kind::Bool, value.to_string(), help)
+    }
+
+    /// A whole number.
+    pub fn integer(key: &'static str, value: i64, help: &'static str) -> Self {
+        Self::new(key, Kind::Integer, value.to_string(), help)
+    }
+
+    /// A number with a fractional part.
+    pub fn float(key: &'static str, value: f64, help: &'static str) -> Self {
+        Self::new(key, Kind::Float, format!("{value:?}"), help)
+    }
+
+    /// A list of strings. No flag; see [`Kind::List`].
+    pub fn list(key: &'static str, value: &[&str], help: &'static str) -> Self {
+        let items: Vec<String> = value.iter().map(|item| format!("{item:?}")).collect();
+        let mut setting = Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help);
+        setting.flag = false;
+        setting
+    }
+
+    fn new(key: &'static str, kind: Kind, value: String, help: &'static str) -> Self {
+        Self {
+            key,
+            kind,
+            value,
+            help,
+            note: String::new(),
+            flag: true,
+            optional: false,
+            commented: false,
+            none_as: None,
+        }
+    }
+
+    /// The file writes this key commented out, as an example.
+    pub fn commented(mut self) -> Self {
+        self.commented = true;
+        self
+    }
+
+    /// The field is an `Option`, and `alias` means `None` as well as an
+    /// empty value does. `--help` and the file's comment say so.
+    pub fn none_as(mut self, alias: &'static str) -> Self {
+        self.optional = true;
+        self.none_as = Some(alias);
+        self
+    }
+
+    /// The help, with what means `None` for an optional setting.
+    pub fn full_help(&self) -> String {
+        match (self.optional, self.none_as) {
+            (false, _) => self.help.to_string(),
+            (true, None) => format!("{} Empty means none.", self.help),
+            (true, Some(alias)) => format!("{} Empty or `{alias}` means none.", self.help),
+        }
+    }
+
+    /// The field is an `Option`: an empty value sets `None`.
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    /// More for the file's comment, under the help.
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = note.into();
+        self
+    }
+
+    /// No flag for this one: the file and the environment only.
+    ///
+    /// For a secret. A flag is in `ps` output for every user on the host and
+    /// in the shell history of whoever typed it.
+    pub fn secret(mut self) -> Self {
+        self.flag = false;
+        self
+    }
+}
+
+/// The TOML a section's declared settings are written as.
+///
+/// Keys without a dot first, under `[section]`; then each subsection under
+/// its own header, in the order its first key was declared. Each key carries
+/// its help as a comment.
+pub fn config_section(section: &str, settings: &[Setting]) -> String {
+    let mut out = format!("\n[{section}]\n");
+    let mut subsections: Vec<&str> = Vec::new();
+    for setting in settings {
+        match setting.key.rsplit_once('.') {
+            None => out.push_str(&config_line(setting.key, setting)),
+            Some((sub, _)) => {
+                if !subsections.contains(&sub) {
+                    subsections.push(sub);
+                }
+            }
+        }
+    }
+    for sub in subsections {
+        out.push_str(&format!("\n[{section}.{sub}]\n"));
+        for setting in settings {
+            if let Some((this, key)) = setting.key.rsplit_once('.') {
+                if this == sub {
+                    out.push_str(&config_line(key, setting));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn config_line(key: &str, setting: &Setting) -> String {
+    let mut out = format!("# {}\n", setting.full_help());
+    if !setting.note.is_empty() {
+        for line in setting.note.split('\n') {
+            out.push_str(format!("# {line}").trim_end());
+            out.push('\n');
+        }
+    }
+    let comment = if setting.optional || setting.commented {
+        "# "
+    } else {
+        ""
+    };
+    out.push_str(&format!("{comment}{key} = {}\n", setting.value));
+    out
+}
+
 /// A second thing to compile: another `[[bin]]` in the generated manifest.
 ///
 /// A backoffice that is its own binary is the case this exists for. The
@@ -644,6 +851,7 @@ pub struct Scaffold {
     files: BTreeMap<String, Owned>,
     slots: BTreeMap<Slot, Vec<Owned>>,
     bins: Vec<(String, Binary)>,
+    settings: Vec<(String, String, Setting)>,
     problems: Vec<String>,
     writing: String,
 }
@@ -725,6 +933,40 @@ impl Scaffold {
             return;
         }
         self.bins.push((self.writing.clone(), bin));
+    }
+
+    /// Declare one setting of a section this module owns.
+    ///
+    /// Prefer [`snippet::configurable`], which declares the settings and
+    /// writes everything that follows from them. This is the half that
+    /// records them, for a module that registers its plugin some other way.
+    ///
+    /// Two declarations of one key are a problem, named with both modules:
+    /// the second would be a flag `clap` refuses and a key the file holds
+    /// once.
+    pub fn setting(&mut self, section: &str, setting: Setting) {
+        let path = format!("{section}.{}", setting.key);
+        if let Some((by, _, _)) = self
+            .settings
+            .iter()
+            .find(|(_, s, other)| format!("{s}.{}", other.key) == path)
+        {
+            self.problems.push(format!(
+                "`{by}` and `{}` both declare the setting `{path}`",
+                self.writing
+            ));
+            return;
+        }
+        self.settings
+            .push((self.writing.clone(), section.to_string(), setting));
+    }
+
+    /// Every declared setting: the module that declared it, its section,
+    /// and the setting. In the order the modules ran.
+    pub fn settings(&self) -> impl Iterator<Item = (&str, &str, &Setting)> {
+        self.settings
+            .iter()
+            .map(|(by, section, setting)| (by.as_str(), section.as_str(), setting))
     }
 
     /// Complain about something only this module can know is wrong. The CLI
@@ -874,6 +1116,37 @@ pub fn order<'a>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_dotted_key_is_a_subsection_after_the_plain_keys() {
+        let text = config_section(
+            "db",
+            &[
+                Setting::integer("pool.max_size", 5, "Connections at most."),
+                Setting::text("url", "sqlite://db", "Where the database is.").note("Two\nlines"),
+                Setting::bool("pool.lazy", true, "Open on first use."),
+            ],
+        );
+        assert_eq!(
+            text,
+            "\n[db]\n# Where the database is.\n# Two\n# lines\nurl = \"sqlite://db\"\n\
+             \n[db.pool]\n# Connections at most.\nmax_size = 5\n# Open on first use.\nlazy = true\n"
+        );
+    }
+
+    #[test]
+    fn one_key_declared_twice_names_both_modules() {
+        let mut s = Scaffold::new();
+        s.now_writing("sessions");
+        s.setting("sessions", Setting::text("cookie", "a", "A."));
+        s.now_writing("other");
+        s.setting("sessions", Setting::text("cookie", "b", "B."));
+        assert_eq!(
+            s.problems(),
+            ["`sessions` and `other` both declare the setting `sessions.cookie`"]
+        );
+        assert_eq!(s.settings().count(), 1);
+    }
+
     struct Noop;
     impl Module for Noop {
         fn manifest(&self) -> Manifest {
@@ -971,7 +1244,49 @@ mod tests {
 /// Not sugar: each one is a place where two modules must agree, and the
 /// agreement belongs in one function rather than in each of them.
 pub mod snippet {
-    use super::{Project, Scaffold, Slot};
+    use super::{Kind, Project, Scaffold, Setting, Slot};
+
+    /// Registers a plugin whose settings are declared, and writes everything
+    /// that follows from the declaration.
+    ///
+    /// * With the `config` module: the `[key]` section, generated from the
+    ///   settings, and the configured registration. The flags reach the
+    ///   file's loader as its top layer when the project turns them on.
+    /// * Without it: a registration that starts from `Settings::default()`
+    ///   and applies whatever flags this run was given, through a function
+    ///   the CLI generates per section in `src/plugins/mod.rs`.
+    ///
+    /// The provider line too, as [`plugin`] writes it. `key` is the module's
+    /// key, its plugin's module name and its section; `ty` the plugin type.
+    pub fn configurable(
+        s: &mut Scaffold,
+        project: &Project,
+        key: &str,
+        ty: &str,
+        settings: Vec<Setting>,
+    ) {
+        if project.has("config") {
+            s.at(Slot::ConfigSections)
+                .block(super::config_section(key, &settings));
+        }
+        // Without a file, a declared setting still has the environment
+        // and, unless it is a secret, a flag.
+        if project.has("config") || settings.iter().all(|setting| setting.kind == Kind::List) {
+            s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+        } else {
+            s.at(Slot::AppPlugins).block(format!(
+                "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
+                 \x20           crate::plugins::{ident}_settings(&given)?,\n\
+                 \x20       ));\n",
+                ident = key.replace('-', "_"),
+            ));
+        }
+        s.at(Slot::PluginsInstalled)
+            .line(format!("{key} crate::plugins::{key}::{ty}"));
+        for setting in settings {
+            s.setting(key, setting);
+        }
+    }
 
     /// The statement that registers a plugin instance in the application.
     ///

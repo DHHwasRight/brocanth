@@ -66,18 +66,28 @@ run = "cargo test"
 //!
 //! My Blog -- a brocanth application.
 //!
-//! No command line was asked for, so this binary does one thing. Everything it
-//! contains is in `src/app.rs`; `brocanth add commands` turns this into a
-//! command line with `serve` as one of its commands.
+//! No command line was asked for, so this binary does one thing. It takes the
+//! flags its modules declared, which `--help` lists and `src/flags.rs`
+//! renames, and nothing else. Everything it contains is in `src/app.rs`;
+//! `brocanth add commands` turns this into a command line with `serve` as one
+//! of its commands.
 
 mod app;
+mod flags;
 mod pages;
 mod plugins;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match app::serve(&app::default_addr()) {
+    let served = plugins::read_line().and_then(|helped| {
+        if helped {
+            Ok(())
+        } else {
+            app::serve(&app::default_addr())
+        }
+    });
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
@@ -86,7 +96,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 0f4669b6e480d9d4
+// brocanth-digest: 00cc5d3be3dca3a4
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1156,13 +1166,13 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth::plugin_api::Plugin;
 
-        // No file lookup, no merge order, no TOML parser: the core takes
-        // values that are already built, so each plugin below is handed a
-        // literal the compiler checks. Add the config plugin when a file is
-        // wanted; nothing else changes.
+        // No file and no TOML parser. Each plugin below starts from its
+        // defaults and takes what this run was given on top: the
+        // environment, then the flags.
+        let given = crate::plugins::given()?;
         let builder = $builder;
         let builder = builder.plugin(crate::plugins::realtime::Realtime::new(
-            crate::plugins::realtime::Settings::default(),
+            crate::plugins::realtime_settings(&given)?,
         ));
         builder
     }};
@@ -1234,6 +1244,318 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
+/// One setting a module declared, by the key it sets.
+pub struct Setting {
+    /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
+    /// unless `src/flags.rs` renames it.
+    pub path: &'static str,
+    /// The line `--help` prints.
+    pub help: &'static str,
+    /// Whether a flag may set it. A secret has none: every user on the host
+    /// can read a process's arguments.
+    pub flag: bool,
+    /// The environment variable that sets it.
+    pub env: &'static str,
+}
+
+/// Every setting the modules declared. `brocanth add` rewrites this list;
+/// `src/flags.rs` renames or hides a flag.
+pub const SETTINGS: &[Setting] = &[
+    Setting {
+        path: "realtime.max_clients",
+        help: "How many connections the broker holds.",
+        flag: true,
+        env: "MY_BLOG_REALTIME__MAX_CLIENTS",
+    },
+    Setting {
+        path: "realtime.max_subscriptions_per_client",
+        help: "How many topics one client may hold.",
+        flag: true,
+        env: "MY_BLOG_REALTIME__MAX_SUBSCRIPTIONS_PER_CLIENT",
+    },
+    Setting {
+        path: "realtime.queue",
+        help: "How many frames a mailbox holds before the overflow policy fires.",
+        flag: true,
+        env: "MY_BLOG_REALTIME__QUEUE",
+    },
+    Setting {
+        path: "realtime.overflow",
+        help: "What a full mailbox does: drop-oldest, drop-newest or disconnect.",
+        flag: true,
+        env: "MY_BLOG_REALTIME__OVERFLOW",
+    },
+];
+
+/// One value this run was given, above the defaults.
+pub struct Given {
+    /// What it sets.
+    pub setting: &'static Setting,
+    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    pub from: String,
+    /// The value, as typed. Empty is `None` for an `Option` setting.
+    pub value: String,
+}
+
+/// The name each flag answers to after `src/flags.rs`, whether the flags are
+/// read or not.
+///
+/// A rename of a key no flag sets, a name that is not spelled as a flag, and
+/// two flags under one name each stop the binary: each would otherwise be a
+/// flag that does nothing, or does something else.
+fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
+    for (path, _) in crate::flags::RENAMES {
+        if !flags().any(|setting| setting.path == *path) {
+            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
+            return Err(format!(
+                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
+                known.join(", ")
+            ));
+        }
+    }
+    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
+    for setting in flags() {
+        let name = crate::flags::RENAMES
+            .iter()
+            .find(|(path, _)| *path == setting.path)
+            .map_or(setting.path, |(_, name)| *name);
+        if name.is_empty() {
+            continue;
+        }
+        let spelled = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        let taken = ["help", "version", "settings"].contains(&name);
+        if !spelled || name.starts_with(['-', '.', '_']) || taken {
+            return Err(format!(
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
+            ));
+        }
+        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            return Err(format!(
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                other.path, setting.path
+            ));
+        }
+        names.push((setting, name));
+    }
+    Ok(names)
+}
+
+/// The flags this run reads: every one, because there is no file.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    names()
+}
+
+/// What this run was given above the defaults, lowest first: each variable
+/// that is set, then each flag in the order typed. A later value for one key
+/// replaces an earlier one.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
+    for setting in SETTINGS {
+        if let Some(value) = std::env::var_os(setting.env) {
+            given.push(Given {
+                setting,
+                from: format!("${}", setting.env),
+                value: value.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    let names = flag_names()?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline) = match written.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (written, None),
+        };
+        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => rest
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
+        };
+        given.push(Given {
+            setting,
+            from: format!("--{name}"),
+            value,
+        });
+    }
+    Ok(given)
+}
+
+/// Refuses anything on the command line that is not a flag, and answers
+/// `--help` and `--settings`. `true` when it printed one of those, so `main`
+/// stops there.
+///
+/// This binary has no command line of its own: `brocanth add commands` gives
+/// it one, and `clap` does this.
+pub fn read_line() -> Result<bool, String> {
+    let names = flag_names()?;
+    let mut rest = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = rest.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("Flags:");
+            for (setting, name) in &names {
+                println!("  --{name} <VALUE>  {}", setting.help);
+            }
+            println!("  --settings  every settings layer, then the merged values");
+            return Ok(true);
+        }
+        if arg == "--settings" {
+            print!("{}", settings_report()?);
+            return Ok(true);
+        }
+        let written = arg.strip_prefix("--").unwrap_or_default();
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if name.is_empty() || !names.iter().any(|(_, known)| *known == name) {
+            return Err(format!(
+                "unknown argument `{arg}`\nhelp: `--help` lists the flags"
+            ));
+        }
+        // `--name VALUE`: the next argument is the value, not a flag.
+        if !written.contains('=') {
+            rest.next();
+        }
+    }
+    Ok(false)
+}
+
+/// Each setting as the plugin's `Default` says, before any layer.
+fn defaults() -> Vec<(&'static str, String)> {
+    let realtime = crate::plugins::realtime::Settings::default();
+    vec![
+        (
+            "realtime.max_clients",
+            format!("{:?}", realtime.max_clients),
+        ),
+        (
+            "realtime.max_subscriptions_per_client",
+            format!("{:?}", realtime.max_subscriptions_per_client),
+        ),
+        ("realtime.queue", format!("{:?}", realtime.queue)),
+        ("realtime.overflow", format!("{:?}", realtime.overflow)),
+    ]
+}
+
+/// One value, as the type of the field it sets.
+fn parsed<T>(given: &Given) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    given
+        .value
+        .parse()
+        .map_err(|e| format!("{} is {:?}: {e}", given.from, given.value))
+}
+
+/// `[realtime]`, as this binary runs it without a file: the plugin's
+/// defaults, then the environment, then the flags.
+pub fn realtime_settings(given: &[Given]) -> Result<crate::plugins::realtime::Settings, String> {
+    let mut settings = crate::plugins::realtime::Settings::default();
+    for given in given {
+        match given.setting.path {
+            "realtime.max_clients" => settings.max_clients = parsed(given)?,
+            "realtime.max_subscriptions_per_client" => {
+                settings.max_subscriptions_per_client = parsed(given)?
+            }
+            "realtime.queue" => settings.queue = parsed(given)?,
+            "realtime.overflow" => settings.overflow = parsed(given)?,
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+/// Each setting as the plugin holds it, after every layer.
+fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
+    let realtime = realtime_settings(given)?;
+    Ok(vec![
+        (
+            "realtime.max_clients",
+            format!("{:?}", realtime.max_clients),
+        ),
+        (
+            "realtime.max_subscriptions_per_client",
+            format!("{:?}", realtime.max_subscriptions_per_client),
+        ),
+        ("realtime.queue", format!("{:?}", realtime.queue)),
+        ("realtime.overflow", format!("{:?}", realtime.overflow)),
+    ])
+}
+
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let given = given()?;
+    let secret = |path: &str| SETTINGS.iter().any(|s| s.path == path && !s.flag);
+    let shown = |path: &str, value: String| {
+        if secret(path) {
+            "(secret)".to_string()
+        } else {
+            value
+        }
+    };
+    let width = SETTINGS.iter().map(|s| s.path.len()).max().unwrap_or(0);
+    let mut out = String::from("layers, lowest precedence first\n\n   1  defaults\n");
+    for (path, value) in defaults() {
+        out.push_str(&format!(
+            "        {path:<width$}  = {}\n",
+            shown(path, value)
+        ));
+    }
+    for (n, label, prefix) in [(2, "environment", "$"), (3, "flags", "--")] {
+        out.push_str(&format!("\n  {n:>2}  {label}\n"));
+        let mine: Vec<&Given> = given
+            .iter()
+            .filter(|g| g.from.starts_with(prefix))
+            .collect();
+        if mine.is_empty() {
+            out.push_str("        (sets nothing)\n");
+        }
+        for g in mine {
+            let value = shown(g.setting.path, format!("{:?}", g.value));
+            let path = g.setting.path;
+            out.push_str(&format!("        {path:<width$}  = {value}  {}\n", g.from));
+        }
+    }
+    out.push_str("\nmerged\n");
+    for (path, value) in merged(&given)? {
+        let layer = match given.iter().rev().find(|g| g.setting.path == path) {
+            Some(g) if g.from.starts_with('$') => "2 environment",
+            Some(_) => "3 flags",
+            None => "1 defaults",
+        };
+        let value = shown(path, value);
+        out.push_str(&format!(
+            "  {path:<w$}  = {value}  {layer}\n",
+            w = width + 6
+        ));
+    }
+    Ok(out)
+}
+
 /// How long a stop waits: [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE).
 ///
 /// This project has no configuration file, so the constant is the answer.
@@ -1271,7 +1593,35 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 72e715d612f4037a
+// brocanth-digest: 7127f6bf431836b5
+===== src/flags.rs =====
+//! The command-line flags of this binary, and the one place to rename them.
+//!
+//! A module declares each of its settings once. From that the binary takes a
+//! flag, `--<module>.<key>=VALUE`, an environment variable,
+//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list in
+//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
+//! and never again.
+
+/// Whether a project with a config file reads the flags too.
+///
+/// Off: with the `config` module, the file and the environment are the
+/// sources, and a flag is refused with a pointer to this line. On: a flag
+/// outranks both, for one run. Without the `config` module the flags are
+/// always read, and this is not.
+#[allow(dead_code)]
+pub const WITH_CONFIG: bool = false;
+
+/// Flags under another name: the key as the module declares it, and the flag
+/// this binary answers to instead, without `--`. An empty name hides the
+/// flag.
+///
+/// ```text
+/// ("sessions.cookie", "cookie"),
+/// ("storage.root", ""),
+/// ```
+pub const RENAMES: &[(&str, &str)] = &[];
 ===== src/plugins/realtime/mod.rs =====
 //! The realtime broker, as this application registers it.
 //!
@@ -1534,8 +1884,8 @@ title = "My Blog"
 enabled = ["realtime"]
 
 [modules.realtime]
-files = ["src/plugins/realtime/"]
-config = []
+files = ["src/flags.rs", "src/plugins/realtime/"]
+config = ["realtime"]
 crates = ["brocanth-realtime"]
 
-# brocanth-digest: a7bf6e1de5144e39
+# brocanth-digest: 4fdc41338123cd7d

@@ -202,6 +202,7 @@ mod de;
 mod dump;
 pub mod env;
 pub mod formats;
+mod layers;
 mod plugin;
 pub mod redact;
 pub mod ser;
@@ -229,6 +230,7 @@ pub use config::{
 };
 pub use de::{from_value, DeError, ValueDeserializer};
 pub use dump::Dump;
+pub use layers::Layers;
 pub use plugin::{
     config_of, effective_of, AppBuilderConfigExt, ConfigPlugin, ConfiguredPlugin, Effective,
     SectionClaim, SharedConfig,

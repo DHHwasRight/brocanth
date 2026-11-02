@@ -53,8 +53,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Authorisation, as a choice on the `brocanth create` menu.
 ///
@@ -89,7 +89,7 @@ impl Module for Policy {
         let dialect = dialect(project);
         s.file("src/plugins/policy/mod.rs", plugin_rs(project, dialect));
         s.at(Slot::PluginsMod).line("pub mod policy;");
-        plugin(s, project, "policy", "Policies");
+        configurable(s, project, "policy", "Policies", settings(project, dialect));
         // The dialect is read at startup, so a brand-new project uses the
         // value it was given rather than warning that nothing does.
         s.at(Slot::AppContext).block(
@@ -103,9 +103,6 @@ impl Module for Policy {
             // module needs the same line, and `use` twice does not
             // compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(section(project, dialect));
         }
     }
 }
@@ -124,19 +121,24 @@ fn dialect(project: &Project) -> &'static str {
 }
 
 /// The `[policy]` section of `config/development.toml`.
-fn section(project: &Project, dialect: &str) -> String {
+fn settings(project: &Project, dialect: &str) -> Vec<Setting> {
     let agrees = if project.has("model") {
-        "# This follows `[model] url`, which the scaffold pointed at SQLite. Move the\n\
-         # two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and\n\
-         # only one of them parses, so a condition compiled for the wrong dialect is\n\
-         # valid SQL that the engine rejects at the worst possible moment.\n"
+        "This follows `[model] url`, which the scaffold pointed at SQLite. Move the\n\
+         two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and\n\
+         only one of them parses, so a condition compiled for the wrong dialect is\n\
+         valid SQL that the engine rejects at the worst possible moment."
     } else {
-        "# postgres or sqlite. Nothing in this project opens a database yet, so this\n\
-         # is the dialect your conditions are compiled for and nothing else. Add the\n\
-         # model later and these two have to agree: `IS NOT DISTINCT FROM` and\n\
-         # `IS NOT` mean the same thing and only one of them parses.\n"
+        "Nothing in this project opens a database yet, so this is the dialect your\n\
+         conditions are compiled for and nothing else. Add the model later and these\n\
+         two have to agree: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing\n\
+         and only one of them parses."
     };
-    format!("\n[policy]\n{agrees}dialect = \"{dialect}\"\n")
+    vec![Setting::text(
+        "dialect",
+        dialect,
+        "The SQL a condition compiles to: postgres or sqlite.",
+    )
+    .note(agrees)]
 }
 
 fn plugin_rs(project: &Project, dialect: &str) -> String {

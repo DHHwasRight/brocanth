@@ -42,6 +42,7 @@
 //! | `-12`, `0`, `9000` | integer |
 //! | `1.5`, `2e3` | float |
 //! | `"true"` (with the quotes) | the string `true` |
+//! | nothing: `MY_APP_X__Y=` | empty: `None` for an `Option`, `""` for a string |
 //! | anything else | string |
 //!
 //! Inference is the only option that does not make the common case wrong. A
@@ -244,7 +245,10 @@ impl Node {
 
 /// Types one variable's text. See the module documentation for the rule and
 /// the reason.
-fn infer(raw: &str) -> ValueKind {
+pub(crate) fn infer(raw: &str) -> ValueKind {
+    if raw.is_empty() {
+        return ValueKind::Empty;
+    }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return ValueKind::String(raw[1..raw.len() - 1].to_string());
     }

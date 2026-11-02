@@ -1,7 +1,7 @@
 //! `model` -- SeaORM, validations and migrations.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The model layer.
 ///
@@ -43,7 +43,19 @@ impl Module for Model {
             s.at(Slot::CommandsMod).line("pub mod migrate;");
         }
         s.at(Slot::PluginsMod).line("pub mod model;");
-        plugin(s, project, "model", "Model");
+        configurable(
+            s,
+            project,
+            "model",
+            "Model",
+            vec![Setting::text(
+                "url",
+                "sqlite://db/development.sqlite?mode=rwc",
+                "The database: a SQLite file, or a Postgres URL.",
+            )
+            .note("A URL can carry a password, so no flag sets it.")
+            .secret()],
+        );
         s.at(Slot::AppContext).block(
             "    let db: &crate::plugins::model::Db = cx.extract();\n\
             \x20   eprintln!(\"database: {}\", db.url);"
@@ -55,11 +67,6 @@ impl Module for Model {
             // module needs the same line, and `use` twice does not
             // compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        if project.has("config") {
-            s.at(Slot::ConfigSections).block(
-                "\n[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n".to_string(),
-            );
         }
     }
 }
