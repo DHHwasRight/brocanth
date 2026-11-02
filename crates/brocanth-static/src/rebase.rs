@@ -20,6 +20,7 @@
 
 /// The attributes whose value is a URL, or (`dp-layout`) a path prefix that
 /// dp-swap compares with `location.pathname`, which carries the base.
+/// `dp-get` is dp-swap's request attribute: it fetches the URL as written.
 pub const ATTRIBUTES: &[&str] = &[
     "href",
     "src",
@@ -28,6 +29,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "poster",
     "srcset",
     "dp-layout",
+    "dp-get",
 ];
 
 /// `"/d3set/"`, `"d3set"` and `"/d3set"` are the same base: `"/d3set"`.
@@ -308,6 +310,15 @@ mod tests {
         assert_eq!(
             html(page, B),
             r#"<a href="/d3set/charts/bar" title="/not-a-url" data-x="/y">x</a><img src='/d3set/i.png' alt=/z><form action=/d3set/go method=post></form>"#
+        );
+    }
+
+    #[test]
+    fn dp_get_requests_carry_the_base() {
+        let page = r##"<a href="/cal/2026-05" dp-get="/cal/2026-05" dp-target="#c">x</a>"##;
+        assert_eq!(
+            html(page, B),
+            r##"<a href="/d3set/cal/2026-05" dp-get="/d3set/cal/2026-05" dp-target="#c">x</a>"##
         );
     }
 

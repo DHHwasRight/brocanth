@@ -81,7 +81,7 @@ links from the root. `base("/repo")` prefixes every root-relative URL
 (`/x`, not `//cdn/x`, not `x`) in what the export writes:
 
 - the attributes `href`, `src`, `action`, `formaction`, `poster`,
-  `srcset` and `dp-layout` of every HTML page and partial;
+  `srcset`, `dp-layout` and `dp-get` of every HTML page and partial;
 - `url(...)` and `@import` in `.css` assets, `<style>` elements and
   `style` attributes.
 
