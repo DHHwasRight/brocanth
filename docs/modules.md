@@ -675,6 +675,16 @@ without editing the CLI.
   nothing asks. `brocanth.toml` lists the present ones as `adapted_to`,
   for the `remove` that will need to know which modules to rewrite.
 
+**One check for a selection.** `create::selection` runs the four rules in
+order: not available, a child without its parent, a module without what it
+`needs`, and a clash. `create` (flags and chooser), `add` and
+`create::scaffold` itself call it. A missing parent or need is refused,
+never added: a flag that quietly adds a module is a flag nobody can read.
+The `help:` line names what to type at the door the selection came in
+through (`--with …` or `brocanth add …`). Before this, `scaffold` trusted
+its caller, and a caller that skipped the flag checks wrote a
+`middleware-csrf` project with no `middleware`, which did not build.
+
 ---
 
 ## 8. What to do, in order
