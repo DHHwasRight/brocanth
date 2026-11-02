@@ -45,6 +45,14 @@ impl Module for Jobs {
             "Background jobs, with retries and a dead letter",
         )
         .krate(Dep::brocanth("brocanth-jobs"))
+        // The generated job derives `Serialize` and `Deserialize`: a payload
+        // is stored as JSON. The config plugin brings serde too, but only
+        // when `config` is chosen, so the queue asks for its own.
+        .krate(
+            Dep::version("serde", "1")
+                .feature("derive")
+                .note("a job's payload is stored as JSON"),
+        )
         // Only for the order of the `[jobs]` section and the builder line:
         // the queue reads its URL from the file the config plugin loaded.
         .after("config")

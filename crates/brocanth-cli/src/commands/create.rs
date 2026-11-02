@@ -1564,7 +1564,11 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // `expect` and not `?`: `ask` already refused a pick whose module is
     // not in this build, and two sources for one name is a mistake in this
     // repository's own registry rather than anything a user typed.
-    for mut dep in merged(&a.picks).expect("the registry does not disagree with itself") {
+    let mut picked = merged(&a.picks).expect("the registry does not disagree with itself");
+    // serde is the one registry crate that both a module and this file may
+    // ask for, so it is held back and written once, after the others.
+    let serde = serde_dep(&mut picked, needs_serde(a, built));
+    for mut dep in picked {
         // Accounts go to Postgres when the project already has a Postgres
         // database. A manifest is static, so this one feature depends on
         // the other picks here; `brocanth_auth::scaffold::POSTGRES_WITH` is
@@ -1596,11 +1600,8 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
                 .to_string(),
         );
     }
-    if needs_serde(a, built) {
-        deps.push(
-            "serde = { version = \"1\", features = [\"derive\"] }  # the config plugin reads typed sections"
-                .to_string(),
-        );
+    if let Some(serde) = &serde {
+        deps.push(source_of(a, serde));
     }
 
     // The receipt, read from the other end. Every module that was not
@@ -1613,7 +1614,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
             absent.push(pair);
         }
     }
-    if !needs_serde(a, built) {
+    if serde.is_none() {
         absent.push(("serde", "nothing here is deserialised"));
     }
     // The column is measured rather than guessed. It was 17, which fitted
@@ -1711,6 +1712,31 @@ fn instances(built: &Built) -> Vec<&str> {
 /// literal in `main` needs no deserialiser, and the scaffold derives none.
 fn needs_serde(a: &Answers, built: &Built) -> bool {
     a.has("config") && !built.slot_is_empty(Slot::ConfigSections)
+}
+
+/// The project's serde line, if anything wants one.
+///
+/// Takes serde out of `picked`, where a module put it, and merges what the
+/// config plugin needs into it. Without this, a module that derives serde
+/// beside `config` writes the crate twice, and the same module without
+/// `config` does not compile.
+fn serde_dep(picked: &mut Vec<Dep>, for_config: bool) -> Option<Dep> {
+    let asked = picked
+        .iter()
+        .position(|dep| dep.name == "serde")
+        .map(|at| picked.remove(at));
+    if !for_config {
+        return asked;
+    }
+    let mut serde = Dep::version("serde", "1")
+        .feature("derive")
+        .note("the config plugin reads typed sections");
+    for feature in asked.into_iter().flat_map(|dep| dep.features) {
+        if !serde.features.contains(&feature) {
+            serde.features.push(feature);
+        }
+    }
+    Some(serde)
 }
 
 /// `src/app.rs`: what this binary is, in the order it happens.
@@ -5167,6 +5193,63 @@ mod tests {
 
         let with_model = cargo_toml(&answers(&["model"]), &built(&["model"]));
         assert!(declared(&with_model, "brocanth-model"), "{with_model}");
+    }
+
+    #[test]
+    fn a_module_that_derives_serde_gets_it_once_with_or_without_config() {
+        // The generated job derives serde. It used to arrive only with
+        // `config`, so `--with jobs` alone did not compile.
+        let count = |manifest: &str| {
+            manifest
+                .lines()
+                .filter(|l| l.starts_with("serde = "))
+                .count()
+        };
+        let alone = cargo_toml(&answers(&["jobs"]), &built(&["jobs"]));
+        assert_eq!(count(&alone), 1, "{alone}");
+        assert!(alone.contains("features = [\"derive\"]"), "{alone}");
+        assert!(!alone.contains("nothing here is deserialised"), "{alone}");
+
+        let configured = cargo_toml(&answers(&["config", "jobs"]), &built(&["config", "jobs"]));
+        assert_eq!(count(&configured), 1, "{configured}");
+    }
+
+    /// `jobs` without `config`, built for real: the case the unit test above
+    /// guards, through cargo. `cargo test -p brocanth-cli -- --ignored`.
+    #[test]
+    #[ignore = "runs cargo build over a generated application"]
+    fn jobs_compiles_without_a_config_file() {
+        let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-jobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            name: "jobs-test".into(),
+            title: "Jobs Test".into(),
+            picks: vec!["jobs"],
+            local: Some(brocanth.display().to_string()),
+            git: false,
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "--all-targets"])
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "jobs without config did not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

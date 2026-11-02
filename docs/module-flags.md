@@ -295,8 +295,5 @@ A project with no declared setting gets none of this.
    comment says it is. A declaration cannot fix that alone: it needs
    `plugin_hooking_from_config` in `brocanth-config`, and `Deserialize` on
    the middleware config types.
-2. **`jobs` without `config` does not compile.** The generated job derives
-   `serde`, and `serde` is a dependency only with `config`. This predates
-   the settings work; found while building every module without `config`.
-3. **The `[server]` section.** `shutdown_grace_secs` belongs to the
+2. **The `[server]` section.** `shutdown_grace_secs` belongs to the
    framework, not to a module, so it has no flag yet.

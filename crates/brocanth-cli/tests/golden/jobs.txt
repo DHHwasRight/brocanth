@@ -1960,6 +1960,6 @@ crates = ["brocanth-config"]
 [modules.jobs]
 files = ["src/flags.rs", "src/plugins/jobs/"]
 config = ["jobs"]
-crates = ["brocanth-jobs"]
+crates = ["brocanth-jobs", "serde"]
 
-# brocanth-digest: 6551ae27e9e9d865
+# brocanth-digest: 0c2c3122b4ffc08a

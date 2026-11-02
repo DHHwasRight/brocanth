@@ -6437,7 +6437,7 @@ crates = ["brocanth-cache"]
 [modules.jobs]
 files = ["src/plugins/jobs/"]
 config = ["jobs"]
-crates = ["brocanth-jobs"]
+crates = ["brocanth-jobs", "serde"]
 
 [modules.auth]
 files = ["src/plugins/auth/"]
@@ -6554,4 +6554,4 @@ files = [".github/workflows/ci.yml"]
 config = []
 crates = []
 
-# brocanth-digest: 65c3beb74dd3f55c
+# brocanth-digest: eb51dda05dbbba13
