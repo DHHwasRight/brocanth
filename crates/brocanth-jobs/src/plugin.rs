@@ -51,12 +51,25 @@
 //! application that never registered this plugin does not compile:
 //! `cx.get::<Queue, _>()`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::queue::Queue;
 use crate::registry::JobRegistry;
 use crate::worker::{WorkerConfig, WorkerHandle};
+
+/// What the worker keeps of the grace period to give back the jobs that did
+/// not finish, so they are on the queue before the process exits.
+const GIVE_BACK: Duration = Duration::from_secs(2);
+
+/// The running jobs' time when the shutdown has no budget: a day, which is
+/// "as long as they take" without an `Instant` overflow.
+const UNBOUNDED: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What [`JobsPlugin`] is built from.
 pub struct JobsConfig {
@@ -100,7 +113,9 @@ impl JobsConfig {
         self
     }
 
-    /// Create the queue's tables during `before_start` if they are absent.
+    /// Create the queue's tables if they are absent, in the readiness check,
+    /// the first time it runs. The server awaits every check once before it
+    /// listens, so the tables are there before the first job is claimed.
     ///
     /// Off by default, and it should stay off anywhere a human reviews
     /// migrations: §4.3 of the plan says the generator proposes and the
@@ -129,14 +144,11 @@ impl JobsPlugin {
         &self.queue
     }
 
-    /// Takes the running worker's handle, so the application can shut it down.
+    /// Takes the running worker's handle, for an application that stops the
+    /// worker itself, before the rest of the shutdown.
     ///
-    /// The core's shutdown hook is declared in its contract and lands with the
-    /// HTTP server layer; until it exists, stopping the worker is the
-    /// application's job and this is how it gets the handle. When the hook
-    /// arrives this plugin will use it, and this method will still be here for
-    /// an application that wants to stop workers before the rest of the
-    /// shutdown rather than during it.
+    /// Without it, `begin_shutdown` stops claiming and `shutdown` waits for
+    /// the running jobs within the grace period.
     pub fn take_handle(&mut self) -> Option<WorkerHandle> {
         self.handle.take()
     }
@@ -170,10 +182,23 @@ impl Plugin for JobsPlugin {
         // Ready when the jobs table answers. A lookup by primary key, so the
         // probe costs one index read however long the queue is; `stats` would
         // count every row on every probe.
+        // With `migrating`, the check creates the tables first, until that
+        // worked once: the server awaits every check before it listens. No
+        // stage waits for it, because a stage that waits hangs a
+        // current-thread runtime.
         let queue = self.queue.clone();
+        let migrated = Arc::new(AtomicBool::new(!self.migrate));
         lc.ready_when(move || {
             let queue = queue.clone();
+            let migrated = Arc::clone(&migrated);
             async move {
+                if !migrated.load(Ordering::Acquire) {
+                    queue
+                        .migrate()
+                        .await
+                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
+                    migrated.store(true, Ordering::Release);
+                }
                 queue
                     .inspect(crate::job::JobId(0))
                     .await
@@ -184,30 +209,9 @@ impl Plugin for JobsPlugin {
         Ok(())
     }
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous, and the two things left to do
-        // here are not. Both need a runtime; in a server process there is one,
-        // and `block_in_place` would be wrong on a current-thread runtime, so
-        // this uses the handle directly and blocks the builder — which is
-        // startup, where blocking is what everybody expects.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "brocanth-jobs needs a Tokio runtime at startup ({e}); build the \
-                 application from inside `#[tokio::main]`"
-            ))
-        })?;
-
-        if self.migrate {
-            let queue = self.queue.clone();
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(|| runtime.block_on(async move { queue.migrate().await }))
-                    .join()
-                    .map_err(|_| PluginError::new("the jobs migration thread panicked"))?
-                    .map_err(|e| PluginError::new(format!("creating the jobs tables: {e}")))
-            })?;
-        }
-
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // In `start`, after the server's startup gate created the tables,
+        // and inside the runtime the server runs on.
         if let Some((registry, config)) = self.worker.take() {
             let mut builder = crate::worker::Worker::builder(&self.queue).registry(registry);
             builder = builder
@@ -225,7 +229,6 @@ impl Plugin for JobsPlugin {
             if let Some(id) = config.id.clone() {
                 builder = builder.id(id);
             }
-            let _guard = runtime.enter();
             self.handle = Some(
                 builder
                     .start()
@@ -233,6 +236,50 @@ impl Plugin for JobsPlugin {
             );
         }
         Ok(())
+    }
+
+    fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        // Stop claiming now. The jobs already running have what is left of
+        // the grace period, less the time to give back those that do not
+        // finish: they go back to the queue with their attempt.
+        if let Some(handle) = &self.handle {
+            let grace = sd.remaining().unwrap_or(UNBOUNDED);
+            handle.stop(grace.saturating_sub(GIVE_BACK));
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Ok(());
+        };
+        // On a current-thread runtime this thread drives the I/O, so a wait
+        // here never ends. The worker stops by itself, by its deadline.
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Ok(());
+        }
+        let remaining = sd.remaining();
+        let finished = async move {
+            match remaining {
+                Some(left) => tokio::time::timeout(left, handle.finished()).await.ok(),
+                None => Some(handle.finished().await),
+            }
+        };
+        match std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(finished))
+                .join()
+                .map_err(|_| PluginError::new("the jobs stopping thread panicked"))
+        })? {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(e)) => Err(PluginError::new(format!("stopping the job workers: {e}"))),
+            None => Err(PluginError::new(
+                "the job workers were still giving jobs back at the deadline",
+            )),
+        }
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {

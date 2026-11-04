@@ -46,7 +46,8 @@
 //!
 //! # Shutdown
 //!
-//! [`WorkerHandle::shutdown`] stops claiming immediately, waits up to a
+//! [`WorkerHandle::shutdown`] (or [`WorkerHandle::stop`], which does not
+//! wait) stops claiming immediately, waits up to a
 //! deadline for the jobs already running, and then gives the rest back:
 //! `state = 'pending'`, runnable now, **and the attempt they had taken is given
 //! back with them**. The worker chose to stop; the job did not fail, and
@@ -320,8 +321,28 @@ impl Worker {
     /// Runs the worker until `shutdown` resolves, then finishes in-flight jobs
     /// within `grace` and returns the rest to the queue.
     ///
-    /// The form for a dedicated worker process: pass
-    /// `tokio::signal::ctrl_c()`, or whatever the deployment uses.
+    /// The form for a dedicated worker process. In a container, pass
+    /// SIGTERM: Kubernetes sends it, waits `terminationGracePeriodSeconds`,
+    /// then kills. Keep `grace` a few seconds below that, so the jobs that
+    /// did not finish go back to the queue, with their attempt given back,
+    /// before the kill. Another worker runs them.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use brocanth_jobs::{Queue, Worker};
+    /// # async fn worker(queue: Queue) -> brocanth_jobs::Result<()> {
+    /// let sigterm = async {
+    ///     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    ///         .expect("a SIGTERM handler");
+    ///     term.recv().await;
+    /// };
+    /// let report = Worker::builder(&queue)
+    ///     .build()?
+    ///     .run(sigterm, Duration::from_secs(25))
+    ///     .await?;
+    /// println!("{} finished, {} returned", report.finished, report.returned);
+    /// # Ok(()) }
+    /// ```
     pub async fn run(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send,
@@ -564,8 +585,58 @@ impl WorkerHandle {
 
     /// Stops claiming, waits up to `grace` for the jobs already running, and
     /// returns the rest to the queue.
+    ///
+    /// After [`WorkerHandle::stop`], the first deadline stands and `grace`
+    /// changes nothing.
     pub async fn shutdown(self, grace: Duration) -> Result<ShutdownReport> {
-        let _ = self.shutdown_tx.send(ShutdownSignal::Draining(grace));
+        self.stop(grace);
+        self.finished().await
+    }
+
+    /// Stops claiming now, and gives the jobs already running `grace` before
+    /// they go back to the queue. Returns at once, so a synchronous stage can
+    /// call it.
+    ///
+    /// The first stop sets the deadline; a later one changes nothing.
+    pub fn stop(&self, grace: Duration) {
+        self.shutdown_tx.send_if_modified(|signal| {
+            if *signal != ShutdownSignal::Running {
+                return false;
+            }
+            *signal = ShutdownSignal::Draining(grace);
+            true
+        });
+    }
+
+    /// Calls [`WorkerHandle::stop`] with `grace` when `signal` resolves.
+    ///
+    /// For a worker that must stop claiming the moment its process begins to
+    /// stop: `signal` is SIGTERM, or `Readiness::draining`. A worker that
+    /// ends first lets the waiting task go with it.
+    pub fn stop_when(
+        &self,
+        signal: impl std::future::Future<Output = ()> + Send + 'static,
+        grace: Duration,
+    ) {
+        let tx = self.shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = signal => {
+                    tx.send_if_modified(|state| {
+                        if *state != ShutdownSignal::Running {
+                            return false;
+                        }
+                        *state = ShutdownSignal::Draining(grace);
+                        true
+                    });
+                }
+                () = tx.closed() => {}
+            }
+        });
+    }
+
+    /// Waits for the worker to end, after [`WorkerHandle::stop`].
+    pub async fn finished(self) -> Result<ShutdownReport> {
         self.join
             .await
             .map_err(|e| Error::NoRuntime(format!("the worker task did not finish: {e}")))?

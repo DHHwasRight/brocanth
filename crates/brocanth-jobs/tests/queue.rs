@@ -909,3 +909,68 @@ async fn discard_removes_a_waiting_job_without_a_dead_letter_row() {
     );
     assert!(!queue.discard(id).await.expect("discard"), "already gone");
 }
+
+/// `stop_when` is the shutdown a plugin wires to SIGTERM: the worker stops
+/// claiming when the signal resolves, and a job still running at the
+/// deadline goes back to the queue with its attempt given back. It is not
+/// dead-lettered, and another worker runs it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again() {
+    let (queue, _dir) = sqlite_queue().await;
+    let token = token("stop-when");
+    let hangs = queue
+        .enqueue(Hangs {
+            token: token.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Hangs>()
+        .start()
+        .expect("start");
+    let (signal, stop) = tokio::sync::oneshot::channel::<()>();
+    worker.stop_when(
+        async move {
+            let _ = stop.await;
+        },
+        Duration::from_millis(200),
+    );
+
+    wait_for("the job to start", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").running == 1
+    })
+    .await;
+    signal.send(()).expect("the watcher waits");
+    // Time for the watcher to send its stop. A second stop does not move the
+    // deadline the first one set.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    worker.stop(Duration::from_secs(60));
+
+    let report = tokio::time::timeout(Duration::from_secs(5), worker.finished())
+        .await
+        .expect("the worker ends by the first deadline")
+        .expect("finished");
+    assert_eq!(report.returned, 1);
+    let state = queue
+        .inspect(hangs.id())
+        .await
+        .expect("inspect")
+        .expect("the row is back");
+    assert_eq!(state.state, "pending");
+    assert_eq!(state.attempts, 0, "a shutdown is not a failed attempt");
+    assert_eq!(queue.stats().await.expect("stats").dead, 0);
+
+    // And a second worker runs it.
+    let again = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Hangs>()
+        .start()
+        .expect("start");
+    wait_for("the job to run again", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").running == 1
+    })
+    .await;
+    again.abort();
+}

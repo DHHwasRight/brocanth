@@ -72,7 +72,7 @@ brocanth-middleware = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 tempfile = "3"
 
 # The other queue, so `tests/panel.rs` can render the same six screens over
