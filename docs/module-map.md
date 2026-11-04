@@ -79,7 +79,7 @@ the file, or a literal in code.
 | `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 17 modules ★ |
 | `sessions` | **Middleware** | Layers, AppContext ★ | | | |
 | `db` | **Enhancer**, Middleware, Renderer | AppContext, PagesItems (`ctx.db()`), Services (`brocanth_db::Db`) ★ | | | |
-| `model` | **Enhancer**, Middleware | AppContext, CommandsMod (`migrate`) ★ | | | `commands` |
+| `model` | **Enhancer**, Middleware, Renderer | PagesItems (`ctx.orm()`), Services (`brocanth_model::Orm`), CommandsMod (`migrate`) ★ | | `db` | `commands` |
 | `cache` | **Enhancer** | AppPlugins ★ | | | |
 | `jobs` | **Enhancer** | AppPlugins (worker) ★ | | | |
 | `auth` | **Middleware**, Enhancer | AppContext ★ | | | `jobs`, `cache` (→ PgStore) |
@@ -97,8 +97,8 @@ the file, or a literal in code.
 | `middleware-rate-limit` | **Middleware** | PluginsHooks, ConfigSections (`[[rate_limit.rules]]`) ★ | middleware (off) | | |
 | `openapi` | **Routes**, Enhancer | PagesRoutes (`/openapi.json`, `.yaml`) ★ | | | `input` |
 | `resource` | **Routes** | RouterMounts (`/api`) | | | |
-| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms) |
-| `admin-model` | Routes | blocked | admin | `model` | |
+| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms), `admin-model` (rows over the ORM) |
+| `admin-model` | Routes | `src/plugins/admin/models.rs` | admin | `model` | |
 | `commands` | **Enhancer** | CommandsMod (`routes`) | | | `input` |
 | `rsx` | **Renderer** | PagesRenderers (`.rsx`), assets | | | children below |
 | `rsx-tailwind` | **External**, Enhancer | CommandsMod (`css`), MiseTasks, package.json | rsx | `commands` | |
@@ -108,7 +108,7 @@ the file, or a literal in code.
 | `docker` | **External** | Dockerfile | | | |
 | `docker-kubernetes` | **External** | `deploy/kubernetes.yaml` | docker (off) | `observability-health` | |
 | `ci` | **External** | (nothing) | | | |
-| `ci-github` | **External** | `.github/workflows/ci.yml` | ci | | `docker`, `static`, `db`/`model`/`jobs`/`cache` |
+| `ci-github` | **External** | `.github/workflows/ci.yml` | ci | | `docker`, `static`, `db`/`jobs`/`cache` |
 
 ## The dependency tree
 
@@ -188,7 +188,7 @@ flowchart LR
   k8s[docker-kubernetes]:::ex
   ci:::ex
   ci_gh[ci-github]:::ex
-  class rt_sse,rt_ws,admin_model blocked
+  class rt_sse,rt_ws blocked
 
   obs ==> obs_logs & obs_health & obs_metrics & obs_tracing
   mwr ==> csrf & sech & rate
@@ -204,6 +204,7 @@ flowchart LR
   static --> commands
   k8s --> obs_health
   admin_model --> model
+  model --> db
 
   logging x-.-x obs_logs
   auth -.-> jobs
@@ -220,12 +221,11 @@ flowchart LR
   static -.-> htmx
   ci_gh -.-> docker
   ci_gh -.-> static
-  ci_gh -.-> model
   ci_gh -.-> jobs
   ci_gh -.-> cache
   ci_gh -.-> db
 
-  linkStyle 20 stroke:#ef4444,stroke-width:1.5px
+  linkStyle 21 stroke:#ef4444,stroke-width:1.5px
 ```
 
 `logging x-.-x observability-logs`: the two are refused together.

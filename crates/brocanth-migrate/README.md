@@ -26,9 +26,9 @@ brocanth migrate down 1
 
 `make` applies nothing. It proposes a file, and you read it and commit it.
 `up`, `down` and `status` run the `migrate` command in the project's binary.
-They read the database URL from `[model] url`, a secret: set it with
-`$<APP>_MODEL__URL` or in `config/<env>.toml`, never with a flag. See the
-`brocanth-model` README for that setting.
+They open the pool from `[db]`, as the `db` plugin does. `url` is a secret:
+set it with `$<APP>_DB__URL` or in `config/<env>.toml`, never with a flag.
+See `docs/modules/db.md` for that section.
 
 To use the library directly:
 

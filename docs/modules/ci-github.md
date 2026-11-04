@@ -13,7 +13,7 @@ The wizard calls it: *GitHub Actions*.
 | Part of | [`ci`](ci.md), ticked with its parent |
 | Needs | none |
 | After | none |
-| Adapts to | [`static`](static.md), [`docker`](docker.md), [`db`](db.md), [`model`](model.md), [`jobs`](jobs.md), [`cache`](cache.md) |
+| Adapts to | [`static`](static.md), [`docker`](docker.md), [`db`](db.md), [`jobs`](jobs.md), [`cache`](cache.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | none |

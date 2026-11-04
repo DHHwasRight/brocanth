@@ -50,7 +50,7 @@ pub struct Model {
 | `brocanth migrate ids` | `src/models/**/*.rs` | the same files, one new line per missing id |
 | `brocanth migrate make <name>` | `src/models/**/*.rs`, `migrations/schema.json` | `migrations/m<UTC>_<name>.rs`, `migrations/schema.json`, `migrations/mod.rs` |
 | `brocanth migrate make <name> --snapshot-only` | the same | `migrations/schema.json` only |
-| `brocanth migrate up` | `migrations/`, `[model] url` | the database: each pending migration, oldest first |
+| `brocanth migrate up` | `migrations/`, `[db] url` | the database: each pending migration, oldest first |
 | `brocanth migrate down [N]` | the same | the database: the newest N applied migrations are rolled back (default 1) |
 | `brocanth migrate status` | the same | nothing; prints `applied` or `pending` per migration |
 
@@ -71,14 +71,15 @@ they name the files it does not list.
 `up`, `down` and `status` run `migrate` in the project's own binary, the way
 every project command runs: the migrations are compiled into that binary.
 The scaffold writes that command as `src/commands/migrate.rs` when the
-project has `model` and `commands`. It reads `[model] url` through the
-application's own config loader, so `$<APP>_ENV` and `$<APP>_MODEL__URL`
+project has `model` and `commands`. It reads `[db] url` through the
+application's own config loader, so `$<APP>_ENV` and `$<APP>_DB__URL`
 work. Where there is no `brocanth` (a container, a release job), run the
 binary: `<binary> migrate up`.
 
-The development URL is a SQLite file, so a generated project turns on the
-`sqlite` feature of `brocanth-model` beside the default `postgres` one. The
-command makes the directory of the SQLite file.
+The command opens the pool from `[db]` the way the `db` plugin does
+(`Settings::config`), and wraps it in `brocanth_model::Orm` the way the
+`model` plugin does. So `search_path` and the other session settings apply
+to the migrations too. The database is Postgres.
 
 `make` refuses, and writes nothing, when:
 

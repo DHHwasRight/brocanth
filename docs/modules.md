@@ -103,7 +103,7 @@ neither has a crate in this workspace to host one.
 | `brocanth-cache` | service | `ConfigSections`, `AppPlugins` | `Plugin`, `Services` |
 | `brocanth-db` | service | `ConfigSections`, `AppPlugins`, `AppContext`, `PagesItems` (`ctx.db()`) | `Plugin`, `Services`, `ProvidesContext`, readiness, shutdown |
 | `brocanth-storage` | service | `ConfigSections`, `GitIgnore` | `Plugin`, `Services` |
-| `brocanth-model` | service + lifetime | `ConfigSections`, `CommandsMod` | `Plugin`, `ModelDispatch`, shutdown |
+| `brocanth-model` | service + lifetime | `PagesItems` (`ctx.orm()`), `CommandsMod` | `Plugin`, `Services` (`Orm`, after `Db`), `ProvidesContext`, `ModelDispatch` |
 | `brocanth-config` | service | `ConfigSections`, `AppPlugins` | `Plugin` |
 | `brocanth-jobs` | lifetime | `ConfigSections`, `CommandsMod` | `Plugin`, both shutdown phases |
 | `brocanth-realtime` | lifetime | `ConfigSections` | `Plugin`; **no transport** |
@@ -118,7 +118,7 @@ neither has a crate in this workspace to host one.
 | `brocanth-client` | boundary + tooling | `CommandsMod` | reads `pages::described()` |
 | `brocanth-resource` | bundle | `RouterMounts`, `PluginsMod` | `pages::mount` into the one table; `RouteSource` for other hosts |
 | `brocanth-admin` | bundle | `RouterMounts`, `PagesRoutes`, `AgentsSections` | a page-shaped `mount` the project owns; `RouteSource` for other hosts |
-| `brocanth-admin-model` | service | **blocked**: the model plugin opens no pool | `AdminData` over SeaORM |
+| `brocanth-admin-model` | service | a file, `src/plugins/admin/models.rs`; `admin` adapts | `AdminData` over SeaORM, on the `Orm` from the context |
 | `brocanth-events` | service | — | `ModelEvent` carrier |
 | `brocanth-assets` | **renderer-like** | written by hand in `create.rs` | — |
 | `rsx` | **renderer** | `PagesRenderers`, five template files | — |
@@ -755,8 +755,8 @@ direction: it never mistakes an edit for the generator's text.
 4. ~~**Add a mount slot and emit a mount.**~~ **Done.** `Slot::RouterMounts`
    (`244b603`), and now two customers: `resource` writes the page triple
    and an empty list of resources at `/api`; `admin` mounts the backoffice
-   at `/admin`, locked. `admin-model` is listed and blocked, because the
-   generated model plugin opens no pool for it to read.
+   at `/admin`, locked. `admin-model` reads its rows through the
+   `brocanth_model::Orm` the model plugin builds on the `db` pool.
 5. ~~**Read the unread slots, or delete them.**~~ **Done**, except one.
    `MiseTasks` is read. `CargoExtra`, `AppItems` and `AppBeforeRouter` are
    deleted. `NodeDependencies` is still unread: `rsx-tailwind` writes the

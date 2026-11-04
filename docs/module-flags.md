@@ -90,7 +90,7 @@ Every module with a section: `admin`, `auth`, `cache`, `jobs`, `logging`,
 `model`, `observability` (each child adds its keys), `openapi`, `policy`,
 `realtime`, `sessions`, `storage`, `validation`.
 
-Every URL setting (`model.url`, `cache.url`, `jobs.url`, `auth.url`) is a
+Every URL setting (`db.url`, `cache.url`, `jobs.url`, `auth.url`) is a
 secret: a database URL can carry a password. So are `storage.secret` and
 `observability.metrics_token`. They have a variable and a file key, and no
 flag.

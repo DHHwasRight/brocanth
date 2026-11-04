@@ -133,13 +133,13 @@ the error says so.
 
 ```text
 brocanth dbshell                      # the development database
-brocanth dbshell --env production     # [model] url of config/production.toml
+brocanth dbshell --env production     # [db] url of config/production.toml
 brocanth dbshell -- -c 'select 1'     # arguments after -- go to the client
 brocanth dbshell --print              # print the command line, run nothing
 ```
 
-It reads `[model] url` through the same `brocanth_config::Loader` the
-application uses, so the files, `$<APP>_ENV` and `$<APP>_MODEL__URL` agree
+It reads `[db] url` through the same `brocanth_config::Loader` the
+application uses, so the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree
 with what the application sees. Then it replaces itself with the database's
 own client:
 
@@ -191,7 +191,7 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 
 | Id | Severity | When |
 |---|---|---|
-| `check/dialect` | error | `[policy] dialect` is not the database of `[model] url` (every environment) |
+| `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` (every environment) |
 | `deploy/env` | warning | `--deploy` reads `development` or `test` |
 | `deploy/no-config` | warning | no file and no variable configures the environment |
 | `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |

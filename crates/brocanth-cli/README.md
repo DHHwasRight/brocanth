@@ -137,7 +137,7 @@ See [docs/migrations.md](../../docs/migrations.md).
 
 ### `brocanth dbshell`
 
-Opens `psql` or `sqlite3` on the database in `[model] url`. Alias:
+Opens `psql` or `sqlite3` on the database in `[db] url`. Alias:
 `brocanth dbconsole`. `--env <ENV>` picks the environment (default
 `$<APP>_ENV`, else `development`). `--print` prints the command line
 without the password. Arguments after `--` go to the client. A Postgres

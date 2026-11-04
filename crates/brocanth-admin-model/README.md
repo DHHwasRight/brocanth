@@ -26,11 +26,13 @@ the dynamic admin and the static ORM, and both need serde.
 
 ### In a generated project
 
-`brocanth create` lists the module `admin-model` and blocks it: the
-generated `model` plugin opens no connection pool, so there is nothing to
-read. Write the source by hand over your own `DatabaseConnection` and pass
-it to `Admin::new` in `src/plugins/admin/mod.rs`, in place of the
-`Fixture`. The module has no settings.
+`brocanth create --with admin,admin-model` (or `brocanth add admin-model`)
+writes `src/plugins/admin/models.rs`: `admin_source!` with an empty list.
+Add one line per entity. `src/plugins/admin/mod.rs` builds the admin over
+`Models`, with the connection of the `brocanth_model::Orm` that the `model`
+plugin builds on the `db` pool. The plugins start after the route table is
+built, so the admin is built by the first request, once. The module has no
+settings.
 
 ## Examples
 

@@ -23,6 +23,7 @@ Features:
 | `postgres` | on | the Postgres driver |
 | `sqlite` | off | the SQLite driver |
 | `plugin` | off | `brocanth_model::plugin`, the ORM end of the core's model seam (links `brocanth`) |
+| `db` | off | `brocanth_model::Orm`: SeaORM over the pool a `brocanth_db::Db` opened (turns on `postgres`) |
 
 A build needs one driver. A build with neither fails with a `compile_error!`.
 For SQLite alone:
@@ -32,27 +33,37 @@ brocanth-model = { git = "https://github.com/DHHwasRight/brocanth", branch = "ma
 ```
 
 This crate has no `scaffold` feature. The `model` module lives in the CLI
-(`crates/brocanth-cli/src/modules/model.rs`):
+(`crates/brocanth-cli/src/modules/model.rs`). It needs the `db` module:
 
 ```sh
-brocanth create my-app --with model,commands   # a new project
-brocanth add model                             # an existing project
+brocanth create my-app --with db,model,commands   # a new project
+brocanth add model                                # an existing project with db
 ```
 
 The module writes `src/plugins/model/mod.rs`, `migrations/mod.rs`, and, with
-`commands`, the `migrate` command. It turns on both `postgres` and `sqlite`,
-because the development database is a SQLite file.
+`commands`, the `migrate` command. It turns on `db` and `plugin`.
 
-Settings, section `[model]`:
+The plugin opens no pool (PLAN.md ADR 2: the ORM is registered after the
+pool, because it needs the pool). In `before_start` it takes the
+`brocanth_db::Db` the `db` plugin put into the services, wraps it in an
+`Orm`, inserts the `Orm` into the services and puts it on every request's
+context. A page reads the connection with `ctx.orm()`. It has no settings:
+the URL and the pool are `[db]`'s.
 
-| Key | Kind | Default | Flag | Environment |
-|---|---|---|---|---|
-| `url` | text | `sqlite://db/development.sqlite?mode=rwc` | none: secret | `$<APP>_MODEL__URL` |
+### `Orm`
 
-`url` is a secret. A database URL can carry a password, and every user on the
-host can read a process's arguments. So no `--model.url` flag exists. Set it
-in the environment or, with the `config` module, in `config/<env>.toml`. The
-settings report prints `(secret)` for it. See `docs/module-flags.md`.
+```rust,ignore
+use brocanth_model::Orm;
+
+let orm = Orm::from_db(&db); // shares db's pool; opens nothing
+let posts = post::Entity::find().all(&*orm).await?;
+let tx = orm.begin().await?; // `Orm` derefs to `DatabaseConnection`
+```
+
+A newtype and not an alias, because the services and the request context are
+keyed by type, and `ContextItem` cannot be implemented for SeaORM's own
+type. `Orm::connection` and `From<Orm> for DatabaseConnection` hand the
+connection to an API that names the SeaORM type.
 
 ## Examples
 
@@ -295,5 +306,5 @@ For a screen that reads models, drive the application with `brocanth-test`'s
 - The crate documentation (`cargo doc -p brocanth-model --open`): one section
   per capability, with the reasons.
 - `docs/migrations.md`: stable ids and `brocanth migrate`.
-- `docs/module-flags.md`: how `[model] url` is set, and why it is a secret.
+- `docs/module-flags.md`: how `[db] url` is set, and why it is a secret.
 - `PLAN.md` §10 (publishing) and §11 (migrations).

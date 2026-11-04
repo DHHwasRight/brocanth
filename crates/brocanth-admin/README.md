@@ -41,8 +41,9 @@ that. Two edits open it: a policy with `AdminConfig::with_policy`, and a
 it. If you have, it prints the change, writes nothing, and goes through
 once you have made the change by hand.
 
-`admin-model` is listed by the CLI and blocked: the generated `model` plugin
-opens no connection pool for it to read. Write the source by hand. See
+`admin-model` reads the rows over SeaORM. It writes
+`src/plugins/admin/models.rs`, one line per entity, and the admin is built
+over the `brocanth_model::Orm` the `model` plugin puts on the context. See
 `brocanth-admin-model`.
 
 The module declares five settings. See [Tuning the admin](#tuning-the-admin).

@@ -9,7 +9,7 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Categories | **Enhancer**, Middleware, Renderer |
 | Wizard question | Data |
 | Default | off |
-| Presets | none |
+| Presets | HTML application, JSON API, Something that does work |
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
