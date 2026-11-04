@@ -78,10 +78,10 @@ impl Module for Logs {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             LOGS,
-            "a JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else",
+            "the production log: JSON on stdout in production, text elsewhere, with request id, duration and spans",
         )
         .category(Category::Middleware)
-        .asked_in("operations", "Logs on stdout")
+        .asked_in("operations", "The production log: JSON in production, request id, duration")
         .part_of("observability")
         .because("the log layer is a feature of `brocanth-observe`, which the parent brings")
         .krate(krate().feature("logs"))
