@@ -16,7 +16,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics", "otel"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
-brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["sqlite"] }  # Postgres by default; SQLite for config/development.toml
+brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
@@ -30,6 +30,7 @@ brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", featur
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", default-features = false }
+brocanth-admin-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
@@ -1546,6 +1547,33 @@ impl Ctx {
     }
 }
 
+/// The ORM, on every request the application dispatches.
+///
+/// `allow(dead_code)`: it is here for the first page that reads a row, and
+/// a new project has none.
+#[allow(dead_code)]
+impl Ctx {
+    /// SeaORM's connection over the pool the `db` plugin opened: the same
+    /// connections as `ctx.db()`.
+    ///
+    /// ```ignore
+    /// let posts = post::Entity::find().all(ctx.orm()).await?;
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// On a `Ctx` built by hand, which has no application behind it.
+    pub fn orm(&self) -> &brocanth_model::sea_orm::DatabaseConnection {
+        self.provided::<brocanth_model::Orm, _>()
+            .expect(
+                "this Ctx has no ORM: it was built by hand, not dispatched by the application\n\
+                 help: send the request through `app::dispatch`, or give the code under test a \
+                 `brocanth_model::Orm` of its own",
+            )
+            .connection()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,9 +1735,6 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::sessions::Sessions>("sessions")
             .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::model::Model>("model")
-            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware ------------------------------------------
         //
@@ -1786,9 +1811,6 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::policy::Policies>("policy")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
 
@@ -1817,6 +1839,9 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::realtime::Realtime>("realtime")
             .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::model::Model>("model")
+            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -1834,6 +1859,9 @@ macro_rules! register {
                 "security_headers",
                 |config| config.inline_script(brocanth_admin::INLINE_SCRIPT),
             )
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::policy::Policies>("policy")
             .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: rate limit ------------------------------
@@ -1868,21 +1896,21 @@ pub(crate) use register;
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
-type WithModel = After<crate::plugins::model::Model, WithSessions>;
-type WithAdmin = After<crate::plugins::admin::AdminSettings, WithModel>;
+type WithAdmin = After<crate::plugins::admin::AdminSettings, WithSessions>;
 type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
-type WithPolicy = After<crate::plugins::policy::Policies, WithAuth>;
-type WithStorage = After<crate::plugins::storage::Files, WithPolicy>;
+type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
 type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
 type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithRealtime>;
-type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithMiddlewareSecurityHeaders>;
+type WithModel = After<crate::plugins::model::Model, WithRealtime>;
+type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
+type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
@@ -1916,8 +1944,6 @@ macro_rules! announce {
         let cx = $app.context();
         let session: &crate::plugins::sessions::Session = cx.extract();
         eprintln!("session cookie: {}", session.cookie);
-        let db: &crate::plugins::model::Db = cx.extract();
-        eprintln!("database: {}", db.url);
         let db: &brocanth_db::Db = cx.extract();
         eprintln!("db: {} connection(s) open", db.pool().size());
         let auth: &crate::plugins::auth::Services = cx.extract();
@@ -1926,8 +1952,6 @@ macro_rules! announce {
             auth.sessions().config().cookie_name,
             auth.providers().len()
         );
-        let rules: &crate::plugins::policy::Rules = cx.extract();
-        eprintln!("policy: compiling for {:?}", rules.dialect);
         let files: &plugins::storage::FileStore = cx.extract();
         eprintln!(
             "storage: ready, download links last {}s",
@@ -1940,6 +1964,8 @@ macro_rules! announce {
             "realtime: up to {} clients",
             realtime.broker.config().max_clients
         );
+        let rules: &crate::plugins::policy::Rules = cx.extract();
+        eprintln!("policy: compiling for {:?}", rules.dialect);
     }};
 }
 pub(crate) use announce;
@@ -2000,13 +2026,6 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: false,
-    },
-    Setting {
-        path: "model.url",
-        help: "The database: a SQLite file, or a Postgres URL.",
-        flag: false,
-        none_as: None,
-        text: true,
     },
     Setting {
         path: "admin.title",
@@ -2254,13 +2273,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "policy.dialect",
-        help: "The SQL a condition compiles to: postgres or sqlite.",
-        flag: true,
-        none_as: None,
-        text: true,
-    },
-    Setting {
         path: "storage.root",
         help: "Where uploads are stored.",
         flag: true,
@@ -2431,6 +2443,13 @@ pub const SETTINGS: &[Setting] = &[
     Setting {
         path: "security_headers.csp.report_uri",
         help: "Where a browser reports what the policy blocked. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "policy.dialect",
+        help: "The SQL a condition compiles to: postgres or sqlite.",
         flag: true,
         none_as: None,
         text: true,
@@ -2647,25 +2666,23 @@ pub fn flag_args(
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
-    let model = crate::plugins::model::Settings::default();
     let admin = crate::plugins::admin::Settings::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let jobs = crate::plugins::jobs::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
-    let policy = crate::plugins::policy::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
     let openapi = crate::plugins::openapi::Settings::default();
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
+    let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
-        ("model.url", format!("{:?}", model.url)),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
@@ -2737,7 +2754,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.absolute_timeout",
             format!("{:?}", auth.absolute_timeout),
         ),
-        ("policy.dialect", format!("{:?}", policy.dialect)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
@@ -2802,6 +2818,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "security_headers.csp.report_uri",
             format!("{:?}", security_headers.csp.report_uri),
         ),
+        ("policy.dialect", format!("{:?}", policy.dialect)),
         (
             "rate_limit.ip_header",
             format!("{:?}", rate_limit.ip_header),
@@ -2909,7 +2926,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: a4b05d01d1a9195a
+// brocanth-digest: 2d761c1b897e2967
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2964,11 +2981,6 @@ cookie = "_my_blog_session"
 # Send the cookie over HTTPS only.
 # Development only. Anywhere a browser reaches over HTTPS, this is true.
 secure = false
-
-[model]
-# The database: a SQLite file, or a Postgres URL.
-# A URL can carry a password, so no flag sets it.
-url = "sqlite://db/development.sqlite?mode=rwc"
 
 [admin]
 # The end of every <title>, and the header and index heading unless set.
@@ -3078,14 +3090,6 @@ idle_timeout = 28800
 # Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
 
-[policy]
-# The SQL a condition compiles to: postgres or sqlite.
-# This follows `[model] url`, which the scaffold pointed at SQLite. Move the
-# two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and
-# only one of them parses, so a condition compiled for the wrong dialect is
-# valid SQL that the engine rejects at the worst possible moment.
-dialect = "sqlite"
-
 [storage]
 # Where uploads are stored.
 # Below the working directory, so an upload is not source and `.gitignore`
@@ -3183,6 +3187,14 @@ enabled = true
 report_only = false
 # Where a browser reports what the policy blocked. Empty means none.
 # report_uri = "/csp-reports"
+
+[policy]
+# The SQL a condition compiles to: postgres or sqlite.
+# This follows `[db] url`, the Postgres database the model reads. Move the
+# two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and
+# only one of them parses, so a condition compiled for the wrong dialect is
+# valid SQL that the engine rejects at the worst possible moment.
+dialect = "postgres"
 
 [rate_limit]
 # A header that holds the client address, set by your edge. Empty means none.
@@ -3378,7 +3390,7 @@ COPY --from=builder /app/config /app/config
 USER 10001
 
 # Every interface, inside the container. `$MY_BLOG_ENV` picks
-# config/production.toml, and a variable such as `$MY_BLOG_MODEL__URL`
+# config/production.toml, and a variable such as `$MY_BLOG_DB__URL`
 # overrides one key of it.
 ENV MY_BLOG_ADDR=0.0.0.0:3000 \
     MY_BLOG_ENV=production
@@ -3815,7 +3827,7 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 ===== src/commands/migrate.rs =====
-//! `migrate` -- apply the migrations in `migrations/` to `[model] url`.
+//! `migrate` -- apply the migrations in `migrations/` to `[db] url`.
 //!
 //! `brocanth migrate up`, `brocanth migrate down [N]` and
 //! `brocanth migrate status` run this command through this binary. Where
@@ -3826,8 +3838,9 @@ fn touch(path: &Path) -> anyhow::Result<()> {
 //! `migrations/mod.rs`. This command applies what that list holds.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
-use brocanth_model::sea_orm::Database;
+use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
+use brocanth_model::Orm;
 
 use crate::migrations::Migrator;
 
@@ -3855,14 +3868,17 @@ enum Action {
 
 impl Command for Migrate {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        // The config files and a relative SQLite path both resolve from the
-        // project root, wherever the command started.
+        // The config files resolve from the project root, wherever the
+        // command started.
         std::env::set_current_dir(ctx.root())?;
-        let url = database_url()?;
-        sqlite_directory(&url)?;
+        let config = database()?;
         tokio::runtime::Runtime::new()?.block_on(async {
-            let db = Database::connect(url.as_str()).await?;
-            let before = Migrator::get_migration_with_status(&db).await?;
+            // The pool the server opens, and the ORM over it, as the
+            // `model` plugin builds it.
+            let pool = Db::connect(&config).await?;
+            let orm = Orm::from_db(&pool);
+            let db = orm.connection();
+            let before = Migrator::get_migration_with_status(db).await?;
             let named = |status: MigrationStatus| -> Vec<String> {
                 before
                     .iter()
@@ -3873,7 +3889,7 @@ impl Command for Migrate {
             match self.action {
                 Action::Up => {
                     let pending = named(MigrationStatus::Pending);
-                    Migrator::up(&db, None).await?;
+                    Migrator::up(db, None).await?;
                     if pending.is_empty() {
                         println!("Nothing to apply: each migration is applied.");
                     }
@@ -3883,7 +3899,7 @@ impl Command for Migrate {
                 }
                 Action::Down { n } => {
                     let applied = named(MigrationStatus::Applied);
-                    Migrator::down(&db, Some(n)).await?;
+                    Migrator::down(db, Some(n)).await?;
                     if applied.is_empty() {
                         println!("Nothing to roll back: no migration is applied.");
                     }
@@ -3909,29 +3925,14 @@ impl Command for Migrate {
     }
 }
 
-/// `[model] url`, through the loader the server uses, so the files,
-/// `$<APP>_ENV` and `$<APP>_MODEL__URL` agree with what the server sees.
-fn database_url() -> anyhow::Result<String> {
+/// The pool's configuration: `[db]`, through the loader the server uses, so
+/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
+/// sees.
+fn database() -> anyhow::Result<DbConfig> {
     let config = brocanth_config::Loader::new(crate::app::APP).load()?;
     Ok(config
-        .section::<crate::plugins::model::Settings>("model")?
-        .url)
-}
-
-/// Makes the directory of a SQLite file. `mode=rwc` creates the file, and
-/// not the directory it is in.
-fn sqlite_directory(url: &str) -> anyhow::Result<()> {
-    let Some(rest) = url.strip_prefix("sqlite://") else {
-        return Ok(());
-    };
-    let path = rest.split('?').next().unwrap_or_default();
-    if path.is_empty() || path == ":memory:" {
-        return Ok(());
-    }
-    if let Some(dir) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    Ok(())
+        .section::<crate::plugins::db::Settings>("db")?
+        .config())
 }
 ===== src/commands/routes.rs =====
 //! Every route this application answers.
@@ -4301,17 +4302,19 @@ pub fn Layout(layout: &str, children: Element) -> Element {
 //! 2. **Who is asking.** [`principal`] returns an anonymous principal until
 //!    it reads your user off the request.
 //!
-//! It has no models yet. A model needs a data source that reads its rows and
-//! a row policy: `AdminConfig::resource(..)`, one per model. A model with no
-//! resource answers 403 on every screen. `brocanth_admin::rows` has the
-//! worked example, and `brocanth-admin-model` is the data source over
-//! SeaORM.
+//! It reads rows through the ORM the `model` plugin publishes. A model is in
+//! the admin when `models.rs` lists it, and it needs a row policy:
+//! `AdminConfig::resource(..)`, one per model. A model with no resource
+//! answers 403 on every screen. `brocanth_admin::rows` has the worked
+//! example.
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
 //! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
 //! therefore a build error, not a race.
 
-use std::sync::{Arc, OnceLock};
+mod models;
+
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
@@ -4399,13 +4402,8 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-    let admin = Arc::new(Admin::new(
-        // An empty in-memory source: no models, so no rows to read. Put
-        // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
-        // over your database connection.
-        Arc::new(Fixture::new()),
-        config,
-    ));
+    // Built by the first request, over the ORM: see `OverOrm`.
+    let admin = Arc::new(OverOrm::new(config));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
         routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
@@ -4414,15 +4412,62 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     Ok(())
 }
 
+/// The admin over the ORM, built once, by the first request.
+///
+/// `mount` runs when the route table is built, and the plugins start after
+/// that: the `db` plugin opens the pool in `before_start`, and the `model`
+/// plugin wraps it. So the admin cannot be built in `mount`. The first
+/// request after the start carries the ORM on its context, and the admin is
+/// built from it then. A row policy for a model that is not listed therefore
+/// panics on that first request, not at startup.
+///
+/// One per route table. The table `src/app.rs` builds only ever sees a
+/// request the application dispatched. A table a test builds sees a `Ctx`
+/// built by hand, which has no ORM: that admin is built over an empty
+/// source, with the same configuration, and shows no rows.
+struct OverOrm {
+    config: Mutex<Option<AdminConfig>>,
+    built: OnceLock<Arc<Admin>>,
+}
+
+impl OverOrm {
+    fn new(config: AdminConfig) -> Self {
+        Self {
+            config: Mutex::new(Some(config)),
+            built: OnceLock::new(),
+        }
+    }
+
+    /// The admin, built by the first request that asks.
+    fn for_request(&self, ctx: &Ctx) -> Arc<Admin> {
+        Arc::clone(self.built.get_or_init(|| {
+            let config = self
+                .config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("the admin is built once");
+            match ctx.provided::<brocanth_model::Orm, _>() {
+                Some(orm) => Arc::new(Admin::new(
+                    Arc::new(models::Models::new(orm.connection().clone())),
+                    config,
+                )),
+                None => Arc::new(Admin::new(Arc::new(Fixture::new()), config)),
+            }
+        }))
+    }
+}
+
 /// One handler for every screen. The admin reads the path and decides.
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<OverOrm>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
         Box::pin(async move {
             let ctx = &*ctx;
+            let admin = admin.for_request(ctx);
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -4502,6 +4547,25 @@ mod tests {
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
+}
+===== src/plugins/admin/models.rs =====
+//! The models the admin shows: one line per entity.
+//!
+//! This file is yours. A model is in the admin when it is listed here, and
+//! not because it compiled: a screen with a delete button on it shows what
+//! somebody chose. Each line is the module path SeaORM's registry reports,
+//! and the entity:
+//!
+//! ```ignore
+//! "my_app::models::post" => crate::models::post::Entity,
+//! ```
+//!
+//! A listed model still answers 403 until it has a row policy:
+//! `AdminConfig::resource(..)` in `mount`.
+
+brocanth_admin_model::admin_source! {
+    /// Every model this admin shows, over the ORM's connection.
+    pub struct Models;
 }
 ===== src/plugins/auth/mod.rs =====
 //! Accounts and sessions, as this application registers them.
@@ -5434,6 +5498,11 @@ impl Plugin for Jobs {
 //! through no other route. An application that stores nothing pays nothing for
 //! it: not a crate in the lock file, not a section in the config, not a byte.
 //!
+//! It opens no pool. The `db` plugin opens one and publishes it as
+//! `brocanth_db::Db`; this plugin wraps that pool in SeaORM's connection, so an
+//! entity query and a sea-query statement share connections, limits and
+//! session settings. A page reads it with `ctx.orm()`.
+//!
 //! The entity modules go under `src/models/`, and you write them by hand: a
 //! struct deriving `DeriveEntityModel` with `#[brocanth_model::validates(..)]`
 //! above it, as `brocanth_model`'s own documentation sets out. There is no
@@ -5441,62 +5510,41 @@ impl Plugin for Jobs {
 //! to one, and a generator for a single entity is not written yet.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_model::ModelRegistry;
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth_model::{ModelRegistry, Orm};
 
-/// What this plugin is built from.
+/// What this plugin is built from: nothing. The URL and the pool are
+/// `[db]`'s.
 ///
 /// It derives `Deserialize` because this application reads it from
 /// `[model]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Settings {
-    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
-    pub url: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
-        }
-    }
-}
-
-/// The handle a handler asks the context for.
-pub struct Db {
-    pub url: String,
-}
-
-impl ContextItem for Db {}
+pub struct Settings {}
 
 pub struct Model {
-    url: String,
+    /// Set in `before_start`, once the `db` plugin has opened the pool.
+    orm: Option<Orm>,
 }
 
 impl Plugin for Model {
     type Config = Settings;
-    type Provides = ProvidesContext<Db>;
+    type Provides = ProvidesContext<Orm>;
     const NAME: &'static str = "model";
 
-    fn new(config: Settings) -> Self {
-        Self { url: config.url }
+    fn new(_config: Settings) -> Self {
+        Self { orm: None }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.url.is_empty() {
-            return Err(PluginError::new(
-                "[model] url is required; there is no default database",
-            ));
-        }
-        Ok(())
-    }
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The `db` plugin is registered first and opened the pool in its own
+        // `before_start`. This wraps it and opens nothing.
+        let orm = Orm::from_db(lc.require_service::<brocanth_db::Db>()?);
+        // For another plugin: `lc.require_service::<Orm>()`.
+        lc.services_mut().insert(orm.clone());
+        self.orm = Some(orm);
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The pool opens here, at the last hook before the server is handed the
-        // application, and drains on the matching shutdown hook.
-        //
         // The registry below is what would make a generator and an admin UI
         // tractable: every entity compiled into this binary can be enumerated,
         // with its columns, nullability and keys. It reads an inventory that
@@ -5510,9 +5558,11 @@ impl Plugin for Model {
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
-        cx.insert(Db {
-            url: self.url.clone(),
-        });
+        // Nothing before `before_start`, so `ctx.orm()` answers an error
+        // rather than a connection to nowhere.
+        if let Some(orm) = &self.orm {
+            cx.insert(orm.clone());
+        }
     }
 }
 ===== src/plugins/observability/mod.rs =====
@@ -6045,7 +6095,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            dialect: "sqlite".to_string(),
+            dialect: "postgres".to_string(),
         }
     }
 }
@@ -6856,7 +6906,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
-- `model`  SeaORM, validations, migrations; without it no SQL driver at all
+- `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
@@ -6872,6 +6922,7 @@ request.
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
+- `admin-model`  the admin's rows over SeaORM, one line per entity
 - `realtime`  one write is a map lookup, not a query per subscriber; no transport yet
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
@@ -7193,7 +7244,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 7e5b1693a9bca891 -->
+<!-- brocanth-digest: e0f0a42ee4484df3 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -7205,7 +7256,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -7264,9 +7315,9 @@ crates = ["brocanth-db"]
 adapted_to = ["config"]
 
 [modules.model]
-kind = ["enhancer", "middleware"]
+kind = ["enhancer", "middleware", "renderer"]
 files = ["migrations/", "src/commands/migrate.rs", "src/plugins/model/"]
-config = ["model"]
+config = []
 crates = ["brocanth-model"]
 adapted_to = ["config", "commands"]
 
@@ -7373,7 +7424,14 @@ kind = ["routes", "enhancer"]
 files = ["src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "middleware-csrf", "commands"]
+adapted_to = ["config", "middleware-csrf", "admin-model", "commands"]
+
+[modules.admin-model]
+kind = ["routes"]
+files = ["src/plugins/admin/models.rs"]
+config = []
+crates = ["brocanth-admin-model"]
+adapted_to = []
 
 [modules.realtime]
 kind = ["enhancer", "middleware"]
@@ -7443,6 +7501,6 @@ kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
 crates = []
-adapted_to = ["docker", "db", "model", "jobs", "cache"]
+adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: feea00a528dacd57
+# brocanth-digest: 856610a384989cd7
