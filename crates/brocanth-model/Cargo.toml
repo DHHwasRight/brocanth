@@ -21,6 +21,13 @@ brocanth-events = { workspace = true }
 # way whether the feature is on or off.
 brocanth = { workspace = true, optional = true }
 
+# Only for `src/orm.rs`: `Orm`, SeaORM over the pool `brocanth-db` opened
+# (ADR 2: the ORM is registered after the pool, because it needs it).
+# Optional, and off: a model layer that opens its own connection does not
+# link a second database crate. Both crates resolve to the one sqlx 0.9 in
+# the lock file, so the pool type is the same type on both sides.
+brocanth-db = { workspace = true, optional = true }
+
 # Pinned exactly. SeaORM 2.0 is three months old; a patch bump is a decision,
 # not a side effect.
 #
@@ -49,6 +56,10 @@ thiserror = "2"
 # The ORM's end of the core's model seam: `brocanth_model::plugin`. See the
 # dependency line above for why it is off.
 plugin = ["dep:brocanth"]
+
+# `Orm`, built from a `brocanth_db::Db`. Postgres, because that is the only
+# pool `brocanth-db` opens.
+db = ["dep:brocanth-db", "postgres"]
 
 # Postgres is the base. brocanth stores queues, cache and blobs in the same
 # database as the models, and every one of those is better on Postgres: a real
@@ -98,6 +109,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 brocanth-model = { path = ".", default-features = false, features = [
     "sqlite",
     "plugin",
+    "db",
 ] }
 
 # The subscriber half, for `tests/changes.rs` only: the proof that a row

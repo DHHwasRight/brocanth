@@ -967,6 +967,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-db",
  "brocanth-events",
  "brocanth-model",
  "brocanth-model-derive",

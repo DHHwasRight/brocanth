@@ -36,6 +36,9 @@
 //! [`schema_sync`], which is the single adapter standing between brocanth and
 //! SeaORM's semver-exempt `schema-sync`.
 //!
+//! With the `db` feature, `Orm` is SeaORM over the pool a `brocanth_db::Db`
+//! opened, so the ORM and sea-query statements share one pool (`orm`).
+//!
 //! Nothing here is global. A probe, a registry and a harness are values an
 //! application holds, so two applications in one process cannot collide.
 //!
@@ -98,6 +101,8 @@ pub mod deferred;
 pub mod eager;
 pub mod errors;
 pub mod fixtures;
+#[cfg(feature = "db")]
+pub mod orm;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod prelude;
@@ -117,6 +122,8 @@ pub use deferred::{Deferred, NotLoaded};
 pub use eager::{Eager, EagerExt, EagerStrategy, WithRelated};
 pub use errors::{Entry, Error, Errors};
 pub use fixtures::{FixtureError, Fixtures};
+#[cfg(feature = "db")]
+pub use orm::Orm;
 pub use probe::{Probe, ProbeConfig, Report, Suspect, UnitOfWork};
 pub use registry::{ModelInfo, ModelRegistry};
 pub use validation::{enforce, Validate, Validated, Write};
