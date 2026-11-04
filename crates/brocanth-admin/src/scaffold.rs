@@ -13,7 +13,7 @@
 //!
 //! `AdminPlugin` contributes the screens as a
 //! `RouteSource`, and a generated project cannot mount one: its table holds
-//! the project's own synchronous `Handler`, and `RouteCx` needs a context the
+//! the project's own `Handler`, and `RouteCx` needs a context the
 //! generated `Ctx` does not lend out. `brocanth-resource` measured the same
 //! walls (`brocanth_resource::pages`). So the module writes a `mount` with the
 //! shape `Slot::RouterMounts` expects, four routes into the one table, each
@@ -95,8 +95,8 @@ impl Module for Backoffice {
                     "@PAGE@",
                     if project.has("middleware-csrf") {
                         "brocanth_admin::Response::Page { status, html } => {\n\
-                         \x20               Response::new(status, stamped(ctx, html))\n\
-                         \x20           }"
+                         \x20                   Response::new(status, stamped(ctx, html))\n\
+                         \x20               }"
                     } else {
                         "brocanth_admin::Response::Page { status, html } => Response::new(status, html),"
                     },
@@ -357,7 +357,6 @@ const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
 //! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
 //! therefore a build error, not a race.
 
-use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use brocanth::plugin_api::Plugin;
@@ -459,24 +458,33 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 }
 
 /// One handler for every screen. The admin reads the path and decides.
+///
+/// The admin is async because a database is, and so is a handler in this
+/// table: the answer is awaited and holds no thread while it waits.
 fn screen(admin: Arc<Admin>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
-        let ctx = &*ctx;
-        // HEAD reaches the GET handler, and the admin knows two verbs.
-        let method = match ctx.verb {
-            Verb::Post => "POST",
-            _ => "GET",
-        };
-        let form = submission(ctx);
-        let who = principal(ctx);
-        // `?` on the admin's own failure: a data source that failed, or a
-        // template that did not render. A refusal is not one: it is a page.
-        let answer = wait(admin.dispatch(who, method, &ctx.path, &ctx.query, &form))?;
-        Ok(match answer {
-            @PAGE@
-            brocanth_admin::Response::Redirect { status, location } => {
-                Response::empty(status).with_header("location", location)
-            }
+        let admin = Arc::clone(&admin);
+        Box::pin(async move {
+            let ctx = &*ctx;
+            // HEAD reaches the GET handler, and the admin knows two verbs.
+            let method = match ctx.verb {
+                Verb::Post => "POST",
+                _ => "GET",
+            };
+            let form = submission(ctx);
+            let who = principal(ctx);
+            // `?` on the admin's own failure: a data source that failed, or
+            // a template that did not render. A refusal is not one: it is a
+            // page.
+            let answer = admin
+                .dispatch(who, method, &ctx.path, &ctx.query, &form)
+                .await?;
+            Ok(match answer {
+                @PAGE@
+                brocanth_admin::Response::Redirect { status, location } => {
+                    Response::empty(status).with_header("location", location)
+                }
+            })
         })
     })
 }
@@ -506,22 +514,6 @@ fn submission(ctx: &Ctx) -> Submission {
     }
 }
 
-/// Runs the admin's answer to completion on this thread.
-///
-/// The admin is async because a database is, and a handler in this table is
-/// not. Under `serve` the runtime has worker threads, so this tells tokio the
-/// thread blocks. Anywhere else, such as a test, the admin's own small
-/// executor runs it.
-fn wait<F: Future>(future: F) -> F::Output {
-    use tokio::runtime::{Handle, RuntimeFlavor};
-    match Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        _ => brocanth_admin::rt::block_on(future),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use brocanth::routing::{Dispatch, Verb};
@@ -529,14 +521,14 @@ mod tests {
     use crate::pages::Ctx;
 
     /// The admin is in the table, and it answers 403 until somebody opens it.
-    #[test]
-    fn the_admin_is_mounted_and_ships_locked() {
+    #[tokio::test]
+    async fn the_admin_is_mounted_and_ships_locked() {
         let router = crate::pages::router().expect("the table builds");
         let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
             panic!("/admin is not in the table");
         };
         let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
-        let answer = handler(&mut ctx).expect("the admin answers");
+        let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
 }

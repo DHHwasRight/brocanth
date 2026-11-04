@@ -6,7 +6,8 @@
 //! and not this crate.
 //!
 //! ```text
-//! pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+//! pub type Handler =
+//!     Box<dyn for<'a> Fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>> + Send + Sync>;
 //! pub fn page<H, T>(handler: H) -> Handler
 //! where H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static, T: IntoResponse;
 //! ```
@@ -21,6 +22,7 @@ mod common;
 
 use std::sync::Arc;
 
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::{BuildError, Dispatch, Router, RouterBuilder, Verb};
 use brocanth_resource::pages::{self, PageCtx, PageError, PageResponse, PageSubject};
 use brocanth_resource::Failure;
@@ -106,7 +108,8 @@ impl Ctx {
     }
 }
 
-type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+type Handler =
+    Box<dyn for<'a> Fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>> + Send + Sync>;
 
 /// Puts a handler in the table whatever it returns.
 fn page<H, T>(handler: H) -> Handler
@@ -114,7 +117,10 @@ where
     H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
     T: IntoResponse,
 {
-    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+    Box::new(move |ctx| {
+        let answered = handler(ctx).map(IntoResponse::into_response);
+        Box::pin(std::future::ready(answered))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +224,12 @@ fn call(
             .map(|who| vec![("x-user".to_owned(), who.to_owned())])
             .unwrap_or_default(),
     };
-    handler(&mut ctx)
+    // The resource's handlers finish before their future is made, so one
+    // poll on a runtime with no threads of its own is all this takes.
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(handler(&mut ctx))
 }
 
 fn answered(

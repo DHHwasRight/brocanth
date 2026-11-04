@@ -1270,6 +1270,12 @@ fn agents_md(a: &Answers) -> String {
          reaches; a page with no handler is a build error too. A private\n\
          `fn handle_*` is a helper and is left alone.\n\
          \n\
+         A handler may be `pub async fn` when it waits on something, such as a\n\
+         database: the table awaits it and the wait holds no thread. A page that\n\
+         waits on nothing stays a plain `fn`. An async handler is dropped at an\n\
+         `.await` when the client goes away, so do not leave a write half done\n\
+         across one.\n\
+         \n\
          **Adding a file does not rebuild on its own** -- nothing referenced it\n\
          yet. Run `touch src/pages/mod.rs` after creating a page or a layout.\n\
          Editing or deleting one is noticed.\n\
@@ -1834,8 +1840,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          \n\
          use brocanth::plugin_app::AppBuilder;\n\
          use brocanth::plugin_hooks::{{self as hooks, Begin, RequestState}};\n\
+         use brocanth::plugin_routes::BoxFuture;\n\
          use brocanth::plugin_shutdown::ShutdownReason;\n\
-         use brocanth::routing::{{Dispatch, MiddlewareStack, Router, Verb}};\n\
+         use brocanth::routing::{{AsyncMiddlewareStack, Dispatch, Router, Verb}};\n\
          \n\
          use crate::pages::{{self, Ctx, Handler, IntoResponse, Response}};\n\
          use crate::plugins;\n\
@@ -1858,7 +1865,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// What a request needs, built once and shared by every connection.\n\
          pub struct App {{\n\
         \x20   pub router: Router<Handler>,\n\
-        \x20   pub stack: MiddlewareStack<Ctx, Response>,\n\
+        \x20   pub stack: AsyncMiddlewareStack<Ctx, Response>,\n\
         \x20   pub plugins: Vec<String>,\n\
         \x20   /// The application the plugins built.\n\
         \x20   ///\n\
@@ -1914,7 +1921,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20   // 3. The chain, from exactly what the block above mounted. A name this\n\
         \x20   //    binary has no layer for stops the application rather than silently\n\
         \x20   //    not running.\n\
-        \x20   let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();\n\
+        \x20   let mut stack: AsyncMiddlewareStack<Ctx, Response> = AsyncMiddlewareStack::new();\n\
         \x20   for mount in app.router_plan().mounts() {\n\
         \x20       let layer = plugins::layer(&mount.middleware).ok_or_else(|| {\n\
         \x20           format!(\n\
@@ -1970,7 +1977,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20   };\n\
         \x20   let mut state = RequestState::new();\n\
         \x20   let outcome = match app.core.begin_async(&mut request, &mut state).await {\n\
-        \x20       Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),\n\
+        \x20       Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),\n\
         \x20       Begin::Answered(outcome) => outcome,\n\
         \x20   };\n\
         \x20   let response = app.core.finish(&mut request, &mut state, outcome);\n\
@@ -1983,7 +1990,11 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// therefore no context. `state` is what the request hooks wrote; the\n\
          /// page reads it through `Ctx::hooked`, and it goes back afterwards so\n\
          /// the response hooks read what the page left.\n\
-         pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {\n\
+         ///\n\
+         /// `async` because a page may be: the chain and the page are awaited\n\
+         /// here, on the worker, and a page that waits on a database does not\n\
+         /// hold a thread while it does.\n\
+         pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {\n\
         \x20   let Some(verb) = Verb::from_http(request.method()) else {\n\
         \x20       return Response::new(501, \"Not Implemented\");\n\
         \x20   };\n\
@@ -1995,9 +2006,18 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20           // what Echo calls an HTTPErrorHandler. It sits inside\n\
         \x20           // the chain's terminal, so a layer still sees what the\n\
         \x20           // error turned into and can rewrite it.\n\
-        \x20           let response = app.stack.run(path, &mut ctx, |c| {\n\
-        \x20               handler(c).unwrap_or_else(IntoResponse::into_response)\n\
-        \x20           });\n\
+        \x20           //\n\
+        \x20           // `handler(c)` is called before the future is built: the\n\
+        \x20           // future may borrow the context and nothing else.\n\
+        \x20           let response = app\n\
+        \x20               .stack\n\
+        \x20               .run(path, &mut ctx, |c: &mut Ctx| -> BoxFuture<'_, Response> {\n\
+        \x20                   let answer = handler(c);\n\
+        \x20                   Box::pin(\n\
+        \x20                       async move { answer.await.unwrap_or_else(IntoResponse::into_response) },\n\
+        \x20                   )\n\
+        \x20               })\n\
+        \x20               .await;\n\
         \x20           *state = ctx.take_state();\n\
         \x20           response\n\
         \x20       }\n\
@@ -2550,6 +2570,7 @@ brocanth_pages::pages!("src/pages"@DESCRIBE@);
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::plugin_hooks::RequestState;
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 use crate::plugins;
@@ -2979,21 +3000,46 @@ impl Ctx {
 /// A handler, as the table stores it. One per verb a page answers.
 ///
 /// Boxed rather than a bare `fn` pointer, because every handler returns its
-/// own type and a `fn` pointer can only hold one of them. [`page`] is what
-/// unifies them, and it runs once per route at startup rather than per
-/// request.
-pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+/// own type and a `fn` pointer can only hold one of them. [`page`] and
+/// [`page_async`] are what unify them, and they run once per route at
+/// startup rather than per request.
+///
+/// It returns a future, so a page may wait -- on a database, on another
+/// service -- without holding a thread. A page that waits on nothing is
+/// still a plain `fn`, and [`page`] hands back its answer already finished.
+pub type Handler =
+    Box<dyn for<'a> Fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>> + Send + Sync>;
 
-/// Puts a handler in the table whatever it returns.
+/// Puts a `pub fn handle` in the table whatever it returns.
 ///
 /// Generic over the return type, so `-> Result<impl IntoResponse, Error>` on
 /// the handler and one concrete `Handler` in the table are the same thing.
+/// The answer is ready when the handler returns; the future around it is
+/// only there so a sync page and an async page share one table.
 pub fn page<H, T>(handler: H) -> Handler
 where
     H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
     T: IntoResponse,
 {
-    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+    Box::new(move |ctx| {
+        let answered = handler(ctx).map(IntoResponse::into_response);
+        Box::pin(std::future::ready(answered))
+    })
+}
+
+/// Puts a `pub async fn handle` in the table.
+///
+/// `pages!` writes the call, with a closure that awaits the page and turns
+/// its answer into a `Response`. The closure is a `fn` pointer and not a
+/// generic, because the page's future borrows the context and a generic
+/// cannot name that borrow.
+///
+/// `allow(dead_code)`: nothing calls it until a page is `async`.
+#[allow(dead_code)]
+pub fn page_async(
+    handler: for<'a> fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>>,
+) -> Handler {
+    Box::new(handler)
 }
 
 "##;
@@ -3630,7 +3676,8 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         out.push_str("use brocanth::plugin_hooks::{Both, HookSource, NoHooks};\n");
     }
     out.push_str(concat!(
-        "use brocanth::routing::Next;\n",
+        "use brocanth::plugin_routes::BoxFuture;\n",
+        "use brocanth::routing::AsyncNext;\n",
         "\n",
         "use crate::pages::{Ctx, Response};\n",
         "\n",
@@ -3804,7 +3851,11 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
          /// A name rather than the type written out: clippy calls the bare\n\
          /// form a very complex type, and it is also the type `src/app.rs`\n\
          /// would have to spell to hold one.\n\
-         pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;\n\
+         ///\n\
+         /// A layer may wait, so it returns a future. The lifetime is named\n\
+         /// because the future borrows both the context and the rest of the\n\
+         /// chain; see `logging::layer` for the shape of one.\n\
+         pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;\n\
          \n\
          /// The function behind a middleware name the application mounted.\n\
          ///\n\
@@ -5161,6 +5212,92 @@ mod tests {
             wrong.join("\n  ")
         );
     }
+
+    /// The golden shapes, built and tested for real, against this checkout.
+    ///
+    /// A snapshot proves the generator wrote what it wrote yesterday, not
+    /// that what it wrote compiles. Minutes, not milliseconds:
+    /// `cargo test -p brocanth-cli --bin brocanth -- --ignored golden_shapes`.
+    /// `BROCANTH_SHAPES=default,admin` narrows it to those shapes. One
+    /// target directory serves every shape, so the dependencies build once.
+    #[test]
+    #[ignore = "runs cargo build and cargo test over generated applications"]
+    fn the_golden_shapes_build_and_pass_their_own_tests() {
+        let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let wanted = std::env::var("BROCANTH_SHAPES").ok();
+        let base = std::env::temp_dir().join(format!("brocanth-shapes-{}", std::process::id()));
+        let target = base.join("target");
+        let mut failed = Vec::new();
+        for (name, picks) in shapes() {
+            if wanted
+                .as_deref()
+                .is_some_and(|list| !list.split(',').any(|w| w == name))
+            {
+                continue;
+            }
+            let root = base.join(name);
+            let _ = std::fs::remove_dir_all(&root);
+            let a = Answers {
+                local: Some(brocanth.display().to_string()),
+                ..answers(&picks)
+            };
+            for (path, contents) in scaffold(&a).expect("the modules agree") {
+                let full = root.join(&path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(&full, contents).unwrap();
+            }
+            // Clippy as the project's own CI runs it, then its tests, then
+            // once more with a page that awaits: the generator writes only
+            // sync pages, and the async path is what a developer adds next.
+            let lint = &["clippy", "--all-targets", "--", "-D", "warnings"][..];
+            for step in [lint, &["test"][..], &["async-page"][..], lint] {
+                if step == ["async-page"] {
+                    std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
+                    // Cargo cannot see a new page, which is documented; the
+                    // table it lives in is rewritten so the build notices.
+                    let table = root.join("src/pages/mod.rs");
+                    let text = std::fs::read(&table).unwrap();
+                    std::fs::write(&table, text).unwrap();
+                    continue;
+                }
+                let output = std::process::Command::new(
+                    std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+                )
+                .args(step)
+                .env("CARGO_TARGET_DIR", &target)
+                .current_dir(&root)
+                .output()
+                .expect("run cargo");
+                if !output.status.success() {
+                    failed.push(format!(
+                        "{name}: cargo {}\n{}",
+                        step.join(" "),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A page that holds the context across an `.await`.
+    const ASYNC_PAGE: &str = r#"//! `/waits`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let before = ctx.path.clone();
+    tokio::task::yield_now().await;
+    Ok(format!("{before} {}", ctx.path))
+}
+"#;
 
     /// Everything a shape writes. The modules have to agree for a project
     /// to exist at all, so a test that cannot get this far has already
@@ -6763,8 +6900,9 @@ pub struct Created {
 
 /// The signature is the declaration. A second parameter is the body, read
 /// and checked before this runs; a `Json<T>` return is what the document
-/// publishes as the answer.
-pub fn handle_post(_ctx: &mut Ctx, body: Signup) -> Result<Json<Created>, Error> {
+/// publishes as the answer. `async`, so the table awaits it; `handle_put`
+/// below is a plain `fn` in the same file.
+pub async fn handle_post(_ctx: &mut Ctx, body: Signup) -> Result<Json<Created>, Error> {
     Ok(Json(Created {
         id: "0191a3f0-0000-7000-8000-000000000000".to_string(),
         handle: body.handle,
@@ -6923,8 +7061,8 @@ mod surface {
         assert_eq!(signup.command(), "signup-post");
     }
 
-    #[test]
-    fn a_body_that_breaks_a_rule_is_refused_before_the_handler_runs() {
+    #[tokio::test]
+    async fn a_body_that_breaks_a_rule_is_refused_before_the_handler_runs() {
         use brocanth::routing::{Dispatch, Verb};
 
         let router = pages::router().expect("the pages produce a table");
@@ -6943,7 +7081,7 @@ mod surface {
         // A match and not `unwrap_err`: that one wants the Ok type to be
         // `Debug`, and a `Response` holding a rendered page has no reason
         // to be.
-        let Err(refused) = handler(&mut ctx) else {
+        let Err(refused) = handler(&mut ctx).await else {
             panic!("the body broke two rules and was not refused");
         };
         assert_eq!(refused.status, 422);
@@ -6951,8 +7089,8 @@ mod surface {
         assert!(refused.message.contains("age"), "both faults: {}", refused.message);
     }
 
-    #[test]
-    fn a_body_that_passes_reaches_the_handler_and_comes_back_as_json() {
+    #[tokio::test]
+    async fn a_body_that_passes_reaches_the_handler_and_comes_back_as_json() {
         use brocanth::routing::{Dispatch, Verb};
 
         let router = pages::router().expect("the pages produce a table");
@@ -6968,7 +7106,7 @@ mod surface {
             )],
         );
 
-        let answered = handler(&mut ctx).expect("the body passed");
+        let answered = handler(&mut ctx).await.expect("the body passed");
         assert_eq!(answered.status, 200);
         assert!(answered.body.contains("\"handle\":\"ada-lovelace\""), "{}", answered.body);
         assert!(answered

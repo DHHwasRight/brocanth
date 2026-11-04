@@ -75,7 +75,8 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 
 use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
-use brocanth::routing::Next;
+use brocanth::plugin_routes::BoxFuture;
+use brocanth::routing::AsyncNext;
 
 use crate::pages::{{Ctx, Response}};
 
@@ -162,7 +163,10 @@ impl Plugin for Sessions {{
 /// The layer `session` mounts. Reading the cookie off the request and writing
 /// `Set-Cookie` on the way out both need the request type that arrives with the
 /// HTTP server; the seam is here and it is already the right shape.
-pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {{
+///
+/// A layer may wait, which is what a session store wants: the lookup is
+/// awaited here and holds no thread.
+pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {{
     next.run(ctx)
 }}
 "##,

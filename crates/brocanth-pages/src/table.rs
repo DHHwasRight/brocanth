@@ -46,6 +46,8 @@ struct Found {
     /// The `T` of a `Json<T>` return, for a handler that says what it
     /// gives.
     gives: Option<syn::Type>,
+    /// `pub async fn`: the page returns a future, and the table awaits it.
+    is_async: bool,
 }
 
 /// `handle` is GET and `handle_<verb>` is that verb.
@@ -85,7 +87,8 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> Tok
             return error(&format!(
                 "`{}` declares no handler, so nothing would route to it; \
                  write `pub fn handle(ctx: &mut Ctx) -> Result<impl \
-                 IntoResponse, Error>`, or delete the file",
+                 IntoResponse, Error>` (or `pub async fn handle` to await \
+                 inside it), or delete the file",
                 page.route_file
             ));
         }
@@ -104,13 +107,31 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> Tok
             // wrapper that reads one. Both produce the same `Handler`, so
             // the table does not know the difference and the page does
             // not have to say it twice.
-            let register = if found.body.is_some() {
-                quote!(page_with_body)
-            } else {
-                quote!(page)
+            //
+            // An `async fn` is wrapped in a closure that awaits it and
+            // turns its answer into a `Response` inside the future. Inside,
+            // because the `impl IntoResponse` an async page returns borrows
+            // the context, and no generic outside the future can name it.
+            let register = match (found.body.is_some(), found.is_async) {
+                (false, false) => quote!(page(#(#path ::)* #handler)),
+                (true, false) => quote!(page_with_body(#(#path ::)* #handler)),
+                (false, true) => quote!(page_async(|ctx| {
+                    ::std::boxed::Box::pin(async move {
+                        #(#path ::)* #handler(ctx)
+                            .await
+                            .map(IntoResponse::into_response)
+                    })
+                })),
+                (true, true) => quote!(page_with_body_async(|ctx, body| {
+                    ::std::boxed::Box::pin(async move {
+                        #(#path ::)* #handler(ctx, body)
+                            .await
+                            .map(IntoResponse::into_response)
+                    })
+                })),
             };
             quote! {
-                routes.file(#file, "", Verb::#verb, #register(#(#path ::)* #handler))?;
+                routes.file(#file, "", Verb::#verb, #register)?;
             }
         })
     });
@@ -482,6 +503,7 @@ fn handlers(path: &Path, route_file: &str) -> Result<Vec<Found>, String> {
         found.push(Found {
             body: body_of(&function.sig, route_file, &name)?,
             gives: gives_of(&function.sig),
+            is_async: function.sig.asyncness.is_some(),
             name,
             verb_ident,
             verb: *verb,
@@ -687,6 +709,53 @@ mod tests {
         assert!(out.contains("compile_error !"), "{out}");
         assert!(out.contains("is not a verb"), "{out}");
         assert!(out.contains("handle_post"), "the message lists them: {out}");
+    }
+
+    #[test]
+    fn a_sync_page_is_registered_exactly_as_it_was() {
+        // Every page written before async existed must expand to the same
+        // row, or a project that changed nothing stops compiling.
+        let out = table(&[("index.rs", GET)]);
+        assert!(
+            out.contains("Verb :: Get , page (index :: handle))"),
+            "{out}"
+        );
+        assert!(!out.contains("page_async"), "{out}");
+    }
+
+    #[test]
+    fn an_async_page_is_awaited_rather_than_called() {
+        let out = table(&[(
+            "users/[id].rs",
+            "pub async fn handle(c: &mut Ctx) -> Result<impl IntoResponse, Error> { }\n\
+             pub fn handle_delete(c: &mut Ctx) -> R { }",
+        )]);
+        assert!(out.contains("Verb :: Get , page_async (| ctx |"), "{out}");
+        assert!(
+            out.contains("users :: _id_ :: handle (ctx) . await"),
+            "{out}"
+        );
+        // The two kinds share a page and a table; each keeps its own row.
+        assert!(
+            out.contains("Verb :: Delete , page (users :: _id_ :: handle_delete))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_async_page_that_takes_a_body_reads_it_before_the_future_starts() {
+        let out = table(&[(
+            "signup.rs",
+            "pub async fn handle_post(c: &mut Ctx, body: Signup) -> R { }",
+        )]);
+        assert!(
+            out.contains("page_with_body_async (| ctx , body |"),
+            "{out}"
+        );
+        assert!(
+            out.contains("signup :: handle_post (ctx , body) . await"),
+            "{out}"
+        );
     }
 
     #[test]
