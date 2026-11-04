@@ -13,6 +13,7 @@ default-run = "my-blog"
 # field on the context, no bytes in the binary.
 #
 # Not here, because nothing asked for it:
+#   brocanth-db        no database pool; a page that needs SQL has nowhere to send it
 #   brocanth-model     no ORM, no SQL driver, no sea-orm anywhere in the lock file
 #   brocanth-cache     no cache; every read does the work a hit would have skipped
 #   brocanth-jobs      no queue; slow work happens inside the request that asked for it
@@ -796,6 +797,12 @@ impl IntoResponse for Error {
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
         let withheld = self.status >= 500;
+        if withheld {
+            // So the message does reach the logs: a database error that came
+            // up through `?` says here what failed, and the client sees none
+            // of it.
+            eprintln!("error {}: {}", self.status, self.message);
+        }
         let body = if withheld {
             String::from("Internal Server Error")
         } else {
@@ -2408,7 +2415,7 @@ request.
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 
-**Absent:** `logging`, `observability-tracing`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2495,7 +2502,7 @@ HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
 is in front. Set `include_subdomains` or `preload` only when the
 person who owns the domain says so.
 
-<!-- brocanth-digest: a0ad6af3384ada1c -->
+<!-- brocanth-digest: 2b551c0445e11e6a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

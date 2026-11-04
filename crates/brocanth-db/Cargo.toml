@@ -51,12 +51,26 @@ thiserror = "2"
 # Off: a service configured in code has no use for it.
 serde = { version = "1", features = ["derive"], optional = true }
 
+# `Db: ContextItem`, so a plugin puts the pool on the request context and a
+# handler reads it with `ctx.db()`. Off: a job runner or a command that only
+# runs statements does not link the core to do it.
+brocanth = { workspace = true, optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key `db`.
+# It lives beside this crate because what it writes is a statement about this
+# crate: `Db::connect`, `DbConfig`'s fields, `Db::ping`, `Db::close`. Off, so
+# an application that has a database never links the code that writes one
+# into a project. The CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
 serde = ["dep:serde"]
+plugin = ["dep:brocanth"]
+scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

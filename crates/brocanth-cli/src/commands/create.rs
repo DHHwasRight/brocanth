@@ -2784,6 +2784,12 @@ impl IntoResponse for Error {
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
         let withheld = self.status >= 500;
+        if withheld {
+            // So the message does reach the logs: a database error that came
+            // up through `?` says here what failed, and the client sees none
+            // of it.
+            eprintln!("error {}: {}", self.status, self.message);
+        }
         let body = if withheld {
             String::from("Internal Server Error")
         } else {
@@ -4886,6 +4892,9 @@ mod tests {
             // The queue, with a config file, which is the shape that opens
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
+            // The pool, with a config file: a `[db]` section, a plugin that
+            // opens it in `before_start`, and `ctx.db()` on the context.
+            ("db", vec!["config", "db"]),
             // The two modules that mount routes, and nothing else: no
             // config file and no renderer, so the admin's own rsx is the
             // only template engine in the tree and `mounted` is written

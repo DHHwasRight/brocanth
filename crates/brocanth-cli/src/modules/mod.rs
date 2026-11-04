@@ -78,6 +78,9 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_observe::scaffold::Tracing,
     &config::Config,
     &sessions::Sessions,
+    // The pool, from the crate that is the pool. Before `model`, which is
+    // the ORM over the same connections.
+    &brocanth_db::scaffold::Database,
     &model::Model,
     // From `brocanth-cache` itself, which is the point: a module can live in
     // the crate it scaffolds, and joining the menu is still one line here.

@@ -15,6 +15,7 @@ default-run = "my-blog"
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics", "otel"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["sqlite"] }  # Postgres by default; SQLite for config/development.toml
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -864,6 +865,12 @@ impl IntoResponse for Error {
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
         let withheld = self.status >= 500;
+        if withheld {
+            // So the message does reach the logs: a database error that came
+            // up through `?` says here what failed, and the client sees none
+            // of it.
+            eprintln!("error {}: {}", self.status, self.message);
+        }
         let body = if withheld {
             String::from("Internal Server Error")
         } else {
@@ -1509,6 +1516,36 @@ pub fn refused(faults: &zod::Faults) -> Error {
     Error::new(422, lines.join("\n"))
 }
 
+/// The database, on every request the application dispatches.
+///
+/// `allow(dead_code)`: it is here for the first page that queries, and a
+/// new project has none.
+#[allow(dead_code)]
+impl Ctx {
+    /// The pool the `db` plugin opened. Each statement takes a connection
+    /// and gives it back, so a page holds none while it waits on anything
+    /// else.
+    ///
+    /// ```ignore
+    /// use brocanth_db::Exec;
+    /// let rows: Vec<(i64, String)> = ctx.db().all(&query).await?;
+    /// ```
+    ///
+    /// A `brocanth_db::DbError` goes through `?`: it is a 500, its message
+    /// goes to the log and not to the client.
+    ///
+    /// # Panics
+    ///
+    /// On a `Ctx` built by hand, which has no application behind it.
+    pub fn db(&self) -> &brocanth_db::Db {
+        self.provided::<brocanth_db::Db, _>().expect(
+            "this Ctx has no database: it was built by hand, not dispatched by the application\n\
+             help: send the request through `app::dispatch`, or give the code under test a \
+             `brocanth_db::Db` of its own",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1628,6 +1665,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 pub mod admin;
 pub mod auth;
 pub mod cache;
+pub mod db;
 pub mod jobs;
 pub mod model;
 pub mod observability;
@@ -1736,6 +1774,9 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
             .map_err(|e| e.to_string())?;
         let builder = builder
+            .plugin_from_config::<crate::plugins::db::Database>("db")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -1830,7 +1871,8 @@ type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithModel = After<crate::plugins::model::Model, WithSessions>;
 type WithAdmin = After<crate::plugins::admin::AdminSettings, WithModel>;
 type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
-type WithCache = After<crate::plugins::cache::Cache, WithObservability>;
+type WithDb = After<crate::plugins::db::Database, WithObservability>;
+type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithAuth>;
@@ -1876,6 +1918,8 @@ macro_rules! announce {
         eprintln!("session cookie: {}", session.cookie);
         let db: &crate::plugins::model::Db = cx.extract();
         eprintln!("database: {}", db.url);
+        let db: &brocanth_db::Db = cx.extract();
+        eprintln!("db: {} connection(s) open", db.pool().size());
         let auth: &crate::plugins::auth::Services = cx.extract();
         eprintln!(
             "auth: session cookie {}, {} provider(s)",
@@ -2068,6 +2112,69 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: false,
+    },
+    Setting {
+        path: "db.url",
+        help: "The Postgres URL: postgres://user:password@host:5432/database.",
+        flag: false,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "db.max_connections",
+        help: "The most connections the pool opens.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.min_connections",
+        help: "The connections the pool keeps open when idle.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.acquire_timeout",
+        help: "Seconds a statement waits for a connection, opening one included.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.idle_timeout",
+        help: "Seconds before an idle connection closes. 0 keeps it open.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.statement_timeout",
+        help: "Seconds before the server cancels a statement. 0 is no limit.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.read_only",
+        help: "Every transaction is read-only: for a replica, or a reporting process.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db.application_name",
+        help: "The name pg_stat_activity shows. Empty sends none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "db.ca_file",
+        help: "A PEM bundle to trust, with verify-full. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
     },
     Setting {
         path: "cache.url",
@@ -2543,6 +2650,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let model = crate::plugins::model::Settings::default();
     let admin = crate::plugins::admin::Settings::default();
     let observability = crate::plugins::observability::Settings::default();
+    let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let jobs = crate::plugins::jobs::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
@@ -2600,6 +2708,18 @@ fn defaults() -> Vec<(&'static str, String)> {
             "observability.sample_ratio",
             format!("{:?}", observability.sample_ratio),
         ),
+        ("db.url", format!("{:?}", db.url)),
+        ("db.max_connections", format!("{:?}", db.max_connections)),
+        ("db.min_connections", format!("{:?}", db.min_connections)),
+        ("db.acquire_timeout", format!("{:?}", db.acquire_timeout)),
+        ("db.idle_timeout", format!("{:?}", db.idle_timeout)),
+        (
+            "db.statement_timeout",
+            format!("{:?}", db.statement_timeout),
+        ),
+        ("db.read_only", format!("{:?}", db.read_only)),
+        ("db.application_name", format!("{:?}", db.application_name)),
+        ("db.ca_file", format!("{:?}", db.ca_file)),
         ("cache.url", format!("{:?}", cache.url)),
         ("jobs.url", format!("{:?}", jobs.url)),
         ("jobs.migrate", format!("{:?}", jobs.migrate)),
@@ -2789,7 +2909,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: acfdd50fa0737736
+// brocanth-digest: a4b05d01d1a9195a
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2883,6 +3003,32 @@ metrics_path = "/metrics"
 # otlp_endpoint = "http://localhost:4318"
 # The share of new traces kept, from 0.0 to 1.0.
 sample_ratio = 1.0
+
+[db]
+# The Postgres URL: postgres://user:password@host:5432/database.
+# A URL can carry a password, so no flag sets it.
+url = "postgres://localhost/development"
+# The most connections the pool opens.
+# A statement holds a connection only while it runs, so this bounds
+# concurrent statements, not concurrent requests.
+max_connections = 10
+# The connections the pool keeps open when idle.
+min_connections = 0
+# Seconds a statement waits for a connection, opening one included.
+acquire_timeout = 30
+# Seconds before an idle connection closes. 0 keeps it open.
+idle_timeout = 600
+# Seconds before the server cancels a statement. 0 is no limit.
+statement_timeout = 0
+# The schemas for a table name with no schema. Empty is the server's default.
+search_path = []
+# Every transaction is read-only: for a replica, or a reporting process.
+read_only = false
+# The name pg_stat_activity shows. Empty sends none.
+application_name = "my-blog"
+# A PEM bundle to trust, with verify-full. Empty means none.
+# Unset, the pool trusts the system's roots.
+# ca_file = "/etc/ssl/certs/db-ca.pem"
 
 [cache]
 # The Postgres URL the cache lives in.
@@ -4845,6 +4991,199 @@ impl Plugin for Cache {
         }
     }
 }
+===== src/plugins/db/mod.rs =====
+//! The database, as this application registers it.
+//!
+//! One Postgres pool, opened at startup and shared by every request. A page
+//! reads it with `ctx.db()`. Another plugin reads it from the application's
+//! services: `lc.require_service::<brocanth_db::Db>()`, from its own
+//! `before_start`, registered after this one.
+//!
+//! `brocanth-db` is in `Cargo.toml` because this file is here, and through no
+//! other route. Delete the registration in `src/plugins/mod.rs` and this
+//! file, and the application links no SQL driver.
+
+use std::time::Duration;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_db::{Db, DbConfig};
+
+/// What this plugin is built from: `[db]`.
+///
+/// A duration is a whole number of seconds, and 0 turns an optional one
+/// off.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[db]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// `postgres://user:password@host:5432/database`.
+    pub url: String,
+    /// The most connections the pool opens.
+    pub max_connections: u32,
+    /// The connections the pool keeps open when idle.
+    pub min_connections: u32,
+    /// Seconds a statement waits for a connection, opening one included.
+    pub acquire_timeout: u64,
+    /// Seconds before an idle connection closes. 0 keeps it open.
+    pub idle_timeout: u64,
+    /// Seconds before the server cancels a statement. 0 is no limit.
+    pub statement_timeout: u64,
+    /// The schemas for a table name with no schema. Empty is the server's
+    /// default.
+    pub search_path: Vec<String>,
+    /// Every transaction is read-only.
+    pub read_only: bool,
+    /// The name `pg_stat_activity` shows. Empty sends none.
+    pub application_name: String,
+    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
+    /// roots.
+    pub ca_file: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            url: "postgres://localhost/development".to_string(),
+            max_connections: 10,
+            min_connections: 0,
+            acquire_timeout: 30,
+            idle_timeout: 600,
+            statement_timeout: 0,
+            search_path: Vec::new(),
+            read_only: false,
+            application_name: "my-blog".to_string(),
+            ca_file: None,
+        }
+    }
+}
+
+impl Settings {
+    /// The pool's configuration, from these settings.
+    pub fn config(&self) -> DbConfig {
+        let seconds = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
+        let mut config = DbConfig::new(&self.url);
+        config.max_connections = self.max_connections;
+        config.min_connections = self.min_connections;
+        config.acquire_timeout = Duration::from_secs(self.acquire_timeout);
+        config.idle_timeout = seconds(self.idle_timeout);
+        config.statement_timeout = seconds(self.statement_timeout);
+        config.search_path = self.search_path.clone();
+        config.read_only = self.read_only;
+        config.application_name =
+            Some(self.application_name.clone()).filter(|name| !name.is_empty());
+        config.ca_file = self.ca_file.clone().map(Into::into);
+        config
+    }
+}
+
+pub struct Database {
+    config: DbConfig,
+    /// Open from `before_start` until `shutdown`.
+    db: Option<Db>,
+}
+
+impl Plugin for Database {
+    type Config = Settings;
+    type Provides = ProvidesContext<Db>;
+    const NAME: &'static str = "db";
+
+    fn new(settings: Settings) -> Self {
+        Self {
+            config: settings.config(),
+            db: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.config.url.is_empty() {
+            return Err(PluginError::new(
+                "[db] url is required; there is no default database\n\
+                 help: set `url` under [db] in the config file, or the variable for `db.url`",
+            ));
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The hook is synchronous and connecting is not. `serve` builds the
+        // application inside its runtime, so take the handle and block on a
+        // scoped thread: `block_in_place` is wrong on a current-thread
+        // runtime. This is startup, where a wait is expected.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            PluginError::new(format!(
+                "[db] needs a Tokio runtime at startup to open its pool ({e})"
+            ))
+        })?;
+        let config = &self.config;
+        // `Db::connect` opens one connection, so a wrong URL, password or
+        // certificate stops the start here and not on the first request.
+        let db = std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(Db::connect(config)))
+                .join()
+                .map_err(|_| PluginError::new("[db] the connection thread panicked"))?
+                .map_err(|e| {
+                    PluginError::new(format!("[db] connecting to {}: {e}", config.redacted_url()))
+                })
+        })?;
+        // Ready while `SELECT 1` answers on a pooled connection.
+        let probe = db.clone();
+        lc.ready_when(move || {
+            let probe = probe.clone();
+            async move { probe.ping().await.map_err(|e| e.to_string()) }
+        });
+        // For a plugin registered after this one: the model layer wraps the
+        // same pool, so there is one set of connections to size.
+        lc.services_mut().insert(db.clone());
+        self.db = Some(db);
+        Ok(())
+    }
+
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        let Some(db) = self.db.take() else {
+            return Ok(());
+        };
+        // Without a runtime there is nothing to wait on: the connections
+        // close when the pool drops.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Ok(());
+        };
+        let remaining = sd.remaining();
+        // `close` waits for the connections in use to come back, so it
+        // waits inside what is left of the grace period and no longer.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime.block_on(async {
+                        match remaining {
+                            Some(left) => tokio::time::timeout(left, db.close()).await.is_ok(),
+                            None => {
+                                db.close().await;
+                                true
+                            }
+                        }
+                    })
+                })
+                .join()
+                .map_err(|_| PluginError::new("[db] the closing thread panicked"))
+        })?
+        .then_some(())
+        .ok_or_else(|| PluginError::new("[db] connections were still in use at the deadline"))
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `before_start` runs before the server is handed the application,
+        // so the pool is here by the time a request builds a context.
+        if let Some(db) = &self.db {
+            cx.insert(db.clone());
+        }
+    }
+}
 ===== src/plugins/jobs/mod.rs =====
 //! Background jobs, as this application registers them.
 //!
@@ -6516,6 +6855,7 @@ request.
 - `observability-tracing`  an OTLP span per request and per job, W3C traceparent in and out; needs a collector
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie, and a `Session` the context hands a handler
+- `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 - `model`  SeaORM, validations, migrations; without it no SQL driver at all
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
@@ -6751,6 +7091,52 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
 
+## The database
+
+`src/plugins/db/mod.rs` opens one Postgres pool at startup from `[db] url`.
+A page reads it with `ctx.db()`, a `&brocanth_db::Db`. Build a statement
+with `brocanth_db::sea_query`. Do not format values into SQL text: sea-query
+sends each value as a bound parameter.
+
+```rust
+use brocanth_db::sea_query::{Expr, ExprTrait, Order, Query};
+use brocanth_db::Exec;
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let q = Query::select()
+        .columns(["id", "title"])
+        .from("posts")
+        .and_where(Expr::col("published").eq(true))
+        .order_by("id", Order::Desc)
+        .limit(10)
+        .to_owned();
+    let posts: Vec<(i64, String)> = ctx.db().all(&q).await?;
+    Ok(posts
+        .iter()
+        .map(|(id, title)| format!("{id} {title}\n"))
+        .collect::<String>())
+}
+```
+
+`ctx.db().json(&q).await?` returns each row as a `serde_json::Value`,
+encoded by Postgres. Writes that belong together go in one transaction.
+`Ok` commits, and `Err` rolls back:
+
+```rust
+ctx.db()
+    .transact(async |tx| {
+        tx.execute(&debit).await?;
+        tx.execute(&credit).await?;
+        Ok(())
+    })
+    .await?;
+```
+
+A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
+log, never to the client.
+
 ## The client
 
 `src/commands/api.rs` is a command line for this application's own
@@ -6807,7 +7193,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: d6c458919924e883 -->
+<!-- brocanth-digest: 7e5b1693a9bca891 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -6819,7 +7205,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "realtime", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -6868,6 +7254,13 @@ kind = ["middleware"]
 files = ["src/plugins/sessions/"]
 config = ["sessions"]
 crates = []
+adapted_to = ["config"]
+
+[modules.db]
+kind = ["enhancer", "middleware", "renderer"]
+files = ["src/plugins/db/"]
+config = ["db"]
+crates = ["brocanth-db"]
 adapted_to = ["config"]
 
 [modules.model]
@@ -7050,6 +7443,6 @@ kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
 crates = []
-adapted_to = ["docker", "model", "jobs", "cache"]
+adapted_to = ["docker", "db", "model", "jobs", "cache"]
 
-# brocanth-digest: 913ac646e5df6669
+# brocanth-digest: feea00a528dacd57

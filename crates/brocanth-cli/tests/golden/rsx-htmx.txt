@@ -14,6 +14,7 @@ edition = "2021"
 # Not here, because nothing asked for it:
 #   brocanth-observe     no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
 #   brocanth-config      no TOML parser; main builds each plugin from a literal
+#   brocanth-db          no database pool; a page that needs SQL has nowhere to send it
 #   brocanth-model       no ORM, no SQL driver, no sea-orm anywhere in the lock file
 #   brocanth-cache       no cache; every read does the work a hit would have skipped
 #   brocanth-jobs        no queue; slow work happens inside the request that asked for it
@@ -857,6 +858,12 @@ impl IntoResponse for Error {
         // whoever is reading the logs, and putting it in the body is how an
         // internal path ends up on a stranger's screen.
         let withheld = self.status >= 500;
+        if withheld {
+            // So the message does reach the logs: a database error that came
+            // up through `?` says here what failed, and the client sees none
+            // of it.
+            eprintln!("error {}: {}", self.status, self.message);
+        }
         let body = if withheld {
             String::from("Internal Server Error")
         } else {
@@ -1678,7 +1685,7 @@ request.
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `jt`, `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `realtime`, `commands`, `jt`, `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1832,7 +1839,7 @@ header and never changes for it.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 2b548e41d28f553b -->
+<!-- brocanth-digest: 7c067b8d02b0d4b1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

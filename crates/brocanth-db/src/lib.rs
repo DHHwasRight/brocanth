@@ -17,6 +17,8 @@ pub mod config;
 mod db;
 pub mod error;
 pub mod exec;
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
 
 pub use config::DbConfig;
 pub use db::{Db, Tx};
@@ -25,3 +27,9 @@ pub use exec::{Exec, WriteStatement};
 
 pub use sea_query;
 pub use sqlx;
+
+/// A handler reads the pool off the request context: `ctx.db()` in a
+/// generated project. Behind the `plugin` feature, the only code here that
+/// names the core.
+#[cfg(feature = "plugin")]
+impl brocanth::plugin_context::ContextItem for Db {}

@@ -24,6 +24,9 @@ brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
 # links a generator.
 brocanth-cache = { workspace = true, features = ["scaffold"] }
 
+# The database pool, for its scaffold module alone, on the same terms.
+brocanth-db = { workspace = true, features = ["scaffold"] }
+
 # The broker, on the same terms. It offers `realtime` and no transport: the
 # core's `Response` is a finished `Vec<u8>` and every response hook is
 # specified to see one, so server-sent events are a change to the hook

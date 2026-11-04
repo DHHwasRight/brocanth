@@ -429,7 +429,7 @@ pub fn deploy(
             );
         }
     }
-    for section in ["model", "cache", "jobs"] {
+    for section in ["db", "model", "cache", "jobs"] {
         let Some(v) = get(config, &format!("{section}.url")) else {
             continue;
         };

@@ -766,6 +766,7 @@ dependencies = [
  "brocanth-cache",
  "brocanth-client",
  "brocanth-config",
+ "brocanth-db",
  "brocanth-input",
  "brocanth-jobs",
  "brocanth-middleware",
@@ -841,6 +842,8 @@ dependencies = [
 name = "brocanth-db"
 version = "0.1.0"
 dependencies = [
+ "brocanth",
+ "brocanth-scaffold",
  "sea-query",
  "sea-query-sqlx",
  "serde",
