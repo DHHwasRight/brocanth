@@ -62,7 +62,8 @@ impl Module for Sessions {
             .line(r#"        "session" => Some(sessions::layer),"#);
         s.at(Slot::AppContext).block(
             "    let session: &crate::plugins::sessions::Session = cx.extract();\n\
-            \x20   eprintln!(\"session cookie: {}\", session.cookie);"
+            \x20   let cookie = &session.cookie;\n\
+            \x20   crate::plugins::say!(info, \"session cookie: {cookie}\"; %cookie);"
                 .to_string(),
         );
     }

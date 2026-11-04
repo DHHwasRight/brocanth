@@ -265,7 +265,8 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+    let names = app.plugins.join(", ");
+    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -293,7 +294,8 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        let report = app.core.shutdown(ShutdownReason::Failed, None);
+        plugins::say!(error, "{report}");
         return Err(e.to_string());
     }
 
@@ -311,7 +313,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    eprintln!("{APP}: listening on http://{bound}");
+    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -320,7 +322,12 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            plugins::say!(
+                info,
+                "{signal}: stopping; open requests have {grace:?} to finish";
+                signal,
+                ?grace
+            );
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -359,12 +366,15 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            eprintln!("{APP}: {report}");
+            plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+        None => plugins::say!(
+            warn,
+            "a request still holds the application, so no plugin stopped"
+        ),
     }
     match failed {
         None => Ok(()),
@@ -1373,6 +1383,26 @@ macro_rules! announce {
 }
 pub(crate) use announce;
 
+/// A line about the application itself: startup, the listener, the stop.
+///
+/// A `tracing` event, because `observability-logs` is installed: the line is
+/// JSON in production and text elsewhere, on stdout, like the request lines.
+/// The fields after `;` are the event's fields, in `tracing`'s shorthand
+/// (`addr`, `%addr`, `?addr`), and name variables already in scope.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+///
+/// Without `observability-logs` there is no subscriber, and the generator
+/// writes this macro as an `eprintln!` instead.
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        brocanth_observe::tracing::$level!($($($field)+,)? $message)
+    };
+}
+pub(crate) use say;
+
 /// One middleware layer, as the stack stores it.
 ///
 /// A name rather than the type written out: clippy calls the bare
@@ -1910,7 +1940,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 17044af7a402dd37
+// brocanth-digest: 7debacc8553fee57
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!

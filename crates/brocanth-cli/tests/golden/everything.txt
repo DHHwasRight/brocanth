@@ -327,7 +327,8 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+    let names = app.plugins.join(", ");
+    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -355,7 +356,8 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        let report = app.core.shutdown(ShutdownReason::Failed, None);
+        plugins::say!(error, "{report}");
         return Err(e.to_string());
     }
 
@@ -378,7 +380,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    eprintln!("{APP}: listening on http://{bound}");
+    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -387,7 +389,12 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            plugins::say!(
+                info,
+                "{signal}: stopping; open requests have {grace:?} to finish";
+                signal,
+                ?grace
+            );
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -426,12 +433,15 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            eprintln!("{APP}: {report}");
+            plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+        None => plugins::say!(
+            warn,
+            "a request still holds the application, so no plugin stopped"
+        ),
     }
     match failed {
         None => Ok(()),
@@ -1980,32 +1990,57 @@ macro_rules! announce {
     ($app:expr) => {{
         let cx = $app.context();
         let session: &crate::plugins::sessions::Session = cx.extract();
-        eprintln!("session cookie: {}", session.cookie);
+        let cookie = &session.cookie;
+        crate::plugins::say!(info, "session cookie: {cookie}"; %cookie);
         let db: &brocanth_db::Db = cx.extract();
-        eprintln!("db: {} connection(s) open", db.pool().size());
+        let connections = db.pool().size();
+        crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
         let auth: &crate::plugins::auth::Services = cx.extract();
-        eprintln!(
-            "auth: session cookie {}, {} provider(s)",
-            auth.sessions().config().cookie_name,
-            auth.providers().len()
+        let cookie = &auth.sessions().config().cookie_name;
+        let providers = auth.providers().len();
+        crate::plugins::say!(
+            info,
+            "auth: session cookie {cookie}, {providers} provider(s)";
+            %cookie,
+            providers
         );
         let files: &plugins::storage::FileStore = cx.extract();
-        eprintln!(
-            "storage: ready, download links last {}s",
-            files.tokens.ttl()
-        );
+        let ttl = files.tokens.ttl();
+        crate::plugins::say!(info, "storage: ready, download links last {ttl}s"; ttl);
         let checks: &brocanth_schema::Validation = cx.extract();
-        eprintln!("validation: reports as {:?}", checks.report_style());
+        let style = checks.report_style();
+        crate::plugins::say!(info, "validation: reports as {style:?}"; ?style);
         let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
         eprintln!(
             "realtime: up to {} clients",
             realtime.broker.config().max_clients
         );
         let rules: &crate::plugins::policy::Rules = cx.extract();
-        eprintln!("policy: compiling for {:?}", rules.dialect);
+        let dialect = &rules.dialect;
+        crate::plugins::say!(info, "policy: compiling for {dialect:?}"; ?dialect);
     }};
 }
 pub(crate) use announce;
+
+/// A line about the application itself: startup, the listener, the stop.
+///
+/// A `tracing` event, because `observability-logs` is installed: the line is
+/// JSON in production and text elsewhere, on stdout, like the request lines.
+/// The fields after `;` are the event's fields, in `tracing`'s shorthand
+/// (`addr`, `%addr`, `?addr`), and name variables already in scope.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+///
+/// Without `observability-logs` there is no subscriber, and the generator
+/// writes this macro as an `eprintln!` instead.
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        brocanth_observe::tracing::$level!($($($field)+,)? $message)
+    };
+}
+pub(crate) use say;
 
 /// One middleware layer, as the stack stores it.
 ///
@@ -2963,7 +2998,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 9e2e58bf45ca442d
+// brocanth-digest: 65ab3af581fdd1ba
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!

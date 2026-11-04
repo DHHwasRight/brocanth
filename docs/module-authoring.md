@@ -635,6 +635,16 @@ s.at(Slot::AppContext).block(
 Spell paths from the crate root (`crate::plugins::..`): the macro expands
 in `src/app.rs`.
 
+To say something at start, use `crate::plugins::say!`, not `eprintln!`.
+With `observability-logs` it is a `tracing` event (JSON in production);
+without it, a line on stderr. Bind each value first, then name it in the
+message and, after `;`, as a field in `tracing`'s shorthand:
+
+```rust
+let connections = db.pool().size();
+crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
+```
+
 #### `plugins::wrap`: around the whole server
 
 `plugins::wrap` puts a function around `handle`, outside the hooks. The

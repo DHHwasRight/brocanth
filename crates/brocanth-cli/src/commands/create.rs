@@ -2132,7 +2132,8 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+    let names = app.plugins.join(", ");
+    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -2160,7 +2161,8 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        let report = app.core.shutdown(ShutdownReason::Failed, None);
+        plugins::say!(error, "{report}");
         return Err(e.to_string());
     }
 
@@ -2178,7 +2180,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    eprintln!("{APP}: listening on http://{bound}");
+    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -2187,7 +2189,12 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            plugins::say!(
+                info,
+                "{signal}: stopping; open requests have {grace:?} to finish";
+                signal,
+                ?grace
+            );
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -2226,12 +2233,15 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            eprintln!("{APP}: {report}");
+            plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+        None => plugins::say!(
+            warn,
+            "a request still holds the application, so no plugin stopped"
+        ),
     }
     match failed {
         None => Ok(()),
@@ -3234,6 +3244,52 @@ const HOOK_RECORD_DOC: &str = "\
 ";
 
 /// The `Hooks` alias and the aliases it is built from.
+/// `say!` with `observability-logs`: a `tracing` event, so production gets a
+/// JSON line with fields, through the subscriber the observability plugin
+/// installed.
+const SAY_LOGGED: &str = r#"/// A line about the application itself: startup, the listener, the stop.
+///
+/// A `tracing` event, because `observability-logs` is installed: the line is
+/// JSON in production and text elsewhere, on stdout, like the request lines.
+/// The fields after `;` are the event's fields, in `tracing`'s shorthand
+/// (`addr`, `%addr`, `?addr`), and name variables already in scope.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+///
+/// Without `observability-logs` there is no subscriber, and the generator
+/// writes this macro as an `eprintln!` instead.
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        brocanth_observe::tracing::$level!($($($field)+,)? $message)
+    };
+}
+pub(crate) use say;
+
+"#;
+
+/// `say!` without `observability-logs`: no subscriber exists, so a line on
+/// stderr. The fields are accepted and dropped, so a call site is the same
+/// text in both.
+const SAY_PRINTED: &str = r#"/// A line about the application itself: startup, the listener, the stop.
+///
+/// A line on stderr, prefixed with the application name. The level and the
+/// fields after `;` are what `observability-logs` would record; without it
+/// there is no subscriber, so they are dropped and the message is printed.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        eprintln!("{}: {}", crate::app::APP, format_args!($message))
+    };
+}
+pub(crate) use say;
+
+"#;
+
 fn hook_record(built: &Built) -> String {
     let mut out = String::from(HOOK_RECORD_DOC);
     let mut held = String::from("NoHooks");
@@ -3886,6 +3942,18 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
         }
     }
     out.push_str("    }};\n}\npub(crate) use announce;\n\n");
+
+    // -- say ----------------------------------------------------------
+    //
+    // Every line the binary writes about itself at startup and at stop goes
+    // through one macro, so the choice between a log event and a line of
+    // text is made once, here, from the module list. `src/app.rs` and the
+    // `announce!` lines call it and never change when the list does.
+    out.push_str(if a.has("observability-logs") {
+        SAY_LOGGED
+    } else {
+        SAY_PRINTED
+    });
 
     // -- layer --------------------------------------------------------
     out.push_str(
