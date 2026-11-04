@@ -48,7 +48,7 @@ bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true

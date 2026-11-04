@@ -205,6 +205,31 @@ unrelated `.await`, or make the cleanup synchronous (`Drop`). A panic in an
 async handler is the same case: a cancellation at the last `.await`, plus
 an unwind. `docs/async-handlers.md` §13.7 has the argument.
 
+**A page may stream, and only when it must.** A page answers with a whole
+body by default, so a failure is a clean 500. `Response::events(stream)`
+(server-sent events) and `Response::stream(status, content_type, stream)`
+answer with a body that is written after the handler returns. A failure
+halfway is then a truncated body, not a 500. Build the stream with
+`brocanth_server::sse::channel`, not with a hand-written `poll`:
+
+```rust
+pub async fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let (events, stream) = brocanth_server::sse::channel(16);
+    tokio::spawn(async move {
+        // `Err`: the client left or the server is stopping. Stop producing.
+        while events.send(Event::new("tick").with_event("clock")).await.is_ok() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    Ok(Response::events(stream.heartbeat(Duration::from_secs(15))))
+}
+```
+
+Give a long-lived stream a heartbeat: the server learns that a client left
+only when a write fails. The response hooks see the headers of a stream and
+never its body. A layer that rewrites `response.body` sees an empty string
+for a stream; leave `response.stream` alone.
+
 **A middleware layer is async too.** A generated project mounts its layers
 on an `AsyncMiddlewareStack`. A layer is a function with a named lifetime.
 It lends the context to the rest of the chain with `next.run(&mut *ctx)`

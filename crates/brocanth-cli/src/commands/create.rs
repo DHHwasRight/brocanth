@@ -2568,6 +2568,7 @@ const PAGES_MOD_RS_HEAD: &str = r##"//! The route table, which is this directory
 
 brocanth_pages::pages!("src/pages"@DESCRIBE@);
 
+use brocanth::plugin_body::{BodyStream, Streaming};
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::plugin_hooks::RequestState;
 use brocanth::plugin_routes::BoxFuture;
@@ -2582,10 +2583,20 @@ use crate::plugins;
 /// can happen. Echo and Gin hand the handler a writer and take an error back,
 /// and both carry the scar -- once a 200 has gone out, the central error
 /// handler cannot take it back. Here there is nothing to take back.
+///
+/// The one exception is opt-in: [`Response::stream`] and [`Response::events`]
+/// answer with a body that is written after the handler returns. A stream
+/// that fails halfway cannot become a 500, because the status is already on
+/// the wire. Use it for server-sent events and large downloads, and nowhere
+/// else.
 pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
+    /// A body the server polls after the handler returns. `None` for every
+    /// page that answers with `body`, which is nearly all of them; when it
+    /// is `Some`, `body` is ignored. Set it with [`Response::stream`].
+    pub stream: Option<Streaming>,
 }
 
 /// Written by hand rather than derived, and the difference matters.
@@ -2599,6 +2610,7 @@ impl Default for Response {
             status: 200,
             body: String::new(),
             headers: Vec::new(),
+            stream: None,
         }
     }
 }
@@ -2618,6 +2630,42 @@ impl Response {
 
     pub fn empty(status: u16) -> Self {
         Self::new(status, "")
+    }
+
+    /// A body written as it is produced: the first bytes reach the client
+    /// before the last exist.
+    ///
+    /// The response hooks see the headers and never the body. The server
+    /// tells the stream to end when it stops (`BodyStream::finish`), so a
+    /// long-lived stream should implement that, or a deploy waits for it.
+    #[allow(dead_code)]
+    pub fn stream(status: u16, content_type: &str, stream: impl BodyStream) -> Self {
+        Self {
+            status,
+            headers: vec![("content-type".to_string(), content_type.to_string())],
+            stream: Some(Streaming::new(stream)),
+            ..Default::default()
+        }
+    }
+
+    /// Server-sent events: `text/event-stream`, and the two headers that stop
+    /// a cache or a proxy from holding the events back.
+    ///
+    /// `brocanth_server::sse::channel` makes the stream from async code:
+    ///
+    /// ```ignore
+    /// let (events, stream) = brocanth_server::sse::channel(16);
+    /// tokio::spawn(async move {
+    ///     // `Err` when the client left or the server is stopping.
+    ///     let _ = events.send(Event::new("hello").with_event("greeting")).await;
+    /// });
+    /// Ok(Response::events(stream.heartbeat(Duration::from_secs(15))))
+    /// ```
+    #[allow(dead_code)]
+    pub fn events(stream: impl BodyStream) -> Self {
+        Self::stream(200, "text/event-stream", stream)
+            .with_header("cache-control", "no-cache")
+            .with_header("x-accel-buffering", "no")
     }
 
     /// For what the struct literal does not cover: several headers, added one
@@ -2810,6 +2858,7 @@ impl IntoResponse for Error {
             // The rest survive: the body is withheld, not the framing the
             // client needs to read what is left.
             headers,
+            stream: None,
         }
     }
 }
@@ -3083,13 +3132,19 @@ const SENT_FN: &str = r#"/// Turns a page's answer into the response the hooks s
 ///
 /// `text/html` unless the page names its own `content-type`, which then
 /// replaces it rather than joining it. Every other header is appended,
-/// because `set-cookie` has to repeat.
+/// because `set-cookie` has to repeat. A page that answered with a stream
+/// keeps it: the hooks see its headers, and the server polls its body.
 fn sent(answered: Response) -> hooks::Response {
-    brocanth_server::bridge::buffered(
-        answered.status,
-        answered.headers,
-        answered.body.into_bytes(),
-    )
+    match answered.stream {
+        Some(stream) => {
+            brocanth_server::bridge::streaming(answered.status, answered.headers, stream)
+        }
+        None => brocanth_server::bridge::buffered(
+            answered.status,
+            answered.headers,
+            answered.body.into_bytes(),
+        ),
+    }
 }
 
 /// The request headers as text, for the page.
@@ -5261,12 +5316,16 @@ mod tests {
                 std::fs::write(&full, contents).unwrap();
             }
             // Clippy as the project's own CI runs it, then its tests, then
-            // once more with a page that awaits: the generator writes only
-            // sync pages, and the async path is what a developer adds next.
+            // once more with a page that awaits and a page that streams: the
+            // generator writes only sync pages, and those two are what a
+            // developer adds next. The new pages change the route table, so
+            // after them only the streaming page's own test runs.
             let lint = &["clippy", "--all-targets", "--", "-D", "warnings"][..];
-            for step in [lint, &["test"][..], &["async-page"][..], lint] {
+            let streams = &["test", "--", "pages::ticks"][..];
+            for step in [lint, &["test"][..], &["async-page"][..], lint, streams] {
                 if step == ["async-page"] {
                     std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
+                    std::fs::write(root.join("src/pages/ticks.rs"), STREAM_PAGE).unwrap();
                     // Cargo cannot see a new page, which is documented; the
                     // table it lives in is rewritten so the build notices.
                     let table = root.join("src/pages/mod.rs");
@@ -5305,6 +5364,55 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let before = ctx.path.clone();
     tokio::task::yield_now().await;
     Ok(format!("{before} {}", ctx.path))
+}
+"#;
+
+    /// A page that answers with server-sent events from a channel, and a test
+    /// that sends a request through the whole application -- the hooks, the
+    /// table, `sent` -- and reads the stream that comes out.
+    const STREAM_PAGE: &str = r#"//! `/ticks`.
+
+use brocanth_server::sse::{self, Event};
+
+use crate::pages::{Ctx, Error, IntoResponse, Response};
+
+pub async fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let (events, stream) = sse::channel(4);
+    tokio::spawn(async move {
+        for n in 1..=3 {
+            let tick = Event::new(n.to_string()).with_event("tick");
+            if events.send(tick).await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok(Response::events(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::{Body, Request};
+
+    #[tokio::test]
+    async fn the_page_streams_its_events_through_the_application() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/ticks")).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some("text/event-stream"));
+        assert_eq!(response.header("cache-control"), Some("no-cache"));
+        let Body::Stream(mut stream) = response.body else {
+            panic!("the page answered with a stream");
+        };
+        let mut seen = String::new();
+        while let Some(chunk) = std::future::poll_fn(|cx| stream.poll_chunk(cx)).await {
+            seen.push_str(std::str::from_utf8(&chunk.expect("no error")).expect("utf-8"));
+        }
+        assert_eq!(
+            seen,
+            "event:tick\ndata:1\n\nevent:tick\ndata:2\n\nevent:tick\ndata:3\n\n"
+        );
+    }
 }
 "#;
 

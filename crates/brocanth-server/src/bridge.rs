@@ -423,7 +423,27 @@ pub fn from_core(response: CoreResponse) -> Response {
 /// refuses is dropped, for the reason [`to_core`] gives. A status outside
 /// 100..=999 is a 500, because nothing else is a status.
 pub fn buffered(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> CoreResponse {
-    let mut out = CoreResponse::new(CoreBody::Buffered(body));
+    answered(status, headers, CoreBody::Buffered(body))
+}
+
+/// A streaming core response from what a page answered: [`buffered`], with a
+/// body the transport polls instead of bytes.
+///
+/// The response hooks then see the head and never the body
+/// (`ResponseHook::on_headers` runs, `on_body` does not), and
+/// [`App::finish`](brocanth::plugin_app::App::finish) puts the stream under
+/// the application's gate, so a shutdown reaches it.
+pub fn streaming(
+    status: u16,
+    headers: Vec<(String, String)>,
+    stream: brocanth::plugin_body::Streaming,
+) -> CoreResponse {
+    answered(status, headers, CoreBody::Streaming(stream))
+}
+
+/// [`buffered`] and [`streaming`], which differ only in the body.
+fn answered(status: u16, headers: Vec<(String, String)>, body: CoreBody) -> CoreResponse {
+    let mut out = CoreResponse::new(body);
     *out.status_mut() =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     let map = out.headers_mut();

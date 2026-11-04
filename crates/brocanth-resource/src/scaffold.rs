@@ -149,6 +149,7 @@ impl PageResponse for Response {
             status,
             body,
             headers,
+            ..Default::default()
         }
     }
 }

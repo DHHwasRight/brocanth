@@ -204,13 +204,19 @@ pub fn build() -> Result<App, String> {
 ///
 /// `text/html` unless the page names its own `content-type`, which then
 /// replaces it rather than joining it. Every other header is appended,
-/// because `set-cookie` has to repeat.
+/// because `set-cookie` has to repeat. A page that answered with a stream
+/// keeps it: the hooks see its headers, and the server polls its body.
 fn sent(answered: Response) -> hooks::Response {
-    brocanth_server::bridge::buffered(
-        answered.status,
-        answered.headers,
-        answered.body.into_bytes(),
-    )
+    match answered.stream {
+        Some(stream) => {
+            brocanth_server::bridge::streaming(answered.status, answered.headers, stream)
+        }
+        None => brocanth_server::bridge::buffered(
+            answered.status,
+            answered.headers,
+            answered.body.into_bytes(),
+        ),
+    }
 }
 
 /// The request headers as text, for the page.
@@ -583,6 +589,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
 
 brocanth_pages::pages!("src/pages");
 
+use brocanth::plugin_body::{BodyStream, Streaming};
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::plugin_hooks::RequestState;
 use brocanth::plugin_routes::BoxFuture;
@@ -597,10 +604,20 @@ use crate::plugins;
 /// can happen. Echo and Gin hand the handler a writer and take an error back,
 /// and both carry the scar -- once a 200 has gone out, the central error
 /// handler cannot take it back. Here there is nothing to take back.
+///
+/// The one exception is opt-in: [`Response::stream`] and [`Response::events`]
+/// answer with a body that is written after the handler returns. A stream
+/// that fails halfway cannot become a 500, because the status is already on
+/// the wire. Use it for server-sent events and large downloads, and nowhere
+/// else.
 pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
+    /// A body the server polls after the handler returns. `None` for every
+    /// page that answers with `body`, which is nearly all of them; when it
+    /// is `Some`, `body` is ignored. Set it with [`Response::stream`].
+    pub stream: Option<Streaming>,
 }
 
 /// Written by hand rather than derived, and the difference matters.
@@ -614,6 +631,7 @@ impl Default for Response {
             status: 200,
             body: String::new(),
             headers: Vec::new(),
+            stream: None,
         }
     }
 }
@@ -633,6 +651,42 @@ impl Response {
 
     pub fn empty(status: u16) -> Self {
         Self::new(status, "")
+    }
+
+    /// A body written as it is produced: the first bytes reach the client
+    /// before the last exist.
+    ///
+    /// The response hooks see the headers and never the body. The server
+    /// tells the stream to end when it stops (`BodyStream::finish`), so a
+    /// long-lived stream should implement that, or a deploy waits for it.
+    #[allow(dead_code)]
+    pub fn stream(status: u16, content_type: &str, stream: impl BodyStream) -> Self {
+        Self {
+            status,
+            headers: vec![("content-type".to_string(), content_type.to_string())],
+            stream: Some(Streaming::new(stream)),
+            ..Default::default()
+        }
+    }
+
+    /// Server-sent events: `text/event-stream`, and the two headers that stop
+    /// a cache or a proxy from holding the events back.
+    ///
+    /// `brocanth_server::sse::channel` makes the stream from async code:
+    ///
+    /// ```ignore
+    /// let (events, stream) = brocanth_server::sse::channel(16);
+    /// tokio::spawn(async move {
+    ///     // `Err` when the client left or the server is stopping.
+    ///     let _ = events.send(Event::new("hello").with_event("greeting")).await;
+    /// });
+    /// Ok(Response::events(stream.heartbeat(Duration::from_secs(15))))
+    /// ```
+    #[allow(dead_code)]
+    pub fn events(stream: impl BodyStream) -> Self {
+        Self::stream(200, "text/event-stream", stream)
+            .with_header("cache-control", "no-cache")
+            .with_header("x-accel-buffering", "no")
     }
 
     /// For what the struct literal does not cover: several headers, added one
@@ -825,6 +879,7 @@ impl IntoResponse for Error {
             // The rest survive: the body is withheld, not the framing the
             // client needs to read what is left.
             headers,
+            stream: None,
         }
     }
 }

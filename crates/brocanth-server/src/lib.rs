@@ -71,6 +71,7 @@
 
 #[cfg(feature = "bridge")]
 pub mod bridge;
+pub mod sse;
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -293,6 +294,9 @@ impl Response {
 
     /// `text/event-stream`, with the two headers every SSE client needs:
     /// nothing may cache it and nothing may buffer it.
+    ///
+    /// [`sse::channel`] builds the stream from async code without a
+    /// hand-written `poll`.
     pub fn events(stream: impl BodyStream) -> Self {
         Self::stream(200, "text/event-stream", stream)
             .with_header("cache-control", "no-cache")
