@@ -1731,7 +1731,7 @@ request.
 ## What this binary contains
 
 - `core`  the router, the context, the plugin seams
-- `logging`  a line per request; the core assumes no log layer
+- `logging`  a plain-text line per response on stderr, for development; for production use observability-logs
 
 **Absent:** `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
@@ -1768,6 +1768,14 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Decisions that belong to the person
+
+The modules in this project are the person's choice. Do not add or
+remove one on your own. Before you run `brocanth add`, show the person
+the question: `brocanth add --questions` lists each module with its
+default, what it needs and what it recommends. Give your
+recommendation, and wait for the answer.
+
 ## House style
 
 - A comment says **why**, next to the decision, and what was chosen
@@ -1784,7 +1792,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: dfd62bec57640788 -->
+<!-- brocanth-digest: d80f01036eb5cf76 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

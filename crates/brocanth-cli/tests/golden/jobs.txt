@@ -1981,6 +1981,19 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Decisions that belong to the person
+
+The modules in this project are the person's choice. Do not add or
+remove one on your own. Before you run `brocanth add`, show the person
+the question: `brocanth add --questions` lists each module with its
+default, what it needs and what it recommends. Give your
+recommendation, and wait for the answer.
+
+Not chosen, and recommended by a module that is here. Ask about each:
+
+- `observability-logs`, for `config`: $<APP>_ENV picks the environment; only observability-logs writes JSON when it is production
+- `observability-health`, for `jobs`: its readiness check, one read of the jobs table, is read only by /readyz; without it a deploy cannot tell that the queue is unreachable
+
 ## House style
 
 - A comment says **why**, next to the decision, and what was chosen
@@ -1997,7 +2010,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 222d84e0717c6636 -->
+<!-- brocanth-digest: 1762f6dc0ca76bdb -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
