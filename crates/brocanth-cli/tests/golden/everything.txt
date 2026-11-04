@@ -443,6 +443,11 @@ async fn run(
         Some(_) => ShutdownReason::Failed,
     };
     let started = Instant::now();
+    // Not ready from the first instant of the stop (ADR 2): `/readyz`
+    // answers 503, and a plugin that awaits `Readiness::draining` stops
+    // taking work now -- the job worker stops claiming -- while the
+    // listener still drains.
+    app.core.readiness().drain();
     if failed.is_none() {
         // With `observe`, `/readyz` fails first, and the listener closes
         // after `[observability] drain_delay_secs`. Inside the grace period.
@@ -3639,7 +3644,7 @@ spec:
           env:
             - name: MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS
               value: "25"
-            - name: MY_BLOG_OBSERVE__DRAIN_DELAY_SECS
+            - name: MY_BLOG_OBSERVABILITY__DRAIN_DELAY_SECS
               value: "5"
           livenessProbe:
             httpGet:
@@ -5381,7 +5386,12 @@ impl Plugin for Cache {
                 let key = brocanth_cache::Namespace::new("brocanth.readyz")
                     .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
                     .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| e.to_string())
+                probe.get(&key).await.map(drop).map_err(|e| {
+                    format!(
+                        "{e}\nhelp: check `[cache] url`, and that the `brocanth_cache` table \
+                         exists: `PgCache::schema_sql()` has the statements for a migration"
+                    )
+                })
             }
         });
         self.handle = Some(CacheHandle::new(cache));
@@ -5657,6 +5667,7 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_jobs::{Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle};
 use serde::{Deserialize, Serialize};
 
@@ -5736,11 +5747,14 @@ pub struct Jobs {
     /// Opened at `before_start` and not before, so this is an `Option` for
     /// exactly the length of the build.
     queue: Option<Queue>,
-    /// Kept so the worker can be stopped. The core's shutdown hook lands
-    /// with the server layer; until then, dropping the application stops
-    /// the process and the worker with it.
+    /// Kept so `shutdown` can wait for the worker to give back what it
+    /// holds.
     worker: Option<WorkerHandle>,
 }
+
+/// What the worker keeps of the grace period to give back the jobs that did
+/// not finish, so they are on the queue before the process exits.
+const GIVE_BACK: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Plugin for Jobs {
     type Config = Settings;
@@ -5816,7 +5830,7 @@ impl Plugin for Jobs {
         Ok(())
     }
 
-    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         // Here and not in `before_start`: `serve` runs this after its
         // startup gate, so the tables exist, and inside the runtime, so the
         // worker has somewhere to spawn. A build that never serves -- a test,
@@ -5825,15 +5839,75 @@ impl Plugin for Jobs {
         let (Some(queue), true) = (&self.queue, self.settings.worker) else {
             return Ok(());
         };
-        self.worker = Some(
-            Worker::builder(queue)
-                .registry(registry())
-                .queues(self.settings.queues.clone())
-                .concurrency(self.settings.concurrency)
-                .start()
-                .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?,
-        );
+        let worker = Worker::builder(queue)
+            .registry(registry())
+            .queues(self.settings.queues.clone())
+            .concurrency(self.settings.concurrency)
+            .start()
+            .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?;
+        // At SIGTERM `serve` marks the application not ready at once, and
+        // the worker stops claiming then, not after the listener drained.
+        // The jobs already running have the grace period, less the time it
+        // takes to give back the ones that do not finish: those go back to
+        // the queue with their attempt, and another pod runs them.
+        let grace = crate::plugins::shutdown_grace().map_err(PluginError::new)?;
+        worker.stop_when(lc.readiness().draining(), grace.saturating_sub(GIVE_BACK));
+        self.worker = Some(worker);
         Ok(())
+    }
+
+    fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        // Nothing new from here, if the drain above has not stopped it yet.
+        if let Some(worker) = &self.worker {
+            let grace = sd.remaining().unwrap_or(crate::app::SHUTDOWN_GRACE);
+            worker.stop(grace.saturating_sub(GIVE_BACK));
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Ok(());
+        };
+        // On a current-thread runtime this thread drives the I/O, so a wait
+        // here never ends. The worker stops by itself, by its deadline.
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Ok(());
+        }
+        // On a multi-thread runtime the workers drive it, and a scoped
+        // thread waits without blocking one of them, inside what is left.
+        let remaining = sd.remaining();
+        let finished = async move {
+            match remaining {
+                Some(left) => tokio::time::timeout(left, worker.finished()).await.ok(),
+                None => Some(worker.finished().await),
+            }
+        };
+        let ended = std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(finished))
+                .join()
+                .map_err(|_| PluginError::new("[jobs] the stopping thread panicked"))
+        })?;
+        match ended {
+            Some(Ok(report)) => {
+                let (finished, returned) = (report.finished, report.returned);
+                crate::plugins::say!(
+                    info,
+                    "[jobs] worker stopped: {finished} finished, {returned} back on the queue";
+                    finished,
+                    returned
+                );
+                Ok(())
+            }
+            Some(Err(e)) => Err(PluginError::new(format!("[jobs] stopping the worker: {e}"))),
+            None => Err(PluginError::new(
+                "[jobs] the worker was still giving jobs back at the deadline",
+            )),
+        }
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {

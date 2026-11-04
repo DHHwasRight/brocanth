@@ -2272,6 +2272,11 @@ async fn run(
         Some(_) => ShutdownReason::Failed,
     };
     let started = Instant::now();
+    // Not ready from the first instant of the stop (ADR 2): `/readyz`
+    // answers 503, and a plugin that awaits `Readiness::draining` stops
+    // taking work now -- the job worker stops claiming -- while the
+    // listener still drains.
+    app.core.readiness().drain();
     if failed.is_none() {
         // With `observe`, `/readyz` fails first, and the listener closes
         // after `[observability] drain_delay_secs`. Inside the grace period.

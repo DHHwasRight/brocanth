@@ -183,7 +183,7 @@ spec:
           env:
             - name: @UPPER@_SERVER__SHUTDOWN_GRACE_SECS
               value: "25"
-            - name: @UPPER@_OBSERVE__DRAIN_DELAY_SECS
+            - name: @UPPER@_OBSERVABILITY__DRAIN_DELAY_SECS
               value: "5"
           livenessProbe:
             httpGet:
