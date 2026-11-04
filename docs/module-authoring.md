@@ -767,6 +767,29 @@ stages. Each one runs for every instance before the next stage starts:
 | `begin_shutdown` | stop accepting work (reverse order) |
 | `shutdown` | drain, within the time left (reverse order) |
 
+**Never block on async work in a stage.** Every stage is synchronous. A
+stage that waits for a future, through `Handle::block_on` on a scoped
+thread or anything else, hangs on a current-thread runtime: the thread
+that runs the stage is the thread that drives the I/O, so the future
+never advances. `#[tokio::test]` is a current-thread runtime, so the first
+test that builds the application hangs. A production server uses a
+multi-thread runtime, which is why the bug stays hidden.
+
+So open lazily and check in the startup gate:
+
+- In `before_start`, build the pool with no connection
+  (`Db::connect_lazy`, `PgCache::connect_lazy`, `Queue::connect_lazy`,
+  `PgStore::connect_lazy`) inside `handle.enter()`, because the pool
+  spawns its upkeep task.
+- Register the check with `lc.ready_when`. Put one-time async setup, such
+  as creating a table, in the check, behind a flag, so it runs once.
+- The generated `serve` awaits `Readiness::check_all` once, before it
+  binds. A failed check stops the start with `[instance] reason`, so give
+  the reason a `help:` line. `/readyz` runs the same checks later.
+- Spawn workers in `start`, which runs after the gate.
+- In `shutdown`, wait for an async close only on a multi-thread runtime.
+  On a current-thread one, spawn it and return.
+
 #### `Slot::CommandsMod`
 
 `pub mod <name>;` in `src/commands/mod.rs`, for a subcommand the module
@@ -983,7 +1006,8 @@ without a change to the CLI.
 7. A `PagesRoutes` line for each route the module adds.
 8. An `AgentsSections` block for each rule an agent must follow.
 9. `outside_runtime()` when the module does not run in the server.
-10. Two lines in the CLI, the goldens blessed and read, a generated
+10. No stage waits for async work: a lazy pool and a readiness check.
+11. Two lines in the CLI, the goldens blessed and read, a generated
     project built.
 
 ## 5. Gaps
