@@ -250,6 +250,7 @@ fn new_still_reaches_create() {
 
 #[test]
 fn the_model_layer_is_the_only_thing_that_puts_an_orm_in_the_manifest() {
+    // `model` needs `db`: the ORM wraps the pool, and `[db]` holds its URL.
     let parent = temp("model");
     let checkout = checkout();
     let run = run_in(
@@ -258,7 +259,7 @@ fn the_model_layer_is_the_only_thing_that_puts_an_orm_in_the_manifest() {
             "create",
             "shop",
             "--with",
-            "model,config",
+            "db,model,config",
             "--no-git",
             "--brocanth-path",
             &checkout,
@@ -269,7 +270,11 @@ fn the_model_layer_is_the_only_thing_that_puts_an_orm_in_the_manifest() {
     let manifest = std::fs::read_to_string(parent.join("shop/Cargo.toml")).unwrap();
     assert!(manifest.contains("brocanth-model = {"), "{manifest}");
     let config = std::fs::read_to_string(parent.join("shop/config/development.toml")).unwrap();
-    assert!(config.contains("[model]"), "{config}");
+    assert!(config.contains("[db]"), "{config}");
+    assert!(
+        !config.contains("[model]"),
+        "the model has no settings: {config}"
+    );
     assert!(!config.contains("[logging]"), "{config}");
     std::fs::remove_dir_all(&parent).unwrap();
 }

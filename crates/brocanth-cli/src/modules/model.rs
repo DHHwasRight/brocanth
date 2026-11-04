@@ -1,38 +1,51 @@
-//! `model` -- SeaORM, validations and migrations.
+//! `model` -- SeaORM, validations and migrations, over the `db` pool.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The model layer.
 ///
 /// Recommended and absent, which is section 8 point 4 word for word: an
-/// application that stores nothing has no SQL driver in its lock file.
+/// application that stores nothing has no ORM in its lock file.
+///
+/// It opens no pool. ADR 2: the ORM is registered after the pool because it
+/// needs the pool. So `model` needs `db`, and its plugin wraps the
+/// `brocanth_db::Db` the `db` plugin published.
 pub struct Model;
 
 impl Module for Model {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "model",
-            "SeaORM, validations, migrations; without it no SQL driver at all",
+            "SeaORM, validations, migrations, over the `db` pool",
         )
         .category(Category::Enhancer)
         .category(Category::Middleware)
+        // `ctx.orm()` is an `impl Ctx` in `src/pages/mod.rs`, a slot the
+        // renderers own.
+        .category(Category::Renderer)
+        .needs(
+            "db",
+            "the ORM runs over the pool the `db` plugin opens, and without `db` there is none",
+        )
         .adapts_to(
             "config",
-            "its settings are read from the config file, not written as a literal",
+            "`migrate` reads `[db]` from the config file, not the default literal",
         )
         .adapts_to("commands", "a `migrate` subcommand is written")
         .asked_in("data", "An ORM with validations and migrations")
-        // Both drivers: the development database is a SQLite file, and the
-        // default features are Postgres, which production uses.
+        // Postgres, the default driver: the pool it wraps is `brocanth-db`'s,
+        // and that is Postgres. `db` builds `Orm` from a `Db`; `plugin`
+        // makes `Orm` a context item.
         .krate(
             Dep::brocanth("brocanth-model")
-                .feature("sqlite")
-                .note("Postgres by default; SQLite for config/development.toml"),
+                .feature("db")
+                .feature("plugin")
+                .note("`Orm` over the `db` pool, and on the request context"),
         )
         .absent(
             "brocanth-model",
-            "no ORM, no SQL driver, no sea-orm anywhere in the lock file",
+            "no ORM, no sea-orm anywhere in the lock file",
         )
     }
 
@@ -50,24 +63,10 @@ impl Module for Model {
             s.at(Slot::CommandsMod).line("pub mod migrate;");
         }
         s.at(Slot::PluginsMod).line("pub mod model;");
-        configurable(
-            s,
-            project,
-            "model",
-            "Model",
-            vec![Setting::text(
-                "url",
-                "sqlite://db/development.sqlite?mode=rwc",
-                "The database: a SQLite file, or a Postgres URL.",
-            )
-            .note("A URL can carry a password, so no flag sets it.")
-            .secret()],
-        );
-        s.at(Slot::AppContext).block(
-            "    let db: &crate::plugins::model::Db = cx.extract();\n\
-            \x20   eprintln!(\"database: {}\", db.url);"
-                .to_string(),
-        );
+        // No settings: the URL and the pool are `[db]`'s. The plugin is
+        // still registered, so it can publish the ORM.
+        plugin(s, project, "model", "Model");
+        s.at(Slot::PagesItems).block(CTX_ORM.to_string());
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
             // method, so the trait has to be in scope. Every plugin
@@ -78,8 +77,40 @@ impl Module for Model {
     }
 }
 
+/// `ctx.orm()`, into `src/pages/mod.rs`, the way `db` writes `ctx.db()`.
+const CTX_ORM: &str = r#"/// The ORM, on every request the application dispatches.
+///
+/// `allow(dead_code)`: it is here for the first page that reads a row, and
+/// a new project has none.
+#[allow(dead_code)]
+impl Ctx {
+    /// SeaORM's connection over the pool the `db` plugin opened: the same
+    /// connections as `ctx.db()`.
+    ///
+    /// ```ignore
+    /// let posts = post::Entity::find().all(ctx.orm()).await?;
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// On a `Ctx` built by hand, which has no application behind it.
+    pub fn orm(&self) -> &brocanth_model::sea_orm::DatabaseConnection {
+        self.provided::<brocanth_model::Orm, _>()
+            .expect(
+                "this Ctx has no ORM: it was built by hand, not dispatched by the application\n\
+                 help: send the request through `app::dispatch`, or give the code under test a \
+                 `brocanth_model::Orm` of its own",
+            )
+            .connection()
+    }
+}
+"#;
+
 pub(crate) fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "model");
+    // An empty struct has nothing to default by hand, so `Default` joins the
+    // derive: one attribute, as rustfmt would merge two.
+    let derive = derive.replacen("#[derive(Debug", "#[derive(Debug, Default", 1);
     format!(
         r##"//! The model layer.
 //!
@@ -89,6 +120,11 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 //! through no other route. An application that stores nothing pays nothing for
 //! it: not a crate in the lock file, not a section in the config, not a byte.
 //!
+//! It opens no pool. The `db` plugin opens one and publishes it as
+//! `brocanth_db::Db`; this plugin wraps that pool in SeaORM's connection, so an
+//! entity query and a sea-query statement share connections, limits and
+//! session settings. A page reads it with `ctx.orm()`.
+//!
 //! The entity modules go under `src/models/`, and you write them by hand: a
 //! struct deriving `DeriveEntityModel` with `#[brocanth_model::validates(..)]`
 //! above it, as `brocanth_model`'s own documentation sets out. There is no
@@ -96,59 +132,38 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 //! to one, and a generator for a single entity is not written yet.
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
-use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
-use brocanth_model::ModelRegistry;
+use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};
+use brocanth_model::{{ModelRegistry, Orm}};
 
-/// What this plugin is built from.
+/// What this plugin is built from: nothing. The URL and the pool are
+/// `[db]`'s.
 ///
 /// {note}
 {derive}
-pub struct Settings {{
-    /// `sqlite://db/development.sqlite?mode=rwc`, or a Postgres URL.
-    pub url: String,
-}}
-
-impl Default for Settings {{
-    fn default() -> Self {{
-        Self {{
-            url: "sqlite://db/development.sqlite?mode=rwc".to_string(),
-        }}
-    }}
-}}
-
-/// The handle a handler asks the context for.
-pub struct Db {{
-    pub url: String,
-}}
-
-impl ContextItem for Db {{}}
+pub struct Settings {{}}
 
 pub struct Model {{
-    url: String,
+    /// Set in `before_start`, once the `db` plugin has opened the pool.
+    orm: Option<Orm>,
 }}
 
 impl Plugin for Model {{
     type Config = Settings;
-    type Provides = ProvidesContext<Db>;
+    type Provides = ProvidesContext<Orm>;
     const NAME: &'static str = "model";
 
-    fn new(config: Settings) -> Self {{
-        Self {{ url: config.url }}
+    fn new(_config: Settings) -> Self {{
+        Self {{ orm: None }}
     }}
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        if self.url.is_empty() {{
-            return Err(PluginError::new(
-                "[model] url is required; there is no default database",
-            ));
-        }}
-        Ok(())
-    }}
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        // The `db` plugin is registered first and opened the pool in its own
+        // `before_start`. This wraps it and opens nothing.
+        let orm = Orm::from_db(lc.require_service::<brocanth_db::Db>()?);
+        // For another plugin: `lc.require_service::<Orm>()`.
+        lc.services_mut().insert(orm.clone());
+        self.orm = Some(orm);
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        // The pool opens here, at the last hook before the server is handed the
-        // application, and drains on the matching shutdown hook.
-        //
         // The registry below is what would make a generator and an admin UI
         // tractable: every entity compiled into this binary can be enumerated,
         // with its columns, nullability and keys. It reads an inventory that
@@ -162,9 +177,11 @@ impl Plugin for Model {{
     }}
 
     fn provide(&self, cx: &mut ContextBuilder) {{
-        cx.insert(Db {{
-            url: self.url.clone(),
-        }});
+        // Nothing before `before_start`, so `ctx.orm()` answers an error
+        // rather than a connection to nowhere.
+        if let Some(orm) = &self.orm {{
+            cx.insert(orm.clone());
+        }}
     }}
 }}
 "##
@@ -185,24 +202,28 @@ fn migrate_rs(project: &Project) -> String {
     MIGRATE_RS.replace("@URL@", url)
 }
 
-const URL_FROM_CONFIG: &str = r#"/// `[model] url`, through the loader the server uses, so the files,
-/// `$<APP>_ENV` and `$<APP>_MODEL__URL` agree with what the server sees.
-fn database_url() -> anyhow::Result<String> {
+const URL_FROM_CONFIG: &str = r#"/// The pool's configuration: `[db]`, through the loader the server uses, so
+/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
+/// sees.
+fn database() -> anyhow::Result<DbConfig> {
     let config = brocanth_config::Loader::new(crate::app::APP).load()?;
     Ok(config
-        .section::<crate::plugins::model::Settings>("model")?
-        .url)
+        .section::<crate::plugins::db::Settings>("db")?
+        .config())
 }
 "#;
 
-const URL_FROM_LITERAL: &str = r#"/// The URL the model plugin is built with. This project has no config
-/// file, so it is the default in `src/plugins/model/mod.rs`.
-fn database_url() -> anyhow::Result<String> {
-    Ok(crate::plugins::model::Settings::default().url)
+const URL_FROM_LITERAL: &str = r#"/// The pool's configuration, as the server reads `[db]` without a file:
+/// the defaults in `src/plugins/db/mod.rs`, then `$<APP>_DB__URL` and the
+/// other variables, then the flags.
+fn database() -> anyhow::Result<DbConfig> {
+    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&given).map_err(anyhow::Error::msg)?;
+    Ok(settings.config())
 }
 "#;
 
-const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations/` to `[model] url`.
+const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations/` to `[db] url`.
 //!
 //! `brocanth migrate up`, `brocanth migrate down [N]` and
 //! `brocanth migrate status` run this command through this binary. Where
@@ -213,8 +234,9 @@ const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations
 //! `migrations/mod.rs`. This command applies what that list holds.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
-use brocanth_model::sea_orm::Database;
+use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
+use brocanth_model::Orm;
 
 use crate::migrations::Migrator;
 
@@ -242,14 +264,17 @@ enum Action {
 
 impl Command for Migrate {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        // The config files and a relative SQLite path both resolve from the
-        // project root, wherever the command started.
+        // The config files resolve from the project root, wherever the
+        // command started.
         std::env::set_current_dir(ctx.root())?;
-        let url = database_url()?;
-        sqlite_directory(&url)?;
+        let config = database()?;
         tokio::runtime::Runtime::new()?.block_on(async {
-            let db = Database::connect(url.as_str()).await?;
-            let before = Migrator::get_migration_with_status(&db).await?;
+            // The pool the server opens, and the ORM over it, as the
+            // `model` plugin builds it.
+            let pool = Db::connect(&config).await?;
+            let orm = Orm::from_db(&pool);
+            let db = orm.connection();
+            let before = Migrator::get_migration_with_status(db).await?;
             let named = |status: MigrationStatus| -> Vec<String> {
                 before
                     .iter()
@@ -260,7 +285,7 @@ impl Command for Migrate {
             match self.action {
                 Action::Up => {
                     let pending = named(MigrationStatus::Pending);
-                    Migrator::up(&db, None).await?;
+                    Migrator::up(db, None).await?;
                     if pending.is_empty() {
                         println!("Nothing to apply: each migration is applied.");
                     }
@@ -270,7 +295,7 @@ impl Command for Migrate {
                 }
                 Action::Down { n } => {
                     let applied = named(MigrationStatus::Applied);
-                    Migrator::down(&db, Some(n)).await?;
+                    Migrator::down(db, Some(n)).await?;
                     if applied.is_empty() {
                         println!("Nothing to roll back: no migration is applied.");
                     }
@@ -296,20 +321,4 @@ impl Command for Migrate {
     }
 }
 
-@URL@
-/// Makes the directory of a SQLite file. `mode=rwc` creates the file, and
-/// not the directory it is in.
-fn sqlite_directory(url: &str) -> anyhow::Result<()> {
-    let Some(rest) = url.strip_prefix("sqlite://") else {
-        return Ok(());
-    };
-    let path = rest.split('?').next().unwrap_or_default();
-    if path.is_empty() || path == ":memory:" {
-        return Ok(());
-    }
-    if let Some(dir) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    Ok(())
-}
-"#;
+@URL@"#;

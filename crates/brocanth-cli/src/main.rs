@@ -99,7 +99,7 @@ enum Command {
     Migrate(commands::migrate::MigrateArgs),
     /// Open psql or sqlite3 on this project's database
     ///
-    /// Reads `[model] url` from the configuration of one environment and
+    /// Reads `[db] url` from the configuration of one environment and
     /// runs the database's own client on it. A Postgres password goes in
     /// PGPASSWORD, not on the command line. This is a data shell: Rust has
     /// no interpreter, so code runs as a project command instead.

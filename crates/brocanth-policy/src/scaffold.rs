@@ -75,7 +75,7 @@ impl Module for Policy {
         )
         .adapts_to(
             "model",
-            "the database URL agrees with the model's SQLite file",
+            "the dialect note names the database the model reads",
         )
         .adapts_to(
             "realtime",
@@ -87,7 +87,7 @@ impl Module for Policy {
         )
         .krate(Dep::brocanth("brocanth-policy"))
         // Only for the order of the two sections and the two builder lines:
-        // `[policy] dialect` has to say what `[model] url` says, so it reads
+        // `[policy] dialect` has to say what `[db] url` says, so it reads
         // under it. Neither module requires the other -- see the module
         // documentation for why this is not `needs`.
         .after("config")
@@ -99,7 +99,7 @@ impl Module for Policy {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let dialect = dialect(project);
+        let dialect = DIALECT;
         s.file("src/plugins/policy/mod.rs", plugin_rs(project, dialect));
         s.at(Slot::PluginsMod).line("pub mod policy;");
         configurable(s, project, "policy", "Policies", settings(project, dialect));
@@ -122,21 +122,15 @@ impl Module for Policy {
 
 /// Which dialect this project's conditions are compiled for.
 ///
-/// The model module's own default URL is SQLite, so a project that has one
-/// gets SQLite here and the two sections agree out of the box. A project with
-/// no model gets Postgres, which is this crate's default and brocanth's base.
-fn dialect(project: &Project) -> &'static str {
-    if project.has("model") {
-        "sqlite"
-    } else {
-        "postgres"
-    }
-}
+/// Postgres, with a model or without. The model runs over the `db` pool,
+/// which is Postgres, so the two sections agree out of the box. Without a
+/// model it is this crate's default and brocanth's base.
+const DIALECT: &str = "postgres";
 
 /// The `[policy]` section of `config/development.toml`.
 fn settings(project: &Project, dialect: &str) -> Vec<Setting> {
     let agrees = if project.has("model") {
-        "This follows `[model] url`, which the scaffold pointed at SQLite. Move the\n\
+        "This follows `[db] url`, the Postgres database the model reads. Move the\n\
          two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and\n\
          only one of them parses, so a condition compiled for the wrong dialect is\n\
          valid SQL that the engine rejects at the worst possible moment."

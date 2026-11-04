@@ -36,7 +36,7 @@ level = "debug"
 [sessions]
 secure = false
 
-[model]
+[db]
 url = "sqlite://db/production.sqlite?mode=rwc"
 
 [auth]
@@ -66,7 +66,7 @@ fn project(name: &str) -> PathBuf {
     std::fs::create_dir_all(dir.join("src/plugins")).unwrap();
     std::fs::write(
         dir.join("brocanth.toml"),
-        "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"sessions\", \"model\", \"auth\", \"middleware\", \"middleware-csrf\"]\n",
+        "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"sessions\", \"db\", \"model\", \"auth\", \"middleware\", \"middleware-csrf\"]\n",
     )
     .unwrap();
     std::fs::write(dir.join("config/production.toml"), COPIED).unwrap();
@@ -158,7 +158,7 @@ fn a_dialect_that_disagrees_with_the_database_fails_in_every_environment() {
     let dir = project("dialect");
     std::fs::write(
         dir.join("config/development.toml"),
-        "[model]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"sqlite\"\n",
+        "[db]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"sqlite\"\n",
     )
     .unwrap();
     let r = run(&dir, &["check"]);

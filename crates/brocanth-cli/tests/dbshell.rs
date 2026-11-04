@@ -23,7 +23,7 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
         .args(args)
         .env_remove("CLICOLOR_FORCE")
         .env_remove("SHOP_ENV")
-        .env_remove("SHOP_MODEL__URL")
+        .env_remove("SHOP_DB__URL")
         .env("NO_COLOR", "1");
     for (k, v) in env {
         command.env(k, v);
@@ -48,7 +48,7 @@ fn project(name: &str, modules: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         dir.join("config/development.toml"),
-        "[model]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n",
+        "[db]\nurl = \"sqlite://db/development.sqlite?mode=rwc\"\n",
     )
     .unwrap();
     std::fs::write(dir.join("db/development.sqlite"), b"").unwrap();
@@ -57,7 +57,7 @@ fn project(name: &str, modules: &str) -> PathBuf {
 
 #[test]
 fn development_opens_the_sqlite_file_under_the_project() {
-    let dir = project("sqlite", "\"model\"");
+    let dir = project("sqlite", "\"db\"");
     let r = run(&dir, &["dbshell", "--print"], &[]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let file = dir.join("db/development.sqlite");
@@ -67,11 +67,11 @@ fn development_opens_the_sqlite_file_under_the_project() {
 
 #[test]
 fn a_variable_wins_over_the_file_and_the_password_stays_off_the_line() {
-    let dir = project("pg", "\"model\"");
+    let dir = project("pg", "\"db\"");
     let r = run(
         &dir,
         &["dbshell", "--print", "--", "-c", "select 1"],
-        &[("SHOP_MODEL__URL", "postgres://shop:hunter2@db:5432/shop")],
+        &[("SHOP_DB__URL", "postgres://shop:hunter2@db:5432/shop")],
     );
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(
@@ -84,13 +84,13 @@ fn a_variable_wins_over_the_file_and_the_password_stays_off_the_line() {
 
 #[test]
 fn an_environment_with_no_url_says_where_to_put_one() {
-    let dir = project("prod", "\"model\"");
+    let dir = project("prod", "\"db\"");
     let r = run(&dir, &["dbshell", "--env", "production", "--print"], &[]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("error[dbshell/no-url]"), "{}", r.stderr);
     assert!(
         r.stderr.contains(
-            "help: set `url` under `[model]` in config/production.toml, or set $SHOP_MODEL__URL"
+            "help: set `url` under `[db]` in config/production.toml, or set $SHOP_DB__URL"
         ),
         "{}",
         r.stderr
@@ -99,15 +99,11 @@ fn an_environment_with_no_url_says_where_to_put_one() {
 }
 
 #[test]
-fn a_project_with_no_model_layer_is_told_how_to_get_one() {
-    let dir = project("nomodel", "\"logging\"");
+fn a_project_with_no_db_module_is_told_how_to_get_one() {
+    let dir = project("nodb", "\"logging\"");
     let r = run(&dir, &["dbshell", "--print"], &[]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("error[dbshell/no-model]"), "{}", r.stderr);
-    assert!(
-        r.stderr.contains("help: `brocanth add model`"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("error[dbshell/no-db]"), "{}", r.stderr);
+    assert!(r.stderr.contains("help: `brocanth add db`"), "{}", r.stderr);
     std::fs::remove_dir_all(&dir).unwrap();
 }

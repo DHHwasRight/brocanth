@@ -38,7 +38,6 @@ impl Module for GitHub {
         .adapts_to("static", "CI keeps the exported site as an artifact")
         .adapts_to("docker", "CI builds the image")
         .adapts_to("db", "CI starts a database for the tests")
-        .adapts_to("model", "CI starts a database for the tests")
         .adapts_to("jobs", "CI starts a database for the tests")
         .adapts_to("cache", "CI starts a database for the tests")
         .outside_runtime()
@@ -54,9 +53,7 @@ impl Module for GitHub {
 
 /// Whether the project's tests want a database: anything that stores rows.
 fn wants_postgres(project: &Project) -> bool {
-    ["db", "model", "jobs", "cache"]
-        .iter()
-        .any(|k| project.has(k))
+    ["db", "jobs", "cache"].iter().any(|k| project.has(k))
 }
 
 fn workflow(project: &Project) -> String {

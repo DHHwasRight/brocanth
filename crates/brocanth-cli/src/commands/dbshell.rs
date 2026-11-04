@@ -1,6 +1,6 @@
 //! `brocanth dbshell` -- the database's own client, on the project's database.
 //!
-//! Django's `dbshell`, Rails' `dbconsole`. It reads `[model] url` from the
+//! Django's `dbshell`, Rails' `dbconsole`. It reads `[db] url` from the
 //! configuration of one environment and replaces itself with `psql` or
 //! `sqlite3` on that database.
 //!
@@ -35,7 +35,7 @@ use crate::ui::{paint, Diagnostic, Ui, ACCENT, DIM};
 
 #[derive(Args)]
 pub struct DbshellArgs {
-    /// The environment whose `[model] url` to open [default: $<APP>_ENV, or development]
+    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]
     #[arg(long, short, value_name = "ENV")]
     pub env: Option<String>,
     /// Print the command line instead of running it. The password is not printed
@@ -61,36 +61,34 @@ pub struct Client {
 pub fn run(ui: &Ui, dir: Option<&Path>, args: DbshellArgs) -> Outcome {
     let project = Project::find(dir)?;
     // An empty list is a marker from before the list, which says nothing.
-    if !project.modules.is_empty() && !project.has("model") {
+    if !project.modules.is_empty() && !project.has("db") {
         return Err(vec![Diagnostic::error(
-            "dbshell/no-model",
-            "this project has no model layer, so it names no database",
+            "dbshell/no-db",
+            "this project has no `db` module, so it names no database",
         )
-        .help(
-            "`brocanth add model` gives it one, with `[model] url` in the config",
-        )]);
+        .help("`brocanth add db` gives it one, with `[db] url` in the config")]);
     }
     let config = project.config(args.env.as_deref())?;
     let env = config.env().to_owned();
 
-    let Some(url) = config.root().at("model.url").and_then(|v| v.as_str()) else {
+    let Some(url) = config.root().at("db.url").and_then(|v| v.as_str()) else {
         return Err(vec![Diagnostic::error(
             "dbshell/no-url",
-            format!("the `{env}` configuration has no `[model] url`"),
+            format!("the `{env}` configuration has no `[db] url`"),
         )
         .help(format!(
-            "set `url` under `[model]` in {}, or set ${}",
+            "set `url` under `[db]` in {}, or set ${}",
             project.config_file(&env),
-            project.variable("model", "url")
+            project.variable("db", "url")
         ))]);
     };
     let from = config
-        .provenance("model.url")
+        .provenance("db.url")
         .map(ToString::to_string)
         .unwrap_or_default();
 
     let client = client_for(url, &project.root)
-        .map_err(|d| vec![d.note(format!("`[model] url` is set at {from}"))])?;
+        .map_err(|d| vec![d.note(format!("`[db] url` is set at {from}"))])?;
 
     if args.print {
         let mut line = String::new();
@@ -125,13 +123,13 @@ pub fn client_for(url: &str, root: &Path) -> Result<Client, Box<Diagnostic>> {
     {
         let path = rest.split('?').next().unwrap_or(rest);
         if path.is_empty() || path == ":memory:" || rest.contains("mode=memory") {
-            return Err(Box::new(Diagnostic::error(
-                "dbshell/memory",
-                "the database is in memory, so no other process can open it",
-            )
-            .help(
-                "point `[model] url` at a file, such as sqlite://db/development.sqlite?mode=rwc",
-            )));
+            return Err(Box::new(
+                Diagnostic::error(
+                    "dbshell/memory",
+                    "the database is in memory, so no other process can open it",
+                )
+                .help("point the URL at a file, such as sqlite://db/development.sqlite?mode=rwc"),
+            ));
         }
         let file = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -171,9 +169,7 @@ pub fn client_for(url: &str, root: &Path) -> Result<Client, Box<Diagnostic>> {
             "dbshell/scheme",
             format!("brocanth has no client for a `{scheme}` URL"),
         )
-        .help(
-            "`[model] url` is a postgres:// or a sqlite:// URL; brocanth-model supports these two",
-        ),
+        .help("`[db] url` is a postgres:// URL; dbshell also opens a sqlite:// file"),
     ))
 }
 

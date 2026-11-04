@@ -12,7 +12,7 @@
 //!
 //! | Id | Severity | When |
 //! |---|---|---|
-//! | `check/dialect` | error | `[policy] dialect` is not the database of `[model] url` |
+//! | `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` |
 //! | `deploy/env` | warning | `--deploy` on `development` or `test` |
 //! | `deploy/no-config` | warning | no file and no variable configures this environment |
 //! | `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |
@@ -230,7 +230,7 @@ fn get<'a>(config: &'a Config, path: &str) -> Option<&'a Value> {
 /// The checks that hold in every environment.
 pub fn always(project: &Project, config: &Config) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    if let (Some(url), Some(dialect)) = (get(config, "model.url"), get(config, "policy.dialect")) {
+    if let (Some(url), Some(dialect)) = (get(config, "db.url"), get(config, "policy.dialect")) {
         let backend = url.as_str().and_then(backend_of);
         let said = dialect.as_str().unwrap_or_default();
         if let Some(backend) = backend {
@@ -239,11 +239,11 @@ pub fn always(project: &Project, config: &Config) -> Vec<Diagnostic> {
                     Diagnostic::error(
                         "check/dialect",
                         format!(
-                            "`[policy] dialect` is `{said}`, and `[model] url` is a {backend} database"
+                            "`[policy] dialect` is `{said}`, and `[db] url` is a {backend} database"
                         ),
                     )
                     .at(place(project, dialect))
-                    .note(format!("`[model] url` is set at {}", place(project, url)))
+                    .note(format!("`[db] url` is set at {}", place(project, url)))
                     .help(format!(
                         "set `dialect = \"{backend}\"`: a condition compiled for another dialect is SQL the database refuses"
                     )),
@@ -429,7 +429,7 @@ pub fn deploy(
             );
         }
     }
-    for section in ["db", "model", "cache", "jobs"] {
+    for section in ["db", "cache", "jobs"] {
         let Some(v) = get(config, &format!("{section}.url")) else {
             continue;
         };
@@ -619,7 +619,7 @@ level = "debug"
 [sessions]
 secure = false
 
-[model]
+[db]
 url = "sqlite::memory:"
 
 [jobs]
@@ -687,7 +687,7 @@ secret = "development only: replace before anything is uploaded in anger"
 level = "info"
 [sessions]
 secure = true
-[model]
+[db]
 url = "postgres://app@db/shop"
 [auth]
 signing_key_env = "SHOP_SESSION_KEY"

@@ -106,7 +106,7 @@ COPY --from=builder /app/config /app/config
 USER 10001
 
 # Every interface, inside the container. `$@UPPER@_ENV` picks
-# config/production.toml, and a variable such as `$@UPPER@_MODEL__URL`
+# config/production.toml, and a variable such as `$@UPPER@_DB__URL`
 # overrides one key of it.
 ENV @UPPER@_ADDR=0.0.0.0:3000 \
     @UPPER@_ENV=production
