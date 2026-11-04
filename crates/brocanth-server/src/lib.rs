@@ -69,6 +69,45 @@
 //! [`bridge`] has both numbers, what the inline arm does about a panicking
 //! handler, and what that does not cover.
 
+//!
+//! # Stopping in Kubernetes
+//!
+//! Kubernetes stops a pod in this order, and each step has a setting here:
+//!
+//! 1. The pod is marked for deletion. The kubelet sends SIGTERM, and, at the
+//!    same time, the endpoint controller removes the pod from the Service.
+//!    That removal reaches every node a few seconds later.
+//! 2. Readiness fails first. An application with a `/readyz` probe answers
+//!    503 from the moment SIGTERM arrives (`Readiness::drain` in the core;
+//!    the generated `serve` and `brocanth-observe` do it).
+//! 3. The listener stays open for a drain delay
+//!    ([`Server::stop_on_signals`]'s `delay`, or `[observability]
+//!    drain_delay_secs` in a generated project), so the requests that still
+//!    arrive during the endpoint change are answered. distroless has no
+//!    `sleep` for a `preStop` hook, so the delay is in the process.
+//! 4. The listener closes. Open response streams end with their last frame,
+//!    and open requests have the grace period ([`Server::drain_grace`]) to
+//!    finish.
+//! 5. The process exits 0. The delay plus the grace must stay below
+//!    `terminationGracePeriodSeconds` (30 by default), or the kubelet sends
+//!    SIGKILL first.
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use brocanth_server::{Response, Server};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     Server::bind("0.0.0.0:3000")
+//!         .await?
+//!         .stop_on_signals(Duration::from_secs(5))
+//!         .drain_grace(Duration::from_secs(20))
+//!         .run(|_request| async { Response::text(200, "ok") })
+//!         .await?;
+//!     Ok(())
+//! }
+//! ```
+
 #[cfg(feature = "bridge")]
 pub mod bridge;
 pub mod sse;
@@ -106,6 +145,8 @@ pub enum ServeError {
     Bind { addr: String, reason: String },
     /// Accepting a connection failed in a way that is not transient.
     Accept(std::io::Error),
+    /// [`Server::stop_on_signals`] could not install its signal handler.
+    Signal(std::io::Error),
 }
 
 impl std::fmt::Display for ServeError {
@@ -113,6 +154,7 @@ impl std::fmt::Display for ServeError {
         match self {
             Self::Bind { addr, reason } => write!(f, "cannot bind {addr}: {reason}"),
             Self::Accept(e) => write!(f, "cannot accept a connection: {e}"),
+            Self::Signal(e) => write!(f, "cannot listen for SIGTERM: {e}"),
         }
     }
 }
@@ -363,6 +405,7 @@ pub struct Server {
     stop: Arc<Notify>,
     streams: StreamGate,
     drain: Option<Duration>,
+    signals: Option<Duration>,
 }
 
 impl Server {
@@ -383,6 +426,7 @@ impl Server {
             stop: Arc::new(Notify::new()),
             streams: StreamGate::new(),
             drain: None,
+            signals: None,
         })
     }
 
@@ -436,6 +480,27 @@ impl Server {
         self
     }
 
+    /// Stops on SIGTERM or SIGINT (Ctrl-C where there are no Unix signals),
+    /// `delay` after it arrives.
+    ///
+    /// Off by default. Turn it on in a binary that serves with
+    /// [`Server::run`] and nothing else: a process that is PID 1 in a
+    /// container has no default action for SIGTERM, so without a handler it
+    /// ignores the stop and is killed at the end of the grace period.
+    ///
+    /// The stop is the one [`Stopper::stop`] makes. During `delay` the
+    /// listener still accepts, so the requests a load balancer sends while
+    /// it removes this endpoint are answered. Then it closes, open response
+    /// streams are told to end (an SSE stream sends its last frame), and
+    /// open requests have [`Server::drain_grace`] to finish. `run` returns
+    /// `Ok`, so `main` exits 0. See the crate documentation for the whole
+    /// Kubernetes sequence.
+    #[must_use]
+    pub fn stop_on_signals(mut self, delay: Duration) -> Self {
+        self.signals = Some(delay);
+        self
+    }
+
     /// Accepts until [`Stopper::stop`], serving each connection as a task.
     ///
     /// `handle` is cloned into every connection, so it is `Fn` rather than
@@ -453,6 +518,21 @@ impl Server {
         // h2, no further keep-alive on h1 -- and resolves when the last one is
         // done. Counting connections by hand would get the protocol half wrong.
         let graceful = GracefulShutdown::new();
+
+        // Installed before the first accept, so a client that was answered
+        // knows a signal from now on stops the server.
+        let signals = match self.signals {
+            None => None,
+            Some(delay) => {
+                let terminated = terminated().map_err(ServeError::Signal)?;
+                let stopper = self.stopper();
+                Some(tokio::spawn(async move {
+                    terminated.await;
+                    tokio::time::sleep(delay).await;
+                    stopper.stop();
+                }))
+            }
+        };
 
         loop {
             let accepted = tokio::select! {
@@ -494,6 +574,9 @@ impl Server {
         // connection in flight, hyper's drain waits for the connection, and
         // the deploy waits for the subscriber.
         self.streams.close();
+        if let Some(signals) = signals {
+            signals.abort();
+        }
 
         match self.drain {
             None => graceful.shutdown().await,
@@ -511,6 +594,29 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+/// A future that resolves at SIGTERM or SIGINT. The handlers are installed
+/// when this returns, not when the future is first polled.
+fn terminated() -> std::io::Result<impl Future<Output = ()> + Send> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut int = signal(SignalKind::interrupt())?;
+        Ok(async move {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
     }
 }
 
