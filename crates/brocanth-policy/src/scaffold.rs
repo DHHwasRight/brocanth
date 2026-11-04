@@ -424,7 +424,8 @@ impl Plugin for Policies {{
             .list(&Visitor::anonymous())
             .condition::<Post>(dialect)
             .map_err(|e| PluginError::new(format!("[policy] posts: {{e}}")))?;
-        eprintln!("[policy] posts, anonymous: {{}}", condition.sql());
+        let sql = condition.sql();
+        crate::plugins::say!(info, "[policy] posts, anonymous: {{sql}}"; sql);
 
         self.dialect = Some(dialect);
         Ok(())

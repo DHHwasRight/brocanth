@@ -119,7 +119,8 @@ impl Plugin for Logging {{
     }}
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        eprintln!("[{{}}] level {{}}", lc.instance(), self.level);
+        let (instance, level) = (lc.instance(), &self.level);
+        crate::plugins::say!(info, "[{{instance}}] level {{level}}"; instance, %level);
         Ok(())
     }}
 }}

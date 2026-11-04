@@ -2391,7 +2391,9 @@ fn main() -> ExitCode {{
     match app::serve(&app::default_addr()) {{
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {{
-            eprintln!("error: {{message}}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {{message}}");
             ExitCode::FAILURE
         }}
     }}
@@ -2437,7 +2439,9 @@ fn main() -> ExitCode {{
     match served {{
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {{
-            eprintln!("error: {{message}}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {{message}}");
             ExitCode::FAILURE
         }}
     }}
@@ -2469,7 +2473,21 @@ mod app;{assets}
 mod commands;{flags_mod}{migrations}
 mod pages;
 {plugins}
-fn main() -> brocanth_command::anyhow::Result<()> {{
+use std::process::ExitCode;
+
+fn main() -> ExitCode {{
+    match run() {{
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {{
+            // Through `say!`: a JSON line when `serve` got as far as the log
+            // subscriber, text for a failure before it or another command.
+            plugins::say!(error, "error: {{e:#}}");
+            ExitCode::FAILURE
+        }}
+    }}
+}}
+
+fn run() -> brocanth_command::anyhow::Result<()> {{
 {run}
 }}
 "##,
@@ -2798,7 +2816,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -3258,11 +3277,17 @@ const SAY_LOGGED: &str = r#"/// A line about the application itself: startup, th
 /// plugins::say!(info, "listening on http://{bound}"; %bound);
 /// ```
 ///
-/// Without `observability-logs` there is no subscriber, and the generator
-/// writes this macro as an `eprintln!` instead.
+/// Before the observability plugin installs its subscriber (a config file
+/// that does not parse, a plugin that fails before it) and with
+/// `install_subscriber = false`, an event would go nowhere. Then this is a
+/// line on stderr, as it is without `observability-logs`.
 macro_rules! say {
     ($level:ident, $message:literal $(; $($field:tt)+)?) => {
-        brocanth_observe::tracing::$level!($($($field)+,)? $message)
+        if brocanth_observe::tracing::dispatcher::has_been_set() {
+            brocanth_observe::tracing::$level!($($($field)+,)? $message)
+        } else {
+            eprintln!("{}: {}", crate::app::APP, format_args!($message))
+        }
     };
 }
 pub(crate) use say;

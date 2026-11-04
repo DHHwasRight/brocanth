@@ -84,13 +84,15 @@ fn main() -> ExitCode {
     match app::serve(&app::default_addr()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("error: {message}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-// brocanth-digest: d496d5793d0b79ec
+// brocanth-digest: 81cccd928e54c0f5
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -873,7 +875,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")

@@ -546,14 +546,16 @@ pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFut
 
 The lifetime is named because the future borrows the context and the rest
 of the chain. A layer lends the context on with `next.run(&mut *ctx)` and
-has it back after the `.await`, so it can write after the page ran:
+has it back after the `.await`, so it can change the response after the
+page ran. This one marks every page under the mount as private to the user:
 
 ```rust
 pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {
     Box::pin(async move {
-        let path = ctx.path.clone();
-        let response = next.run(&mut *ctx).await;
-        eprintln!("{path} -> {}", response.status);
+        let mut response = next.run(&mut *ctx).await;
+        response
+            .headers
+            .push(("cache-control".to_string(), "private".to_string()));
         response
     })
 }
@@ -568,7 +570,7 @@ Three parts, because the pieces have three owners:
    `MiddlewareCatalog` has no `mount`, so a plugin cannot mount itself.
    ```rust
    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
-       catalog.offer("request_log", "one line per request: verb, path, status");
+       catalog.offer("session", "reads the cookie and puts a Session on the context");
        Ok(())
    }
    ```
@@ -577,13 +579,13 @@ Three parts, because the pieces have three owners:
    the developer's file.
    ```rust
    s.at(Slot::AppSetup)
-       .line(r#"            setup.router().mount("/{*rest}", "request_log");"#);
+       .line(r#"            setup.router().mount("/users/{*rest}", "session");"#);
    ```
 3. `Slot::PluginsLayers` maps the name to the function, in
    `plugins::layer`:
    ```rust
    s.at(Slot::PluginsLayers)
-       .line(r#"        "request_log" => Some(logging::layer),"#);
+       .line(r#"        "session" => Some(sessions::layer),"#);
    ```
 
 A mounted name with no layer stops the application at start.

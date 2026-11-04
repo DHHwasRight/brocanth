@@ -93,13 +93,15 @@ fn main() -> ExitCode {
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("error: {message}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-// brocanth-digest: 00cc5d3be3dca3a4
+// brocanth-digest: 5c625988c80ed3bd
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -823,7 +825,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -1833,7 +1836,7 @@ impl Plugin for Sessions {
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if !self.secure {
-            eprintln!("[sessions] Secure is off: development only");
+            crate::plugins::say!(warn, "[sessions] Secure is off: development only");
         }
         Ok(())
     }

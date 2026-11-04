@@ -738,7 +738,7 @@ pub enum Slot {
     /// registration together.
     PluginsHooks,
     /// `src/plugins/mod.rs`, one arm of `layer`, for a module that offers
-    /// middleware: `"request_log" => Some(logging::layer),`.
+    /// middleware: `"session" => Some(sessions::layer),`.
     ///
     /// The arm used to be written in `src/app.rs` by a generator that knew
     /// two module keys by name. Mounting a layer is the application's

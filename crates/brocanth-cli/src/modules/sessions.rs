@@ -149,7 +149,7 @@ impl Plugin for Sessions {{
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         if !self.secure {{
-            eprintln!("[sessions] Secure is off: development only");
+            crate::plugins::say!(warn, "[sessions] Secure is off: development only");
         }}
         Ok(())
     }}

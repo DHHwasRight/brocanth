@@ -101,11 +101,25 @@ mod commands;
 mod pages;
 mod plugins;
 
-fn main() -> brocanth_command::anyhow::Result<()> {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // Through `say!`: a JSON line when `serve` got as far as the log
+            // subscriber, text for a failure before it or another command.
+            plugins::say!(error, "error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main(brocanth_command::Context::boot()?)
 }
 
-// brocanth-digest: f49df3f0193e376f
+// brocanth-digest: 54738851cb19117e
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -888,7 +902,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")

@@ -227,7 +227,6 @@ to place, and the project compiles and runs without it:
 ! src/app.rs is yours, and one line belongs in it
   a mount is a decision, so the generator does not make it
 
-                  setup.router().mount("/{*rest}", "request_log");
     +             setup.router().mount("/users/{*rest}", "session");
                   Ok(())
 ```

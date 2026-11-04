@@ -172,7 +172,8 @@ impl Plugin for Model {{
         // exists under `src/models/`, and the line is here so that it is not
         // a surprise when it fills.
         let registry = ModelRegistry::new();
-        eprintln!("[model] {{}} entities registered", registry.names().len());
+        let entities = registry.names().len();
+        crate::plugins::say!(info, "[model] {{entities}} entities registered"; entities);
         Ok(())
     }}
 

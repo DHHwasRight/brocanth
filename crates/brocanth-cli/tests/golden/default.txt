@@ -83,11 +83,25 @@ mod flags;
 mod pages;
 mod plugins;
 
-fn main() -> brocanth_command::anyhow::Result<()> {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // Through `say!`: a JSON line when `serve` got as far as the log
+            // subscriber, text for a failure before it or another command.
+            plugins::say!(error, "error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: f35ee34c5738bbf6
+// brocanth-digest: e41b82fec04dd891
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -812,7 +826,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -1394,11 +1409,17 @@ pub(crate) use announce;
 /// plugins::say!(info, "listening on http://{bound}"; %bound);
 /// ```
 ///
-/// Without `observability-logs` there is no subscriber, and the generator
-/// writes this macro as an `eprintln!` instead.
+/// Before the observability plugin installs its subscriber (a config file
+/// that does not parse, a plugin that fails before it) and with
+/// `install_subscriber = false`, an event would go nowhere. Then this is a
+/// line on stderr, as it is without `observability-logs`.
 macro_rules! say {
     ($level:ident, $message:literal $(; $($field:tt)+)?) => {
-        brocanth_observe::tracing::$level!($($($field)+,)? $message)
+        if brocanth_observe::tracing::dispatcher::has_been_set() {
+            brocanth_observe::tracing::$level!($($($field)+,)? $message)
+        } else {
+            eprintln!("{}: {}", crate::app::APP, format_args!($message))
+        }
     };
 }
 pub(crate) use say;
@@ -1940,7 +1961,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 7debacc8553fee57
+// brocanth-digest: c38ad1a124650653
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!

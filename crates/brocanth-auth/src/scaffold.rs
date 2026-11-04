@@ -336,7 +336,7 @@ pub type Store = PgStore;",
             loop {
                 every.tick().await;
                 if let Err(e) = store.sweep(SystemClock.now(), idle_timeout).await {
-                    eprintln!(\"[auth] sweep: {e}\");
+                    crate::plugins::say!(warn, \"[auth] sweep: {e}\"; error = %e);
                 }
             }
         }));
