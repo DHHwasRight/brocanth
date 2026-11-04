@@ -1,6 +1,6 @@
 # Module map
 
-Every module `brocanth create` offers (38), grouped into five categories,
+Every module `brocanth create` offers (39), grouped into five categories,
 with its dependencies. The data comes from the manifests and from the
 slots each module writes (checked against `b3a3461` + `a0df519`).
 
@@ -76,8 +76,9 @@ the file, or a literal in code.
 | `observability-health` | **Routes** | `/up`, `/readyz` via the observer, not RouterMounts | observability | | |
 | `observability-metrics` | **Routes** | `/metrics`, on a side listener | observability | | |
 | `observability-tracing` | **Middleware** | (parent's plugin) | observability (off) | | |
-| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 16 modules ★ |
+| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 17 modules ★ |
 | `sessions` | **Middleware** | Layers, AppContext ★ | | | |
+| `db` | **Enhancer**, Middleware, Renderer | AppContext, PagesItems (`ctx.db()`), Services (`brocanth_db::Db`) ★ | | | |
 | `model` | **Enhancer**, Middleware | AppContext, CommandsMod (`migrate`) ★ | | | `commands` |
 | `cache` | **Enhancer** | AppPlugins ★ | | | |
 | `jobs` | **Enhancer** | AppPlugins (worker) ★ | | | |
@@ -107,12 +108,12 @@ the file, or a literal in code.
 | `docker` | **External** | Dockerfile | | | |
 | `docker-kubernetes` | **External** | `deploy/kubernetes.yaml` | docker (off) | `observability-health` | |
 | `ci` | **External** | (nothing) | | | |
-| `ci-github` | **External** | `.github/workflows/ci.yml` | ci | | `docker`, `static`, `model`/`jobs`/`cache` |
+| `ci-github` | **External** | `.github/workflows/ci.yml` | ci | | `docker`, `static`, `db`/`model`/`jobs`/`cache` |
 
 ## The dependency tree
 
 Thick arrow: part of. Solid: needs. Dashed: optional. Red: refused
-together. Colour: main category. `config` is left out of the graph: 16
+together. Colour: main category. `config` is left out of the graph: 17
 modules adapt to it (★).
 
 Colours are d3set's light series palette (`src/theme/theme.ts`):
@@ -156,6 +157,7 @@ flowchart LR
   obs_tracing[observability-tracing]:::mw
   config:::en
   sessions:::mw
+  db:::en
   model:::en
   cache:::en
   jobs:::en
@@ -221,6 +223,7 @@ flowchart LR
   ci_gh -.-> model
   ci_gh -.-> jobs
   ci_gh -.-> cache
+  ci_gh -.-> db
 
   linkStyle 20 stroke:#ef4444,stroke-width:1.5px
 ```
@@ -242,7 +245,7 @@ is not drawn.
    `project.has` is an `adapts_to(key, what_changes)` in the manifest, 39
    in all (16 of them `config`, most through `snippet::configurable` and
    `snippet::configurable_hooking`). A test fails on an undeclared one.
-3. **`config` is cross-cutting.** 16 modules write two shapes, one with
+3. **`config` is cross-cutting.** 17 modules write two shapes, one with
    it and one without. It behaves like a shared dependency, not a module
    on equal footing.
 4. **Routes do not share one seam.** `admin` and `resource` use

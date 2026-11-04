@@ -60,6 +60,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`observability-tracing`](observability-tracing.md) | an OTLP span per request and per job, W3C traceparent in and out; needs a collector | Middleware | observability |
 | [`config`](config.md) | config/<env>.toml, merged; without it nothing links a TOML parser | Enhancer |  |
 | [`sessions`](sessions.md) | a cookie, and a `Session` the context hands a handler | Middleware |  |
+| [`db`](db.md) | one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver | Enhancer, Middleware, Renderer |  |
 | [`model`](model.md) | SeaORM, validations, migrations; without it no SQL driver at all | Enhancer, Middleware |  |
 | [`cache`](cache.md) | a cache on an unlogged Postgres table, not Redis; without it no cache at all | Enhancer |  |
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |

@@ -93,14 +93,15 @@ developer owns it from then on. The generator *is* the publish step.
 
 ## 3. The inventory
 
-Twenty-six crates and two outside engines. Twenty-two offer a module;
-twelve keep it beside the crate behind an off-by-default `scaffold`
+Twenty-seven crates and two outside engines. Twenty-three offer a module;
+thirteen keep it beside the crate behind an off-by-default `scaffold`
 feature, which is the pattern. `rsx` and `jt` are in the CLI, because
 neither has a crate in this workspace to host one.
 
 | Crate | Kind (§4) | Build-time seams | Run-time seams |
 | --- | --- | --- | --- |
 | `brocanth-cache` | service | `ConfigSections`, `AppPlugins` | `Plugin`, `Services` |
+| `brocanth-db` | service | `ConfigSections`, `AppPlugins`, `AppContext`, `PagesItems` (`ctx.db()`) | `Plugin`, `Services`, `ProvidesContext`, readiness, shutdown |
 | `brocanth-storage` | service | `ConfigSections`, `GitIgnore` | `Plugin`, `Services` |
 | `brocanth-model` | service + lifetime | `ConfigSections`, `CommandsMod` | `Plugin`, `ModelDispatch`, shutdown |
 | `brocanth-config` | service | `ConfigSections`, `AppPlugins` | `Plugin` |

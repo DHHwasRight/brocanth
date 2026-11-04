@@ -15,9 +15,37 @@ brocanth-db = { git = "https://github.com/DHHwasRight/brocanth", branch = "main"
 | Feature | Default | Adds |
 |---|---|---|
 | `serde` | off | `DbConfig: Deserialize`, for a `[db]` config section |
+| `plugin` | off | `Db: ContextItem`, so a plugin puts the pool on the request context |
+| `scaffold` | off | the `db` module of `brocanth create`; for the CLI only |
 
 `brocanth_db::sea_query` and `brocanth_db::sqlx` are re-exports. You do not
 need a second dependency line for either.
+
+### In a generated project
+
+`brocanth create --modules db` or `brocanth add db` writes
+`src/plugins/db/mod.rs` and a `[db]` section. The plugin opens the pool in
+`before_start`, registers `Db::ping` as the readiness check, inserts the
+`Db` into the application's services, puts it on every request's context,
+and closes it on shutdown. A page reads it with `ctx.db()`:
+
+```rust,ignore
+use brocanth_db::sea_query::Query;
+use brocanth_db::Exec;
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let q = Query::select().columns(["id", "title"]).from("posts").to_owned();
+    let posts: Vec<(i64, String)> = ctx.db().all(&q).await?;
+    Ok(format!("{} posts", posts.len()))
+}
+```
+
+A `DbError` goes through `?` as a 500: the message goes to the log, not to
+the client. Another plugin, registered after `db`, reads the same pool with
+`lc.require_service::<brocanth_db::Db>()`. The settings are in
+[docs/modules/db.md](../../docs/modules/db.md).
 
 ## Example
 
