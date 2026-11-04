@@ -43,6 +43,10 @@ impl Module for Database {
             "its settings are read from the config file, not written as a literal",
         )
         .asked_in("data", "A Postgres pool, and SQL built with sea-query")
+        .recommends(
+            "observability-health",
+            "its readiness check, `Db::ping`, is read only by /readyz; without it a deploy sends traffic to an instance whose database is down",
+        )
         .krate(
             Dep::brocanth("brocanth-db")
                 .feature("plugin")

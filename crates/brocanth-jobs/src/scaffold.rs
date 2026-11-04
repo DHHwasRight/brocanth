@@ -49,6 +49,10 @@ impl Module for Jobs {
             "behaviour",
             "Background jobs, with retries and a dead letter",
         )
+        .recommends(
+            "observability-health",
+            "its readiness check, one read of the jobs table, is read only by /readyz; without it a deploy cannot tell that the queue is unreachable",
+        )
         .krate(Dep::brocanth("brocanth-jobs"))
         // The generated job derives `Serialize` and `Deserialize`: a payload
         // is stored as JSON. The config plugin brings serde too, but only
