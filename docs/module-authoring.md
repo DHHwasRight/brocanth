@@ -47,7 +47,7 @@ and only after every module named in its `after` list.
 
 ### The manifest
 
-`Manifest` (`lib.rs:81`) has 17 fields. Build it with `Manifest::new(key,
+`Manifest` (`lib.rs:81`) has 18 fields. Build it with `Manifest::new(key,
 gist)` and the builder methods. Do not set the fields directly: some
 builders set two fields at once on purpose.
 
@@ -70,6 +70,7 @@ builders set two fields at once on purpose.
 | `categories` | `category(Category::X)`, once per category | The kinds of seam it hooks into: `Middleware`, `Renderer`, `External`, `Enhancer`, `Routes`. The first is the main one. A test holds the module to the slots its categories open (`Slot::open_to`). |
 | `conflicts` | `conflicts(k, why)` | It cannot be chosen beside `k`. Declare it on the side that gives way. `create`, `add` and the chooser all read it through `brocanth_scaffold::clash`. |
 | `adapts_to` | `adapts_to(k, what_changes)` | It writes different code when `k` is chosen: the optional dependency. Every `project.has(k)` in `contribute` must be declared here, in `needs`, or be the parent. A test checks both directions. |
+| `recommends` | `recommends(k, why)` | A deployed project with this module usually wants `k`. Advice only: nothing refuses. `create` and `add` warn when `k` is absent, `brocanth check` warns (`check/recommended`), and `--questions` lists the edge. `why` names the cost in production. Not for a module already in `needs`. |
 
 `Dep` (`lib.rs:313`) names a crate and leaves the source to the CLI for
 brocanth's own crates:
@@ -752,7 +753,8 @@ stages. Each one runs for every instance before the next stage starts:
 #### `Slot::CommandsMod`
 
 `pub mod <name>;` in `src/commands/mod.rs`, for a subcommand the module
-writes. A project without `commands` has no command line, so declare
+writes. The generator owns the lines above the `// Your commands` line;
+the developer's own `pub mod` lines go below it, and `add` keeps them. A project without `commands` has no command line, so declare
 `needs("commands", "<what breaks>")`.
 
 #### Settings: `snippet::configurable`

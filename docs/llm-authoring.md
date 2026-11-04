@@ -57,6 +57,57 @@ cannot: a native-library conflict. Two crates wanting different
 `libsqlite3-sys` versions breaks resolution for *every* crate, and
 `cargo check -p <one>` will not show it.
 
+## Decisions that belong to the person
+
+The modules in a project are the person's decisions. A model does not
+make them. The chooser asks them one group at a time, and a model that
+runs `brocanth create NAME --with ...` skips the chooser. So the model
+asks instead.
+
+**The rule.** Before you run `brocanth create --with` or `brocanth add`,
+present the questions to the person: each group, its options, the
+default, and your recommendation. Wait for the answer. Never choose in
+silence, and never drop a default without saying so.
+
+The groups are the chooser's questions. Each module names its group with
+`asked_in`:
+
+| Group | What it asks | Modules |
+|---|---|---|
+| Shape | What the application is. It ticks a starting set. | the presets: HTML application, JSON API, worker, static site, nothing |
+| Foundations | The three nobody regrets. | `logging`, `config`, `commands` |
+| Data | Where rows and bytes live. | `db`, `model`, `cache`, `storage` |
+| Pages | How HTML is made, if any is. | `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static` |
+| Behaviour | What happens that a request did not ask for. | `jobs`, `realtime` |
+| Doors | Who gets in, and what they may do. | `sessions`, `auth`, `policy`, `input`, `client`, `middleware` and its children, `openapi`, `validation`, `resource`, `admin` |
+| Operations | What it reports, how it ships, what checks every push. | `observability` and its children, `docker`, `docker-kubernetes`, `ci`, `ci-github` |
+
+Do not copy this table into a prompt. Print it from the build you run:
+
+```
+brocanth create --questions          # text: groups, options, defaults, edges
+brocanth create --questions --json   # the same, for a program
+brocanth add --questions             # inside a project: marks what is installed
+```
+
+The output reads the same manifests the chooser reads. Each module comes
+with its default, what it needs, what it conflicts with and what it
+recommends.
+
+**Logs are a decision with a trap.** `logging` is one plain-text line per
+response on stderr (`GET /nope -> 404`), for development: no structure,
+no request id, no duration. `observability-logs` is the production log:
+JSON in production and text elsewhere, with a request id, the duration
+and spans. A service that ships with `logging` alone logs text in
+production. Ask.
+
+After a run driven by flags, `create` and `add` print a warning for each
+module that a chosen module `recommends` and the selection lacks:
+`docker` and `config` recommend `observability-logs`; `docker`, `db`,
+`cache` and `jobs` recommend `observability-health`. Each warning names
+the cost and the command that adds it. Show the warnings to the person.
+`brocanth check` repeats them as `check/recommended`.
+
 ## What cannot compile
 
 This is the part to rely on. Each of these is a mistake that fails at build
