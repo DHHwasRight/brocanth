@@ -78,7 +78,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`resource`](resource.md) | typed CRUD routes over one table, with the policy in the WHERE clause | Routes |  |
 | [`admin`](admin.md) | a Django-shaped backoffice at /admin, locked until you say who may in | Routes |  |
 | [`admin-model`](admin-model.md) | the admin's rows over SeaORM, one line per entity | Routes | admin |
-| [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber; no transport yet | Enhancer, Middleware |  |
+| [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber | Enhancer, Middleware |  |
 | [`realtime-sse`](realtime-sse.md) | one long response per subscriber, frames written as they are made | Routes | realtime |
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |
 | [`commands`](commands.md) | this project's own command line, `serve` plus whatever you add | Enhancer |  |
@@ -94,5 +94,5 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 
 ## Blocked
 
-`admin-model`, `realtime-sse` and `realtime-websocket` are on the menu and
+`realtime-websocket` is on the menu and
 cannot be chosen. Each page gives the reason from the manifest.

@@ -106,7 +106,7 @@ neither has a crate in this workspace to host one.
 | `brocanth-model` | service + lifetime | `PagesItems` (`ctx.orm()`), `CommandsMod` | `Plugin`, `Services` (`Orm`, after `Db`), `ProvidesContext`, `ModelDispatch` |
 | `brocanth-config` | service | `ConfigSections`, `AppPlugins` | `Plugin` |
 | `brocanth-jobs` | lifetime | `ConfigSections`, `CommandsMod` | `Plugin`, both shutdown phases |
-| `brocanth-realtime` | lifetime | `ConfigSections` | `Plugin`; **no transport** |
+| `brocanth-realtime` | lifetime | `ConfigSections`; `realtime-sse`: `PluginsMod`, `PagesRoutes`, `AgentsSections`, a page file | `Plugin`; the SSE transport is generated into the project (`realtime-sse`) |
 | `brocanth-middleware` | edge | `PluginsMod`, `PluginsLayers`, `AppSetup` | `MiddlewareCatalog`, `HookSource` |
 | `logging` (in-CLI) | edge | `PluginsMod`, `PluginsLayers`, `AppContext` | `MiddlewareCatalog`, `ProvidesContext` |
 | `sessions` (in-CLI) | edge | `PluginsMod`, `AppContext` | `ProvidesContext` |

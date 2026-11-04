@@ -1,8 +1,8 @@
 # `realtime`
 
-One write is a map lookup, not a query per subscriber; no transport yet.
+One write is a map lookup, not a query per subscriber. `realtime-sse` carries it to a browser.
 
-The wizard calls it: *A broadcast broker. No transport yet*.
+The wizard calls it: *A broadcast broker*.
 
 | | |
 |---|---|

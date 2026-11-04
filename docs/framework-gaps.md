@@ -443,7 +443,7 @@ means it is not yet a feature.
 | Fixtures (D27) | **partial** | `brocanth_model::Fixtures`: JSON, checked against the entities, loaded through their hooks, in the test harness's transaction. No `dumpdata`. See `docs/tooling.md` §1 |
 | Background jobs with retries and a dead letter | **yes, and further** | `brocanth-jobs`; Rails and Django both need a second product for this |
 | Single binary, embedded database (PocketBase) | **branch** | `brocanth-pgserver`, unmerged |
-| Realtime subscriptions (PocketBase) | **broker only** | no transport; blocked on the buffered `Response` |
+| Realtime subscriptions (PocketBase) | **yes** | `realtime-sse` writes `GET /realtime/events?topics=..` over the broker: one connection per subscriber, topics authorised on connect, a heartbeat, `lagged` for dropped frames, an end on shutdown. No replay: a reconnect is told `lagged` |
 | OpenAPI document (PocketBase) | **yes, unwired** | `brocanth-openapi`, 5,873 lines, one test file |
 
 ---
@@ -459,7 +459,7 @@ because the argument is still why each one matters.
 
 | | Gap | State |
 |---|---|---|
-| G1 | the response body cannot stream | **done**: `Body::{Buffered,Streaming}`, `ResponseHook` split into `on_headers` and `on_body`, `StreamGate` in the shutdown |
+| G1 | the response body cannot stream | **done**: `Body::{Buffered,Streaming}`, `ResponseHook` split into `on_headers` and `on_body`, `StreamGate` in the shutdown. A page answers `Response::events` or `Response::stream`; `brocanth_server::sse::channel` builds the events from async code; `realtime-sse` is the broker's transport |
 | G2 | dp-swap has no mutating verb | **done**: `dp-post`/`put`/`patch`/`delete` in `brocanth_middleware::dp::SCRIPT`, typed `DP-*` response headers, `Oob`, `DpSwap` (`Vary`), `CsrfToken::meta_tag`, `brocanth_input::rerender` for the 422. The jobs panel's buttons use it |
 | G3 | capability crates are not reachable | **done**: every capability crate has a module. `resource` and `admin` are on the menu and write a project that passes its own `cargo test`. `admin-model` reads its rows through `brocanth_model::Orm`, which the `model` plugin builds on the `db` pool (ADR 2), and lists its entities in `src/plugins/admin/models.rs` |
 | G4 | the model layer publishes to nobody | **done** (`c58f688`): an insert, update or delete through the ORM publishes a `RowChange`, and it reaches a realtime subscriber. `brocanth-cache`'s `TagInvalidator` can take the same changes |

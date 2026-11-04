@@ -5,25 +5,26 @@ policy is a value (`brocanth_policy::Pred`), so the broker inverts "the
 owner" into the key `(author_id, 7)` and files the subscriber under it. A
 write is then a map lookup with zero queries, not one query per subscriber.
 The broker holds the index, a bounded mailbox per client, and the encoded
-frames. It stops one layer short of the socket: it ships no transport.
+frames. It stops one layer short of the socket: the crate ships no
+transport, and the `realtime-sse` module writes one into your application.
 Use it to tell other parts of a process about a write (a cache
-invalidator, an audit log), for long polling, or as the engine under an SSE
-endpoint you write yourself. Do not use it if you need a ready-made
-WebSocket or SSE endpoint: neither exists yet.
+invalidator, an audit log), to push changes to a browser over server-sent
+events, or for long polling. Do not use it if you need a WebSocket: that
+transport does not exist yet.
 
-## Transports: what is blocked, and why
+## Transports
 
 | Transport | State | Reason |
 | --- | --- | --- |
 | In process (`Mailbox::recv_blocking`, `recv`, `drain`) | works | No socket. A thread or any executor reads the mailbox. |
 | Long polling (`Mailbox::recv_timeout` then `drain`) | works, you write the handler | The handler returns all frames as one complete body. Every response hook runs as usual. |
-| Server-sent events (`realtime-sse`) | **blocked** in `brocanth create` | The core can stream now: `Body` can be a `BodyStream`, `on_headers` runs for a stream, and shutdown reaches an open stream. The transport is simply not written yet. This crate does not depend on `brocanth`, because a transport is a handler, and a handler belongs to the crate that owns the routes. |
+| Server-sent events (`realtime-sse`) | works, generated | `brocanth create --with realtime,realtime-sse` writes `GET /realtime/events?topics=posts/*` and a `BodyStream` over the client's mailbox into the project. The code is generated and not in this crate, because this crate does not depend on `brocanth`: a transport is a response body, and a body belongs to the crate that owns the routes. |
 | WebSocket (`realtime-websocket`) | **blocked** in `brocanth create` | It needs an HTTP upgrade out of the request/response shape and a frame codec. Neither is a body. That is a second exit from `brocanth-server`, not a new body type. |
 
 The crate docs (`cargo doc -p brocanth-realtime --open`, section "The limit:
-this crate does not ship the transport") list the thirty lines an SSE
-handler needs: a `BodyStream` over a `Mailbox`, `Response::events`, and a
-second endpoint that authorises a subscription.
+this crate does not ship the transport") describe what the generated SSE
+transport does: a `BodyStream` over a `Mailbox`, `Response::events`, a
+heartbeat, `lagged` for dropped frames, and an end on shutdown.
 
 ## Getting started
 
@@ -47,8 +48,17 @@ It declares these settings in the `[realtime]` section (see
 | `overflow` | `drop-oldest` | `--realtime.overflow` | `$MY_APP_REALTIME__OVERFLOW` |
 
 `overflow` is `drop-oldest`, `drop-newest` or `disconnect`.
-`realtime-sse` and `realtime-websocket` are on the menu but blocked; the
-CLI prints the reason above.
+`realtime-sse` adds the browser transport:
+
+```sh
+brocanth create my_app --with realtime,realtime-sse
+```
+
+It writes `src/plugins/realtime_sse/mod.rs` (the stream) and
+`src/pages/realtime/events.rs` (the route). List a collection in `PUBLIC`
+there, or gate it by a policy in `authorise`, before a browser can follow
+it. `realtime-websocket` is on the menu but blocked; the CLI prints the
+reason above.
 
 ### By hand
 

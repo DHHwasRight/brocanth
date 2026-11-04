@@ -87,7 +87,7 @@ the file, or a literal in code.
 | `storage` | **Enhancer**, Middleware | AppContext, GitIgnore ★ | | | |
 | `validation` | **Middleware** | AppContext ★ | | | |
 | `realtime` | **Enhancer**, Middleware | AppContext ★ | | | |
-| `realtime-sse` | Routes | blocked | realtime | | |
+| `realtime-sse` | Routes | PluginsMod, PagesRoutes (`/realtime/events`), AgentsSections | realtime | | |
 | `realtime-websocket` | Routes | blocked | realtime | | |
 | `input` | **Enhancer**, Renderer | PagesItems (`describe`) | | | `rsx` |
 | `client` | **Enhancer** | CommandsMod (`api`) | | `input`, `commands` | |
@@ -188,7 +188,7 @@ flowchart LR
   k8s[docker-kubernetes]:::ex
   ci:::ex
   ci_gh[ci-github]:::ex
-  class rt_sse,rt_ws blocked
+  class rt_ws blocked
 
   obs ==> obs_logs & obs_health & obs_metrics & obs_tracing
   mwr ==> csrf & sech & rate
