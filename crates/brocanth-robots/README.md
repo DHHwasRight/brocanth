@@ -22,8 +22,8 @@ brocanth create my-site --with robots
 brocanth add robots
 ```
 
-The `static` preset can take it too: the static export writes the file as
-`robots.txt`.
+The "A static site" wizard preset ticks it: the static export writes the
+file as `robots.txt`, open, because the export is the published site.
 
 By hand:
 
@@ -34,7 +34,8 @@ brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 
 ### Settings
 
-The module declares four settings in `[robots]`. See
+The module declares four settings in `[robots]`, plus groups for named
+crawlers. See
 `docs/module-flags.md` for flags, environment variables and precedence.
 
 | Key | Default | Flag | Environment |
@@ -43,8 +44,28 @@ The module declares four settings in `[robots]`. See
 | `disallow` | `[]`, or `["/admin"]` with `admin` | none (a list) | by index, with `config` |
 | `allow` | `[]` | none (a list) | by index, with `config` |
 | `sitemap` | none | `--robots.sitemap` | `$<APP>_ROBOTS__SITEMAP` |
+| `groups` | none | none (records) | none: file only |
 
-`index = false` writes `User-agent: *` and `Disallow: /`, and nothing else.
+`index = false` writes `User-agent: *` and `Disallow: /`, and nothing else:
+no groups, no allow rules, no sitemap.
+
+### Groups for named crawlers
+
+Each `[[robots.groups]]` table is one group, written after the `*` group.
+`agents` names the crawlers; `allow` and `disallow` are their rules. A
+group is a record, so it lives in the file only and has no flag. The
+generated file holds this example, commented out. It asks crawlers that
+collect training data to read nothing:
+
+```toml
+[[robots.groups]]
+agents = ["GPTBot", "CCBot", "Google-Extended", "ClaudeBot"]
+disallow = ["/"]
+```
+
+robots.txt is a request, not a lock. A crawler may ignore it, and these
+product tokens change; check each operator's own documentation. A crawler
+that matches a named group follows that group only, not the `*` rules.
 
 ## Examples
 

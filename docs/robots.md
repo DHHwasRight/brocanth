@@ -1,7 +1,7 @@
 # robots.txt
 
-The `robots` module serves `/robots.txt` from settings. A draft: the
-decisions below are open to review.
+The `robots` module serves `/robots.txt` from settings. The "A static site"
+wizard preset ticks it by default.
 
 ## Where it lives
 
@@ -44,6 +44,7 @@ it was generated.
 | `disallow` | list | paths no crawler may read |
 | `allow` | list | exceptions under a disallowed path |
 | `sitemap` | text, optional | an absolute URL |
+| `groups` | records, `[[robots.groups]]` | groups for named crawlers, after the `*` group |
 
 **Decision: development and staging are closed, production is open.** The
 plugin's default for `index` is `true`. The generated
@@ -57,15 +58,25 @@ Why not read the environment name (`$<APP>_ENV`) and close every
 environment that is not `production`? It ties a security-relevant answer to
 a naming convention the project does not otherwise have, and a project
 without `config` has no environment name at all. A setting is visible in
-the settings report (`my-app settings`) and can be checked per layer. This
-is open question 1 below.
+the settings report (`my-app settings`) and can be checked per layer.
+Decided: keep the explicit setting.
 
-**Closed is a whole file.** When `index = false`, the `allow` and `sitemap`
-values are not written. One `Allow:` left over from the production list
+**Closed is a whole file.** When `index = false`, the `allow`, `groups`
+and `sitemap` values are not written. One `Allow:` left over from the production list
 would open that path on staging.
 
 **Lists have no flag.** A list of paths is file-only, as for every declared
 list (see `docs/module-flags.md`).
+
+**Groups are records, file-only.** Each `[[robots.groups]]` table has
+`agents`, `allow` and `disallow`, all lists. A record list has no flag and
+no environment variable, as for the rate limit's rules. A table with no
+agent stops the build with a `help:` line. The generated file holds one
+example, commented out, that asks AI training crawlers (`GPTBot`, `CCBot`,
+`Google-Extended`, `ClaudeBot`) to read nothing. robots.txt is a request:
+nothing makes a crawler obey it, and the docs say so. A crawler that
+matches a named group follows that group only, not the `*` rules (RFC
+9309), so a group repeats any `*` rule it should keep.
 
 ## Adaptations
 
@@ -102,11 +113,8 @@ it:
   setting holds today. Both modules would read it.
 - With a sitemap module, `robots.sitemap` defaults to its URL.
 
-## Open questions
+## Decisions
 
-1. Close every environment that is not `production` automatically, from
-   `$<APP>_ENV`, instead of the `index` setting?
-2. Tick `robots` in the `static` preset by default?
-3. Per-crawler groups (for example blocking AI crawlers such as `GPTBot`)
-   are in the builder but not in the settings. Add a `[[robots.groups]]`
-   table?
+1. The `index` setting stays explicit. It is not derived from `$<APP>_ENV`.
+2. The "A static site" preset ticks `robots`.
+3. Per-crawler groups are settings: `[[robots.groups]]`, file-only.

@@ -9,7 +9,7 @@ The wizard calls it: *A robots.txt that says what crawlers may read*.
 | Categories | **Routes** |
 | Wizard question | Pages |
 | Default | off |
-| Presets | none |
+| Presets | Static site |
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
@@ -44,6 +44,7 @@ Section `[robots]`. Environment variable: `$<APP>_ROBOTS__<KEY>`. Flag: `--robot
 | `disallow` | list | `[]` (`["/admin"]` with `admin`) | none | Paths no crawler may read, each from the root. |
 | `allow` | list | `[]` | none | Paths a crawler may read under a disallowed one. |
 | `sitemap` | text, optional | commented out | `--robots.sitemap` | Where the sitemap is, as a full URL. |
+| `groups` | records, `[[robots.groups]]` | an AI-crawler example, commented out | none | Groups for named crawlers: `agents`, `allow`, `disallow`. File only. |
 
 The plugin's own default for `index` is `true`: a production server with no
 `[robots]` section is indexed.

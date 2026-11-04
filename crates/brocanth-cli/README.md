@@ -97,7 +97,7 @@ you then edit, and skips the questions it makes pointless:
 | An HTML application | `observability` (+ `-logs`, `-health`, `-metrics`), `docker`, `ci`, `ci-github`, `config`, `commands`, `model`, `sessions`, `rsx`, `rsx-tailwind`, `rsx-htmx` | |
 | A JSON API | `observability` (+ `-logs`, `-health`, `-metrics`), `docker`, `ci`, `ci-github`, `config`, `commands`, `model`, `validation`, `openapi` | Pages |
 | Something that does work | `observability` (+ `-logs`, `-health`, `-metrics`), `docker`, `ci`, `ci-github`, `config`, `commands`, `model`, `jobs`, `cache` | Pages |
-| A static site | `static`, `ci`, `ci-github`, `config`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` | Data, Behaviour, Doors |
+| A static site | `static`, `ci`, `ci-github`, `config`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx`, `robots` | Data, Behaviour, Doors |
 | Nothing yet | nothing | |
 
 ### `brocanth add`

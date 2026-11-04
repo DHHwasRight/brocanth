@@ -81,7 +81,7 @@ you then edit, and skips the questions that do not apply:
 | An HTML application | `observability` (logs, health, metrics), `docker`, `ci-github`, `config`, `commands`, `model`, `sessions`, `rsx`, `rsx-tailwind`, `rsx-htmx` | |
 | A JSON API | `observability` (logs, health, metrics), `docker`, `ci-github`, `config`, `commands`, `model`, `validation`, `openapi` | Pages |
 | Something that does work | `observability` (logs, health, metrics), `docker`, `ci-github`, `config`, `commands`, `model`, `jobs`, `cache` | Pages |
-| A static site | `static`, `ci-github`, `config`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx` | Data, Behaviour, Doors |
+| A static site | `static`, `ci-github`, `config`, `commands`, `rsx`, `rsx-tailwind`, `rsx-htmx`, `robots` | Data, Behaviour, Doors |
 | Nothing yet | nothing | |
 
 The questions after the shape: Foundations, Data, Pages, Behaviour, Doors,

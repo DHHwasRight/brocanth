@@ -56,11 +56,27 @@ impl Module for Robots {
         s.at(Slot::PagesRoutes).line("/robots.txt");
         s.at(Slot::PluginsMod).line("pub mod robots;");
         configurable(s, project, "robots", "Robots", settings(project));
-        if !project.has("config") {
+        if project.has("config") {
+            // Groups are records, so they are file-only, as every list of
+            // records is. Written commented out: an example, not a choice.
+            s.at(Slot::ConfigSections).block(GROUPS_TOML.to_string());
+        } else {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
     }
 }
+
+/// The per-crawler groups, as the file holds them. Commented out, because
+/// which crawlers to name is the site owner's decision.
+const GROUPS_TOML: &str = r#"
+# More groups, for named crawlers, written after the `*` group. One table
+# per group. A crawler that matches a named group follows that group only,
+# not the `*` rules. robots.txt is a request: a crawler may ignore it.
+# Example: ask crawlers that collect training data to read nothing.
+# [[robots.groups]]
+# agents = ["GPTBot", "CCBot", "Google-Extended", "ClaudeBot"]
+# disallow = ["/"]
+"#;
 
 /// What the file is written with. With `static` the export is the
 /// published site, so the file opens it; otherwise the file is the
@@ -191,6 +207,11 @@ mod tests {{
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "robots");
+    let group_derive = if project.has("config") {
+        "#[derive(Debug, Clone, Default, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
+    } else {
+        "#[derive(Debug, Clone, Default)]"
+    };
     let disallow = disallowed(project)
         .iter()
         .map(|path| format!("{path:?}.to_string()"))
@@ -214,7 +235,7 @@ use std::sync::OnceLock;
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
-use brocanth_robots::Robots as Text;
+use brocanth_robots::{{Group, Robots as Text}};
 
 /// The rendered text, set once at `configure`.
 static RENDERED: OnceLock<String> = OnceLock::new();
@@ -237,6 +258,20 @@ pub struct Settings {{
     pub allow: Vec<String>,
     /// Where the sitemap is, as a full URL.
     pub sitemap: Option<String>,
+    /// Groups for named crawlers, written after the `*` group. File-only:
+    /// `[[robots.groups]]`.
+    pub groups: Vec<CrawlerGroup>,
+}}
+
+/// One `[[robots.groups]]` table.
+{group_derive}
+pub struct CrawlerGroup {{
+    /// The crawlers this group names, by product token: "GPTBot".
+    pub agents: Vec<String>,
+    /// Paths these crawlers may read under a disallowed one.
+    pub allow: Vec<String>,
+    /// Paths these crawlers may not read.
+    pub disallow: Vec<String>,
 }}
 
 impl Default for Settings {{
@@ -247,6 +282,7 @@ impl Default for Settings {{
             disallow: vec![{disallow}],
             allow: Vec::new(),
             sitemap: None,
+            groups: Vec::new(),
         }}
     }}
 }}
@@ -257,9 +293,9 @@ pub struct Robots {{
 
 impl Robots {{
     /// The builder these settings describe.
-    fn text(&self) -> Text {{
+    fn text(&self) -> Result<Text, PluginError> {{
         if !self.settings.index {{
-            return Text::closed();
+            return Ok(Text::closed());
         }}
         let mut text = Text::new();
         for path in &self.settings.disallow {{
@@ -268,10 +304,36 @@ impl Robots {{
         for path in &self.settings.allow {{
             text = text.allow(path.as_str());
         }}
+        for named in &self.settings.groups {{
+            let Some((first, rest)) = named.agents.split_first() else {{
+                return Err(PluginError::new(
+                    "[robots] a [[robots.groups]] table names no crawler\n\
+                     help: give it agents = [\"GPTBot\"], or delete the table",
+                ));
+            }};
+            let mut group = Group::new(first.as_str());
+            for agent in rest {{
+                group = group.agent(agent.as_str());
+            }}
+            for path in &named.disallow {{
+                group = group.disallow(path.as_str());
+            }}
+            for path in &named.allow {{
+                group = group.allow(path.as_str());
+            }}
+            text = text.group(group);
+        }}
         if let Some(url) = &self.settings.sitemap {{
             text = text.sitemap(url.as_str());
         }}
-        text
+        Ok(text)
+    }}
+
+    /// The text these settings describe, or why it cannot be served.
+    fn rendered(&self) -> Result<String, PluginError> {{
+        self.text()?
+            .render()
+            .map_err(|e| PluginError::new(format!("[robots] {{e}}")))
     }}
 }}
 
@@ -285,11 +347,7 @@ impl Plugin for Robots {{
     }}
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        let rendered = self
-            .text()
-            .render()
-            .map_err(|e| PluginError::new(format!("[robots] {{e}}")))?;
-        let _ = RENDERED.set(rendered);
+        let _ = RENDERED.set(self.rendered()?);
         Ok(())
     }}
 }}
@@ -298,33 +356,54 @@ impl Plugin for Robots {{
 mod tests {{
     use super::*;
 
-    #[test]
-    fn closed_settings_answer_disallow_everything() {{
-        let robots = Robots::new(Settings {{
-            index: false,
-            ..Settings::default()
-        }});
-        assert_eq!(
-            robots.text().render().unwrap(),
-            "User-agent: *\nDisallow: /\n"
-        );
+    fn ai_crawlers() -> CrawlerGroup {{
+        CrawlerGroup {{
+            agents: vec!["GPTBot".to_string(), "CCBot".to_string()],
+            disallow: vec!["/".to_string()],
+            ..CrawlerGroup::default()
+        }}
     }}
 
     #[test]
-    fn open_settings_write_each_rule() {{
+    fn closed_settings_answer_disallow_everything_and_nothing_else() {{
+        let robots = Robots::new(Settings {{
+            index: false,
+            groups: vec![ai_crawlers()],
+            ..Settings::default()
+        }});
+        assert_eq!(robots.rendered().unwrap(), "User-agent: *\nDisallow: /\n");
+    }}
+
+    #[test]
+    fn open_settings_write_each_rule_then_each_group() {{
         let robots = Robots::new(Settings {{
             disallow: vec!["/private".to_string()],
             allow: vec!["/private/help".to_string()],
             sitemap: Some("https://example.com/sitemap.xml".to_string()),
+            groups: vec![ai_crawlers()],
             ..Settings::default()
         }});
-        let text = robots.text().render().unwrap();
+        let text = robots.rendered().unwrap();
         assert!(text.contains("Disallow: /private\n"), "{{text}}");
         assert!(text.contains("Allow: /private/help\n"), "{{text}}");
+        assert!(
+            text.contains("\nUser-agent: GPTBot\nUser-agent: CCBot\nDisallow: /\n"),
+            "{{text}}"
+        );
         assert!(
             text.ends_with("Sitemap: https://example.com/sitemap.xml\n"),
             "{{text}}"
         );
+    }}
+
+    #[test]
+    fn a_group_with_no_crawler_stops_the_build() {{
+        let robots = Robots::new(Settings {{
+            groups: vec![CrawlerGroup::default()],
+            ..Settings::default()
+        }});
+        let error = robots.rendered().unwrap_err().to_string();
+        assert!(error.contains("help:"), "{{error}}");
     }}
 }}
 "##

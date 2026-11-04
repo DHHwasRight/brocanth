@@ -184,6 +184,9 @@ pub const PRESETS: &[Preset] = &[
             "rsx",
             "rsx-tailwind",
             "rsx-htmx",
+            // A published site says what crawlers may read. The export
+            // writes the file open, because the export is what goes live.
+            "robots",
         ],
         // Each of these asks only about modules that need a server.
         skips: &["data", "behaviour", "doors"],
