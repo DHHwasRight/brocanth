@@ -92,8 +92,30 @@ where
     T: IntoResponse,
 {
     Box::new(move |ctx| {
-        let body = ctx.body_as::<B>()?;
-        handler(ctx, body).map(IntoResponse::into_response)
+        let answered = ctx
+            .body_as::<B>()
+            .and_then(|body| handler(ctx, body).map(IntoResponse::into_response));
+        Box::pin(std::future::ready(answered))
+    })
+}
+
+/// [`page_with_body`] for a `pub async fn handle_post(ctx, body)`.
+///
+/// The body is read and checked before the page's future exists, so a
+/// refused body never reaches the page. `pages!` writes the call.
+///
+/// `allow(dead_code)`: nothing calls it until a page that takes a body is
+/// `async`.
+#[allow(dead_code)]
+pub fn page_with_body_async<B>(
+    handler: for<'a> fn(&'a mut Ctx, B) -> BoxFuture<'a, Result<Response, Error>>,
+) -> Handler
+where
+    B: zod::Entry + 'static,
+{
+    Box::new(move |ctx| match ctx.body_as::<B>() {
+        Ok(body) => handler(ctx, body),
+        Err(refused) => Box::pin(std::future::ready(Err(refused))),
     })
 }
 

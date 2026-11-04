@@ -75,7 +75,8 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 
 use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
-use brocanth::routing::Next;
+use brocanth::plugin_routes::BoxFuture;
+use brocanth::routing::AsyncNext;
 
 use crate::pages::{{Ctx, Response}};
 
@@ -127,15 +128,23 @@ impl Plugin for Logging {{
 
 /// The layer `request_log` mounts.
 ///
-/// A plain function is a layer: `Layer` is implemented for anything callable
-/// with a context and the rest of the chain. Not calling `next.run` is how a
-/// layer short-circuits, and dropping it is all that takes.
-pub fn layer(ctx: &mut Ctx, next: Next<'_, Ctx, Response>) -> Response {{
-    let verb = ctx.verb;
-    let path = ctx.path.clone();
-    let response = next.run(ctx);
-    eprintln!("{{verb}} {{path}} -> {{}}", response.status);
-    response
+/// A plain function is a layer: `AsyncLayer` is implemented for anything
+/// callable with a context and the rest of the chain that returns a future.
+/// The lifetime is named because that future borrows both. Not calling
+/// `next.run` is how a layer short-circuits, and dropping it is all that
+/// takes.
+///
+/// `next.run(&mut *ctx)` lends the context to the rest of the chain for the
+/// length of the await, so this layer has it back for the line it writes
+/// afterwards.
+pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {{
+    Box::pin(async move {{
+        let verb = ctx.verb;
+        let path = ctx.path.clone();
+        let response = next.run(&mut *ctx).await;
+        eprintln!("{{verb}} {{path}} -> {{}}", response.status);
+        response
+    }})
 }}
 "##
     )

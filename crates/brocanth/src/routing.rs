@@ -91,6 +91,9 @@ use std::collections::HashMap;
 
 pub use crate::routing_codegen::{generate_helpers, CodegenError, RouteHelper};
 pub use crate::routing_middleware::{Layer, MiddlewareStack, Next, Scope};
+pub use crate::routing_middleware_async::{
+    AsyncLayer, AsyncMiddlewareStack, AsyncNext, AsyncTerminal,
+};
 pub use crate::routing_params::{ParamError, ParamErrorKind, Params};
 pub use crate::routing_path::{
     encode_catch_all, encode_segment, module_path_for_file, route_for_file, ParamKind, ParamSpec,

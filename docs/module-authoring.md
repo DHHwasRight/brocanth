@@ -489,7 +489,7 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
     };
     let mut state = RequestState::new();
     let outcome = match app.core.begin_async(&mut request, &mut state).await {
-        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),
+        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
         Begin::Answered(outcome) => outcome,
     };
     let response = app.core.finish(&mut request, &mut state, outcome);
@@ -502,7 +502,8 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
 2. `begin_async` runs the request hooks. A hook that answers skips the
    router and the page.
 3. `dispatch` matches the route, builds `Ctx`, runs the layers, then the
-   page.
+   page. It is `async`: the layers and the page are awaited, so a page or a
+   layer that waits holds no thread.
 4. `sent` buffers the page's answer, so the body hooks can read it.
 5. `finish` runs the response hooks, then the error hooks for an error,
    then `after_dispatch`.
@@ -520,7 +521,7 @@ let mut ctx = Ctx::new(verb, path, matched.params())
     .with_plugins(app.core.context())
     .with_state(std::mem::take(state))
     // ...
-let response = app.stack.run(path, &mut ctx, |c| { /* the page */ });
+let response = app.stack.run(path, &mut ctx, |c| { /* the page */ }).await;
 *state = ctx.take_state();
 ```
 
@@ -537,11 +538,29 @@ let id = ctx.hooked::<brocanth_correlation::CorrelationId>();
 #### `Slot::PluginsLayers` and `Slot::AppSetup`: a layer
 
 A layer is a function around the page. It runs only for a matched route,
-inside the `Ctx`:
+inside the `Ctx`. It returns a future, because a layer may wait:
 
 ```rust
-pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
+pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;
 ```
+
+The lifetime is named because the future borrows the context and the rest
+of the chain. A layer lends the context on with `next.run(&mut *ctx)` and
+has it back after the `.await`, so it can write after the page ran:
+
+```rust
+pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {
+    Box::pin(async move {
+        let path = ctx.path.clone();
+        let response = next.run(&mut *ctx).await;
+        eprintln!("{path} -> {}", response.status);
+        response
+    })
+}
+```
+
+Not calling `next.run` short-circuits the chain. A closure is not a layer:
+it cannot name the lifetime, so write a `fn`.
 
 Three parts, because the pieces have three owners:
 

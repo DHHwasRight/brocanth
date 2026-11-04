@@ -245,6 +245,7 @@ pub mod plugin_shutdown;
 pub mod routing;
 pub mod routing_codegen;
 pub mod routing_middleware;
+pub mod routing_middleware_async;
 pub mod routing_params;
 pub mod routing_path;
 pub mod routing_pattern;

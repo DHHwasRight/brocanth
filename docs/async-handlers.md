@@ -260,6 +260,18 @@ The three behavioural rules survive, and are tested against the async stack:
 registration order, short-circuit by not calling `run`, and `except` beating
 the pattern.
 
+*Correction, from building it (§10 step 6): points 1 and 2 were not forced.
+The shipped `AsyncNext::run<'b>(self, ctx: &'b mut C) -> BoxFuture<'b, O>`
+takes the context for any lifetime shorter than the chain, so a layer
+reborrows — `next.run(&mut *ctx).await` — and has the context back after the
+await. No tuple. And `AsyncMiddlewareStack::run` is an `async fn`, so the
+selected `Vec` is a local of its own future; `chain_for` and `run_chain` are
+not needed. Point 3 stands for closures, but a `fn` item names its lifetime
+and is a layer through a blanket impl, which is what a generated project
+writes. One new limit: the terminal's future may borrow the context and
+nothing else, so a terminal calls what it captured before it builds the
+future.*
+
 ---
 
 ## 3. What becomes async, and what does not
@@ -808,9 +820,10 @@ ADR 2's `begin_shutdown` and calls `BodyStream::finish`, and
 
 ## 10. Migration path
 
-> **Status, 2026-10-13: steps 1 to 5 are landed.** Only step 6 remains, and it
-> still has no caller. Three steps turned out differently from the plan, and
-> the correction sits under the claim that was wrong rather than only in §13.
+> **Status, 2026-11-04: steps 1 to 6 are landed.** Step 6 got its caller: a
+> generated project's pages may be `async`, and its layers are async. Four
+> steps turned out differently from the plan, and the correction sits under
+> the claim that was wrong rather than only in §13.
 
 There is one, and it is unusually cheap, because `Handler<E>` does not change
 and `Router<H>` does not change.
@@ -855,7 +868,18 @@ whichever kind `session` is — including a **sync** hook ordered after an
 
 **Step 6 — async middleware**, if and when `MiddlewareCatalog` carries layers
 rather than names. Not before. There is no caller today.
-*Not landed. Still no caller.*
+*Landed. The caller was not the catalogue but the generated project, which
+mounts its own layers by name and wanted `async` pages so that a database
+call is awaited rather than blocked on. `routing_middleware_async.rs` holds
+`AsyncLayer`, `AsyncNext` and `AsyncMiddlewareStack`, simpler than §2.5 (see
+the correction there). In a generated project `dispatch` is `async`, the
+`Handler` returns a `BoxFuture`, `pages!` reads `async` off a page's
+signature and awaits it, and a sync page is wrapped in a ready future so
+both share one table. The `logging` and `sessions` layers and the admin's
+screen are async. A request now costs two `Box::pin` (the page's future and
+the chain's terminal) plus one per layer, where §6.1 counted zero for a sync
+route through the core's enum: the generated project chose one handler type
+over a second table.*
 
 Steps 1 to 3 are reversible and testable on their own. Step 4 is the one to
 plan time for. Steps 5 and 6 are optional and independent of each other.
@@ -974,7 +998,8 @@ Treat step 5 as a second proposal. §5 says it is affordable, which is the
 question that needed answering. Whether the plugin contract should grow a fifth
 hook family is a different question, and this document does not answer it.
 
-Do not do step 6 until something mounts a middleware layer.
+Do not do step 6 until something mounts a middleware layer. *Something
+did: the generated project. Step 6 is landed.*
 
 ---
 
@@ -1031,7 +1056,13 @@ sentences to distrust.
    whose rollback is async, for instance. This belongs in the handler-authoring
    docs.
 
-8. **One thing the document got right**, and it was listed as the open risk:
+8. **§2.5 called its three differences from the sync stack forced.** Two
+   were not. The context handback and the `chain_for`/`run_chain` split both
+   follow from `AsyncNext::run` taking the context for the chain's whole
+   lifetime. Taking it for a shorter one removes both. See the correction
+   under §2.5.
+
+9. **One thing the document got right**, and it was listed as the open risk:
    `catch_unwind` across an `.await` is sound here. Not because futures are
    unwind-safe, but because the bridge stops looking at anything the handler
    touched — the request and its state are local to the caught region, are shown

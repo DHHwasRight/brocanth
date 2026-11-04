@@ -56,9 +56,11 @@
 //! service rather than borrowing a chain, so nothing it awaits is a borrow of
 //! the stack.
 //!
-//! `docs/async-handlers.md` §4 has the full argument, both compiler errors in
-//! full, and the `AsyncLayer` shape that does work. It is not built here:
-//! nothing mounts a layer yet, so there is no caller to need it.
+//! `docs/async-handlers.md` §4 has the full argument and both compiler
+//! errors in full. The shape that does work is
+//! [`AsyncMiddlewareStack`](crate::routing::AsyncMiddlewareStack), in
+//! `routing_middleware_async`, and a generated project mounts its layers
+//! there.
 
 use crate::routing_path::TemplateError;
 use crate::routing_pattern::ScopePattern;
@@ -172,7 +174,7 @@ impl Scope {
         &self.except
     }
 
-    fn compile(self) -> Result<CompiledScope, TemplateError> {
+    pub(crate) fn compile(self) -> Result<CompiledScope, TemplateError> {
         let pattern = ScopePattern::parse(&self.pattern)?;
         let except = self
             .except
@@ -183,14 +185,20 @@ impl Scope {
     }
 }
 
+/// A [`Scope`] whose patterns parsed. Shared with the async stack, so the
+/// two cannot disagree about which paths a layer covers.
 #[derive(Debug, Clone)]
-struct CompiledScope {
+pub(crate) struct CompiledScope {
     pattern: ScopePattern,
     except: Vec<ScopePattern>,
 }
 
 impl CompiledScope {
-    fn applies_to(&self, path: &str) -> bool {
+    pub(crate) fn pattern(&self) -> &str {
+        self.pattern.as_str()
+    }
+
+    pub(crate) fn applies_to(&self, path: &str) -> bool {
         self.pattern.matches(path) && !self.except.iter().any(|p| p.matches(path))
     }
 }

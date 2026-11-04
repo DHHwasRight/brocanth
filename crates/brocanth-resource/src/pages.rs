@@ -4,7 +4,8 @@
 //! handler is:
 //!
 //! ```text
-//! pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+//! pub type Handler =
+//!     Box<dyn for<'a> Fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>> + Send + Sync>;
 //! ```
 //!
 //! and every route source in that project offers one function:
@@ -21,7 +22,7 @@
 //! and [`PageError`] are the three things a records route needs from a page
 //! triple, and a generated project writes one delegating line per method.
 //! [`mount`] is then generic over the triple, and `RouterBuilder<Handler>` and
-//! `RouterBuilder<Box<dyn Fn(&mut Ctx) -> …>>` are the same type, because a
+//! `RouterBuilder<Box<dyn for<'a> Fn(&'a mut Ctx) -> …>>` are the same type, because a
 //! type alias is transparent.
 //!
 //! The project's own `mount` is four lines:
@@ -75,6 +76,7 @@
 
 use std::sync::Arc;
 
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 
 use crate::error::Failure;
@@ -157,7 +159,23 @@ pub trait PageSubject<C>: Resource {
 ///
 /// The same type as the project's own `Handler` alias whenever `C`, `Resp` and
 /// `Err` are its `Ctx`, `Response` and `Error`.
-pub type PageHandler<C, Resp, Err> = Box<dyn Fn(&mut C) -> Result<Resp, Err> + Send + Sync>;
+///
+/// It returns a future because a project's page may wait. The handlers here
+/// do not: the flow over `ResourceData` is synchronous, so each answer is
+/// finished before its future is made.
+pub type PageHandler<C, Resp, Err> =
+    Box<dyn for<'a> Fn(&'a mut C) -> BoxFuture<'a, Result<Resp, Err>> + Send + Sync>;
+
+/// A handler whose answer is ready when it returns, as a [`PageHandler`].
+fn ready<C, Resp, Err, F>(handler: F) -> PageHandler<C, Resp, Err>
+where
+    C: 'static,
+    Resp: Send + 'static,
+    Err: Send + 'static,
+    F: Fn(&mut C) -> Result<Resp, Err> + Send + Sync + 'static,
+{
+    Box::new(move |ctx| Box::pin(std::future::ready(handler(ctx))))
+}
 
 // ---------------------------------------------------------------------------
 // Mounting
@@ -182,8 +200,8 @@ pub fn mount<R, C, Resp, Err>(
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
     mount_api(routes, prefix, Arc::clone(&resource))?;
     let one = join(prefix, "/{id}");
@@ -215,8 +233,8 @@ pub fn mount_api<R, C, Resp, Err>(
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
     let collection = join(prefix, "/");
     let one = join(prefix, "/{id}");
@@ -262,10 +280,10 @@ fn list_handler<R, C, Resp, Err>(resource: Arc<R>) -> PageHandler<C, Resp, Err>
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
-    Box::new(move |ctx| {
+    ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
             let query = query_of(ctx);
@@ -284,10 +302,10 @@ fn view_handler<R, C, Resp, Err>(resource: Arc<R>) -> PageHandler<C, Resp, Err>
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
-    Box::new(move |ctx| {
+    ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
             let id = require_id(ctx)?;
@@ -304,10 +322,10 @@ fn create_handler<R, C, Resp, Err>(resource: Arc<R>, prefix: String) -> PageHand
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
-    Box::new(move |ctx| {
+    ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
             flow::create(&*resource, &subject, ctx.body())
@@ -332,10 +350,10 @@ fn update_handler<R, C, Resp, Err>(resource: Arc<R>) -> PageHandler<C, Resp, Err
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
-    Box::new(move |ctx| {
+    ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
             let id = require_id(ctx)?.to_owned();
@@ -356,10 +374,10 @@ fn delete_handler<R, C, Resp, Err>(resource: Arc<R>) -> PageHandler<C, Resp, Err
 where
     R: PageSubject<C>,
     C: PageCtx + 'static,
-    Resp: PageResponse + 'static,
-    Err: PageError + 'static,
+    Resp: PageResponse + Send + 'static,
+    Err: PageError + Send + 'static,
 {
-    Box::new(move |ctx| {
+    ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
             let id = require_id(ctx)?;

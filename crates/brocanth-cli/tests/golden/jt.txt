@@ -107,8 +107,9 @@ use std::time::{Duration, Instant};
 
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::plugin_shutdown::ShutdownReason;
-use brocanth::routing::{Dispatch, MiddlewareStack, Router, Verb};
+use brocanth::routing::{AsyncMiddlewareStack, Dispatch, Router, Verb};
 
 use crate::pages::{self, Ctx, Handler, IntoResponse, Response};
 use crate::plugins;
@@ -127,7 +128,7 @@ pub fn default_addr() -> String {
 /// What a request needs, built once and shared by every connection.
 pub struct App {
     pub router: Router<Handler>,
-    pub stack: MiddlewareStack<Ctx, Response>,
+    pub stack: AsyncMiddlewareStack<Ctx, Response>,
     pub plugins: Vec<String>,
     /// The application the plugins built.
     ///
@@ -171,7 +172,7 @@ pub fn build() -> Result<App, String> {
     // 3. The chain, from exactly what the block above mounted. A name this
     //    binary has no layer for stops the application rather than silently
     //    not running.
-    let mut stack: MiddlewareStack<Ctx, Response> = MiddlewareStack::new();
+    let mut stack: AsyncMiddlewareStack<Ctx, Response> = AsyncMiddlewareStack::new();
     for mount in app.router_plan().mounts() {
         let layer = plugins::layer(&mount.middleware).ok_or_else(|| {
             format!(
@@ -504,7 +505,7 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
     };
     let mut state = RequestState::new();
     let outcome = match app.core.begin_async(&mut request, &mut state).await {
-        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state))),
+        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
         Begin::Answered(outcome) => outcome,
     };
     let response = app.core.finish(&mut request, &mut state, outcome);
@@ -517,7 +518,11 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
 /// therefore no context. `state` is what the request hooks wrote; the
 /// page reads it through `Ctx::hooked`, and it goes back afterwards so
 /// the response hooks read what the page left.
-pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {
+///
+/// `async` because a page may be: the chain and the page are awaited
+/// here, on the worker, and a page that waits on a database does not
+/// hold a thread while it does.
+pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -> Response {
     let Some(verb) = Verb::from_http(request.method()) else {
         return Response::new(501, "Not Implemented");
     };
@@ -536,9 +541,18 @@ pub fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestState) -
             // what Echo calls an HTTPErrorHandler. It sits inside
             // the chain's terminal, so a layer still sees what the
             // error turned into and can rewrite it.
-            let response = app.stack.run(path, &mut ctx, |c| {
-                handler(c).unwrap_or_else(IntoResponse::into_response)
-            });
+            //
+            // `handler(c)` is called before the future is built: the
+            // future may borrow the context and nothing else.
+            let response = app
+                .stack
+                .run(path, &mut ctx, |c: &mut Ctx| -> BoxFuture<'_, Response> {
+                    let answer = handler(c);
+                    Box::pin(
+                        async move { answer.await.unwrap_or_else(IntoResponse::into_response) },
+                    )
+                })
+                .await;
             *state = ctx.take_state();
             response
         }
@@ -569,6 +583,7 @@ brocanth_pages::pages!("src/pages");
 
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::plugin_hooks::RequestState;
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::{BuildError, Params, Router, Verb};
 
 use crate::plugins;
@@ -998,21 +1013,46 @@ impl Ctx {
 /// A handler, as the table stores it. One per verb a page answers.
 ///
 /// Boxed rather than a bare `fn` pointer, because every handler returns its
-/// own type and a `fn` pointer can only hold one of them. [`page`] is what
-/// unifies them, and it runs once per route at startup rather than per
-/// request.
-pub type Handler = Box<dyn Fn(&mut Ctx) -> Result<Response, Error> + Send + Sync>;
+/// own type and a `fn` pointer can only hold one of them. [`page`] and
+/// [`page_async`] are what unify them, and they run once per route at
+/// startup rather than per request.
+///
+/// It returns a future, so a page may wait -- on a database, on another
+/// service -- without holding a thread. A page that waits on nothing is
+/// still a plain `fn`, and [`page`] hands back its answer already finished.
+pub type Handler =
+    Box<dyn for<'a> Fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>> + Send + Sync>;
 
-/// Puts a handler in the table whatever it returns.
+/// Puts a `pub fn handle` in the table whatever it returns.
 ///
 /// Generic over the return type, so `-> Result<impl IntoResponse, Error>` on
 /// the handler and one concrete `Handler` in the table are the same thing.
+/// The answer is ready when the handler returns; the future around it is
+/// only there so a sync page and an async page share one table.
 pub fn page<H, T>(handler: H) -> Handler
 where
     H: Fn(&mut Ctx) -> Result<T, Error> + Send + Sync + 'static,
     T: IntoResponse,
 {
-    Box::new(move |ctx| handler(ctx).map(IntoResponse::into_response))
+    Box::new(move |ctx| {
+        let answered = handler(ctx).map(IntoResponse::into_response);
+        Box::pin(std::future::ready(answered))
+    })
+}
+
+/// Puts a `pub async fn handle` in the table.
+///
+/// `pages!` writes the call, with a closure that awaits the page and turns
+/// its answer into a `Response`. The closure is a `fn` pointer and not a
+/// generic, because the page's future borrows the context and a generic
+/// cannot name that borrow.
+///
+/// `allow(dead_code)`: nothing calls it until a page is `async`.
+#[allow(dead_code)]
+pub fn page_async(
+    handler: for<'a> fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>>,
+) -> Handler {
+    Box::new(handler)
 }
 
 /// Every JSON template in this application.
@@ -1173,7 +1213,8 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! is yours.
 
 use brocanth::plugin_context::Base;
-use brocanth::routing::Next;
+use brocanth::plugin_routes::BoxFuture;
+use brocanth::routing::AsyncNext;
 
 use crate::pages::{Ctx, Response};
 
@@ -1244,7 +1285,11 @@ pub(crate) use announce;
 /// A name rather than the type written out: clippy calls the bare
 /// form a very complex type, and it is also the type `src/app.rs`
 /// would have to spell to hold one.
-pub type Layer = fn(&mut Ctx, Next<'_, Ctx, Response>) -> Response;
+///
+/// A layer may wait, so it returns a future. The lifetime is named
+/// because the future borrows both the context and the rest of the
+/// chain; see `logging::layer` for the shape of one.
+pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;
 
 /// The function behind a middleware name the application mounted.
 ///
@@ -1296,7 +1341,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 4698e07a5a1d3883
+// brocanth-digest: f597b803d6f4e3fc
 ===== src/pages/status.jt =====
 // The body of `/status`. A template is a function whose body is JSON with
 // holes, and the macro compiles it into straight-line writes: every static
@@ -1404,6 +1449,12 @@ list is a build error naming the list, rather than a handler nothing
 reaches; a page with no handler is a build error too. A private
 `fn handle_*` is a helper and is left alone.
 
+A handler may be `pub async fn` when it waits on something, such as a
+database: the table awaits it and the wait holds no thread. A page that
+waits on nothing stays a plain `fn`. An async handler is dropped at an
+`.await` when the client goes away, so do not leave a write half done
+across one.
+
 **Adding a file does not rebuild on its own** -- nothing referenced it
 yet. Run `touch src/pages/mod.rs` after creating a page or a layout.
 Editing or deleting one is noticed.
@@ -1428,7 +1479,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 759a4e5d7f93e100 -->
+<!-- brocanth-digest: 377917b9610d583e -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
