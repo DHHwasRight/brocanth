@@ -536,17 +536,31 @@ impl Observer {
 
     /// Installs [`Observer::subscriber`] on stdout as the process default.
     ///
+    /// Once per process. A second call after one that worked is a success
+    /// that changes nothing: tests build the application once each, in one
+    /// process, and the first subscriber serves them all.
+    ///
     /// # Errors
     ///
-    /// The level does not parse, or a default subscriber is already set.
+    /// The level does not parse, or another crate set a default subscriber.
     #[cfg(feature = "logs")]
     pub fn install(&self) -> Result<(), String> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+
         let subscriber = self.subscriber(logs::Stdout)?;
-        tracing::subscriber::set_global_default(subscriber).map_err(|_| {
-            "a tracing subscriber is already installed for this process\nhelp: set \
-             `install_subscriber = false` and install `Observer::subscriber` yourself"
-                .to_string()
-        })
+        match tracing::subscriber::set_global_default(subscriber) {
+            Ok(()) => {
+                INSTALLED.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(_) if INSTALLED.load(Ordering::SeqCst) => Ok(()),
+            Err(_) => Err(
+                "a tracing subscriber is already installed for this process\nhelp: set \
+                 `install_subscriber = false` and install `Observer::subscriber` yourself"
+                    .to_string(),
+            ),
+        }
     }
 
     /// Exports what is buffered and stops the trace exporter.
