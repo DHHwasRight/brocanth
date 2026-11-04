@@ -53,13 +53,24 @@ impl Module for Cache {
             project,
             "cache",
             "Cache",
-            vec![Setting::text(
-                "url",
-                "postgres://localhost/development",
-                "The Postgres URL the cache lives in.",
-            )
-            .note("A URL can carry a password, so no flag sets it.")
-            .secret()],
+            vec![
+                Setting::text(
+                    "url",
+                    "postgres://localhost/development",
+                    "The Postgres URL the cache lives in.",
+                )
+                .note("A URL can carry a password, so no flag sets it.")
+                .secret(),
+                Setting::bool(
+                    "migrate",
+                    true,
+                    "Create the unlogged cache table at startup if it is absent.",
+                )
+                .note(
+                    "Development only: see `PgCache::schema_sql` for the statements to put in a\n\
+                     migration instead.",
+                ),
+            ],
         );
         if !project.has("config") {
             // The literal form calls `Plugin::new`, which is a trait
@@ -110,18 +121,22 @@ pub struct Settings {{
     /// purpose: a cache for a SQLite deployment is a separate crate behind the
     /// same `Cache` trait.
     pub url: String,
+    /// Create the unlogged cache table at startup if it is absent.
+    pub migrate: bool,
 }}
 
 impl Default for Settings {{
     fn default() -> Self {{
         Self {{
             url: "postgres://localhost/development".to_string(),
+            migrate: true,
         }}
     }}
 }}
 
 pub struct Cache {{
     url: String,
+    migrate: bool,
     /// Open at `before_start` and not before, so the field is an `Option` for
     /// exactly the length of the build.
     handle: Option<CacheHandle>,
@@ -135,6 +150,7 @@ impl Plugin for Cache {{
     fn new(config: Settings) -> Self {{
         Self {{
             url: config.url,
+            migrate: config.migrate,
             handle: None,
         }}
     }}
@@ -163,26 +179,35 @@ impl Plugin for Cache {{
             PgCache::connect_lazy(&self.url)
                 .map_err(|e| PluginError::new(format!("[cache] {{e}}")))?
         }};
-        // The table is not created here. `brocanth-cache` can create it, and
-        // it is off there for the reason it is absent here: the generator
-        // proposes and the developer commits. `PgCache::schema_sql` hands out
-        // the statements for a migration you can read.
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
         // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers. `serve`
-        // awaits this once before it listens, so an unreachable store stops
-        // the start there.
+        // miss is a pass: the question is whether the store answers. With
+        // `migrate`, the first check creates the table, as the jobs module
+        // does, so a new project starts; a project with reviewers turns it
+        // off and keeps `PgCache::schema_sql` in a migration. `serve` awaits
+        // this once before it listens, so an unreachable store stops the
+        // start there.
         let probe = Arc::clone(&cache);
+        let migrate = self.migrate;
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {{
             let probe = Arc::clone(&probe);
+            let migrated = Arc::clone(&migrated);
             async move {{
+                if migrate {{
+                    migrated
+                        .get_or_try_init(|| probe.migrate())
+                        .await
+                        .map_err(|e| format!("creating the cache table: {{e}}"))?;
+                }}
                 let key = brocanth_cache::Namespace::new("brocanth.readyz")
                     .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
                     .map_err(|e| e.to_string())?;
                 probe.get(&key).await.map(drop).map_err(|e| {{
                     format!(
-                        "{{e}}\nhelp: check `[cache] url`, and that the `brocanth_cache` table \
-                         exists: `PgCache::schema_sql()` has the statements for a migration"
+                        "{{e}}\nhelp: check `[cache] url`; with `migrate = false`, the \
+                         `brocanth_cache` table must exist: `PgCache::schema_sql()` has the \
+                         statements for a migration"
                     )
                 }})
             }}
