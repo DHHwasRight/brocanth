@@ -988,6 +988,26 @@ impl Ctx {
         self.state.get::<T>()
     }
 
+    /// The same value, to change. `None` when no hook wrote one.
+    ///
+    /// The state goes back to the hooks when the page returns, so a change
+    /// made here is what `after_dispatch` and the response hooks read: a
+    /// request hook puts a per-request log record on the state, and the
+    /// page fills in the fields only it knows.
+    pub fn hooked_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.state.get_mut::<T>()
+    }
+
+    /// Puts a value on the request state for the hooks that run after the
+    /// page, and returns the value it replaced.
+    ///
+    /// For a value that no request hook wrote first. A hook that reads it
+    /// must also accept `None`: a 404, a 405 and a request that a request
+    /// hook answered run no page.
+    pub fn hook_insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.state.insert(value)
+    }
+
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1083,6 +1103,23 @@ mod tests {
         let router = router().expect("the pages produce a table");
         let allow = router.allow_for("/about").expect("/about is a route");
         assert_eq!(allow.to_string(), "GET, HEAD");
+    }
+
+    #[test]
+    fn a_page_writes_what_the_hooks_read_after_it() {
+        // A request hook's record, as `after_dispatch` would find it.
+        struct Record(Vec<&'static str>);
+        let mut state = RequestState::new();
+        state.insert(Record(vec!["hook"]));
+        let mut ctx = Ctx::new(Verb::Get, "/", Params::empty()).with_state(state);
+
+        let record = ctx.hooked_mut::<Record>().expect("the hook wrote it");
+        record.0.push("page");
+        assert!(ctx.hook_insert(7_u32).is_none(), "nothing was there");
+
+        let state = ctx.take_state();
+        assert_eq!(state.get::<Record>().expect("kept").0, ["hook", "page"]);
+        assert_eq!(state.get::<u32>(), Some(&7));
     }
 }
 ===== src/pages/index.rs =====
