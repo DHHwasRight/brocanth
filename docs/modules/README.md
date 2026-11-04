@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 38. The list
+One page per module that `brocanth create` offers. There are 41. The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
 
 Each page has the same parts:
@@ -58,6 +58,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`observability-health`](observability-health.md) | /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM | Routes | observability |
 | [`observability-metrics`](observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues | Routes | observability |
 | [`observability-tracing`](observability-tracing.md) | an OTLP span per request and per job, W3C traceparent in and out; needs a collector | Middleware | observability |
+| [`analytics`](analytics.md) | page views counted on the server: no cookie, no script, no third party; rows in your Postgres | Middleware |  |
 | [`config`](config.md) | config/<env>.toml, merged; without it nothing links a TOML parser | Enhancer |  |
 | [`sessions`](sessions.md) | a cookie, and a `Session` the context hands a handler | Middleware |  |
 | [`db`](db.md) | one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver | Enhancer, Middleware, Renderer |  |

@@ -76,6 +76,9 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_observe::scaffold::Health,
     &brocanth_observe::scaffold::Metrics,
     &brocanth_observe::scaffold::Tracing,
+    // Page views, counted by a hook on the server and kept in the `db`
+    // module's database. No script, no cookie, no third party.
+    &brocanth_analytics::scaffold::PageViews,
     &config::Config,
     &sessions::Sessions,
     // The pool, from the crate that is the pool. Before `model`, which is

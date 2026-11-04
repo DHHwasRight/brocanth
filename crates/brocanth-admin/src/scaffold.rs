@@ -71,6 +71,10 @@ impl Module for Backoffice {
             "commands",
             "the binary gets `admin eject`, which runs `brocanth admin eject` in the project",
         )
+        .adapts_to(
+            "analytics",
+            "the page-view numbers are a tab, `AnalyticsPanel`, at /admin/analytics",
+        )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
         .krate(
             Dep::brocanth("brocanth-admin")
@@ -107,6 +111,14 @@ impl Module for Backoffice {
                 .replace("@HOLD@", pick(HOLD_ORM, HOLD))
                 .replace("@OVER_ORM@", pick(OVER_ORM, ""))
                 .replace("@HELD@", pick("OverOrm", "Admin"))
+                .replace(
+                    "@PANELS@",
+                    if project.has("analytics") {
+                        ANALYTICS_PANEL
+                    } else {
+                        ""
+                    },
+                )
                 .replace(
                     "@SYNC@",
                     pick("Arc, Mutex, OnceLock, PoisonError", "Arc, OnceLock"),
@@ -401,6 +413,13 @@ const MODELS_DOC_ORM: &str = "\
 //! answers 403 on every screen. `brocanth_admin::rows` has the worked
 //! example.";
 
+/// The analytics tab, with the `analytics` module. The panel finds the
+/// plugin's recorder when it renders, because `mount` runs before a plugin
+/// could hand it one.
+const ANALYTICS_PANEL: &str = "    // The page views the analytics plugin counts, as a tab.
+    config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+";
+
 /// The admin `mount` builds, over an empty source.
 const HOLD: &str = r#"    let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
@@ -568,7 +587,7 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+@PANELS@@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
         routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
         routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;

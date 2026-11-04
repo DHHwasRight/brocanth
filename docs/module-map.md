@@ -76,7 +76,8 @@ the file, or a literal in code.
 | `observability-health` | **Routes** | `/up`, `/readyz` via the observer, not RouterMounts | observability | | |
 | `observability-metrics` | **Routes** | `/metrics`, on a side listener | observability | | |
 | `observability-tracing` | **Middleware** | (parent's plugin) | observability (off) | | |
-| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 17 modules ★ |
+| `analytics` | **Middleware** | PluginsHooks (an after-dispatch request hook), Services (reads `brocanth_db::Db`) ★ | | `db` | |
+| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 18 modules ★ |
 | `sessions` | **Middleware** | Layers, AppContext ★ | | | |
 | `db` | **Enhancer**, Middleware, Renderer | AppContext, PagesItems (`ctx.db()`), Services (`brocanth_db::Db`) ★ | | | |
 | `model` | **Enhancer**, Middleware, Renderer | PagesItems (`ctx.orm()`), Services (`brocanth_model::Orm`), CommandsMod (`migrate`) ★ | | `db` | `commands` |
@@ -97,7 +98,7 @@ the file, or a literal in code.
 | `middleware-rate-limit` | **Middleware** | PluginsHooks, ConfigSections (`[[rate_limit.rules]]`) ★ | middleware (off) | | |
 | `openapi` | **Routes**, Enhancer | PagesRoutes (`/openapi.json`, `.yaml`) ★ | | | `input` |
 | `resource` | **Routes** | RouterMounts (`/api`) | | | |
-| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms), `admin-model` (rows over the ORM) |
+| `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms), `admin-model` (rows over the ORM), `analytics` (a tab) |
 | `admin-model` | Routes | `src/plugins/admin/models.rs` | admin | `model` | |
 | `commands` | **Enhancer** | CommandsMod (`routes`) | | | `input` |
 | `rsx` | **Renderer** | PagesRenderers (`.rsx`), assets | | | children below |

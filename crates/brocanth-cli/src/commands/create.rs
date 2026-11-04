@@ -5173,6 +5173,10 @@ mod tests {
             // The pool, with a config file: a `[db]` section, a plugin that
             // opens it in `before_start`, and `ctx.db()` on the context.
             ("db", vec!["config", "db"]),
+            // Page views over that pool, with the admin, so the generated
+            // `mount` carries the analytics tab and the hook record names a
+            // plugin from a library crate.
+            ("analytics", vec!["config", "db", "analytics", "admin"]),
             // The two modules that mount routes, and nothing else: no
             // config file and no renderer, so the admin's own rsx is the
             // only template engine in the tree and `mounted` is written

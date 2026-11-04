@@ -1,0 +1,61 @@
+[package]
+name = "brocanth-analytics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "First-party page-view counting for brocanth: a request hook, a daily-rotating visitor hash, rows in your own Postgres. No cookie, no script, no third party."
+readme = "README.md"
+
+# Every dependency below is already in the workspace tree. The hook is
+# synchronous and stores nothing personal, so what it needs is a digest,
+# a random salt and a clock; the database is behind a feature.
+[dependencies]
+brocanth.workspace = true
+http = "1"
+
+# The visitor hash. The same version `brocanth-middleware`, `brocanth-auth`
+# and `brocanth-storage` take, so this adds no second copy.
+sha2 = "0.11"
+
+# The daily salt comes from the OS CSPRNG. A salt a visitor can predict
+# makes the hash a lookup table of addresses. Same version as the
+# middleware's CSRF tokens.
+getrandom = "0.4"
+
+# The store is a trait object behind an `Arc`, so its methods are boxed
+# futures. The same crate `brocanth-cache` and `brocanth-admin` use.
+async-trait = "0.1"
+
+# The flusher: one task, a timer, and the runtime a server already has.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "sync"] }
+
+# `postgres`: `PgStore`, two tables in the database the `db` module opened.
+brocanth-db = { workspace = true, optional = true }
+
+# `config`: `AnalyticsConfig` reads from an `[analytics]` section.
+serde = { version = "1", features = ["derive"], optional = true }
+
+# `admin`: `AnalyticsPanel`, a tab in `brocanth-admin`. Off, so a worker or
+# an application without the backoffice links no admin.
+brocanth-admin = { workspace = true, optional = true }
+
+# `scaffold`: the module `brocanth create` offers as `analytics`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-test.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# This crate, with every feature on, so `cargo test -p brocanth-analytics`
+# runs the panel and Postgres tests instead of compiling them out.
+brocanth-analytics = { path = ".", features = ["postgres", "config", "admin"] }
+brocanth-config.workspace = true
+
+[features]
+default = ["postgres"]
+postgres = ["dep:brocanth-db"]
+config = ["dep:serde"]
+admin = ["dep:brocanth-admin"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

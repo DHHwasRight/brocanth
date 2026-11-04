@@ -687,6 +687,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-analytics"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-admin",
+ "brocanth-analytics",
+ "brocanth-config",
+ "brocanth-db",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "getrandom 0.4.3",
+ "http",
+ "serde",
+ "sha2 0.11.0",
+ "tokio",
+]
+
+[[package]]
 name = "brocanth-assets"
 version = "0.1.0"
 dependencies = [
@@ -762,6 +781,7 @@ dependencies = [
  "anstyle",
  "brocanth",
  "brocanth-admin",
+ "brocanth-analytics",
  "brocanth-auth",
  "brocanth-cache",
  "brocanth-client",

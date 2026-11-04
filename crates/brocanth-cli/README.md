@@ -220,14 +220,14 @@ project without the `commands` module has no command line, and
 
 ## Modules
 
-The CLI offers 39 modules, grouped here by their main category
+The CLI offers 41 modules, grouped here by their main category
 ([docs/module-map.md](../../docs/module-map.md) has every category, the
 seams and the dependency graph). `brocanth create --help` prints each
 module with what it costs.
 
 | Category | Hooks in through | Modules |
 |---|---|---|
-| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag` |
+| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag` |
 | Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `admin`, `admin-model`, `realtime-sse`, `realtime-websocket`, `robots` |
 | Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `model`, `cache`, `jobs`, `storage`, `realtime`, `input`, `client`, `commands` |
 | Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt` |

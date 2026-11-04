@@ -32,6 +32,7 @@ map.
 | [surface.md](surface.md) | One route table read by the OpenAPI document, the client and the handlers. |
 | [policy.md](policy.md) | Predicates, `condition()`, `Verified`, and the `policy!` macro. |
 | [observability.md](observability.md) | Logs, probes, metrics and traces in `brocanth-observe`. |
+| [analytics.md](analytics.md) | `brocanth-analytics`: page views counted on the server, the daily visitor hash, and the privacy reasoning with its limits. |
 | [i18n.md](i18n.md) | Message catalogs checked at build time, locales, CLDR plurals. |
 | [static-export.md](static-export.md) | `brocanth-static`: the pages compiled to files for a static host. |
 | [robots.md](robots.md) | `brocanth-robots`: the robots.txt module, its settings and the sitemap follow-up. |
