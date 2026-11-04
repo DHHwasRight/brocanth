@@ -652,9 +652,9 @@ The module writes a thin `export` command and depends on
 in the crate: an application that calls the crate directly decides for
 itself. See `docs/static-export.md`.
 
-### Manifest rules — `category`, `conflicts`, `adapts_to`
+### Manifest rules — `category`, `conflicts`, `adapts_to`, `recommends`
 
-Three relations that were implicit are now declared, each for the same
+Four relations that were implicit are now declared, each for the same
 reason: a module from another repository must be able to state it
 without editing the CLI.
 
@@ -677,6 +677,16 @@ without editing the CLI.
   and fails on a question the manifest does not declare, or a declaration
   nothing asks. `brocanth.toml` lists the present ones as `adapted_to`,
   for the `remove` that will need to know which modules to rewrite.
+- **`recommends(key, why)`.** Advice, the weakest relation. `docker`
+  recommends `observability-logs` and `observability-health`, because the
+  image sets `<APP>_ENV=production` and its `HEALTHCHECK` calls `/up`.
+  Nothing refuses. After a run driven by flags, `create` and `add` warn
+  about each recommended module the selection lacks; `brocanth check`
+  warns too (`check/recommended`); `--questions` lists the edges. Why not
+  a hard-coded list of "what a service needs": a list in the CLI cannot
+  know about a module from another repository, and an edge on the
+  manifest can. A recommendation that clashes with a static site is
+  dropped; one that conflicts with a chosen module says it replaces it.
 
 **One check for a selection.** `create::selection` runs the four rules in
 order: not available, a child without its parent, a module without what it
@@ -711,6 +721,37 @@ difference. Three rules decide what it may touch:
    prints the change and writes nothing. When the developer has made the
    change by hand around their own lines, the next run finds every added
    line present and every removed line gone, and goes through.
+4. **A deleted file stays deleted.** A file the generator wrote before
+   this add, and that is gone, was deleted by the developer: an example
+   page they did not want. `add` does not write it again, and says so.
+   Only a file that is new with this add is written when absent.
+5. **The shared files are edited, never rewritten.** `Cargo.toml` goes
+   through `toml_edit`: a dependency already there keeps its spec, and
+   only a feature the new module needs is added to it. A new git
+   dependency takes the `branch`, `rev` or `tag` of a dependency the
+   project already takes from that repository, because cargo reads one
+   repository at two refs as two sources. In the receipt above
+   `[dependencies]`, only the line of the module that arrived goes. A
+   new `config/<env>.toml` section is appended as text at the end of the
+   file. Inserted through the document, it landed before the file's
+   trailing comments, which belong to the section above.
+
+**`src/commands/mod.rs` has a part of the developer's.** The file is
+owned: its `mod` lines follow from the module list. But a command of the
+developer's needs a `mod` line too, and Rust declares a module only in
+its parent. So the file ends with a line, `// Your commands: ...`, below
+the digest. The lines below it are the developer's: the digest does not
+cover them, and `add` carries them into the file it rewrites (minus a
+line the generator now writes itself). Before this, the generated
+`AGENTS.md` told an agent to add a `mod` line, and the next `add`
+refused the edited file.
+
+Two other designs were weighed. A user file beside it (`yours.rs`)
+cannot declare a sibling module without `#[path]`, which every reader
+then has to decode. A `commands!` macro that reads the directory, as
+`pages!` does, removes the list altogether, and costs a proc macro for
+one `mod` line per command. The region keeps the file plain Rust and the
+rule visible in the file itself.
 
 Why refuse, rather than finish the add and leave the proposed file
 beside the real one (`<file>.brocanth-new`)? Every change the generator

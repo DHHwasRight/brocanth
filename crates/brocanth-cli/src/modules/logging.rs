@@ -20,7 +20,7 @@ impl Module for Logging {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "logging",
-            "a line per request; the core assumes no log layer",
+            "a plain-text line per response on stderr, for development; for production use observability-logs",
         )
         .category(Category::Middleware)
         .adapts_to(
@@ -31,7 +31,10 @@ impl Module for Logging {
             "observability-logs",
             "both write a line per request; `observability-logs` writes JSON on stdout",
         )
-        .asked_in("foundations", "A line per request")
+        .asked_in(
+            "foundations",
+            "A text line per response, for development",
+        )
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {

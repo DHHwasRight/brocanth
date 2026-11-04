@@ -23,6 +23,10 @@ impl Module for Config {
             "Settings in config/<env>.toml, layered per environment",
         )
         .krate(Dep::brocanth("brocanth-config"))
+        .recommends(
+            "observability-logs",
+            "$<APP>_ENV picks the environment; only observability-logs writes JSON when it is production",
+        )
         .absent(
             "brocanth-config",
             "no TOML parser; main builds each plugin from a literal",

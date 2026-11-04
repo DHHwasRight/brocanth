@@ -9,6 +9,7 @@
 mod commands;
 mod modules;
 mod owned;
+mod questions;
 mod tui;
 mod ui;
 mod wizard;
@@ -83,6 +84,10 @@ enum Command {
     /// With no NAME and a terminal on both descriptors this opens a chooser.
     /// With a NAME it runs straight through, because every other answer has a
     /// default this command will tell you about.
+    ///
+    /// The modules are the person's decisions. `--questions` (or
+    /// `--questions --json`) prints what the chooser would ask, with the
+    /// defaults, so an agent can put the questions to the person first.
     #[command(alias = "new")]
     Create(commands::create::CreateArgs),
     /// Put a module into a project that already exists
@@ -90,6 +95,7 @@ enum Command {
     /// The same generator `create` runs, with one more entry on the list in
     /// `brocanth.toml`. It rewrites what it owns, appends to `Cargo.toml`
     /// and the config, and refuses rather than overwrite a file of yours.
+    /// `--questions` prints the choices, with what this project has.
     Add(commands::add::AddArgs),
     /// Write migrations from the models, and the ids that make renames visible
     ///

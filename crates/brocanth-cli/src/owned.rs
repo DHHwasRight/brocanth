@@ -87,7 +87,7 @@ fn comment(path: &str) -> (&'static str, &'static str) {
 fn instead(path: &str) -> &'static str {
     match path {
         "src/commands/mod.rs" => {
-            "A command of your own is a file beside this one; nothing lists it."
+            "A command of your own: a file beside this one, and its `pub mod` line at the end."
         }
         "brocanth.toml" => "Change the module list with `brocanth add`, not here.",
         "AGENTS.md" => "Notes of your own go in a file of your own, beside this one.",
@@ -109,6 +109,52 @@ fn rewriter(path: &str) -> &'static str {
         MIGRATOR => "`brocanth migrate`",
         _ => "`brocanth add`",
     }
+}
+
+/// The line that opens the developer's part of an owned file.
+///
+/// `src/commands/mod.rs` is owned, because the generator's `mod` lines
+/// follow from the module list. But a command of the developer's needs a
+/// `mod` line too, and Rust has no other place for it: a module is declared
+/// in its parent. So the file has two parts. Above this line, the
+/// generator's, under the digest. Below it, the developer's, which the
+/// digest does not cover and `add` carries over.
+///
+/// A region and not a second file, because a second file cannot declare a
+/// sibling module without `#[path]`, and a `#[path]` is a puzzle for every
+/// reader. The alternative the pages took, a macro that reads the
+/// directory, needs a proc macro for one `mod` line per command.
+pub const YOURS: &str =
+    "// Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.";
+
+/// Whether an owned file ends with a part of the developer's.
+fn has_region(path: &str) -> bool {
+    path == "src/commands/mod.rs"
+}
+
+/// The developer's part of a stamped file: the lines after [`YOURS`].
+pub fn yours(text: &str) -> &str {
+    text.find(&format!("\n{YOURS}\n"))
+        .map_or("", |at| &text[at + YOURS.len() + 2..])
+}
+
+/// A freshly generated, stamped `generated` with the developer's part of
+/// `current` carried over.
+///
+/// A line of theirs that the generator now writes itself is dropped, so a
+/// command the developer declared and a module later brought does not
+/// become a duplicate `mod`.
+pub fn keep_yours(path: &str, current: &str, generated: &str) -> String {
+    if !has_region(path) {
+        return generated.to_string();
+    }
+    let body = unstamp(generated).map_or(generated.to_string(), |(body, _)| body);
+    let theirs: String = yours(current)
+        .lines()
+        .filter(|line| line.trim().is_empty() || !body.lines().any(|l| l == *line))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    format!("{generated}{theirs}")
 }
 
 /// `text` with the header and the digest on it, ready to write.
@@ -139,7 +185,12 @@ pub fn stamp(path: &str, text: &str) -> String {
     let (open, close) = comment(path);
     let close = if close == "-->" { " -->" } else { "" };
     let open = if open == "//!" { "//" } else { open };
-    format!("{body}\n{open} {MARKER} {}{close}\n", digest(&body))
+    let region = if has_region(path) {
+        format!("{YOURS}\n")
+    } else {
+        String::new()
+    };
+    format!("{body}\n{open} {MARKER} {}{close}\n{region}", digest(&body))
 }
 
 /// The body of a stamped file and the digest it carries, or `None` for a
@@ -162,7 +213,16 @@ pub fn unstamp(text: &str) -> Option<(String, &str)> {
         .unwrap_or("");
     // The blank line `stamp` put between the body and the digest goes too.
     let head = text[..start].strip_suffix('\n')?;
-    Some((format!("{head}{}", &text[end..]), carried))
+    // The developer's part, when the file has one, is theirs and outside
+    // the digest. Only directly below the digest: anywhere else the line
+    // is an edit like any other.
+    let rest = &text[end..];
+    let rest = if rest.starts_with(&format!("{YOURS}\n")) {
+        ""
+    } else {
+        rest
+    };
+    Some((format!("{head}{rest}"), carried))
 }
 
 /// Whether a file on disk is still the one the generator wrote.
@@ -275,6 +335,39 @@ mod tests {
             "//! The plugins.\n\npub mod logging;\n",
         );
         assert_eq!(unedited(&format!("{text}pub mod mine;\n")), Some(false));
+    }
+
+    #[test]
+    fn a_command_of_the_developers_below_the_line_is_not_an_edit() {
+        let path = "src/commands/mod.rs";
+        let text = stamp(path, "//! Commands.\n\npub mod serve;\n");
+        assert!(text.ends_with(&format!("{YOURS}\n")), "{text}");
+        assert_eq!(unedited(&text), Some(true));
+
+        let theirs = format!("{text}pub mod orgs;\n");
+        assert_eq!(unedited(&theirs), Some(true), "{theirs}");
+        assert_eq!(yours(&theirs), "pub mod orgs;\n");
+
+        // Above the line, an edit is still an edit.
+        let above = theirs.replace("pub mod serve;", "pub mod serve;\npub mod mine;");
+        assert_eq!(unedited(&above), Some(false));
+
+        // Rewritten, the developer's part comes along, minus a line the
+        // generator now writes itself.
+        let fresh = stamp(path, "//! Commands.\n\npub mod orgs;\npub mod serve;\n");
+        let kept = keep_yours(path, &format!("{theirs}pub mod billing;\n"), &fresh);
+        assert_eq!(unedited(&kept), Some(true));
+        assert_eq!(yours(&kept), "pub mod billing;\n", "{kept}");
+    }
+
+    #[test]
+    fn a_file_with_no_region_takes_no_lines_below_the_digest() {
+        let text = stamp("src/plugins/mod.rs", "pub mod logging;\n");
+        assert!(!text.contains(YOURS));
+        assert_eq!(
+            keep_yours("src/plugins/mod.rs", &format!("{text}x\n"), &text),
+            text
+        );
     }
 
     #[test]

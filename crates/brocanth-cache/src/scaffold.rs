@@ -30,6 +30,10 @@ impl Module for Cache {
             "its settings are read from the config file, not written as a literal",
         )
         .asked_in("data", "A cache, in the database you already have")
+        .recommends(
+            "observability-health",
+            "its readiness check is read only by /readyz; without it a deploy cannot tell that the cache table is unreachable",
+        )
         .krate(Dep::brocanth("brocanth-cache"))
         // Only for the order of the `[cache]` section and the builder line:
         // the cache reads its URL from the file the config plugin loaded, so

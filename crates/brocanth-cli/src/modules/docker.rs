@@ -23,6 +23,14 @@ impl Module for Docker {
         )
         .category(Category::External)
         .asked_in("operations", "A container image")
+        .recommends(
+            "observability-logs",
+            "the image sets <APP>_ENV=production; without it production writes no log line a machine can read",
+        )
+        .recommends(
+            "observability-health",
+            "the HEALTHCHECK calls /up; without it every check is a 404 that passes, so a hung process looks alive",
+        )
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
@@ -46,6 +54,11 @@ impl Module for Kubernetes {
         .needs(
             "observability-health",
             "its liveness and readiness probes are `/up` and `/readyz`",
+        )
+        // Not health: that one is a need above, and a need is stronger.
+        .recommends(
+            "observability-logs",
+            "the pods run with <APP>_ENV=production; without it the cluster collects no JSON log line",
         )
     }
 

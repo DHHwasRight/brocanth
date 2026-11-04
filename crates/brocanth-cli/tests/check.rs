@@ -66,7 +66,9 @@ fn project(name: &str) -> PathBuf {
     std::fs::create_dir_all(dir.join("src/plugins")).unwrap();
     std::fs::write(
         dir.join("brocanth.toml"),
-        "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"sessions\", \"db\", \"model\", \"auth\", \"middleware\", \"middleware-csrf\"]\n",
+        // With the probe `db` recommends, so `check/recommended` stays out
+        // of the findings these tests count.
+        "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"observability\", \"observability-health\", \"sessions\", \"db\", \"model\", \"auth\", \"middleware\", \"middleware-csrf\"]\n",
     )
     .unwrap();
     std::fs::write(dir.join("config/production.toml"), COPIED).unwrap();

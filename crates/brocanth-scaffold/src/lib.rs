@@ -217,6 +217,17 @@ pub struct Manifest {
     /// [`needs`]: Manifest::needs
     /// [`after`]: Manifest::after
     pub adapts_to: Vec<(&'static str, &'static str)>,
+    /// Modules a deployed project with this one usually wants, each with
+    /// the reason. Set with [`Manifest::recommends`].
+    ///
+    /// Advice, and the weakest of the relations. [`needs`] refuses a
+    /// selection; this one only speaks. `create` and `add` print the
+    /// recommended modules that were not chosen, `brocanth check` warns
+    /// about them, and `--questions` lists the edges, so a person (or the
+    /// agent that asks them) sees the choice before the deploy does.
+    ///
+    /// [`needs`]: Manifest::needs
+    pub recommends: Vec<(&'static str, &'static str)>,
 }
 
 impl Manifest {
@@ -240,6 +251,7 @@ impl Manifest {
             categories: Vec::new(),
             conflicts: Vec::new(),
             adapts_to: Vec::new(),
+            recommends: Vec::new(),
         }
     }
 
@@ -267,6 +279,17 @@ impl Manifest {
     /// [`Project::has`] about that is not a need or the parent.
     pub fn adapts_to(mut self, key: &'static str, what_changes: &'static str) -> Self {
         self.adapts_to.push((key, what_changes));
+        self
+    }
+
+    /// Advise another module beside this one, and say what goes wrong
+    /// without it.
+    ///
+    /// `why` is printed to whoever left the other module out, so it names
+    /// the consequence in production, not the arrow. Never refuses: a
+    /// project without the other module still builds and runs.
+    pub fn recommends(mut self, key: &'static str, why: &'static str) -> Self {
+        self.recommends.push((key, why));
         self
     }
 

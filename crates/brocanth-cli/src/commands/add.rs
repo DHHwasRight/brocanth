@@ -21,9 +21,15 @@
 //!   `src/main.rs`, `brocanth.toml`. Rewritten whole. Each carries a digest,
 //!   and a digest that does not match stops the command: the generator
 //!   cannot prevent an edit, so it must never destroy one in silence.
+//!   `src/commands/mod.rs` ends with a part of the developer's, below
+//!   [`owned::YOURS`], which the digest does not cover and the rewrite
+//!   keeps.
 //! * **Shared** -- `Cargo.toml` and `config/<env>.toml`. Both sides write in
-//!   them, so this appends and leaves every other byte alone.
-//! * **The developer's** -- everything else. Written when it is absent.
+//!   them, so this appends and leaves every other byte alone: comments,
+//!   and the spec of a dependency already there.
+//! * **The developer's** -- everything else. Written when it is new with
+//!   this add; a file the generator wrote before and the developer has
+//!   since deleted stays deleted.
 //!   Rewritten only while it still holds, byte for byte, what the
 //!   generator wrote for the modules recorded before this add: then
 //!   nobody has edited it, and rewriting it loses nothing.
@@ -67,7 +73,7 @@ pub struct AddArgs {
     /// Modules to add; repeat the argument or separate with commas
     #[arg(
         value_name = "MODULE",
-        required = true,
+        required_unless_present = "questions",
         value_delimiter = ',',
         value_parser = create::offered()
     )]
@@ -75,6 +81,12 @@ pub struct AddArgs {
     /// Rewrite a generated file that was edited, discarding the edit
     #[arg(long)]
     pub force: bool,
+    /// Print the chooser's questions, with what this project has, and add nothing
+    #[arg(long, conflicts_with = "modules")]
+    pub questions: bool,
+    /// With --questions: print JSON instead of text
+    #[arg(long, requires = "questions")]
+    pub json: bool,
 }
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
@@ -93,6 +105,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
 
     let marker = root.join("brocanth.toml");
     let recorded = std::fs::read_to_string(&marker).map_err(|e| read_error(&marker, &e))?;
+    if args.questions {
+        let project = read_record(&recorded)?;
+        crate::questions::print(ui, args.json, &project.enabled, Some(&project.enabled));
+        return Ok(ExitCode::SUCCESS);
+    }
     if owned::unedited(&recorded) == Some(false) && !args.force {
         return Err(vec![Diagnostic::error(
             "edited",
@@ -163,11 +180,15 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     let mut by_hand: Vec<(String, String)> = Vec::new();
     let mut shared: Vec<(String, String, String)> = Vec::new();
 
+    let mut kept_deleted: Vec<&str> = Vec::new();
     for (path, text) in &after {
         let full = root.join(path);
         let on_disk = std::fs::read_to_string(&full).ok();
         match owned::kind(path) {
             Kind::Owned => {
+                // The lines below `owned::YOURS` are the developer's, and
+                // they come along into the rewritten file.
+                let text = &owned::keep_yours(path, on_disk.as_deref().unwrap_or(""), text);
                 if let Some(current) = &on_disk {
                     match owned::unedited(current) {
                         Some(true) => {}
@@ -203,7 +224,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
                 None => writes.push((full, text.clone(), "written")),
             },
             Kind::Theirs => match (&on_disk, before.get(path)) {
-                (None, _) => writes.push((full, text.clone(), "written")),
+                // The generator wrote it before this add, and it is gone:
+                // the developer deleted it. A deleted example page is a
+                // decision, and an add that brought it back would undo it.
+                (None, Some(_)) => kept_deleted.push(path),
+                (None, None) => writes.push((full, text.clone(), "written")),
                 // Already what the generator writes: unchanged by this
                 // module, or changed by hand to match it.
                 (Some(current), _) if current == text => {}
@@ -261,6 +286,18 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         ]);
     }
     ui.table_note(&table);
+    if !kept_deleted.is_empty() {
+        ui.note(format!(
+            "  {}",
+            crate::ui::paint(
+                DIM,
+                format!(
+                    "not written again, because you deleted it: {}",
+                    kept_deleted.join(", ")
+                )
+            )
+        ));
+    }
 
     for (path, patch) in &by_hand {
         ui.gap();
@@ -289,6 +326,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         ]);
     }
     ui.table_note(&contents);
+
+    // `add` asks nobody, so what the modules now in the project recommend
+    // is said here, as `create` says it after a run driven by flags.
+    crate::questions::warn_wanted(ui, &after_picks);
 
     ui.gap();
     ui.done(format!(
@@ -431,17 +472,28 @@ fn merge_manifest(path: &str, current: &str, generated: &str) -> Result<String, 
             .or_insert(Item::Table(Default::default()));
         if let Some(have) = have.as_table_mut() {
             for (key, item) in deps.iter() {
-                if have.contains_key(key) {
+                if let Some(old) = have.get_mut(key) {
+                    // The developer's spec stays: a `branch`, a `rev`, a
+                    // version they pinned. Only a feature the new module
+                    // needs is added to it.
+                    add_features(old, item);
                     continue;
                 }
-                have.insert(key, item.clone());
+                let item = same_source(have, item);
+                have.insert(key, item);
             }
             // The receipt above `[dependencies]` names every capability the
-            // project does *not* have, so it goes stale the moment one
-            // arrives. It is generated prose with nothing of the
-            // developer's in it, so it is replaced rather than left lying.
+            // project does *not* have, so a line of it goes stale the
+            // moment that capability arrives. Only those lines go: the
+            // developer may have written comments of their own around it.
             if let Some(fresh) = deps.decor().prefix().and_then(|p| p.as_str()) {
-                have.decor_mut().set_prefix(fresh.to_string());
+                let current = have
+                    .decor()
+                    .prefix()
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                have.decor_mut().set_prefix(receipt(&current, fresh));
             }
         }
     }
@@ -484,22 +536,146 @@ fn merge_manifest(path: &str, current: &str, generated: &str) -> Result<String, 
     Ok(doc.to_string())
 }
 
+/// The receipt in `current` with the lines `fresh` no longer has taken out,
+/// and every other line, the developer's included, left where it was.
+///
+/// A receipt line is one in the block under `# Not here`, indented by
+/// three spaces. Outside that block nothing is touched.
+fn receipt(current: &str, fresh: &str) -> String {
+    let mut out = String::with_capacity(current.len());
+    let mut in_block = false;
+    for line in current.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if bare.starts_with("# Not here") {
+            in_block = true;
+        } else if in_block && bare.starts_with("#   ") {
+            if !fresh.lines().any(|l| l == bare) {
+                continue;
+            }
+        } else {
+            in_block = false;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Add to `old` every feature `new` asks for that it does not have.
+fn add_features(old: &mut Item, new: &Item) {
+    let Some(wanted) = new
+        .as_table_like()
+        .and_then(|t| t.get("features"))
+        .and_then(Item::as_array)
+    else {
+        return;
+    };
+    let Some(old) = old.as_table_like_mut() else {
+        return;
+    };
+    if old.get("features").is_none() {
+        old.insert("features", toml_edit::value(toml_edit::Array::new()));
+    }
+    let Some(have) = old.get_mut("features").and_then(Item::as_array_mut) else {
+        return;
+    };
+    for feature in wanted.iter() {
+        let Some(name) = feature.as_str() else {
+            continue;
+        };
+        if !have.iter().any(|f| f.as_str() == Some(name)) {
+            have.push(name);
+        }
+    }
+}
+
+/// `item`, a new git dependency, from the same `branch`, `rev` or `tag` as
+/// a dependency the project already takes from that repository.
+///
+/// Cargo treats one repository at two refs as two sources, so a new
+/// brocanth crate from the default branch beside a `branch = "main"` core
+/// is a second copy of the core, and the types do not meet.
+fn same_source(deps: &toml_edit::Table, item: &Item) -> Item {
+    let mut item = item.clone();
+    let Some(url) = item
+        .as_table_like()
+        .and_then(|t| t.get("git"))
+        .and_then(Item::as_str)
+        .map(str::to_string)
+    else {
+        return item;
+    };
+    let Some(pinned) = deps.iter().find_map(|(_, dep)| {
+        let dep = dep.as_table_like()?;
+        (dep.get("git")?.as_str()? == url).then(|| {
+            ["branch", "rev", "tag"]
+                .into_iter()
+                .filter_map(|key| {
+                    dep.get(key)
+                        .and_then(Item::as_value)
+                        .map(|v| (key, v.clone()))
+                })
+                .collect::<Vec<_>>()
+        })
+    }) else {
+        return item;
+    };
+    if let Some(inline) = item.as_inline_table_mut() {
+        // Rebuilt in order, so the ref sits beside the `git` it qualifies.
+        let mut out = toml_edit::InlineTable::new();
+        for (key, value) in inline.iter() {
+            out.insert(key, value.clone());
+            if key == "git" {
+                for (k, v) in &pinned {
+                    out.insert(*k, v.clone().decorated(" ", ""));
+                }
+            }
+        }
+        *out.decor_mut() = inline.decor().clone();
+        *inline = out;
+    } else if let Some(table) = item.as_table_like_mut() {
+        for (k, v) in pinned {
+            table.insert(k, Item::Value(v));
+        }
+    }
+    item
+}
+
 /// The project's `config/<env>.toml` with the new sections appended.
 ///
 /// A section the file already has is left exactly as it is, comments,
 /// values and all: the developer has had a chance to set the URL in it, and
 /// a generator that reset it to `postgres://localhost/development` would be
 /// a generator nobody runs twice.
+///
+/// Appended as text at the end of the file, after a blank line. Inserted
+/// through the document instead, a section lands before the file's
+/// trailing comments, which belong to the section above it: the new
+/// header would cut that section's comments in two.
 fn merge_config(path: &str, current: &str, generated: &str) -> Result<String, Vec<Diagnostic>> {
-    let mut doc: DocumentMut = current.parse().map_err(|e| toml_error(path, &e))?;
+    let doc: DocumentMut = current.parse().map_err(|e| toml_error(path, &e))?;
     let want: DocumentMut = generated.parse().map_err(|e| toml_error(path, &e))?;
+    let mut out = current.to_string();
     for (key, item) in want.iter() {
         if doc.contains_key(key) {
             continue;
         }
-        doc.insert(key, item.clone());
+        let mut one = DocumentMut::new();
+        one.insert(key, item.clone());
+        let text = one.to_string();
+        if !out.is_empty() {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+        }
+        out.push_str(text.trim_start_matches(['\n', '\r']));
     }
-    Ok(doc.to_string())
+    // Still a document, and still holding every key it held.
+    out.parse::<DocumentMut>()
+        .map_err(|e| toml_error(path, &e))?;
+    Ok(out)
 }
 
 // -- the refusals -----------------------------------------------------------
@@ -507,11 +683,19 @@ fn merge_config(path: &str, current: &str, generated: &str) -> Result<String, Ve
 fn edited(path: &str, current: &str, was: &str) -> Diagnostic {
     let body = owned::unstamp(current).map_or_else(|| current.to_string(), |(body, _)| body);
     let was = owned::unstamp(was).map_or_else(|| was.to_string(), |(body, _)| body);
+    let help = if path == "src/commands/mod.rs" {
+        format!(
+            "move your `pub mod` lines below the line `{}`, at the end of the file; `add` keeps them there",
+            owned::YOURS
+        )
+    } else {
+        "move the edit into a file of your own, or pass --force to discard it".to_string()
+    };
     Diagnostic::error("edited", format!("{path} has been edited"))
         .at(path)
         .note("`brocanth add` rewrites this file, and the edit would go with it")
         .note(owned::diff(&was, &body))
-        .help("move the edit into a file of your own, or pass --force to discard it")
+        .help(help)
 }
 
 fn unstamped(path: &str) -> Diagnostic {
@@ -598,6 +782,8 @@ mod tests {
             AddArgs {
                 modules: vec![module.to_string()],
                 force,
+                questions: false,
+                json: false,
             },
         )
     }
@@ -937,6 +1123,160 @@ mod tests {
             panic!("the change is in place: {}", said(&e));
         }
         assert!(read(&root, "src/pages/mod.rs").ends_with("// mine\n"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn add_many(root: &Path, modules: &[&str]) -> Outcome {
+        run(
+            &ui(),
+            Some(root),
+            AddArgs {
+                modules: modules.iter().map(|m| (*m).to_string()).collect(),
+                force: false,
+                questions: false,
+                json: false,
+            },
+        )
+    }
+
+    /// The service that found these: a real one, made without observability.
+    const SERVICE: &[&str] = &["config", "db", "middleware", "commands"];
+
+    #[test]
+    fn a_command_of_the_developers_survives_an_add_that_rewrites_the_list() {
+        // AGENTS.md says a command is a file and a `pub mod` line. The line
+        // goes below the marker, and `admin` then rewrites the list above
+        // it to add its own `admin eject`.
+        let root = project("orgs", SERVICE);
+        let path = root.join("src/commands/mod.rs");
+        let text = read(&root, "src/commands/mod.rs");
+        assert!(text.ends_with(&format!("{}\n", owned::YOURS)), "{text}");
+        std::fs::write(&path, format!("{text}pub mod orgs;\n")).expect("write");
+
+        if let Err(e) = add(&root, "admin", false) {
+            panic!("{}", said(&e));
+        }
+        let after = read(&root, "src/commands/mod.rs");
+        assert!(after.contains("pub mod admin;"), "{after}");
+        assert!(after.ends_with("pub mod orgs;\n"), "{after}");
+        assert_eq!(owned::unedited(&after), Some(true), "{after}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_edit_above_the_marker_names_the_place_for_a_command() {
+        let root = project("orgsabove", SERVICE);
+        let path = root.join("src/commands/mod.rs");
+        let text = read(&root, "src/commands/mod.rs")
+            .replace("pub mod serve;", "pub mod orgs;\npub mod serve;");
+        std::fs::write(&path, &text).expect("write");
+        let refused = said(&add(&root, "admin", false).expect_err("an edit above the line"));
+        assert!(refused.contains("below the line"), "{refused}");
+        assert_eq!(read(&root, "src/commands/mod.rs"), text);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_page_the_developer_deleted_is_not_written_back() {
+        let root = project("pruned", SERVICE);
+        std::fs::remove_file(root.join("src/pages/about.rs")).expect("rm");
+        std::fs::remove_file(root.join("src/pages/users/[id].rs")).expect("rm");
+
+        if let Err(e) = add_many(&root, &["observability", "observability-logs"]) {
+            panic!("{}", said(&e));
+        }
+        assert!(!root.join("src/pages/about.rs").exists(), "about came back");
+        assert!(
+            !root.join("src/pages/users/[id].rs").exists(),
+            "a user page came back"
+        );
+        // The new module's own files still arrive.
+        assert!(root.join("src/plugins/observability/mod.rs").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_manifest_keeps_the_developers_comments_and_git_branch() {
+        let root = project("pinned", SERVICE);
+        let manifest = read(&root, "Cargo.toml")
+            .replace(
+                "\"https://github.com/DHHwasRight/brocanth.git\"",
+                "\"https://github.com/DHHwasRight/brocanth.git\", branch = \"main\"",
+            )
+            .replace(
+                "[dependencies]\n",
+                "# Mine: pinned to main until brocanth tags a release.\n[dependencies]\n",
+            )
+            .replace("[package]\n", "# Mine: the package.\n[package]\n");
+        let manifest = format!("{manifest}# Mine: at the end.\n");
+        std::fs::write(root.join("Cargo.toml"), &manifest).expect("write");
+
+        if let Err(e) = add_many(&root, &["observability", "observability-logs"]) {
+            panic!("{}", said(&e));
+        }
+        let after = read(&root, "Cargo.toml");
+        for mine in [
+            "# Mine: pinned to main until brocanth tags a release.\n[dependencies]\n",
+            "# Mine: the package.\n[package]\n",
+            "# Mine: at the end.\n",
+        ] {
+            assert!(after.contains(mine), "{mine:?} went missing:\n{after}");
+        }
+        let observe = after
+            .lines()
+            .find(|l| l.starts_with("brocanth-observe = "))
+            .unwrap_or_else(|| panic!("no brocanth-observe:\n{after}"));
+        assert!(observe.contains("branch = \"main\""), "{observe}");
+        assert!(observe.contains("\"logs\""), "{observe}");
+        // The core keeps its own spec, untouched.
+        assert!(
+            after.contains("brocanth = { git = \"https://github.com/DHHwasRight/brocanth.git\", branch = \"main\" }"),
+            "{after}"
+        );
+        // The receipt line about the module that arrived is gone.
+        assert!(!after.contains("#   brocanth-observe"), "{after}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_feature_a_new_child_needs_is_added_to_the_dependency_already_there() {
+        let root = project(
+            "featured",
+            &["config", "observability", "observability-health"],
+        );
+        if let Err(e) = add(&root, "observability-logs", false) {
+            panic!("{}", said(&e));
+        }
+        let observe = read(&root, "Cargo.toml")
+            .lines()
+            .find(|l| l.starts_with("brocanth-observe = "))
+            .map(str::to_string)
+            .expect("brocanth-observe");
+        assert!(observe.contains("\"logs\""), "{observe}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_config_section_goes_after_the_last_sections_comments() {
+        let root = project("notes", SERVICE);
+        let path = root.join("config/development.toml");
+        let before = format!(
+            "{}# Mine: about the last section.\n# permissions = \"later\"\n",
+            read(&root, "config/development.toml")
+        );
+        std::fs::write(&path, &before).expect("write");
+
+        if let Err(e) = add_many(&root, &["observability", "observability-logs"]) {
+            panic!("{}", said(&e));
+        }
+        let after = read(&root, "config/development.toml");
+        assert!(after.starts_with(&before), "the file above moved:\n{after}");
+        assert!(
+            after[before.len()..]
+                .trim_start()
+                .starts_with("[observability]"),
+            "{after}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

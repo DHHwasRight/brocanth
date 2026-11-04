@@ -82,15 +82,13 @@ fn main() -> ExitCode {
     match app::serve(&app::default_addr()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            // Through `say!`: a JSON line when the log subscriber is up,
-            // text when the failure came before it.
-            plugins::say!(error, "error: {message}");
+            eprintln!("error: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-// brocanth-digest: a630b3b16101ba0d
+// brocanth-digest: 0f4669b6e480d9d4
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -206,19 +204,13 @@ pub fn build() -> Result<App, String> {
 ///
 /// `text/html` unless the page names its own `content-type`, which then
 /// replaces it rather than joining it. Every other header is appended,
-/// because `set-cookie` has to repeat. A page that answered with a stream
-/// keeps it: the hooks see its headers, and the server polls its body.
+/// because `set-cookie` has to repeat.
 fn sent(answered: Response) -> hooks::Response {
-    match answered.stream {
-        Some(stream) => {
-            brocanth_server::bridge::streaming(answered.status, answered.headers, stream)
-        }
-        None => brocanth_server::bridge::buffered(
-            answered.status,
-            answered.headers,
-            answered.body.into_bytes(),
-        ),
-    }
+    brocanth_server::bridge::buffered(
+        answered.status,
+        answered.headers,
+        answered.body.into_bytes(),
+    )
 }
 
 /// The request headers as text, for the page.
@@ -274,8 +266,7 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    let names = app.plugins.join(", ");
-    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
+    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -303,8 +294,7 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        let report = app.core.shutdown(ShutdownReason::Failed, None);
-        plugins::say!(error, "{report}");
+        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
         return Err(e.to_string());
     }
 
@@ -322,7 +312,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
+    eprintln!("{APP}: listening on http://{bound}");
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -331,12 +321,7 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            plugins::say!(
-                info,
-                "{signal}: stopping; open requests have {grace:?} to finish";
-                signal,
-                ?grace
-            );
+            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -375,15 +360,12 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            plugins::say!(info, "{report}");
+            eprintln!("{APP}: {report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
     }
     match failed {
         None => Ok(()),
@@ -601,7 +583,6 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
 
 brocanth_pages::pages!("src/pages");
 
-use brocanth::plugin_body::{BodyStream, Streaming};
 use brocanth::plugin_context::{Context, ContextItem, Has};
 use brocanth::plugin_hooks::RequestState;
 use brocanth::plugin_routes::BoxFuture;
@@ -616,20 +597,10 @@ use crate::plugins;
 /// can happen. Echo and Gin hand the handler a writer and take an error back,
 /// and both carry the scar -- once a 200 has gone out, the central error
 /// handler cannot take it back. Here there is nothing to take back.
-///
-/// The one exception is opt-in: [`Response::stream`] and [`Response::events`]
-/// answer with a body that is written after the handler returns. A stream
-/// that fails halfway cannot become a 500, because the status is already on
-/// the wire. Use it for server-sent events and large downloads, and nowhere
-/// else.
 pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
-    /// A body the server polls after the handler returns. `None` for every
-    /// page that answers with `body`, which is nearly all of them; when it
-    /// is `Some`, `body` is ignored. Set it with [`Response::stream`].
-    pub stream: Option<Streaming>,
 }
 
 /// Written by hand rather than derived, and the difference matters.
@@ -643,7 +614,6 @@ impl Default for Response {
             status: 200,
             body: String::new(),
             headers: Vec::new(),
-            stream: None,
         }
     }
 }
@@ -663,42 +633,6 @@ impl Response {
 
     pub fn empty(status: u16) -> Self {
         Self::new(status, "")
-    }
-
-    /// A body written as it is produced: the first bytes reach the client
-    /// before the last exist.
-    ///
-    /// The response hooks see the headers and never the body. The server
-    /// tells the stream to end when it stops (`BodyStream::finish`), so a
-    /// long-lived stream should implement that, or a deploy waits for it.
-    #[allow(dead_code)]
-    pub fn stream(status: u16, content_type: &str, stream: impl BodyStream) -> Self {
-        Self {
-            status,
-            headers: vec![("content-type".to_string(), content_type.to_string())],
-            stream: Some(Streaming::new(stream)),
-            ..Default::default()
-        }
-    }
-
-    /// Server-sent events: `text/event-stream`, and the two headers that stop
-    /// a cache or a proxy from holding the events back.
-    ///
-    /// `brocanth_server::sse::channel` makes the stream from async code:
-    ///
-    /// ```ignore
-    /// let (events, stream) = brocanth_server::sse::channel(16);
-    /// tokio::spawn(async move {
-    ///     // `Err` when the client left or the server is stopping.
-    ///     let _ = events.send(Event::new("hello").with_event("greeting")).await;
-    /// });
-    /// Ok(Response::events(stream.heartbeat(Duration::from_secs(15))))
-    /// ```
-    #[allow(dead_code)]
-    pub fn events(stream: impl BodyStream) -> Self {
-        Self::stream(200, "text/event-stream", stream)
-            .with_header("cache-control", "no-cache")
-            .with_header("x-accel-buffering", "no")
     }
 
     /// For what the struct literal does not cover: several headers, added one
@@ -869,8 +803,7 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            let (status, message) = (self.status, &self.message);
-            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
+            eprintln!("error {}: {}", self.status, self.message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -892,7 +825,6 @@ impl IntoResponse for Error {
             // The rest survive: the body is withheld, not the framing the
             // client needs to read what is left.
             headers,
-            stream: None,
         }
     }
 }
@@ -1057,26 +989,6 @@ impl Ctx {
         self.state.get::<T>()
     }
 
-    /// The same value, to change. `None` when no hook wrote one.
-    ///
-    /// The state goes back to the hooks when the page returns, so a change
-    /// made here is what `after_dispatch` and the response hooks read: a
-    /// request hook puts a per-request log record on the state, and the
-    /// page fills in the fields only it knows.
-    pub fn hooked_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
-        self.state.get_mut::<T>()
-    }
-
-    /// Puts a value on the request state for the hooks that run after the
-    /// page, and returns the value it replaced.
-    ///
-    /// For a value that no request hook wrote first. A hook that reads it
-    /// must also accept `None`: a 404, a 405 and a request that a request
-    /// hook answered run no page.
-    pub fn hook_insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
-        self.state.insert(value)
-    }
-
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1172,23 +1084,6 @@ mod tests {
         let router = router().expect("the pages produce a table");
         let allow = router.allow_for("/about").expect("/about is a route");
         assert_eq!(allow.to_string(), "GET, HEAD");
-    }
-
-    #[test]
-    fn a_page_writes_what_the_hooks_read_after_it() {
-        // A request hook's record, as `after_dispatch` would find it.
-        struct Record(Vec<&'static str>);
-        let mut state = RequestState::new();
-        state.insert(Record(vec!["hook"]));
-        let mut ctx = Ctx::new(Verb::Get, "/", Params::empty()).with_state(state);
-
-        let record = ctx.hooked_mut::<Record>().expect("the hook wrote it");
-        record.0.push("page");
-        assert!(ctx.hook_insert(7_u32).is_none(), "nothing was there");
-
-        let state = ctx.take_state();
-        assert_eq!(state.get::<Record>().expect("kept").0, ["hook", "page"]);
-        assert_eq!(state.get::<u32>(), Some(&7));
     }
 }
 ===== src/pages/index.rs =====
@@ -1355,22 +1250,6 @@ macro_rules! announce {
 }
 pub(crate) use announce;
 
-/// A line about the application itself: startup, the listener, the stop.
-///
-/// A line on stderr, prefixed with the application name. The level and the
-/// fields after `;` are what `observability-logs` would record; without it
-/// there is no subscriber, so they are dropped and the message is printed.
-///
-/// ```ignore
-/// plugins::say!(info, "listening on http://{bound}"; %bound);
-/// ```
-macro_rules! say {
-    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
-        eprintln!("{}: {}", crate::app::APP, format_args!($message))
-    };
-}
-pub(crate) use say;
-
 /// One middleware layer, as the stack stores it.
 ///
 /// A name rather than the type written out: clippy calls the bare
@@ -1379,14 +1258,14 @@ pub(crate) use say;
 ///
 /// A layer may wait, so it returns a future. The lifetime is named
 /// because the future borrows both the context and the rest of the
-/// chain; see `sessions::layer` for the shape of one.
+/// chain; see `logging::layer` for the shape of one.
 pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;
 
 /// The function behind a middleware name the application mounted.
 ///
 /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
 /// decision and the decision is the application's. Which function answers
-/// to `"session"` is not a decision, so it is here, where adding a
+/// to `"request_log"` is not a decision, so it is here, where adding a
 /// plugin can write it.
 pub fn layer(name: &str) -> Option<Layer> {
     // Nothing in this binary offers middleware, so nothing can be
@@ -1432,7 +1311,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: b3cc665c126ddbf0
+// brocanth-digest: f597b803d6f4e3fc
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -1460,7 +1339,7 @@ request.
 
 - `core`  the router, the context, the plugin seams
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -1495,6 +1374,14 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Decisions that belong to the person
+
+The modules in this project are the person's choice. Do not add or
+remove one on your own. Before you run `brocanth add`, show the person
+the question: `brocanth add --questions` lists each module with its
+default, what it needs and what it recommends. Give your
+recommendation, and wait for the answer.
+
 ## House style
 
 - A comment says **why**, next to the decision, and what was chosen
@@ -1511,7 +1398,7 @@ unlikely.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 6e58f2b72d2cee49 -->
+<!-- brocanth-digest: 5f4f864648d75736 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
