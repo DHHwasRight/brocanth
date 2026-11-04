@@ -40,7 +40,8 @@ impl Db {
     }
 
     /// Builds the pool and opens no connection. The first statement opens
-    /// one. For a process that must start while the database is down.
+    /// one. For a synchronous stage, which must not wait for I/O: check the
+    /// pool later with [`Db::ping`], from async code.
     ///
     /// With `min_connections` above 0, this spawns a task that opens them,
     /// so it must run inside a Tokio runtime.
@@ -111,14 +112,20 @@ impl Db {
         })
     }
 
-    /// Runs `SELECT 1` on a pooled connection. For a readiness probe.
+    /// Runs `SELECT 1` on a pooled connection. For a readiness probe, and
+    /// for the startup gate of a pool opened with [`Db::connect_lazy`].
+    ///
+    /// Taking the connection is reported as [`Db::connect`] reports it, so a
+    /// lazy pool with a wrong password fails here with the same message and
+    /// `help:` line.
     ///
     /// # Errors
-    /// [`DbError::Query`] when no connection was free in `acquire_timeout`
-    /// or the server did not answer.
+    /// [`DbError::Connect`] when no connection could be taken in
+    /// `acquire_timeout`; [`DbError::Query`] when the server did not answer.
     pub async fn ping(&self) -> Result<(), DbError> {
+        let mut conn = self.pool.acquire().await.map_err(DbError::connect)?;
         sqlx::query("SELECT 1")
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map(drop)
             .map_err(DbError::query)

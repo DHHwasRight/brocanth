@@ -1,14 +1,15 @@
 //! `db` -- what `brocanth create` writes when somebody asks for a database.
 //!
 //! The module is here and not in the CLI because what it writes is a
-//! statement about this crate: `Db::connect`, the fields of `DbConfig`,
+//! statement about this crate: `Db::connect_lazy`, the fields of `DbConfig`,
 //! `Db::ping` for readiness, `Db::close` for shutdown, and `Db` as a context
 //! item. Those move when this crate moves.
 //!
 //! What a project gets:
 //!
-//! - `src/plugins/db/mod.rs`: a plugin that opens the pool in `before_start`,
-//!   registers `Db::ping` as its readiness check, publishes the `Db` in the
+//! - `src/plugins/db/mod.rs`: a plugin that builds the pool in `before_start`
+//!   with no connection, registers `Db::ping` as its readiness check (which
+//!   `serve` awaits once before it listens), publishes the `Db` in the
 //!   application's services for a later plugin
 //!   (`lc.require_service::<brocanth_db::Db>()`), puts it on every request's
 //!   context, and closes it on shutdown.
@@ -234,7 +235,8 @@ fn plugin_rs(project: &Project) -> String {
     format!(
         r##"//! The database, as this application registers it.
 //!
-//! One Postgres pool, opened at startup and shared by every request. A page
+//! One Postgres pool, built at startup and shared by every request. It opens
+//! no connection in the build; `serve` checks it once before it listens. A page
 //! reads it with `ctx.db()`. Another plugin reads it from the application's
 //! services: `lc.require_service::<brocanth_db::Db>()`, from its own
 //! `before_start`, registered after this one.
@@ -248,7 +250,7 @@ use std::time::Duration;
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};
 use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_db::{{Db, DbConfig}};
+use brocanth_db::{{Db, DbConfig, DbError}};
 
 /// What this plugin is built from: `[db]`.
 ///
@@ -347,32 +349,33 @@ impl Plugin for Database {{
     }}
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        // The hook is synchronous and connecting is not. `serve` builds the
-        // application inside its runtime, so take the handle and block on a
-        // scoped thread: `block_in_place` is wrong on a current-thread
-        // runtime. This is startup, where a wait is expected.
+        // The hook is synchronous and connecting is not, so the pool opens
+        // lazily and nothing here waits. Waiting would hang a current-thread
+        // runtime, where this thread is the one that drives the I/O. The
+        // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {{
             PluginError::new(format!(
                 "[db] needs a Tokio runtime at startup to open its pool ({{e}})"
             ))
         }})?;
-        let config = &self.config;
-        // `Db::connect` opens one connection, so a wrong URL, password or
-        // certificate stops the start here and not on the first request.
-        let db = std::thread::scope(|scope| {{
-            scope
-                .spawn(|| runtime.block_on(Db::connect(config)))
-                .join()
-                .map_err(|_| PluginError::new("[db] the connection thread panicked"))?
-                .map_err(|e| {{
-                    PluginError::new(format!("[db] connecting to {{}}: {{e}}", config.redacted_url()))
-                }})
-        }})?;
-        // Ready while `SELECT 1` answers on a pooled connection.
+        let db = {{
+            let _entered = runtime.enter();
+            Db::connect_lazy(&self.config).map_err(|e| PluginError::new(format!("[db] {{e}}")))?
+        }};
+        // Ready while `SELECT 1` answers on a pooled connection. `serve`
+        // awaits this once before it listens, so a wrong URL, password or
+        // certificate stops the start there and not on the first request.
         let probe = db.clone();
+        let url = self.config.redacted_url();
         lc.ready_when(move || {{
             let probe = probe.clone();
-            async move {{ probe.ping().await.map_err(|e| e.to_string()) }}
+            let url = url.clone();
+            async move {{
+                probe.ping().await.map_err(|e| match e {{
+                    DbError::Connect {{ .. }} => format!("connecting to {{url}}: {{e}}"),
+                    other => other.to_string(),
+                }})
+            }}
         }});
         // For a plugin registered after this one: the model layer wraps the
         // same pool, so there is one set of connections to size.
@@ -393,19 +396,26 @@ impl Plugin for Database {{
         let remaining = sd.remaining();
         // `close` waits for the connections in use to come back, so it
         // waits inside what is left of the grace period and no longer.
+        let close = async move {{
+            match remaining {{
+                Some(left) => tokio::time::timeout(left, db.close()).await.is_ok(),
+                None => {{
+                    db.close().await;
+                    true
+                }}
+            }}
+        }};
+        // On a current-thread runtime this thread drives the I/O, so a wait
+        // here never ends. The close runs as a task, under the same limit.
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {{
+            runtime.spawn(close);
+            return Ok(());
+        }}
+        // On a multi-thread runtime the workers drive it, and a scoped
+        // thread waits without blocking one of them.
         std::thread::scope(|scope| {{
             scope
-                .spawn(|| {{
-                    runtime.block_on(async {{
-                        match remaining {{
-                            Some(left) => tokio::time::timeout(left, db.close()).await.is_ok(),
-                            None => {{
-                                db.close().await;
-                                true
-                            }}
-                        }}
-                    }})
-                }})
+                .spawn(|| runtime.block_on(close))
                 .join()
                 .map_err(|_| PluginError::new("[db] the closing thread panicked"))
         }})?
