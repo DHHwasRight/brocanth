@@ -275,11 +275,10 @@ pub fn serve(addr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // The runtime first, and the application inside it. A plugin
-    // that opens a connection pool does it in `before_start`,
-    // where the hook is synchronous and connecting is not, so it
-    // reaches for the current runtime handle and blocks on a
-    // scoped thread. Building the application first would leave
-    // it with no handle to reach for.
+    // that opens a connection pool builds it in `before_start`
+    // with no connection, and the pool spawns its upkeep task on
+    // the current runtime. Building the application first would
+    // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
         build()?
@@ -301,6 +300,23 @@ async fn run(
     mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
     grace: Duration,
 ) -> Result<(), String> {
+    // Every readiness check once, before the socket: the same checks
+    // `/readyz` runs. The build waits for no I/O, so a wrong password or
+    // an unreachable database stops the start here, with the plugin's
+    // message and its `help:` line, and not at the first request. A
+    // check can wait for a pool's acquire timeout, so a signal ends the
+    // wait.
+    tokio::select! {
+        checked = app.core.readiness().check_all() => {
+            checked.map_err(|not_ready| not_ready.to_string())?;
+        }
+        _ = stop.recv() => {
+            let report = app.core.shutdown(ShutdownReason::Signal, Some(grace));
+            plugins::say!(info, "{report}");
+            return Ok(());
+        }
+    }
+
     // One gate: a stop at the listener and a stop at `App::shutdown`
     // close the same set of response streams.
     let server = brocanth_server::Server::bind(addr)
@@ -1852,6 +1868,8 @@ concurrency = 5
 //! shared pool or a worker-only process wants. This one takes a URL, because
 //! a new project has a URL.
 
+use std::sync::Arc;
+
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
 use brocanth_jobs::{Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle};
@@ -1968,56 +1986,39 @@ impl Plugin for Jobs {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous and opening a pool is not. A
-        // server process has a runtime, `block_in_place` is wrong on a
-        // current-thread one, so take the handle and block the builder on a
-        // scoped thread. This is startup, where blocking is expected.
+        // The lifecycle hooks are synchronous and opening a pool is not, so
+        // the pool opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 "[jobs] needs a Tokio runtime at startup to open its pool ({e})"
             ))
         })?;
-
-        let url = self.settings.url.clone();
-        let migrate = self.settings.migrate;
-        let queue = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    runtime.block_on(async move {
-                        let queue = Queue::connect(&url).await?;
-                        if migrate {
-                            queue.migrate().await?;
-                        }
-                        Ok::<_, brocanth_jobs::Error>(queue)
-                    })
-                })
-                .join()
-                .map_err(|_| PluginError::new("the jobs connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[jobs] connecting: {e}")))
-        })?;
-
-        if self.settings.worker {
-            // `enter` so that `start` finds the runtime to spawn on. The
-            // worker is woken by the enqueue itself on Postgres rather than
-            // polling; see `brocanth_jobs::listen`.
-            let _guard = runtime.enter();
-            self.worker = Some(
-                Worker::builder(&queue)
-                    .registry(registry())
-                    .queues(self.settings.queues.clone())
-                    .concurrency(self.settings.concurrency)
-                    .start()
-                    .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?,
-            );
-        }
+        let queue = {
+            let _entered = runtime.enter();
+            Queue::connect_lazy(&self.settings.url)
+                .map_err(|e| PluginError::new(format!("[jobs] {e}")))?
+        };
 
         // Ready when the jobs table answers, as `JobsPlugin` does: a lookup
         // by primary key, so a probe costs one index read however long the
-        // queue is.
+        // queue is. With `migrate`, the first check creates the tables, and
+        // the first check is the one `serve` awaits before it listens: an
+        // unreachable database stops the start there.
         let probe = queue.clone();
+        let migrate = self.settings.migrate;
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {
             let probe = probe.clone();
+            let migrated = Arc::clone(&migrated);
             async move {
+                if migrate {
+                    migrated
+                        .get_or_try_init(|| probe.migrate())
+                        .await
+                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
+                }
                 probe
                     .inspect(brocanth_jobs::JobId(0))
                     .await
@@ -2027,6 +2028,26 @@ impl Plugin for Jobs {
         });
 
         self.queue = Some(queue);
+        Ok(())
+    }
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Here and not in `before_start`: `serve` runs this after its
+        // startup gate, so the tables exist, and inside the runtime, so the
+        // worker has somewhere to spawn. A build that never serves -- a test,
+        // a command -- starts no worker. The worker is woken by the enqueue
+        // itself on Postgres rather than polling; see `brocanth_jobs::listen`.
+        let (Some(queue), true) = (&self.queue, self.settings.worker) else {
+            return Ok(());
+        };
+        self.worker = Some(
+            Worker::builder(queue)
+                .registry(registry())
+                .queues(self.settings.queues.clone())
+                .concurrency(self.settings.concurrency)
+                .start()
+                .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?,
+        );
         Ok(())
     }
 

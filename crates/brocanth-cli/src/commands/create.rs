@@ -2173,11 +2173,10 @@ pub fn serve(addr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // The runtime first, and the application inside it. A plugin
-    // that opens a connection pool does it in `before_start`,
-    // where the hook is synchronous and connecting is not, so it
-    // reaches for the current runtime handle and blocks on a
-    // scoped thread. Building the application first would leave
-    // it with no handle to reach for.
+    // that opens a connection pool builds it in `before_start`
+    // with no connection, and the pool spawns its upkeep task on
+    // the current runtime. Building the application first would
+    // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
         build()?
@@ -2199,6 +2198,23 @@ async fn run(
     mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
     grace: Duration,
 ) -> Result<(), String> {
+    // Every readiness check once, before the socket: the same checks
+    // `/readyz` runs. The build waits for no I/O, so a wrong password or
+    // an unreachable database stops the start here, with the plugin's
+    // message and its `help:` line, and not at the first request. A
+    // check can wait for a pool's acquire timeout, so a signal ends the
+    // wait.
+    tokio::select! {
+        checked = app.core.readiness().check_all() => {
+            checked.map_err(|not_ready| not_ready.to_string())?;
+        }
+        _ = stop.recv() => {
+            let report = app.core.shutdown(ShutdownReason::Signal, Some(grace));
+            plugins::say!(info, "{report}");
+            return Ok(());
+        }
+    }
+
     // One gate: a stop at the listener and a stop at `App::shutdown`
     // close the same set of response streams.
     let server = brocanth_server::Server::bind(addr)
@@ -5479,6 +5495,10 @@ mod tests {
             .expect("the framework is beside the cli");
         let wanted = std::env::var("BROCANTH_SHAPES").ok();
         let base = std::env::temp_dir().join(format!("brocanth-shapes-{}", std::process::id()));
+        // Each shape has a target directory of a few gigabytes. The guard
+        // deletes them when the test ends, passed or failed, so a failed run
+        // cannot fill the disk. `BROCANTH_SHAPES_KEEP=1` keeps them to debug.
+        let _cleanup = TempDir(base.clone());
         let target = base.join("target");
         let mut failed = Vec::new();
         for (name, picks) in shapes() {
@@ -5504,12 +5524,35 @@ mod tests {
             // generator writes only sync pages, and those two are what a
             // developer adds next. The new pages change the route table, so
             // after them only the streaming page's own test runs.
+            //
+            // With a database, a third page needs it, and its test runs with
+            // no database reachable: the build must finish on the
+            // current-thread runtime of `#[tokio::test]`, and the page must
+            // fail rather than hang. Every URL points at a closed port, and
+            // the pool gives up after a second.
             let lint = &["clippy", "--all-targets", "--", "-D", "warnings"][..];
-            let streams = &["test", "--", "pages::ticks"][..];
+            let has_db = picks.contains(&"db");
+            let streams = if has_db {
+                &["test", "--", "pages::ticks", "pages::pinged"][..]
+            } else {
+                &["test", "--", "pages::ticks"][..]
+            };
             for step in [lint, &["test"][..], &["async-page"][..], lint, streams] {
                 if step == ["async-page"] {
                     std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
                     std::fs::write(root.join("src/pages/ticks.rs"), STREAM_PAGE).unwrap();
+                    if has_db {
+                        std::fs::write(root.join("src/pages/pinged.rs"), DB_PAGE).unwrap();
+                        let config = root.join("config/development.toml");
+                        let text = std::fs::read_to_string(&config).unwrap();
+                        let text = text
+                            .replace(
+                                "\"postgres://localhost/development\"",
+                                "\"postgres://brocanth@127.0.0.1:1/none\"",
+                            )
+                            .replace("acquire_timeout = 30", "acquire_timeout = 1");
+                        std::fs::write(&config, text).unwrap();
+                    }
                     // Cargo cannot see a new page, which is documented; the
                     // table it lives in is rewritten so the build notices.
                     let table = root.join("src/pages/mod.rs");
@@ -5526,17 +5569,33 @@ mod tests {
                 .output()
                 .expect("run cargo");
                 if !output.status.success() {
+                    // Both streams: cargo writes to stderr, and a failing
+                    // test writes its panic to stdout.
                     failed.push(format!(
-                        "{name}: cargo {}\n{}",
+                        "{name}: cargo {}\n{}\n{}",
                         step.join(" "),
-                        String::from_utf8_lossy(&output.stderr)
+                        String::from_utf8_lossy(&output.stderr),
+                        String::from_utf8_lossy(&output.stdout)
                     ));
                     break;
                 }
             }
         }
         assert!(failed.is_empty(), "{}", failed.join("\n\n"));
-        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Deletes a directory when dropped, a panic included, unless
+    /// `BROCANTH_SHAPES_KEEP` is set.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if std::env::var_os("BROCANTH_SHAPES_KEEP").is_some() {
+                eprintln!("kept {}", self.0.display());
+                return;
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// A page that holds the context across an `.await`.
@@ -5596,6 +5655,46 @@ mod tests {
             seen,
             "event:tick\ndata:1\n\nevent:tick\ndata:2\n\nevent:tick\ndata:3\n\n"
         );
+    }
+}
+"#;
+
+    /// A page that needs the database, and a test that builds the whole
+    /// application on `#[tokio::test]`'s current-thread runtime with no
+    /// database reachable. The build waits for no I/O, so it finishes; the
+    /// page fails with a 500 and does not hang; the startup gate names the
+    /// pool with its `help:` line.
+    const DB_PAGE: &str = r#"//! `/pinged`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    ctx.db().ping().await?;
+    Ok("pong")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn with_no_database_the_build_finishes_and_the_page_fails() {
+        let app = crate::app::build().expect("the application builds");
+        let answer = tokio::time::timeout(
+            Duration::from_secs(20),
+            crate::app::handle(&app, Request::new(Verb::Get, "/pinged")),
+        )
+        .await
+        .expect("the request ends");
+        assert!(matches!(answer.status, 500 | 503), "{}", answer.status);
+        let failed = tokio::time::timeout(Duration::from_secs(20), app.core.readiness().check_all())
+            .await
+            .expect("the gate ends")
+            .expect_err("no database answers");
+        assert!(failed.to_string().contains("help:"), "{failed}");
     }
 }
 "#;

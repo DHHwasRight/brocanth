@@ -275,11 +275,10 @@ pub fn serve(addr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // The runtime first, and the application inside it. A plugin
-    // that opens a connection pool does it in `before_start`,
-    // where the hook is synchronous and connecting is not, so it
-    // reaches for the current runtime handle and blocks on a
-    // scoped thread. Building the application first would leave
-    // it with no handle to reach for.
+    // that opens a connection pool builds it in `before_start`
+    // with no connection, and the pool spawns its upkeep task on
+    // the current runtime. Building the application first would
+    // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
         build()?
@@ -301,6 +300,23 @@ async fn run(
     mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
     grace: Duration,
 ) -> Result<(), String> {
+    // Every readiness check once, before the socket: the same checks
+    // `/readyz` runs. The build waits for no I/O, so a wrong password or
+    // an unreachable database stops the start here, with the plugin's
+    // message and its `help:` line, and not at the first request. A
+    // check can wait for a pool's acquire timeout, so a signal ends the
+    // wait.
+    tokio::select! {
+        checked = app.core.readiness().check_all() => {
+            checked.map_err(|not_ready| not_ready.to_string())?;
+        }
+        _ = stop.recv() => {
+            let report = app.core.shutdown(ShutdownReason::Signal, Some(grace));
+            plugins::say!(info, "{report}");
+            return Ok(());
+        }
+    }
+
     // One gate: a stop at the listener and a stop at `App::shutdown`
     // close the same set of response streams.
     let server = brocanth_server::Server::bind(addr)

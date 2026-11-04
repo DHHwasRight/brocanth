@@ -339,11 +339,10 @@ pub fn serve(addr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // The runtime first, and the application inside it. A plugin
-    // that opens a connection pool does it in `before_start`,
-    // where the hook is synchronous and connecting is not, so it
-    // reaches for the current runtime handle and blocks on a
-    // scoped thread. Building the application first would leave
-    // it with no handle to reach for.
+    // that opens a connection pool builds it in `before_start`
+    // with no connection, and the pool spawns its upkeep task on
+    // the current runtime. Building the application first would
+    // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
         build()?
@@ -365,6 +364,23 @@ async fn run(
     mut stop: tokio::sync::mpsc::UnboundedReceiver<Stop>,
     grace: Duration,
 ) -> Result<(), String> {
+    // Every readiness check once, before the socket: the same checks
+    // `/readyz` runs. The build waits for no I/O, so a wrong password or
+    // an unreachable database stops the start here, with the plugin's
+    // message and its `help:` line, and not at the first request. A
+    // check can wait for a pool's acquire timeout, so a signal ends the
+    // wait.
+    tokio::select! {
+        checked = app.core.readiness().check_all() => {
+            checked.map_err(|not_ready| not_ready.to_string())?;
+        }
+        _ = stop.recv() => {
+            let report = app.core.shutdown(ShutdownReason::Signal, Some(grace));
+            plugins::say!(info, "{report}");
+            return Ok(());
+        }
+    }
+
     // One gate: a stop at the listener and a stop at `App::shutdown`
     // close the same set of response streams.
     let server = brocanth_server::Server::bind(addr)
@@ -4945,11 +4961,11 @@ brocanth_admin_model::admin_source! {
 //!
 //! 1. **`Store = PgStore`.** Accounts and sessions are rows in the
 //!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and
-//!    a deploy. The pool opens in `before_start`, because opening it is async
-//!    and `Plugin::new` is not, and `migrate` creates the tables there (it is
-//!    idempotent and takes an advisory lock). To review the schema in a
-//!    migration file instead, copy `PgStore::schema_sql()` into one and
-//!    delete the `migrate` call.
+//!    a deploy. The pool is built in `before_start` with no connection, and
+//!    the readiness check that `serve` awaits before it listens runs
+//!    `migrate` once (it is idempotent and takes an advisory lock). To review
+//!    the schema in a migration file instead, copy `PgStore::schema_sql()`
+//!    into one and delete the `migrate` call.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -5116,7 +5132,7 @@ impl Plugin for Auth {
         Ok(())
     }
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {
             return Err(PluginError::new("[auth] cookie_name must not be empty"));
         }
@@ -5132,19 +5148,25 @@ impl Plugin for Auth {
         }
 
         let name = self.settings.signing_key_env.clone();
-        let raw = std::env::var(&name).map_err(|_| {
-            PluginError::new(format!(
-                "[auth] ${name} is not set. It is 32 random bytes, base64url:\n  \
-                 export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
-                 There is no default: a key invented at startup would log every session \
-                 out on each restart and differ between the instances of a fleet."
-            ))
-        })?;
-        // Rejected rather than stretched. Padding a four-character secret to
-        // 32 bytes is how a deployment ends up with a forgeable cookie and no
-        // warning anywhere.
-        let signing_key = SigningKey::parse(&raw)
-            .map_err(|e| PluginError::new(format!("[auth] ${name}: {e}")))?;
+        let signing_key = match std::env::var(&name) {
+            // Rejected rather than stretched. Padding a four-character secret
+            // to 32 bytes is how a deployment ends up with a forgeable cookie
+            // and no warning anywhere.
+            Ok(raw) => SigningKey::parse(&raw)
+                .map_err(|e| PluginError::new(format!("[auth] ${name}: {e}")))?,
+            // This project's own tests build the application with no secret
+            // in the environment. The key is fixed and public, and `cfg(test)`
+            // keeps it out of every binary.
+            Err(_) if cfg!(test) => SigningKey::from_bytes([7; 32]),
+            Err(_) => {
+                return Err(PluginError::new(format!(
+                    "[auth] ${name} is not set. It is 32 random bytes, base64url:\n  \
+                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
+                     There is no default: a key invented at startup would log every session \
+                     out on each restart and differ between the instances of a fleet."
+                )));
+            }
+        };
 
         let passwords = Passwords::recommended()
             .map_err(|e| PluginError::new(format!("[auth] argon2id: {e}")))?;
@@ -5165,31 +5187,38 @@ impl Plugin for Auth {
             ..SessionConfig::default()
         };
 
-        // The hooks are synchronous and opening a pool is not. A server
-        // process has a runtime, `block_in_place` is wrong on a current-thread
-        // one, so take the handle and block the build on a scoped thread, as
-        // the generated cache and jobs plugins do. This is startup.
+        // The hooks are synchronous and opening a pool is not, so the pool
+        // opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 "[auth] needs a Tokio runtime at startup to open its pool ({e})"
             ))
         })?;
-        let url = self.settings.url.clone();
-        let store = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    runtime.block_on(async move {
-                        let store = PgStore::connect(&url).await?;
-                        store.migrate().await?;
-                        Ok::<_, brocanth_auth::StoreError>(store)
-                    })
-                })
-                .join()
-                .map_err(|_| PluginError::new("the auth connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[auth] connecting: {e}")))
-        })?;
+        let store = {
+            let _entered = runtime.enter();
+            PgStore::connect_lazy(&self.settings.url)
+                .map_err(|e| PluginError::new(format!("[auth] {e}")))?
+        };
         let store = Arc::new(store);
         self.store = Some(Arc::clone(&store));
+        // Ready when the database answers. The first check also creates the
+        // tables, and the first check is the one `serve` awaits before it
+        // listens: an unreachable database stops the start there.
+        let probe = Arc::clone(&store);
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
+        lc.ready_when(move || {
+            let probe = Arc::clone(&probe);
+            let migrated = Arc::clone(&migrated);
+            async move {
+                migrated
+                    .get_or_try_init(|| probe.migrate())
+                    .await
+                    .map_err(|e| format!("creating the auth tables: {e}"))?;
+                probe.ping().await.map_err(|e| e.to_string())
+            }
+        });
 
         self.services = Some(
             brocanth_auth::Auth::build(AuthConfig {
@@ -5260,7 +5289,7 @@ impl Plugin for Auth {
 //! The crate also ships `CachePlugin`, and this is not that. `CachePlugin` is
 //! handed a cache that is already open, because a pool is made asynchronously
 //! and `Plugin::new` is not async. An application whose cache is one URL wants
-//! the shorter road, so this plugin takes the URL, opens the pool at startup,
+//! the shorter road, so this plugin takes the URL, builds the pool at startup,
 //! and publishes the same `CacheHandle`. Hand-built caches -- a shared pool, a
 //! second namespace policy, a different backend -- are what `CachePlugin` is
 //! for, and swapping to it is a change in this file alone.
@@ -5322,31 +5351,29 @@ impl Plugin for Cache {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous and opening a pool is not. This
-        // is the manoeuvre `CachePlugin` makes, for the same reason: a server
-        // process has a runtime, `block_in_place` is wrong on a current-thread
-        // one, so take the handle and block the builder on a scoped thread.
-        // This is startup, where blocking is what everybody expects.
+        // The lifecycle hooks are synchronous and opening a pool is not, so
+        // the pool opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 "[cache] needs a Tokio runtime at startup to open its pool ({e})"
             ))
         })?;
-        let url = self.url.clone();
-        let cache = std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(async move { PgCache::connect(&url).await }))
-                .join()
-                .map_err(|_| PluginError::new("the cache connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[cache] connecting: {e}")))
-        })?;
+        let cache = {
+            let _entered = runtime.enter();
+            PgCache::connect_lazy(&self.url)
+                .map_err(|e| PluginError::new(format!("[cache] {e}")))?
+        };
         // The table is not created here. `brocanth-cache` can create it, and
         // it is off there for the reason it is absent here: the generator
         // proposes and the developer commits. `PgCache::schema_sql` hands out
         // the statements for a migration you can read.
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
         // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers.
+        // miss is a pass: the question is whether the store answers. `serve`
+        // awaits this once before it listens, so an unreachable store stops
+        // the start there.
         let probe = Arc::clone(&cache);
         lc.ready_when(move || {
             let probe = Arc::clone(&probe);
@@ -5372,7 +5399,8 @@ impl Plugin for Cache {
 ===== src/plugins/db/mod.rs =====
 //! The database, as this application registers it.
 //!
-//! One Postgres pool, opened at startup and shared by every request. A page
+//! One Postgres pool, built at startup and shared by every request. It opens
+//! no connection in the build; `serve` checks it once before it listens. A page
 //! reads it with `ctx.db()`. Another plugin reads it from the application's
 //! services: `lc.require_service::<brocanth_db::Db>()`, from its own
 //! `before_start`, registered after this one.
@@ -5386,7 +5414,7 @@ use std::time::Duration;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
 use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_db::{Db, DbConfig};
+use brocanth_db::{Db, DbConfig, DbError};
 
 /// What this plugin is built from: `[db]`.
 ///
@@ -5488,32 +5516,33 @@ impl Plugin for Database {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The hook is synchronous and connecting is not. `serve` builds the
-        // application inside its runtime, so take the handle and block on a
-        // scoped thread: `block_in_place` is wrong on a current-thread
-        // runtime. This is startup, where a wait is expected.
+        // The hook is synchronous and connecting is not, so the pool opens
+        // lazily and nothing here waits. Waiting would hang a current-thread
+        // runtime, where this thread is the one that drives the I/O. The
+        // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 "[db] needs a Tokio runtime at startup to open its pool ({e})"
             ))
         })?;
-        let config = &self.config;
-        // `Db::connect` opens one connection, so a wrong URL, password or
-        // certificate stops the start here and not on the first request.
-        let db = std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(Db::connect(config)))
-                .join()
-                .map_err(|_| PluginError::new("[db] the connection thread panicked"))?
-                .map_err(|e| {
-                    PluginError::new(format!("[db] connecting to {}: {e}", config.redacted_url()))
-                })
-        })?;
-        // Ready while `SELECT 1` answers on a pooled connection.
+        let db = {
+            let _entered = runtime.enter();
+            Db::connect_lazy(&self.config).map_err(|e| PluginError::new(format!("[db] {e}")))?
+        };
+        // Ready while `SELECT 1` answers on a pooled connection. `serve`
+        // awaits this once before it listens, so a wrong URL, password or
+        // certificate stops the start there and not on the first request.
         let probe = db.clone();
+        let url = self.config.redacted_url();
         lc.ready_when(move || {
             let probe = probe.clone();
-            async move { probe.ping().await.map_err(|e| e.to_string()) }
+            let url = url.clone();
+            async move {
+                probe.ping().await.map_err(|e| match e {
+                    DbError::Connect { .. } => format!("connecting to {url}: {e}"),
+                    other => other.to_string(),
+                })
+            }
         });
         // For a plugin registered after this one: the model layer wraps the
         // same pool, so there is one set of connections to size.
@@ -5534,19 +5563,26 @@ impl Plugin for Database {
         let remaining = sd.remaining();
         // `close` waits for the connections in use to come back, so it
         // waits inside what is left of the grace period and no longer.
+        let close = async move {
+            match remaining {
+                Some(left) => tokio::time::timeout(left, db.close()).await.is_ok(),
+                None => {
+                    db.close().await;
+                    true
+                }
+            }
+        };
+        // On a current-thread runtime this thread drives the I/O, so a wait
+        // here never ends. The close runs as a task, under the same limit.
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            runtime.spawn(close);
+            return Ok(());
+        }
+        // On a multi-thread runtime the workers drive it, and a scoped
+        // thread waits without blocking one of them.
         std::thread::scope(|scope| {
             scope
-                .spawn(|| {
-                    runtime.block_on(async {
-                        match remaining {
-                            Some(left) => tokio::time::timeout(left, db.close()).await.is_ok(),
-                            None => {
-                                db.close().await;
-                                true
-                            }
-                        }
-                    })
-                })
+                .spawn(|| runtime.block_on(close))
                 .join()
                 .map_err(|_| PluginError::new("[db] the closing thread panicked"))
         })?
@@ -5616,6 +5652,8 @@ impl Plugin for Database {
 //! handed a queue that is already open, which is what an application with a
 //! shared pool or a worker-only process wants. This one takes a URL, because
 //! a new project has a URL.
+
+use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
@@ -5733,56 +5771,39 @@ impl Plugin for Jobs {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous and opening a pool is not. A
-        // server process has a runtime, `block_in_place` is wrong on a
-        // current-thread one, so take the handle and block the builder on a
-        // scoped thread. This is startup, where blocking is expected.
+        // The lifecycle hooks are synchronous and opening a pool is not, so
+        // the pool opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 "[jobs] needs a Tokio runtime at startup to open its pool ({e})"
             ))
         })?;
-
-        let url = self.settings.url.clone();
-        let migrate = self.settings.migrate;
-        let queue = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    runtime.block_on(async move {
-                        let queue = Queue::connect(&url).await?;
-                        if migrate {
-                            queue.migrate().await?;
-                        }
-                        Ok::<_, brocanth_jobs::Error>(queue)
-                    })
-                })
-                .join()
-                .map_err(|_| PluginError::new("the jobs connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[jobs] connecting: {e}")))
-        })?;
-
-        if self.settings.worker {
-            // `enter` so that `start` finds the runtime to spawn on. The
-            // worker is woken by the enqueue itself on Postgres rather than
-            // polling; see `brocanth_jobs::listen`.
-            let _guard = runtime.enter();
-            self.worker = Some(
-                Worker::builder(&queue)
-                    .registry(registry())
-                    .queues(self.settings.queues.clone())
-                    .concurrency(self.settings.concurrency)
-                    .start()
-                    .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?,
-            );
-        }
+        let queue = {
+            let _entered = runtime.enter();
+            Queue::connect_lazy(&self.settings.url)
+                .map_err(|e| PluginError::new(format!("[jobs] {e}")))?
+        };
 
         // Ready when the jobs table answers, as `JobsPlugin` does: a lookup
         // by primary key, so a probe costs one index read however long the
-        // queue is.
+        // queue is. With `migrate`, the first check creates the tables, and
+        // the first check is the one `serve` awaits before it listens: an
+        // unreachable database stops the start there.
         let probe = queue.clone();
+        let migrate = self.settings.migrate;
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {
             let probe = probe.clone();
+            let migrated = Arc::clone(&migrated);
             async move {
+                if migrate {
+                    migrated
+                        .get_or_try_init(|| probe.migrate())
+                        .await
+                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
+                }
                 probe
                     .inspect(brocanth_jobs::JobId(0))
                     .await
@@ -5792,6 +5813,26 @@ impl Plugin for Jobs {
         });
 
         self.queue = Some(queue);
+        Ok(())
+    }
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Here and not in `before_start`: `serve` runs this after its
+        // startup gate, so the tables exist, and inside the runtime, so the
+        // worker has somewhere to spawn. A build that never serves -- a test,
+        // a command -- starts no worker. The worker is woken by the enqueue
+        // itself on Postgres rather than polling; see `brocanth_jobs::listen`.
+        let (Some(queue), true) = (&self.queue, self.settings.worker) else {
+            return Ok(());
+        };
+        self.worker = Some(
+            Worker::builder(queue)
+                .registry(registry())
+                .queues(self.settings.queues.clone())
+                .concurrency(self.settings.concurrency)
+                .start()
+                .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?,
+        );
         Ok(())
     }
 
