@@ -587,11 +587,16 @@ Three parts, because the pieces have three owners:
    ```
 
 A mounted name with no layer stops the application at start.
-`crates/brocanth-cli/src/modules/logging.rs` uses all three.
+`crates/brocanth-cli/src/modules/sessions.rs` uses all three.
 
 **Hook or layer?** A hook sees every request, before routing, and can
 answer a 404. A layer sees only matched routes and has `Ctx`. A security
-policy is a hook. A request log that wants the route is a layer.
+policy is a hook. A request log is a hook too: a layer never sees a 404, a
+405, a CORS preflight or a 401 that a request hook answered.
+`crates/brocanth-cli/src/modules/logging.rs` writes its line from
+`after_dispatch`, which runs for every response. A page passes a value to
+that hook with `ctx.hook_insert(value)` or changes a hook's value with
+`ctx.hooked_mut::<T>()`.
 
 #### `Slot::PluginsInstalled` and `Slot::AppContext`: a context value
 

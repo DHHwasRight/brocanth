@@ -1479,14 +1479,14 @@ pub(crate) use announce;
 ///
 /// A layer may wait, so it returns a future. The lifetime is named
 /// because the future borrows both the context and the rest of the
-/// chain; see `logging::layer` for the shape of one.
+/// chain; see `sessions::layer` for the shape of one.
 pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;
 
 /// The function behind a middleware name the application mounted.
 ///
 /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
 /// decision and the decision is the application's. Which function answers
-/// to `"request_log"` is not a decision, so it is here, where adding a
+/// to `"session"` is not a decision, so it is here, where adding a
 /// plugin can write it.
 pub fn layer(name: &str) -> Option<Layer> {
     // Nothing in this binary offers middleware, so nothing can be
@@ -1532,7 +1532,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: f597b803d6f4e3fc
+// brocanth-digest: 6d8c8411ef96236c
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own is a file beside this one; nothing lists it.

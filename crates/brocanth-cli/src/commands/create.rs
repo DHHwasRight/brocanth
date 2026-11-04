@@ -3897,14 +3897,14 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
          ///\n\
          /// A layer may wait, so it returns a future. The lifetime is named\n\
          /// because the future borrows both the context and the rest of the\n\
-         /// chain; see `logging::layer` for the shape of one.\n\
+         /// chain; see `sessions::layer` for the shape of one.\n\
          pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;\n\
          \n\
          /// The function behind a middleware name the application mounted.\n\
          ///\n\
          /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a\n\
          /// decision and the decision is the application's. Which function answers\n\
-         /// to `\"request_log\"` is not a decision, so it is here, where adding a\n\
+         /// to `\"session\"` is not a decision, so it is here, where adding a\n\
          /// plugin can write it.\n\
          pub fn layer(name: &str) -> Option<Layer> {\n",
     );
@@ -5547,7 +5547,7 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         // must never have to write into it.
         let registry = plugins_mod_rs(&a, &built(&picks));
         for line in [
-            ".plugin_from_config::<crate::plugins::logging::Logging>(\"logging\")",
+            ".plugin_hooking_from_config::<crate::plugins::logging::Logging>(\"logging\")",
             ".plugin_from_config::<crate::plugins::sessions::Sessions>(\"sessions\")",
         ] {
             assert!(registry.contains(line), "{registry}");
@@ -5557,11 +5557,11 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         // The mount is in the application's setup block, never in the plugin
         // and never in the generated file: a pattern is a decision.
         assert!(
-            main.contains("setup.router().mount(\"/{*rest}\", \"request_log\")"),
+            main.contains("setup.router().mount(\"/users/{*rest}\", \"session\")"),
             "{main}"
         );
         assert!(!registry.contains(".mount("), "{registry}");
-        let plugin = crate::modules::logging::plugin_rs(&project(&["logging"]));
+        let plugin = crate::modules::sessions::plugin_rs(&project(&["sessions"]));
         assert!(
             !plugin.contains(".mount("),
             "a plugin must not mount: {plugin}"
@@ -5612,14 +5612,14 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
     #[test]
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
-        let registry = plugins_mod_rs(&answers(&["logging"]), &built(&["logging"]));
+        let registry = plugins_mod_rs(&answers(&["sessions"]), &built(&["sessions"]));
         // Already wrapped, because it is longer than rustfmt's chain_width
         // and a project must survive its own first `cargo fmt`. The literal
         // is the default, with the environment and the flags on top.
         assert!(
-            registry.contains(".plugin(crate::plugins::logging::Logging::new(\n")
-                && registry.contains("crate::plugins::logging_settings(&given)?,")
-                && registry.contains("crate::plugins::logging::Settings::default();"),
+            registry.contains(".plugin(crate::plugins::sessions::Sessions::new(\n")
+                && registry.contains("crate::plugins::sessions_settings(&given)?,")
+                && registry.contains("crate::plugins::sessions::Settings::default();"),
             "{registry}"
         );
         assert!(!registry.contains("plugin_from_config"), "{registry}");
