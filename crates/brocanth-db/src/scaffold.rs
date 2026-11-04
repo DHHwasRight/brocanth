@@ -71,7 +71,8 @@ impl Module for Database {
         // this stops compiling the moment the registration is deleted.
         s.at(Slot::AppContext).block(
             "    let db: &brocanth_db::Db = cx.extract();\n\
-            \x20   eprintln!(\"db: {} connection(s) open\", db.pool().size());"
+            \x20   let connections = db.pool().size();\n\
+            \x20   crate::plugins::say!(info, \"db: {connections} connection(s) open\"; connections);"
                 .to_string(),
         );
         s.at(Slot::PagesItems).block(CTX_DB.to_string());

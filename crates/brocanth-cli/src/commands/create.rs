@@ -2132,7 +2132,8 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+    let names = app.plugins.join(", ");
+    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -2160,7 +2161,8 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        let report = app.core.shutdown(ShutdownReason::Failed, None);
+        plugins::say!(error, "{report}");
         return Err(e.to_string());
     }
 
@@ -2178,7 +2180,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    eprintln!("{APP}: listening on http://{bound}");
+    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -2187,7 +2189,12 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            plugins::say!(
+                info,
+                "{signal}: stopping; open requests have {grace:?} to finish";
+                signal,
+                ?grace
+            );
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -2226,12 +2233,15 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            eprintln!("{APP}: {report}");
+            plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+        None => plugins::say!(
+            warn,
+            "a request still holds the application, so no plugin stopped"
+        ),
     }
     match failed {
         None => Ok(()),
@@ -2381,7 +2391,9 @@ fn main() -> ExitCode {{
     match app::serve(&app::default_addr()) {{
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {{
-            eprintln!("error: {{message}}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {{message}}");
             ExitCode::FAILURE
         }}
     }}
@@ -2427,7 +2439,9 @@ fn main() -> ExitCode {{
     match served {{
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {{
-            eprintln!("error: {{message}}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {{message}}");
             ExitCode::FAILURE
         }}
     }}
@@ -2459,7 +2473,21 @@ mod app;{assets}
 mod commands;{flags_mod}{migrations}
 mod pages;
 {plugins}
-fn main() -> brocanth_command::anyhow::Result<()> {{
+use std::process::ExitCode;
+
+fn main() -> ExitCode {{
+    match run() {{
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {{
+            // Through `say!`: a JSON line when `serve` got as far as the log
+            // subscriber, text for a failure before it or another command.
+            plugins::say!(error, "error: {{e:#}}");
+            ExitCode::FAILURE
+        }}
+    }}
+}}
+
+fn run() -> brocanth_command::anyhow::Result<()> {{
 {run}
 }}
 "##,
@@ -2836,7 +2864,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -3021,6 +3050,26 @@ impl Ctx {
     /// context built by hand.
     pub fn hooked<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.state.get::<T>()
+    }
+
+    /// The same value, to change. `None` when no hook wrote one.
+    ///
+    /// The state goes back to the hooks when the page returns, so a change
+    /// made here is what `after_dispatch` and the response hooks read: a
+    /// request hook puts a per-request log record on the state, and the
+    /// page fills in the fields only it knows.
+    pub fn hooked_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.state.get_mut::<T>()
+    }
+
+    /// Puts a value on the request state for the hooks that run after the
+    /// page, and returns the value it replaced.
+    ///
+    /// For a value that no request hook wrote first. A hook that reads it
+    /// must also accept `None`: a 404, a 405 and a request that a request
+    /// hook answered run no page.
+    pub fn hook_insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.state.insert(value)
     }
 
     /// A request header by name, case-insensitively, or `None`.
@@ -3222,6 +3271,23 @@ mod tests {
         let allow = router.allow_for("/about").expect("/about is a route");
         assert_eq!(allow.to_string(), "GET, HEAD");
     }
+
+    #[test]
+    fn a_page_writes_what_the_hooks_read_after_it() {
+        // A request hook's record, as `after_dispatch` would find it.
+        struct Record(Vec<&'static str>);
+        let mut state = RequestState::new();
+        state.insert(Record(vec!["hook"]));
+        let mut ctx = Ctx::new(Verb::Get, "/", Params::empty()).with_state(state);
+
+        let record = ctx.hooked_mut::<Record>().expect("the hook wrote it");
+        record.0.push("page");
+        assert!(ctx.hook_insert(7_u32).is_none(), "nothing was there");
+
+        let state = ctx.take_state();
+        assert_eq!(state.get::<Record>().expect("kept").0, ["hook", "page"]);
+        assert_eq!(state.get::<u32>(), Some(&7));
+    }
 }
 "##;
 
@@ -3252,6 +3318,58 @@ const HOOK_RECORD_DOC: &str = "\
 ";
 
 /// The `Hooks` alias and the aliases it is built from.
+/// `say!` with `observability-logs`: a `tracing` event, so production gets a
+/// JSON line with fields, through the subscriber the observability plugin
+/// installed.
+const SAY_LOGGED: &str = r#"/// A line about the application itself: startup, the listener, the stop.
+///
+/// A `tracing` event, because `observability-logs` is installed: the line is
+/// JSON in production and text elsewhere, on stdout, like the request lines.
+/// The fields after `;` are the event's fields, in `tracing`'s shorthand
+/// (`addr`, `%addr`, `?addr`), and name variables already in scope.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+///
+/// Before the observability plugin installs its subscriber (a config file
+/// that does not parse, a plugin that fails before it) and with
+/// `install_subscriber = false`, an event would go nowhere. Then this is a
+/// line on stderr, as it is without `observability-logs`.
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        if brocanth_observe::tracing::dispatcher::has_been_set() {
+            brocanth_observe::tracing::$level!($($($field)+,)? $message)
+        } else {
+            eprintln!("{}: {}", crate::app::APP, format_args!($message))
+        }
+    };
+}
+pub(crate) use say;
+
+"#;
+
+/// `say!` without `observability-logs`: no subscriber exists, so a line on
+/// stderr. The fields are accepted and dropped, so a call site is the same
+/// text in both.
+const SAY_PRINTED: &str = r#"/// A line about the application itself: startup, the listener, the stop.
+///
+/// A line on stderr, prefixed with the application name. The level and the
+/// fields after `;` are what `observability-logs` would record; without it
+/// there is no subscriber, so they are dropped and the message is printed.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        eprintln!("{}: {}", crate::app::APP, format_args!($message))
+    };
+}
+pub(crate) use say;
+
+"#;
+
 fn hook_record(built: &Built) -> String {
     let mut out = String::from(HOOK_RECORD_DOC);
     let mut held = String::from("NoHooks");
@@ -3905,6 +4023,18 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     }
     out.push_str("    }};\n}\npub(crate) use announce;\n\n");
 
+    // -- say ----------------------------------------------------------
+    //
+    // Every line the binary writes about itself at startup and at stop goes
+    // through one macro, so the choice between a log event and a line of
+    // text is made once, here, from the module list. `src/app.rs` and the
+    // `announce!` lines call it and never change when the list does.
+    out.push_str(if a.has("observability-logs") {
+        SAY_LOGGED
+    } else {
+        SAY_PRINTED
+    });
+
     // -- layer --------------------------------------------------------
     out.push_str(
         "/// One middleware layer, as the stack stores it.\n\
@@ -3915,14 +4045,14 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
          ///\n\
          /// A layer may wait, so it returns a future. The lifetime is named\n\
          /// because the future borrows both the context and the rest of the\n\
-         /// chain; see `logging::layer` for the shape of one.\n\
+         /// chain; see `sessions::layer` for the shape of one.\n\
          pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;\n\
          \n\
          /// The function behind a middleware name the application mounted.\n\
          ///\n\
          /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a\n\
          /// decision and the decision is the application's. Which function answers\n\
-         /// to `\"request_log\"` is not a decision, so it is here, where adding a\n\
+         /// to `\"session\"` is not a decision, so it is here, where adding a\n\
          /// plugin can write it.\n\
          pub fn layer(name: &str) -> Option<Layer> {\n",
     );
@@ -5622,7 +5752,7 @@ mod tests {
         // must never have to write into it.
         let registry = plugins_mod_rs(&a, &built(&picks));
         for line in [
-            ".plugin_from_config::<crate::plugins::logging::Logging>(\"logging\")",
+            ".plugin_hooking_from_config::<crate::plugins::logging::Logging>(\"logging\")",
             ".plugin_from_config::<crate::plugins::sessions::Sessions>(\"sessions\")",
         ] {
             assert!(registry.contains(line), "{registry}");
@@ -5632,11 +5762,11 @@ mod tests {
         // The mount is in the application's setup block, never in the plugin
         // and never in the generated file: a pattern is a decision.
         assert!(
-            main.contains("setup.router().mount(\"/{*rest}\", \"request_log\")"),
+            main.contains("setup.router().mount(\"/users/{*rest}\", \"session\")"),
             "{main}"
         );
         assert!(!registry.contains(".mount("), "{registry}");
-        let plugin = crate::modules::logging::plugin_rs(&project(&["logging"]));
+        let plugin = crate::modules::sessions::plugin_rs(&project(&["sessions"]));
         assert!(
             !plugin.contains(".mount("),
             "a plugin must not mount: {plugin}"
@@ -5687,14 +5817,14 @@ mod tests {
 
     #[test]
     fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
-        let registry = plugins_mod_rs(&answers(&["logging"]), &built(&["logging"]));
+        let registry = plugins_mod_rs(&answers(&["sessions"]), &built(&["sessions"]));
         // Already wrapped, because it is longer than rustfmt's chain_width
         // and a project must survive its own first `cargo fmt`. The literal
         // is the default, with the environment and the flags on top.
         assert!(
-            registry.contains(".plugin(crate::plugins::logging::Logging::new(\n")
-                && registry.contains("crate::plugins::logging_settings(&given)?,")
-                && registry.contains("crate::plugins::logging::Settings::default();"),
+            registry.contains(".plugin(crate::plugins::sessions::Sessions::new(\n")
+                && registry.contains("crate::plugins::sessions_settings(&given)?,")
+                && registry.contains("crate::plugins::sessions::Settings::default();"),
             "{registry}"
         );
         assert!(!registry.contains("plugin_from_config"), "{registry}");

@@ -92,13 +92,15 @@ fn main() -> ExitCode {
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("error: {message}");
+            // Through `say!`: a JSON line when the log subscriber is up,
+            // text when the failure came before it.
+            plugins::say!(error, "error: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-// brocanth-digest: 00cc5d3be3dca3a4
+// brocanth-digest: 5c625988c80ed3bd
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -282,7 +284,8 @@ pub fn serve(addr: &str) -> Result<(), String> {
         let _guard = runtime.enter();
         build()?
     };
-    eprintln!("{APP}: plugins: [{}]", app.plugins.join(", "));
+    let names = app.plugins.join(", ");
+    plugins::say!(info, "plugins: [{names}]"; plugins = %names);
 
     let result = runtime.block_on(run(addr, app, stop, grace));
     // A request that outlived the drain can still be on a worker. Waiting
@@ -310,7 +313,8 @@ async fn run(
     // After the bind, so a plugin does not start work for a port that
     // turned out to be taken.
     if let Err(e) = app.core.start() {
-        eprintln!("{APP}: {}", app.core.shutdown(ShutdownReason::Failed, None));
+        let report = app.core.shutdown(ShutdownReason::Failed, None);
+        plugins::say!(error, "{report}");
         return Err(e.to_string());
     }
 
@@ -328,7 +332,7 @@ async fn run(
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
-    eprintln!("{APP}: listening on http://{bound}");
+    plugins::say!(info, "listening on http://{bound}"; addr = %bound);
 
     // Phase 1: stop accepting, and give the open requests the grace period.
     let mut failed = tokio::select! {
@@ -337,7 +341,12 @@ async fn run(
                 Some(Stop::Signal(signal)) => signal,
                 _ => "stop",
             };
-            eprintln!("{APP}: {signal}: stopping; open requests have {grace:?} to finish");
+            plugins::say!(
+                info,
+                "{signal}: stopping; open requests have {grace:?} to finish";
+                signal,
+                ?grace
+            );
             None
         }
         // The listener stopped by itself. That is a failure, and the
@@ -376,12 +385,15 @@ async fn run(
     match owned(app).await {
         Some(mut app) => {
             let report = app.core.shutdown(reason, Some(remaining));
-            eprintln!("{APP}: {report}");
+            plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => eprintln!("{APP}: a request still holds the application, so no plugin stopped"),
+        None => plugins::say!(
+            warn,
+            "a request still holds the application, so no plugin stopped"
+        ),
     }
     match failed {
         None => Ok(()),
@@ -867,7 +879,8 @@ impl IntoResponse for Error {
             // So the message does reach the logs: a database error that came
             // up through `?` says here what failed, and the client sees none
             // of it.
-            eprintln!("error {}: {}", self.status, self.message);
+            let (status, message) = (self.status, &self.message);
+            crate::plugins::say!(error, "error {status}: {message}"; status, %message);
         }
         let body = if withheld {
             String::from("Internal Server Error")
@@ -1054,6 +1067,26 @@ impl Ctx {
         self.state.get::<T>()
     }
 
+    /// The same value, to change. `None` when no hook wrote one.
+    ///
+    /// The state goes back to the hooks when the page returns, so a change
+    /// made here is what `after_dispatch` and the response hooks read: a
+    /// request hook puts a per-request log record on the state, and the
+    /// page fills in the fields only it knows.
+    pub fn hooked_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.state.get_mut::<T>()
+    }
+
+    /// Puts a value on the request state for the hooks that run after the
+    /// page, and returns the value it replaced.
+    ///
+    /// For a value that no request hook wrote first. A hook that reads it
+    /// must also accept `None`: a 404, a 405 and a request that a request
+    /// hook answered run no page.
+    pub fn hook_insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.state.insert(value)
+    }
+
     /// A request header by name, case-insensitively, or `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -1149,6 +1182,23 @@ mod tests {
         let router = router().expect("the pages produce a table");
         let allow = router.allow_for("/about").expect("/about is a route");
         assert_eq!(allow.to_string(), "GET, HEAD");
+    }
+
+    #[test]
+    fn a_page_writes_what_the_hooks_read_after_it() {
+        // A request hook's record, as `after_dispatch` would find it.
+        struct Record(Vec<&'static str>);
+        let mut state = RequestState::new();
+        state.insert(Record(vec!["hook"]));
+        let mut ctx = Ctx::new(Verb::Get, "/", Params::empty()).with_state(state);
+
+        let record = ctx.hooked_mut::<Record>().expect("the hook wrote it");
+        record.0.push("page");
+        assert!(ctx.hook_insert(7_u32).is_none(), "nothing was there");
+
+        let state = ctx.take_state();
+        assert_eq!(state.get::<Record>().expect("kept").0, ["hook", "page"]);
+        assert_eq!(state.get::<u32>(), Some(&7));
     }
 }
 ===== src/pages/index.rs =====
@@ -1324,6 +1374,22 @@ macro_rules! announce {
 }
 pub(crate) use announce;
 
+/// A line about the application itself: startup, the listener, the stop.
+///
+/// A line on stderr, prefixed with the application name. The level and the
+/// fields after `;` are what `observability-logs` would record; without it
+/// there is no subscriber, so they are dropped and the message is printed.
+///
+/// ```ignore
+/// plugins::say!(info, "listening on http://{bound}"; %bound);
+/// ```
+macro_rules! say {
+    ($level:ident, $message:literal $(; $($field:tt)+)?) => {
+        eprintln!("{}: {}", crate::app::APP, format_args!($message))
+    };
+}
+pub(crate) use say;
+
 /// One middleware layer, as the stack stores it.
 ///
 /// A name rather than the type written out: clippy calls the bare
@@ -1332,14 +1398,14 @@ pub(crate) use announce;
 ///
 /// A layer may wait, so it returns a future. The lifetime is named
 /// because the future borrows both the context and the rest of the
-/// chain; see `logging::layer` for the shape of one.
+/// chain; see `sessions::layer` for the shape of one.
 pub type Layer = for<'a> fn(&'a mut Ctx, AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response>;
 
 /// The function behind a middleware name the application mounted.
 ///
 /// Mounting is `src/app.rs`'s decision and stays there: the pattern is a
 /// decision and the decision is the application's. Which function answers
-/// to `"request_log"` is not a decision, so it is here, where adding a
+/// to `"session"` is not a decision, so it is here, where adding a
 /// plugin can write it.
 pub fn layer(name: &str) -> Option<Layer> {
     // Nothing in this binary offers middleware, so nothing can be
@@ -1666,7 +1732,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: cacf1857a1201003
+// brocanth-digest: 2139be4097abf00f
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!

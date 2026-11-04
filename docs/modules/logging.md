@@ -26,12 +26,17 @@ Files:
 
 Slots:
 
-- src/plugins/mod.rs (the builder chain)
-- src/app.rs (setup): `setup.router().mount("/{*rest}", "request_log");`
+- src/plugins/mod.rs (the builder chain): `plugin_hooking`, because the plugin installs a request hook
 - src/plugins/mod.rs: `pub mod logging;`
 - src/plugins/mod.rs (the provider list): `logging crate::plugins::logging::Logging`
-- src/plugins/mod.rs (layer): `"request_log" => Some(logging::layer),`
+- src/plugins/mod.rs (the hook record): `crate::plugins::logging::Logging`
 - config/<env>.toml: `[logging]`
+
+The line is written by the request hook's `after_dispatch`, so every
+response that reaches `handle` is logged: a page, a 404, a 405, a CORS
+preflight, and a 401 or a 429 that another request hook answered. Static
+files are not logged. It is plain text on stderr, through `plugins::say!`
+for its startup line.
 
 ## Settings
 

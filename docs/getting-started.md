@@ -227,7 +227,6 @@ to place, and the project compiles and runs without it:
 ! src/app.rs is yours, and one line belongs in it
   a mount is a decision, so the generator does not make it
 
-                  setup.router().mount("/{*rest}", "request_log");
     +             setup.router().mount("/users/{*rest}", "session");
                   Ok(())
 ```
@@ -244,15 +243,15 @@ brocanth serve
 ```
 
 ```
-blog: plugins: [config, security_headers, observability]
-blog: listening on http://127.0.0.1:3000
+2026-10-30T18:56:36.601Z  INFO plugins: [config, security_headers, observability] plugins="config, security_headers, observability"
+2026-10-30T18:56:36.602Z  INFO listening on http://127.0.0.1:3000 addr=127.0.0.1:3000
 2026-10-30T18:56:36.637Z  INFO GET / -> 200 request_id=7adc3a51… method=GET path=/ route=/ status=200 duration_ms=0.06
 2026-10-30T18:56:36.650Z  INFO GET /users/7 -> 200 request_id=30a8f7b2… method=GET path=/users/7 route=/users/{id} status=200 duration_ms=0.037
 2026-10-30T18:56:36.677Z  INFO DELETE /about -> 405 request_id=61988… method=DELETE path=/about route=/about status=405 duration_ms=0.034
 ```
 
-The request lines are text in development and JSON when `$BLOG_ENV` is
-`production`. `/up` answers `{"status":"ok"}`, and `/readyz` runs each
+The request lines and the application's own lines (`plugins::say!`) are
+text in development and JSON when `$BLOG_ENV` is `production`. `/up` answers `{"status":"ok"}`, and `/readyz` runs each
 plugin's readiness check.
 
 **That is a real socket.** Open `http://127.0.0.1:3000` in a browser, or:

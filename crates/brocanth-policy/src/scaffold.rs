@@ -107,7 +107,8 @@ impl Module for Policy {
         // value it was given rather than warning that nothing does.
         s.at(Slot::AppContext).block(
             "    let rules: &crate::plugins::policy::Rules = cx.extract();\n\
-            \x20   eprintln!(\"policy: compiling for {:?}\", rules.dialect);"
+            \x20   let dialect = &rules.dialect;\n\
+            \x20   crate::plugins::say!(info, \"policy: compiling for {dialect:?}\"; ?dialect);"
                 .to_string(),
         );
         if !project.has("config") {
@@ -423,7 +424,8 @@ impl Plugin for Policies {{
             .list(&Visitor::anonymous())
             .condition::<Post>(dialect)
             .map_err(|e| PluginError::new(format!("[policy] posts: {{e}}")))?;
-        eprintln!("[policy] posts, anonymous: {{}}", condition.sql());
+        let sql = condition.sql();
+        crate::plugins::say!(info, "[policy] posts, anonymous: {{sql}}"; sql);
 
         self.dialect = Some(dialect);
         Ok(())

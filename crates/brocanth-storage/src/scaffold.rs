@@ -78,10 +78,8 @@ impl Module for FileStorage {
         // framework is wrong.
         s.at(Slot::AppContext).block(
             "    let files: &plugins::storage::FileStore = cx.extract();\n\
-            \x20   eprintln!(\n\
-            \x20       \"storage: ready, download links last {}s\",\n\
-            \x20       files.tokens.ttl()\n\
-            \x20   );"
+            \x20   let ttl = files.tokens.ttl();\n\
+            \x20   crate::plugins::say!(info, \"storage: ready, download links last {ttl}s\"; ttl);"
                 .to_string(),
         );
         configurable(s, project, "storage", "Files", settings());

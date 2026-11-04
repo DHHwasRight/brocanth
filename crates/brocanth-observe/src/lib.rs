@@ -93,6 +93,11 @@ pub use jobs::JobTelemetry;
 #[cfg(feature = "metrics")]
 pub use metrics::Metrics;
 pub use probes::{CheckReport, ReadyReport};
+/// The `tracing` this crate's subscriber reads, for an application that logs
+/// through it without a dependency of its own: the generated `say!` macro
+/// writes `brocanth_observe::tracing::info!`.
+#[cfg(feature = "logs")]
+pub use tracing;
 
 /// The route label for a request no route matched.
 pub const UNMATCHED: &str = "unmatched";

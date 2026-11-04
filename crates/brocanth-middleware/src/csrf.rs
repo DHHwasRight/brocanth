@@ -427,12 +427,11 @@ impl ResponseHook for Hook {
             // no token and must not carry one.
             return Ok(());
         };
-        // Appended rather than inserted, because a handler may already
+        // Merged rather than inserted, because a handler may already
         // vary by something. A page holds this request's token, and a
         // shared cache that served it to the next visitor would hand out
         // somebody else's.
-        head.headers
-            .append(http::header::VARY, http::HeaderValue::from_static("Cookie"));
+        crate::add_vary(&mut head.headers, "Cookie");
         if !token.fresh {
             // The client already has it. Setting it again on every
             // response would reset the cookie under a second tab that

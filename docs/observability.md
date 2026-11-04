@@ -239,8 +239,6 @@ flag. See `docs/modules/observability.md`.
   synchronous handler can stall the serving runtime's signal driver), then
   calls `plugins::stop_accepting`, which is `Observer::drain_then_stop`.
   `drain_delay_secs` counts against `[server] shutdown_grace_secs`.
-- **`serve`'s own lines** (listening, stopping, the shutdown report) go to
-  stderr with `eprintln!`, not through the subscriber.
 - **No database readiness check.** `brocanth-model`'s plugin opens no pool,
   so there is nothing to ping. The same gap blocks pool stats.
 - **The generated cache and jobs plugins** (`brocanth-cache`'s and

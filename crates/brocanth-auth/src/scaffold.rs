@@ -139,10 +139,13 @@ impl Module for Auth {
         // reader is surprised by is the one they go and look up.
         s.at(Slot::AppContext).block(
             "    let auth: &crate::plugins::auth::Services = cx.extract();\n\
-            \x20   eprintln!(\n\
-            \x20       \"auth: session cookie {}, {} provider(s)\",\n\
-            \x20       auth.sessions().config().cookie_name,\n\
-            \x20       auth.providers().len()\n\
+            \x20   let cookie = &auth.sessions().config().cookie_name;\n\
+            \x20   let providers = auth.providers().len();\n\
+            \x20   crate::plugins::say!(\n\
+            \x20       info,\n\
+            \x20       \"auth: session cookie {cookie}, {providers} provider(s)\";\n\
+            \x20       %cookie,\n\
+            \x20       providers\n\
             \x20   );"
                 .to_string(),
         );
@@ -333,7 +336,7 @@ pub type Store = PgStore;",
             loop {
                 every.tick().await;
                 if let Err(e) = store.sweep(SystemClock.now(), idle_timeout).await {
-                    eprintln!(\"[auth] sweep: {e}\");
+                    crate::plugins::say!(warn, \"[auth] sweep: {e}\"; error = %e);
                 }
             }
         }));

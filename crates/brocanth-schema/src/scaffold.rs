@@ -82,7 +82,8 @@ impl Module for Validation {
         // registration above is deleted.
         s.at(Slot::AppContext).block(
             "    let checks: &brocanth_schema::Validation = cx.extract();\n\
-            \x20   eprintln!(\"validation: reports as {:?}\", checks.report_style());"
+            \x20   let style = checks.report_style();\n\
+            \x20   crate::plugins::say!(info, \"validation: reports as {style:?}\"; ?style);"
                 .to_string(),
         );
         if !project.has("config") {

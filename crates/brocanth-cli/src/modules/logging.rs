@@ -1,13 +1,19 @@
 //! `logging` -- a line per request.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable_hooking, settings_derive, Hooking};
 use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// A request logger, written out into the project rather than linked.
 ///
 /// It has no crate of its own on purpose: the whole of it is a plugin with
-/// two hooks, and a reader who can see it can change it. The core assumes no
-/// log layer at all, which is the thing this choice makes visible.
+/// one request hook, and a reader who can see it can change it. The core
+/// assumes no log layer at all, which is the thing this choice makes visible.
+///
+/// It logs every response, from `after_dispatch`: a 404, a 405, a CORS
+/// preflight and a 401 that a request hook answered included. It was a
+/// layer mounted at `/{*rest}`, and a layer runs inside dispatch, so it saw
+/// only the routes that matched. Static files never reach `handle`, so they
+/// are not logged.
 pub struct Logging;
 
 impl Module for Logging {
@@ -31,35 +37,28 @@ impl Module for Logging {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/logging/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod logging;");
-        // `debug` in the development file; `info` without one.
-        configurable(
+        // A request hook and not a mounted layer. A layer runs inside
+        // dispatch, for a route that matched, so it never saw a 404, a 405,
+        // a preflight or a 401 a request hook answered. `after_dispatch`
+        // runs for every one of them.
+        configurable_hooking(
             s,
             project,
-            "logging",
-            "Logging",
+            Hooking {
+                key: "logging",
+                section: "logging",
+                ty: "crate::plugins::logging::Logging",
+                config_ty: "crate::plugins::logging::Settings",
+                prelude: String::new(),
+                adjust: None,
+            },
+            // `debug` in the development file; `info` without one.
             vec![Setting::text(
                 "level",
                 "debug",
                 "The least severe line written: error, warn, info or debug.",
             )],
         );
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait
-            // method, so the trait has to be in scope. Every plugin
-            // module needs the same line, and `use` twice does not
-            // compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
-        // A plugin *offers* middleware and cannot mount it. The pattern is
-        // a decision, and the decision is the application's -- so the line
-        // is in `main` where it can be read and changed.
-        s.at(Slot::AppSetup)
-            .line(r#"            setup.router().mount("/{*rest}", "request_log");"#);
-        // What `src/app.rs` reaches for once that mount is read back. The
-        // mount is the application's decision; which function answers to
-        // the name is not, so it is written here and not there.
-        s.at(Slot::PluginsLayers)
-            .line(r#"        "request_log" => Some(logging::layer),"#);
     }
 }
 
@@ -70,15 +69,20 @@ pub(crate) fn plugin_rs(project: &Project) -> String {
 //!
 //! The core assumes no log layer at all -- not `log`, not `tracing`, not a
 //! trait with a no-op default. This file is the whole of logging in this
-//! binary: delete the registration in `main` and nothing logs, delete this file
-//! and nothing about logging is compiled.
+//! binary: delete the registration in `src/plugins/mod.rs` and nothing logs,
+//! delete this file and nothing about logging is compiled.
+//!
+//! One line per response, written by a request hook's `after_dispatch`. That
+//! runs for every request `handle` sees: a page, a 404, a 405, a CORS
+//! preflight, and a 401 or a 429 that another request hook answered. A
+//! middleware layer would see only the requests that matched a route.
 
-use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
+use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
-use brocanth::plugin_routes::BoxFuture;
-use brocanth::routing::AsyncNext;
-
-use crate::pages::{{Ctx, Response}};
+use brocanth::plugin_hooks::{{
+    HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState, Response,
+}};
+use brocanth::plugin_order::Order;
 
 /// What this plugin is built from.
 ///
@@ -106,6 +110,7 @@ impl Plugin for Logging {{
     /// Nothing on the context: a logger writes, it does not hand values out.
     type Provides = NoContext;
     const NAME: &'static str = "logging";
+    const INSTALLS_HOOKS: bool = true;
 
     fn new(config: Settings) -> Self {{
         Self {{
@@ -113,38 +118,39 @@ impl Plugin for Logging {{
         }}
     }}
 
-    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {{
-        // Offered, not mounted. Where it runs is the application's call, made
-        // in `main`, at a pattern this file never sees.
-        catalog.offer("request_log", "one line per request: verb, path, status");
-        Ok(())
-    }}
-
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        eprintln!("[{{}}] level {{}}", lc.instance(), self.level);
+        let (instance, level) = (lc.instance(), &self.level);
+        crate::plugins::say!(info, "[{{instance}}] level {{level}}"; instance, %level);
         Ok(())
     }}
 }}
 
-/// The layer `request_log` mounts.
-///
-/// A plain function is a layer: `AsyncLayer` is implemented for anything
-/// callable with a context and the rest of the chain that returns a future.
-/// The lifetime is named because that future borrows both. Not calling
-/// `next.run` is how a layer short-circuits, and dropping it is all that
-/// takes.
-///
-/// `next.run(&mut *ctx)` lends the context to the rest of the chain for the
-/// length of the await, so this layer has it back for the line it writes
-/// afterwards.
-pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {{
-    Box::pin(async move {{
-        let verb = ctx.verb;
-        let path = ctx.path.clone();
-        let response = next.run(&mut *ctx).await;
-        eprintln!("{{verb}} {{path}} -> {{}}", response.status);
-        response
-    }})
+impl HookSource for Logging {{
+    type Families = OnRequest;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {{
+        registrar.request("line", Order::new(), Line);
+        Ok(())
+    }}
+}}
+
+/// The hook that writes the line.
+struct Line;
+
+impl RequestHook for Line {{
+    /// After the response is final, whatever answered: the response hooks
+    /// have run, so the status is the one the client gets.
+    ///
+    /// A page can add to the line: put a value on the request state with
+    /// `ctx.hook_insert`, and read it here from `state`.
+    fn after_dispatch(&self, request: &Request, response: &Response, _state: &mut RequestState) {{
+        eprintln!(
+            "{{}} {{}} -> {{}}",
+            request.method(),
+            request.uri().path(),
+            response.status().as_u16()
+        );
+    }}
 }}
 "##
     )
