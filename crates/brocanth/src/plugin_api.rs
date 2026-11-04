@@ -425,6 +425,14 @@ pub trait Plugin: Sized + Send + Sync + 'static {
     }
 
     /// Last chance before the server is handed the application.
+    ///
+    /// Synchronous, like every stage, so it never waits for async work: on a
+    /// current-thread runtime the waiting thread is the one that drives the
+    /// I/O, and the wait never ends. Open a pool lazily here and register a
+    /// check with [`Lifecycle::ready_when`]; the server awaits every check
+    /// once before it binds ([`Readiness::check_all`]).
+    ///
+    /// [`Readiness::check_all`]: crate::plugin_health::Readiness::check_all
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         Ok(())
     }

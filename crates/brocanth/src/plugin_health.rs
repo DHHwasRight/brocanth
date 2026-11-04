@@ -25,6 +25,16 @@
 //! returns, and the thing that serves the probe awaits it under a timeout it
 //! chooses.
 //!
+//! # Once at startup, before the socket
+//!
+//! A plugin opens its pool lazily in a synchronous stage and registers a
+//! check. It does not wait for the pool there: on a current-thread runtime
+//! the thread that runs the stage is the thread that drives the I/O, so a
+//! wait in the stage waits forever. The async code that starts the server
+//! awaits [`Readiness::check_all`] once, before it binds. A wrong password
+//! or a missing database still stops the start, with the plugin's message,
+//! and the build stays free of I/O.
+//!
 //! # Shutdown flips it first (ADR 2)
 //!
 //! A load balancer routes to a pod until its readiness probe fails. If the
@@ -74,6 +84,26 @@ where
         Box::pin(self())
     }
 }
+
+/// The first check that failed in [`Readiness::check_all`].
+///
+/// It displays as `[name] reason`: the instance name in brackets, then the
+/// check's own text, which carries its `help:` line when it has one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotReady {
+    /// The name the check reports under: a plugin's instance name.
+    pub name: String,
+    /// What the check said.
+    pub reason: String,
+}
+
+impl fmt::Display for NotReady {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.name, self.reason)
+    }
+}
+
+impl std::error::Error for NotReady {}
 
 /// One registered check, with the name it reports under.
 #[derive(Clone)]
@@ -152,6 +182,31 @@ impl Readiness {
             .clone()
     }
 
+    /// Runs every check once, in the order they were added, and stops at the
+    /// first that fails.
+    ///
+    /// The startup gate: the code that starts the server awaits this before
+    /// it binds, and stops with the [`NotReady`] it returns. The checks run
+    /// one at a time, so the first plugin registered is the first one
+    /// blamed. There is no timeout here, because the core has no timer: each
+    /// check bounds its own wait, as a pool's acquire timeout does.
+    ///
+    /// The future owns a copy of the list, so it borrows nothing.
+    pub fn check_all(&self) -> BoxFuture<'static, Result<(), NotReady>> {
+        let checks = self.checks();
+        Box::pin(async move {
+            for check in checks {
+                if let Err(reason) = check.probe.check().await {
+                    return Err(NotReady {
+                        name: check.name,
+                        reason,
+                    });
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// From now on, the application is not ready, whatever the checks say.
     ///
     /// Idempotent, and there is no way back: a process that began to stop
@@ -205,6 +260,33 @@ mod tests {
             ready_now(checks[1].probe().check()),
             Err("connection refused".to_string())
         );
+    }
+
+    #[test]
+    fn check_all_names_the_first_failure_and_runs_nothing_after_it() {
+        use std::sync::atomic::AtomicUsize;
+
+        let readiness = Readiness::new();
+        assert_eq!(ready_now(readiness.check_all()), Ok(()));
+
+        let after = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&after);
+        readiness.add("ok", || async { Ok(()) });
+        readiness.add("db", || async {
+            Err("the server refused the password\nhelp: check the URL".to_string())
+        });
+        readiness.add("later", move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+
+        let failed = ready_now(readiness.check_all()).expect_err("db fails");
+        assert_eq!(failed.name, "db");
+        assert_eq!(
+            failed.to_string(),
+            "[db] the server refused the password\nhelp: check the URL"
+        );
+        assert_eq!(after.load(Ordering::SeqCst), 0, "the gate stops at the first failure");
     }
 
     #[test]
