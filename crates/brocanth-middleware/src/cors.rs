@@ -35,7 +35,7 @@ use brocanth::plugin_hooks::{
     RequestState, Response, ResponseHead, ResponseHook,
 };
 
-use crate::text;
+use crate::{add_vary, text};
 
 /// The wildcard, as a borrow that outlives the call.
 const ANY: &str = "*";
@@ -224,7 +224,7 @@ impl RequestHook for Hook {
         // `Vary: Origin` even when the origin was refused, because the
         // refusal itself depends on the origin and a cache must not reuse
         // it for another.
-        out.insert(http::header::VARY, http::HeaderValue::from_static("Origin"));
+        add_vary(out, "Origin");
 
         let Some(allow) = self.allow(origin) else {
             // The specification's way to refuse is to answer without the
@@ -272,10 +272,11 @@ impl ResponseHook for Hook {
             // make every response vary by a header that was never sent.
             return Ok(());
         };
-        // Appended rather than inserted: a handler may already vary by
-        // something, and replacing that would poison its cache.
-        head.headers
-            .append(http::header::VARY, http::HeaderValue::from_static("Origin"));
+        // Merged rather than inserted: a handler may already vary by
+        // something, and replacing that would poison its cache. Merged
+        // rather than appended: a preflight already carries `Origin`, and
+        // a second line would name it twice.
+        add_vary(&mut head.headers, "Origin");
         let Some(allow) = self.allow(origin) else {
             return Ok(());
         };
@@ -522,7 +523,45 @@ mod tests {
             .iter()
             .map(|v| v.to_str().expect("ascii"))
             .collect();
-        assert!(varies.contains(&"Accept-Encoding"), "{varies:?}");
-        assert!(varies.contains(&"Origin"), "{varies:?}");
+        assert_eq!(varies, ["Accept-Encoding, Origin"]);
+    }
+
+    #[test]
+    fn a_preflight_names_origin_in_one_vary() {
+        // The preflight sets `Vary: Origin`, and the response hook then
+        // runs on the same response. It used to append a second line.
+        let hook = hook(CorsConfig::from(["https://ok.example"]));
+        let request = preflight("https://ok.example", "POST");
+        let response = answered(&hook, preflight("https://ok.example", "POST")).expect("answered");
+        let (mut head, _) = response.into_parts();
+        hook.on_headers(
+            &request,
+            &mut head,
+            BodyShape::Buffered { len: 0 },
+            &mut RequestState::new(),
+        )
+        .expect("ok");
+        let varies: Vec<&str> = head
+            .headers
+            .get_all(http::header::VARY)
+            .iter()
+            .map(|v| v.to_str().expect("ascii"))
+            .collect();
+        assert_eq!(varies, ["Origin"]);
+    }
+
+    #[test]
+    fn vary_is_merged_case_blind_and_a_star_stays_alone() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::VARY, http::HeaderValue::from_static("origin"));
+        headers.append(http::header::VARY, http::HeaderValue::from_static("Cookie"));
+        add_vary(&mut headers, "Origin, DP-Request");
+        let varies: Vec<_> = headers.get_all(http::header::VARY).iter().collect();
+        assert_eq!(varies, ["origin, Cookie, DP-Request"]);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::VARY, http::HeaderValue::from_static("*"));
+        add_vary(&mut headers, "Origin");
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "*");
     }
 }

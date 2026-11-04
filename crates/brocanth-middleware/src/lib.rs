@@ -113,6 +113,42 @@ fn text(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<&st
     headers.get(name)?.to_str().ok()
 }
 
+/// Adds the tokens in `add` to the response's `Vary`, keeping the ones
+/// already there.
+///
+/// The result is one `Vary` line that names each token once. Several hooks
+/// add to `Vary` (CORS on the preflight and again on the response, CSRF,
+/// DP), and a plain `append` gave a preflight two `Vary: Origin` lines. A
+/// cache reads all the lines as one list, so this changes no caching; it
+/// stops the response from looking broken. A `*` already there stays alone,
+/// because it varies by everything.
+fn add_vary(headers: &mut http::HeaderMap, add: &str) {
+    let old: Vec<String> = headers
+        .get_all(http::header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let mut tokens: Vec<&str> = Vec::new();
+    for part in old
+        .iter()
+        .flat_map(|v| v.split(','))
+        .chain(add.split(','))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        if !tokens.iter().any(|t| t.eq_ignore_ascii_case(part)) {
+            tokens.push(part);
+        }
+    }
+    if tokens.contains(&"*") {
+        tokens = vec!["*"];
+    }
+    if let Ok(value) = http::HeaderValue::from_str(&tokens.join(", ")) {
+        headers.insert(http::header::VARY, value);
+    }
+}
+
 /// The first comma-separated element of a header, trimmed.
 fn first(value: &str) -> &str {
     value.split(',').next().unwrap_or(value).trim()

@@ -407,11 +407,8 @@ impl ResponseHook for Hook {
         _body: BodyShape<'_>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
-        // Appended, so a handler's own `Vary` stays.
-        head.headers.append(
-            http::header::VARY,
-            http::HeaderValue::from_static("DP-Request, DP-Partial"),
-        );
+        // Merged, so a handler's own `Vary` stays and no token repeats.
+        crate::add_vary(&mut head.headers, "DP-Request, DP-Partial");
         Ok(())
     }
 }
