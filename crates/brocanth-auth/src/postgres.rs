@@ -110,16 +110,39 @@ impl PgStore {
     /// [`StoreError::Backend`] when the URL is not a Postgres URL, or the
     /// connection fails.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
-        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
-            return Err(StoreError::backend(format!(
-                "`{}` is not a Postgres URL.\nhelp: PgStore needs a `postgres://` URL. \
-                 For another database, implement `AuthStore` over it.",
-                url.split(':').next().unwrap_or(url)
-            )));
-        }
+        postgres_url(url)?;
         Ok(Self::from_pool(
             PgPool::connect(url).await.map_err(backend)?,
         ))
+    }
+
+    /// Builds a pool from a database URL and opens no connection. The first
+    /// statement opens one.
+    ///
+    /// For a synchronous stage, which must not wait for I/O: a plugin calls
+    /// this in `before_start`, and runs [`PgStore::migrate`] and
+    /// [`PgStore::ping`] later, from async code. The pool spawns its upkeep
+    /// task, so call it inside a Tokio runtime.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] when the URL is not a Postgres URL, or the
+    /// driver cannot parse it.
+    pub fn connect_lazy(url: &str) -> Result<Self, StoreError> {
+        postgres_url(url)?;
+        Ok(Self::from_pool(PgPool::connect_lazy(url).map_err(backend)?))
+    }
+
+    /// Runs `SELECT 1` on a pooled connection. For a readiness check.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] when no connection could be taken, or the
+    /// server did not answer.
+    pub async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(drop)
+            .map_err(backend)
     }
 
     /// Uses a pool the application already has.
@@ -213,6 +236,18 @@ impl PgStore {
             otp_challenges,
         })
     }
+}
+
+/// A URL that is not `postgres://…` is an error that says what to do instead.
+fn postgres_url(url: &str) -> Result<(), StoreError> {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        return Ok(());
+    }
+    Err(StoreError::backend(format!(
+        "`{}` is not a Postgres URL.\nhelp: PgStore needs a `postgres://` URL. \
+         For another database, implement `AuthStore` over it.",
+        url.split(':').next().unwrap_or(url)
+    )))
 }
 
 fn backend(e: sqlx::Error) -> StoreError {

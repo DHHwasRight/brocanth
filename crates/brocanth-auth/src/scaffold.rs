@@ -25,8 +25,9 @@
 //! in one generated file.
 //!
 //! The generated file says the one sentence that matters for the swap: the
-//! moment the store is a database, the build moves into `before_start` and
-//! reaches for a runtime handle, exactly as `brocanth-cache` does.
+//! moment the store is a database, the build moves into `before_start`,
+//! which builds the pool lazily and leaves the wait to `serve`'s startup
+//! gate, exactly as `brocanth-cache` does.
 //!
 //! # What this module writes, out of a crate with 8,875 lines in it
 //!
@@ -198,17 +199,18 @@ const POSTGRES_EDITS: &[(&str, &str)] = &[
 //!    that carry a requirement are a unique email and a `consume_token` that
 //!    deletes and returns under one lock -- and change the line below.
 //!
-//!    When you do, the build moves: a pool is opened asynchronously and
-//!    `Plugin::new` is not, so `configure` becomes `before_start` and reaches
-//!    for the current runtime handle. `brocanth-cache` does it in about ten
-//!    lines and they are worth copying rather than inventing.",
+//!    When you do, the build moves: a pool is opened asynchronously and no
+//!    stage may wait for it, so `configure` becomes `before_start`, builds the
+//!    pool lazily and registers a readiness check that `serve` awaits before
+//!    it listens. `brocanth-cache` does it in about ten lines and they are
+//!    worth copying rather than inventing.",
         "//! 1. **`Store = PgStore`.** Accounts and sessions are rows in the\n\
 //!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and\n\
-//!    a deploy. The pool opens in `before_start`, because opening it is async\n\
-//!    and `Plugin::new` is not, and `migrate` creates the tables there (it is\n\
-//!    idempotent and takes an advisory lock). To review the schema in a\n\
-//!    migration file instead, copy `PgStore::schema_sql()` into one and\n\
-//!    delete the `migrate` call.",
+//!    a deploy. The pool is built in `before_start` with no connection, and\n\
+//!    the readiness check that `serve` awaits before it listens runs\n\
+//!    `migrate` once (it is idempotent and takes an advisory lock). To review\n\
+//!    the schema in a migration file instead, copy `PgStore::schema_sql()`\n\
+//!    into one and delete the `migrate` call.",
     ),
     (
         "use brocanth::plugin_context::{ContextBuilder, ProvidesContext};",
@@ -276,42 +278,49 @@ pub type Store = PgStore;",
         Ok(())
     }
 
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {",
     ),
     (
         "        // Nothing here opens anything, so there is no `before_start`:
         // `MemoryStore` is a `HashMap` and `Auth::build` is synchronous. A
         // store over a database is a pool, a pool is opened asynchronously,
-        // and `Plugin::new` is not async -- so that swap moves this block
-        // into `before_start`, where it takes the current runtime handle and
-        // blocks on a scoped thread. `brocanth-cache` does exactly that.
+        // and no stage may wait for it -- so that swap moves this block into
+        // `before_start`, where it builds the pool lazily and registers a
+        // readiness check that `serve` awaits. `brocanth-cache` does that.
         self.services = Some(",
-        "        // The hooks are synchronous and opening a pool is not. A server
-        // process has a runtime, `block_in_place` is wrong on a current-thread
-        // one, so take the handle and block the build on a scoped thread, as
-        // the generated cache and jobs plugins do. This is startup.
+        "        // The hooks are synchronous and opening a pool is not, so the pool
+        // opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
                 \"[auth] needs a Tokio runtime at startup to open its pool ({e})\"
             ))
         })?;
-        let url = self.settings.url.clone();
-        let store = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    runtime.block_on(async move {
-                        let store = PgStore::connect(&url).await?;
-                        store.migrate().await?;
-                        Ok::<_, brocanth_auth::StoreError>(store)
-                    })
-                })
-                .join()
-                .map_err(|_| PluginError::new(\"the auth connection thread panicked\"))?
-                .map_err(|e| PluginError::new(format!(\"[auth] connecting: {e}\")))
-        })?;
+        let store = {
+            let _entered = runtime.enter();
+            PgStore::connect_lazy(&self.settings.url)
+                .map_err(|e| PluginError::new(format!(\"[auth] {e}\")))?
+        };
         let store = Arc::new(store);
         self.store = Some(Arc::clone(&store));
+        // Ready when the database answers. The first check also creates the
+        // tables, and the first check is the one `serve` awaits before it
+        // listens: an unreachable database stops the start there.
+        let probe = Arc::clone(&store);
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
+        lc.ready_when(move || {
+            let probe = Arc::clone(&probe);
+            let migrated = Arc::clone(&migrated);
+            async move {
+                migrated
+                    .get_or_try_init(|| probe.migrate())
+                    .await
+                    .map_err(|e| format!(\"creating the auth tables: {e}\"))?;
+                probe.ping().await.map_err(|e| e.to_string())
+            }
+        });
 
         self.services = Some(",
     ),
@@ -509,10 +518,11 @@ fn plugin_rs(project: &Project) -> String {
 //!    that carry a requirement are a unique email and a `consume_token` that
 //!    deletes and returns under one lock -- and change the line below.
 //!
-//!    When you do, the build moves: a pool is opened asynchronously and
-//!    `Plugin::new` is not, so `configure` becomes `before_start` and reaches
-//!    for the current runtime handle. `brocanth-cache` does it in about ten
-//!    lines and they are worth copying rather than inventing.
+//!    When you do, the build moves: a pool is opened asynchronously and no
+//!    stage may wait for it, so `configure` becomes `before_start`, builds the
+//!    pool lazily and registers a readiness check that `serve` awaits before
+//!    it listens. `brocanth-cache` does it in about ten lines and they are
+//!    worth copying rather than inventing.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -673,19 +683,25 @@ impl Plugin for Auth {{
         }}
 
         let name = self.settings.signing_key_env.clone();
-        let raw = std::env::var(&name).map_err(|_| {{
-            PluginError::new(format!(
-                "[auth] ${{name}} is not set. It is 32 random bytes, base64url:\n  \
-                 export {{name}}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
-                 There is no default: a key invented at startup would log every session \
-                 out on each restart and differ between the instances of a fleet."
-            ))
-        }})?;
-        // Rejected rather than stretched. Padding a four-character secret to
-        // 32 bytes is how a deployment ends up with a forgeable cookie and no
-        // warning anywhere.
-        let signing_key = SigningKey::parse(&raw)
-            .map_err(|e| PluginError::new(format!("[auth] ${{name}}: {{e}}")))?;
+        let signing_key = match std::env::var(&name) {{
+            // Rejected rather than stretched. Padding a four-character secret
+            // to 32 bytes is how a deployment ends up with a forgeable cookie
+            // and no warning anywhere.
+            Ok(raw) => SigningKey::parse(&raw)
+                .map_err(|e| PluginError::new(format!("[auth] ${{name}}: {{e}}")))?,
+            // This project's own tests build the application with no secret
+            // in the environment. The key is fixed and public, and `cfg(test)`
+            // keeps it out of every binary.
+            Err(_) if cfg!(test) => SigningKey::from_bytes([7; 32]),
+            Err(_) => {{
+                return Err(PluginError::new(format!(
+                    "[auth] ${{name}} is not set. It is 32 random bytes, base64url:\n  \
+                     export {{name}}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
+                     There is no default: a key invented at startup would log every session \
+                     out on each restart and differ between the instances of a fleet."
+                )));
+            }}
+        }};
 
         let passwords = Passwords::recommended()
             .map_err(|e| PluginError::new(format!("[auth] argon2id: {{e}}")))?;
@@ -709,9 +725,9 @@ impl Plugin for Auth {{
         // Nothing here opens anything, so there is no `before_start`:
         // `MemoryStore` is a `HashMap` and `Auth::build` is synchronous. A
         // store over a database is a pool, a pool is opened asynchronously,
-        // and `Plugin::new` is not async -- so that swap moves this block
-        // into `before_start`, where it takes the current runtime handle and
-        // blocks on a scoped thread. `brocanth-cache` does exactly that.
+        // and no stage may wait for it -- so that swap moves this block into
+        // `before_start`, where it builds the pool lazily and registers a
+        // readiness check that `serve` awaits. `brocanth-cache` does that.
         self.services = Some(
             brocanth_auth::Auth::build(AuthConfig {{
                 store: Arc::new(Store::new()),
