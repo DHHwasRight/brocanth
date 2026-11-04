@@ -400,3 +400,16 @@ async fn the_cache_plugin_registers_a_readiness_check_that_reads_the_store() {
     assert_eq!(checks[0].name(), "cache");
     assert_eq!(checks[0].probe().check().await, Ok(()));
 }
+
+/// `migrating` waits for nothing in the build, so the build finishes on a
+/// current-thread runtime, and the first check creates the table.
+#[tokio::test]
+async fn a_migrating_cache_plugin_builds_on_a_current_thread_runtime() {
+    let app = AppBuilder::new()
+        .plugin(brocanth_cache::CachePlugin::new(
+            brocanth_cache::CacheConfig::new(Arc::new(Map::default())).migrating(),
+        ))
+        .build()
+        .expect("builds");
+    assert_eq!(app.readiness().check_all().await, Ok(()));
+}

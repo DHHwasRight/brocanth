@@ -52,6 +52,20 @@ impl std::fmt::Debug for PgCache {
     }
 }
 
+/// A URL that is not `postgres://…` is an error that names the crate to look
+/// at, because a SQLite cache is a different crate, not a different URL.
+fn postgres_url(url: &str) -> Result<()> {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        return Ok(());
+    }
+    Err(CacheError::Config(format!(
+        "`{}` is not a Postgres URL. brocanth-cache is Postgres only on \
+         purpose; a cache for a SQLite deployment is a separate crate \
+         implementing the same `Cache` trait.",
+        url.split(':').next().unwrap_or(url)
+    )))
+}
+
 impl PgCache {
     /// Opens a cache from a database URL.
     ///
@@ -64,15 +78,23 @@ impl PgCache {
     /// [`CacheError::Config`] for a URL this crate cannot use;
     /// [`CacheError::Backend`] when the connection could not be made.
     pub async fn connect(url: &str) -> Result<Self> {
-        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
-            return Err(CacheError::Config(format!(
-                "`{}` is not a Postgres URL. brocanth-cache is Postgres only on \
-                 purpose; a cache for a SQLite deployment is a separate crate \
-                 implementing the same `Cache` trait.",
-                url.split(':').next().unwrap_or(url)
-            )));
-        }
+        postgres_url(url)?;
         Ok(Self::from_pool(PgPool::connect(url).await?))
+    }
+
+    /// Builds a cache from a database URL and opens no connection. The first
+    /// read or write opens one.
+    ///
+    /// For a synchronous stage, which must not wait for I/O: a plugin calls
+    /// this in `before_start` and checks the store later, from async code.
+    /// The pool spawns its upkeep task, so call it inside a Tokio runtime.
+    ///
+    /// # Errors
+    /// [`CacheError::Config`] for a URL this crate cannot use;
+    /// [`CacheError::Backend`] for a URL the driver cannot parse.
+    pub fn connect_lazy(url: &str) -> Result<Self> {
+        postgres_url(url)?;
+        Ok(Self::from_pool(PgPool::connect_lazy(url)?))
     }
 
     /// Builds a cache on a pool the application already has.

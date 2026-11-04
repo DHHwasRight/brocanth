@@ -1,7 +1,7 @@
 //! `cache` -- what `brocanth create` writes when somebody asks for a cache.
 //!
 //! The module is here rather than in the CLI because everything it writes is
-//! a statement about this crate: the name `PgCache::connect`, the shape of
+//! a statement about this crate: the name `PgCache::connect_lazy`, the shape of
 //! `CacheHandle`, the fact that the lifecycle hook is synchronous while a
 //! pool is not. Those move when this crate moves, and a generator living in
 //! another repository would learn about it from a bug report.
@@ -90,7 +90,7 @@ fn plugin_rs(project: &Project) -> String {
 //! The crate also ships `CachePlugin`, and this is not that. `CachePlugin` is
 //! handed a cache that is already open, because a pool is made asynchronously
 //! and `Plugin::new` is not async. An application whose cache is one URL wants
-//! the shorter road, so this plugin takes the URL, opens the pool at startup,
+//! the shorter road, so this plugin takes the URL, builds the pool at startup,
 //! and publishes the same `CacheHandle`. Hand-built caches -- a shared pool, a
 //! second namespace policy, a different backend -- are what `CachePlugin` is
 //! for, and swapping to it is a change in this file alone.
@@ -149,31 +149,29 @@ impl Plugin for Cache {{
     }}
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        // The lifecycle hooks are synchronous and opening a pool is not. This
-        // is the manoeuvre `CachePlugin` makes, for the same reason: a server
-        // process has a runtime, `block_in_place` is wrong on a current-thread
-        // one, so take the handle and block the builder on a scoped thread.
-        // This is startup, where blocking is what everybody expects.
+        // The lifecycle hooks are synchronous and opening a pool is not, so
+        // the pool opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {{
             PluginError::new(format!(
                 "[cache] needs a Tokio runtime at startup to open its pool ({{e}})"
             ))
         }})?;
-        let url = self.url.clone();
-        let cache = std::thread::scope(|scope| {{
-            scope
-                .spawn(|| runtime.block_on(async move {{ PgCache::connect(&url).await }}))
-                .join()
-                .map_err(|_| PluginError::new("the cache connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[cache] connecting: {{e}}")))
-        }})?;
+        let cache = {{
+            let _entered = runtime.enter();
+            PgCache::connect_lazy(&self.url)
+                .map_err(|e| PluginError::new(format!("[cache] {{e}}")))?
+        }};
         // The table is not created here. `brocanth-cache` can create it, and
         // it is off there for the reason it is absent here: the generator
         // proposes and the developer commits. `PgCache::schema_sql` hands out
         // the statements for a migration you can read.
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
         // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers.
+        // miss is a pass: the question is whether the store answers. `serve`
+        // awaits this once before it listens, so an unreachable store stops
+        // the start there.
         let probe = Arc::clone(&cache);
         lc.ready_when(move || {{
             let probe = Arc::clone(&probe);

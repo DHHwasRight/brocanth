@@ -42,6 +42,7 @@
 //! `cx.get::<CacheHandle, _>()`.
 
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
@@ -106,7 +107,12 @@ impl CacheConfig {
         }
     }
 
-    /// Create the cache's table during `before_start` if it is absent.
+    /// Create the cache's table if it is absent, in the readiness check, the
+    /// first time it runs. The server awaits every check once before it
+    /// listens ([`Readiness::check_all`]), so the table is there before the
+    /// first request.
+    ///
+    /// [`Readiness::check_all`]: brocanth::plugin_health::Readiness::check_all
     ///
     /// Off by default, and it should stay off anywhere a human reviews
     /// migrations: §4.3 of the plan says the generator proposes and the
@@ -161,11 +167,24 @@ impl Plugin for CachePlugin {
         lc.services_mut()
             .insert(CacheHandle::new(self.cache.clone()));
         // Ready when one read of the table succeeds. A miss is a success: the
-        // question is whether the store answers, not what it holds.
+        // question is whether the store answers, not what it holds. With
+        // `migrating`, the check creates the table first, until that worked
+        // once: the server awaits every check before it listens, so the
+        // table is there before the first request. No stage waits for it,
+        // because a stage that waits hangs a current-thread runtime.
         let cache = self.cache.clone();
+        let migrated = Arc::new(AtomicBool::new(!self.migrate));
         lc.ready_when(move || {
             let cache = cache.clone();
+            let migrated = Arc::clone(&migrated);
             async move {
+                if !migrated.load(Ordering::Acquire) {
+                    cache
+                        .migrate()
+                        .await
+                        .map_err(|e| format!("creating the cache table: {e}"))?;
+                    migrated.store(true, Ordering::Release);
+                }
                 let key = crate::key::Namespace::new("brocanth.readyz")
                     .and_then(|ns| crate::key::Key::new(ns, "probe"))
                     .map_err(|e| e.to_string())?;
@@ -173,33 +192,6 @@ impl Plugin for CachePlugin {
             }
         });
         Ok(())
-    }
-
-    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if !self.migrate {
-            return Ok(());
-        }
-        // The lifecycle hooks are synchronous and `migrate` is not. This is the
-        // same manoeuvre `brocanth-jobs` makes, for the same reason: in a
-        // server process there is a runtime, `block_in_place` would be wrong on
-        // a current-thread one, so take the handle and block the builder on a
-        // scoped thread. That is startup, where blocking is what everybody
-        // expects.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "brocanth-cache needs a Tokio runtime at startup to create its \
-                 table ({e}); build the application from inside `#[tokio::main]`, \
-                 or call `migrate` yourself and drop `migrating()`"
-            ))
-        })?;
-        let cache = self.cache.clone();
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(async move { cache.migrate().await }))
-                .join()
-                .map_err(|_| PluginError::new("the cache migration thread panicked"))?
-                .map_err(|e| PluginError::new(format!("creating the cache table: {e}")))
-        })
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
