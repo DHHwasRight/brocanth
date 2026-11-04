@@ -34,6 +34,7 @@ default-run = "my-blog"
 #   brocanth-admin-model  the admin reads no table; its data source is an empty fixture
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
+#   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   serde                 nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -2298,7 +2299,7 @@ request.
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `jt`, `docker`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `jt`, `robots`, `docker`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2494,7 +2495,7 @@ is the preview, not the deployment.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
 
-<!-- brocanth-digest: 7cf0c1b34bd3bf6b -->
+<!-- brocanth-digest: 5b209c5150705170 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

@@ -5140,6 +5140,15 @@ mod tests {
                     "ci-github",
                 ],
             ),
+            // A robots.txt with a config file and an admin to keep crawlers
+            // out of: the development file answers `Disallow: /`.
+            ("robots", vec!["config", "admin", "robots"]),
+            // And on a static site, where the file opens the site because
+            // the export is what gets published.
+            (
+                "robots-static",
+                vec!["static", "config", "commands", "robots"],
+            ),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin
             // has to translate. No config file either, so the literal
@@ -6634,6 +6643,44 @@ mod tests {
             "the scaffold did not compile:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The static export writes `/robots.txt` as a file, open, because the
+    /// export is the published site.
+    #[test]
+    #[ignore = "runs cargo run over a generated application"]
+    fn the_static_export_writes_robots_txt() {
+        let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-robots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            local: Some(brocanth.display().to_string()),
+            ..answers(&["static", "config", "commands", "robots"])
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["run", "-q", "--", "export"])
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the export failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let written = std::fs::read_to_string(root.join("dist/robots.txt"))
+            .expect("the export wrote dist/robots.txt");
+        assert_eq!(written, "User-agent: *\nDisallow:\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 

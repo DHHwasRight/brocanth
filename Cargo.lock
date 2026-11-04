@@ -776,6 +776,7 @@ dependencies = [
  "brocanth-policy",
  "brocanth-realtime",
  "brocanth-resource",
+ "brocanth-robots",
  "brocanth-scaffold",
  "brocanth-schema",
  "brocanth-storage",
@@ -1133,6 +1134,13 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "trybuild",
+]
+
+[[package]]
+name = "brocanth-robots"
+version = "0.1.0"
+dependencies = [
+ "brocanth-scaffold",
 ]
 
 [[package]]

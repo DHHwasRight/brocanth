@@ -1,0 +1,23 @@
+[package]
+name = "brocanth-robots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A robots.txt written from a builder, checked before it is served, and the `robots` module that serves it at /robots.txt."
+readme = "README.md"
+
+# No dependencies. robots.txt is a few lines of text with a grammar small
+# enough to write and check by hand (RFC 9309), and an application that
+# serves one should not link a parser for it.
+[dependencies]
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `robots`. It lives beside the builder it writes into a project, as the
+# openapi module does, so a renamed method breaks the generator's build here
+# and not a generated project later. Optional and off: only the CLI asks for
+# `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[features]
+default = []
+scaffold = ["dep:brocanth-scaffold"]

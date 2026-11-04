@@ -36,6 +36,7 @@ brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
+brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
@@ -1719,6 +1720,7 @@ mod tests {
                 "/openapi.json",
                 "/openapi.yaml",
                 "/realtime/events",
+                "/robots.txt",
                 "/status",
                 "/users/{id}"
             ]
@@ -1842,6 +1844,7 @@ pub mod policy;
 pub mod realtime;
 pub mod realtime_sse;
 pub mod resource;
+pub mod robots;
 pub mod sessions;
 pub mod storage;
 pub mod validation;
@@ -1981,6 +1984,9 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::realtime::Realtime>("realtime")
             .map_err(|e| e.to_string())?;
         let builder = builder
+            .plugin_from_config::<crate::plugins::robots::Robots>("robots")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
             .map_err(|e| e.to_string())?;
 
@@ -2048,7 +2054,8 @@ type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
 type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
-type WithModel = After<crate::plugins::model::Model, WithRealtime>;
+type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
+type WithModel = After<crate::plugins::model::Model, WithRobots>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
@@ -2548,6 +2555,20 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "robots.index",
+        help: "Let crawlers read this site. False answers `Disallow: /` and nothing else.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "robots.sitemap",
+        help: "Where the sitemap is, as a full URL. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "security_headers.behind_tls",
         help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
         flag: true,
@@ -2854,6 +2875,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let openapi = crate::plugins::openapi::Settings::default();
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
+    let robots = crate::plugins::robots::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
@@ -2952,6 +2974,8 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("realtime.queue", format!("{:?}", realtime.queue)),
         ("realtime.overflow", format!("{:?}", realtime.overflow)),
+        ("robots.index", format!("{:?}", robots.index)),
+        ("robots.sitemap", format!("{:?}", robots.sitemap)),
         (
             "security_headers.behind_tls",
             format!("{:?}", security_headers.behind_tls),
@@ -3104,7 +3128,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 81b4663a9c8da33c
+// brocanth-digest: ec21bafe985eae5b
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3338,6 +3362,19 @@ queue = 32
 # The reader is told how many frames it missed either way, so a stale view
 # is a thing the client can see.
 overflow = "drop-oldest"
+
+[robots]
+# Let crawlers read this site. False answers `Disallow: /` and nothing else.
+# False here because this file is the development one. Production reads
+# the plugin's default, true, unless its own file says otherwise. Set it
+# false on staging, or a search engine lists staging beside production.
+index = false
+# Paths no crawler may read, each from the root: "/admin".
+disallow = ["/admin"]
+# Paths a crawler may read under a disallowed one: "/admin/help".
+allow = []
+# Where the sitemap is, as a full URL. Empty means none.
+# sitemap = "https://example.com/sitemap.xml"
 
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
@@ -4546,6 +4583,57 @@ mod tests {
     #[tokio::test]
     async fn a_topic_no_rule_allows_is_refused() {
         assert_eq!(status("/realtime/events?topics=posts/*").await, 403);
+    }
+}
+===== src/pages/robots.txt.rs =====
+//! `/robots.txt` -- because the file is called `robots.txt.rs`.
+//!
+//! The text was rendered once, at startup, by `src/plugins/robots/mod.rs`.
+//! This page hands it out and does nothing else.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/robots.txt`.
+///
+/// An hour of cache: crawlers keep the file for a day anyway, and an hour
+/// is how long a changed rule takes to reach one that asked just before.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::robots::text().ok_or_else(|| {
+        Error::internal("the robots plugin is not registered, so there is no robots.txt to serve")
+    })?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            (
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            ("cache-control".to_string(), "max-age=3600".to_string()),
+        ],
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    /// What this project answered the day it was generated. Change the
+    /// `[robots]` settings and this line with them.
+    const GENERATED: &str = "User-agent: *\nDisallow: /\n";
+
+    #[tokio::test]
+    async fn the_application_answers_robots_txt_as_text() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/robots.txt")).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = response.body.bytes().expect("a whole body");
+        assert_eq!(std::str::from_utf8(body).expect("utf-8"), GENERATED);
     }
 }
 ===== src/pages/status.jt =====
@@ -7100,6 +7188,140 @@ impl PageError for Error {
         Error::new(status, message)
     }
 }
+===== src/plugins/robots/mod.rs =====
+//! The robots.txt, as this application answers it.
+//!
+//! Rendered once at startup from `Settings`, then served by
+//! `src/pages/robots.txt.rs`. A rule path that does not start with `/`, or
+//! a sitemap that is not a full URL, stops the build here: a crawler would
+//! ignore that line, and the page it was meant to hide would be indexed.
+//!
+//! `index = false` answers `User-agent: *` / `Disallow: /` and nothing
+//! else. That is the answer for development and staging.
+//!
+//! Only the root `/robots.txt` of a host is read. Under a base path, as on
+//! a GitHub Pages project site, crawlers never ask for this file.
+
+use std::sync::OnceLock;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth_robots::Robots as Text;
+
+/// The rendered text, set once at `configure`.
+static RENDERED: OnceLock<String> = OnceLock::new();
+
+/// The text, or `None` when this plugin was never registered.
+pub fn text() -> Option<&'static str> {
+    RENDERED.get().map(String::as_str)
+}
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[robots]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Let crawlers read this site.
+    pub index: bool,
+    /// Paths no crawler may read.
+    pub disallow: Vec<String>,
+    /// Paths a crawler may read under a disallowed one.
+    pub allow: Vec<String>,
+    /// Where the sitemap is, as a full URL.
+    pub sitemap: Option<String>,
+}
+
+impl Default for Settings {
+    /// Open: a production server with no `[robots]` section is indexed.
+    fn default() -> Self {
+        Self {
+            index: true,
+            disallow: vec!["/admin".to_string()],
+            allow: Vec::new(),
+            sitemap: None,
+        }
+    }
+}
+
+pub struct Robots {
+    settings: Settings,
+}
+
+impl Robots {
+    /// The builder these settings describe.
+    fn text(&self) -> Text {
+        if !self.settings.index {
+            return Text::closed();
+        }
+        let mut text = Text::new();
+        for path in &self.settings.disallow {
+            text = text.disallow(path.as_str());
+        }
+        for path in &self.settings.allow {
+            text = text.allow(path.as_str());
+        }
+        if let Some(url) = &self.settings.sitemap {
+            text = text.sitemap(url.as_str());
+        }
+        text
+    }
+}
+
+impl Plugin for Robots {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "robots";
+
+    fn new(config: Settings) -> Self {
+        Self { settings: config }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let rendered = self
+            .text()
+            .render()
+            .map_err(|e| PluginError::new(format!("[robots] {e}")))?;
+        let _ = RENDERED.set(rendered);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_settings_answer_disallow_everything() {
+        let robots = Robots::new(Settings {
+            index: false,
+            ..Settings::default()
+        });
+        assert_eq!(
+            robots.text().render().unwrap(),
+            "User-agent: *\nDisallow: /\n"
+        );
+    }
+
+    #[test]
+    fn open_settings_write_each_rule() {
+        let robots = Robots::new(Settings {
+            disallow: vec!["/private".to_string()],
+            allow: vec!["/private/help".to_string()],
+            sitemap: Some("https://example.com/sitemap.xml".to_string()),
+            ..Settings::default()
+        });
+        let text = robots.text().render().unwrap();
+        assert!(text.contains("Disallow: /private\n"), "{text}");
+        assert!(text.contains("Allow: /private/help\n"), "{text}");
+        assert!(
+            text.ends_with("Sitemap: https://example.com/sitemap.xml\n"),
+            "{text}"
+        );
+    }
+}
 ===== src/plugins/sessions/mod.rs =====
 //! Cookie sessions, and the one value they put on the context.
 
@@ -7615,6 +7837,7 @@ request.
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
+- `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -7966,7 +8189,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: c93e6acf9ca2f365 -->
+<!-- brocanth-digest: 61ad79d2bb3ca1ac -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -7978,7 +8201,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -8204,6 +8427,13 @@ config = []
 crates = []
 adapted_to = []
 
+[modules.robots]
+kind = ["routes"]
+files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
+config = ["robots"]
+crates = ["brocanth-robots"]
+adapted_to = ["config", "admin"]
+
 [modules.docker]
 kind = ["external"]
 files = [".dockerignore", "Dockerfile"]
@@ -8232,4 +8462,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 6d4d3ca5d6b8d5c8
+# brocanth-digest: d1ab027250a75d0b

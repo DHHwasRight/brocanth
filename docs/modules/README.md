@@ -87,6 +87,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`rsx-tailwind`](rsx-tailwind.md) | a CSS build over the class names in your templates; needs node | External, Enhancer | rsx |
 | [`rsx-htmx`](rsx-htmx.md) | a click swaps what changed; the server renders from the shared layout down | Renderer | rsx |
 | [`static`](static.md) | `export` writes every GET page and every asset to dist/; no server, so no runtime modules | External, Enhancer |  |
+| [`robots`](robots.md) | a robots.txt from your settings, served at /robots.txt; closed outside production | Routes |  |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |

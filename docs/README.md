@@ -34,6 +34,7 @@ map.
 | [observability.md](observability.md) | Logs, probes, metrics and traces in `brocanth-observe`. |
 | [i18n.md](i18n.md) | Message catalogs checked at build time, locales, CLDR plurals. |
 | [static-export.md](static-export.md) | `brocanth-static`: the pages compiled to files for a static host. |
+| [robots.md](robots.md) | `brocanth-robots`: the robots.txt module, its settings and the sitemap follow-up. |
 
 ## Admin
 
