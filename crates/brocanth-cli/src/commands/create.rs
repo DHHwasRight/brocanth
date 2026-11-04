@@ -4944,6 +4944,10 @@ mod tests {
             // has to translate. No config file either, so the literal
             // branch of both is here.
             ("realtime", vec!["realtime"]),
+            // The broker's transport: a stream over a mailbox, and a page
+            // that authorises its topics. With a config file, so the
+            // broker's limits come from `[realtime]`.
+            ("realtime-sse", vec!["config", "realtime", "realtime-sse"]),
             // The queue, with a config file, which is the shape that opens
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
@@ -6127,14 +6131,14 @@ mod tests {
         // for a test. The flags refuse by name with the reason; the module
         // itself refuses if it is somehow reached anyway, so nothing can
         // write half a project.
-        let flagged = unavailable(&["realtime", "realtime-sse"])
+        let flagged = unavailable(&["realtime", "realtime-websocket"])
             .expect_err("a transport that is not written yet");
         assert_eq!(flagged.len(), 1);
 
-        let reached = contributions(&answers(&["realtime", "realtime-sse"]))
+        let reached = contributions(&answers(&["realtime", "realtime-websocket"]))
             .expect_err("the module refuses even when it is called");
         assert!(
-            format!("{reached:?}").contains("not written yet"),
+            format!("{reached:?}").contains("upgrade out of the request/response shape"),
             "the refusal does not say why: {reached:?}"
         );
     }

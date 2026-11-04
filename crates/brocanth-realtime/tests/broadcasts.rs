@@ -702,3 +702,23 @@ fn replacing_the_subscription_set_is_the_whole_set() {
         1
     );
 }
+
+#[test]
+fn the_last_frame_id_is_what_a_reconnecting_browser_compares_with() {
+    let broker = Broker::new();
+    assert_eq!(broker.last_frame_id(), 0, "nothing published yet");
+    let client = broker.connect().unwrap();
+    client
+        .subscribe(Subscription::new(
+            Topic::collection("posts").unwrap(),
+            brocanth_realtime::Gate::everyone(),
+        ))
+        .unwrap();
+    broker.publish_change(&RowChange::created("posts", 1i64));
+    broker.publish_change(&RowChange::created("posts", 2i64));
+    let mut last = 0;
+    while let Some(Event::Frame(frame)) = client.mailbox().try_recv() {
+        last = frame.id();
+    }
+    assert_eq!(broker.last_frame_id(), last);
+}

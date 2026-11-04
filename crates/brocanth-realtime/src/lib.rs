@@ -119,17 +119,19 @@
 //! putting one here would make every application that merely broadcasts link
 //! the router.
 //!
-//! **What a transport does with this crate**, in about thirty lines none of
-//! which are here: implement `brocanth::plugin_body::BodyStream` over a
-//! [`Mailbox`], returning `Poll::Ready(Some(Ok(frame.bytes().to_vec())))` for
-//! each frame and `Poll::Pending` with the waker [`Mailbox::recv`] already
-//! knows how to store; answer the route with
-//! `brocanth_server::Response::events(that_stream)`; open the [`Client`] with
-//! [`Broker::connect`], write [`Client::id`] in the first frame, and accept a
-//! subscription request on a second endpoint, authorising *there*, as
-//! PocketBase does, because that is where the subject is known. Implement
-//! `BodyStream::finish` by draining the mailbox once and ending, or a deploy
-//! waits for the longest-lived subscriber.
+//! **The transport is generated, not shipped.** `brocanth create --with
+//! realtime-sse` writes it into the application, which depends on this
+//! crate, on `brocanth` and on `brocanth-server` already: a
+//! `brocanth::plugin_body::BodyStream` over one [`Client`]'s [`Mailbox`]
+//! (`src/plugins/realtime_sse/mod.rs`), answered by
+//! `Response::events` from `GET /realtime/events?topics=..`
+//! (`src/pages/realtime/events.rs`). The page authorises each topic, opens
+//! the [`Client`] with [`Broker::connect`] and files the subscriptions; the
+//! stream writes each frame, writes `lagged` for [`Event::Lagged`], writes
+//! a heartbeat when idle, and on `BodyStream::finish` drains the mailbox
+//! once and ends. Dropping the stream drops the [`Client`], which is the
+//! disconnect. [`Broker::last_frame_id`] answers a reconnect's
+//! `Last-Event-ID`. See `scaffold::Sse` for why it lives there.
 //!
 //! A websocket is still a second piece of work, and not this one: it needs an
 //! HTTP upgrade below `Response` and a frame codec, neither of which is a

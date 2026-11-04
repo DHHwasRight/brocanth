@@ -9,21 +9,18 @@
 //! a generator living in another repository would learn about it from a bug
 //! report.
 //!
-//! # What it does not write
+//! # The transport is a second module
 //!
-//! A transport. The core can carry one now -- `Response` is
-//! `http::Response<brocanth::plugin_body::Body>`, a response hook sees the
-//! headers of a stream and is never handed an unfinished body, and a shutdown
-//! reaches an open stream -- so SSE is no longer blocked. What still holds is
-//! the arrow: this crate does not depend on `brocanth` and must not, because
-//! nothing here touches a request, a response or a route. A transport is a
-//! handler, and a handler belongs to whichever crate owns the routes.
+//! [`Realtime`] writes the index, the mailboxes and the frames. [`Sse`]
+//! (`realtime-sse`) writes the transport into the project: a `BodyStream`
+//! over one client's mailbox, and the page `GET /realtime/events` that
+//! authorises the topics. The transport is generated code and not a type in
+//! this crate, because this crate does not depend on `brocanth` and must
+//! not: nothing here touches a request, a response or a route. [`Sse`] says
+//! why in full.
 //!
-//! A websocket is a second piece of work in any case: it needs an HTTP
-//! upgrade below `Response` and a frame codec, neither of which is a body.
-//!
-//! So this module scaffolds the index, the mailboxes and the frames, and the
-//! generated file says in its own header what reads them.
+//! A websocket is still blocked: it needs an HTTP upgrade below `Response`
+//! and a frame codec, neither of which is a body.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -41,7 +38,7 @@ impl Module for Realtime {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "realtime",
-            "one write is a map lookup, not a query per subscriber; no transport yet",
+            "one write is a map lookup, not a query per subscriber",
         )
         .category(Category::Enhancer)
         .category(Category::Middleware)
@@ -49,7 +46,7 @@ impl Module for Realtime {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .asked_in("behaviour", "A broadcast broker. No transport yet")
+        .asked_in("behaviour", "A broadcast broker")
         .krate(Dep::brocanth("brocanth-realtime"))
         // Only for the order of the `[realtime]` section and the builder
         // line: the broker reads its limits from the file the config plugin
@@ -86,12 +83,24 @@ impl Module for Realtime {
     }
 }
 
-/// Server-sent events, listed and not available.
+/// Server-sent events: the broker's transport to a browser.
 ///
-/// On the menu rather than absent from it, because the question "where is
-/// SSE" has an answer and the place to read it is where it is asked. What
-/// the core must change is in this crate's own documentation, in three
-/// numbered points.
+/// # Where the transport lives, and why
+///
+/// In the generated project, as two files the application owns:
+/// `src/plugins/realtime_sse/mod.rs` (a `BodyStream` over one client's
+/// mailbox) and `src/pages/realtime/events.rs` (the route, and the one
+/// function that authorises a topic).
+///
+/// Not in this crate, because a transport is a response body and this crate
+/// does not depend on `brocanth`: nothing in it touches a request, a
+/// response or a route, and an application that only broadcasts in process
+/// must not link the router. Not in `brocanth-server` either, because that
+/// would draw an arrow from the HTTP transport to one capability crate.
+/// The project already depends on all three, so the arrow is drawn where it
+/// costs nothing. And the authorisation of a topic is the application's
+/// decision in any case: which subject, which policy. A crate would have to
+/// take it as a callback; a generated file lets the developer write it.
 pub struct Sse;
 
 impl Module for Sse {
@@ -104,19 +113,443 @@ impl Module for Sse {
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it writes the frames the broker makes, and the broker is realtime")
-        .blocked("the core can stream now; this transport is simply not written yet")
+        // `RowChange` is what a page publishes, and the transport's own test
+        // publishes one.
+        .krate(Dep::brocanth("brocanth-events"))
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        // Never reached while the CLI honours `Manifest::blocked`. Here so
-        // that a CLI which does not stops rather than writing a project
-        // whose pages cannot compile.
-        s.refuse(
-            "realtime-sse cannot be scaffolded: the core can stream a response body now, \
-             and the transport that writes the broker's frames to one is not written yet",
-        );
+        s.file("src/plugins/realtime_sse/mod.rs", FRAMES_RS.to_string());
+        s.at(Slot::PluginsMod).line("pub mod realtime_sse;");
+        s.file("src/pages/realtime/events.rs", EVENTS_RS.to_string());
+        // The table's own test lists every route.
+        s.at(Slot::PagesRoutes).line("/realtime/events");
+        s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
+
+/// `src/plugins/realtime_sse/mod.rs`: the stream.
+const FRAMES_RS: &str = r#"//! `realtime-sse`: the broker's frames, written to a browser as server-sent
+//! events.
+//!
+//! The transport is here, in the application, and not in
+//! `brocanth-realtime`, because that crate does not depend on `brocanth`:
+//! nothing in it touches a request, a response or a route. A transport is a
+//! response body, and a body belongs to the crate that owns the routes, which
+//! is this one. `src/pages/realtime/events.rs` is the route.
+//!
+//! # What the stream writes
+//!
+//! ```text
+//! : connected 7              first, so the headers leave at once
+//! event:lagged               first, when a reconnect may have missed frames
+//! id:12 event:posts/* data:  each frame the broker addressed to this client
+//! event:lagged data:3        the mailbox was full and 3 frames were dropped
+//! :                          a heartbeat, after HEARTBEAT with nothing to say
+//! event:close                the server is stopping; the browser reconnects
+//! ```
+//!
+//! `lagged` means "what you show may be stale: fetch it again". It is the
+//! mailbox's `Event::Lagged`, written for the browser.
+//!
+//! # Back-pressure
+//!
+//! The broker never waits for this stream. The mailbox is bounded, and
+//! `[realtime] overflow` says what a full one does. `drop-oldest` and
+//! `drop-newest` drop frames, and the stream writes `lagged`. `disconnect`
+//! closes the mailbox, the stream ends, and the browser reconnects with
+//! `Last-Event-ID` and is told `lagged`.
+//!
+//! # Ending
+//!
+//! * The browser leaves. The server drops this stream, which drops the
+//!   `Client`, which unsubscribes it and closes its mailbox. The server
+//!   learns that a socket is gone only when a write fails, so the heartbeat
+//!   is also what frees a dead subscriber, within one period.
+//! * The server stops. The stream gate calls `finish`. The stream writes the
+//!   frames already queued, then `event:close`, and ends, so a deploy does
+//!   not wait for a subscriber.
+
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use brocanth::plugin_body::{BodyStream, Chunk};
+use brocanth_realtime::{Client, Event};
+use tokio::time::{Instant, Interval, MissedTickBehavior};
+
+/// How long a stream stays silent before it writes a heartbeat.
+///
+/// Shorter than the idle timeout of any proxy in front of this server, and
+/// the longest a dead subscriber holds its mailbox.
+pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// One subscriber's frames, as a response body.
+pub struct Frames {
+    /// The broker's handle for this connection. Dropped with the stream, and
+    /// that drop is the disconnect.
+    client: Client,
+    /// Written before the first frame.
+    preamble: Option<Vec<u8>>,
+    /// What `finish` left to write: the queued frames and `event:close`.
+    tail: Option<Vec<u8>>,
+    ended: bool,
+    /// Built on the first idle poll: a timer needs the runtime, and the
+    /// server's poll is certain to have one.
+    ticker: Option<Interval>,
+}
+
+impl Frames {
+    /// A stream over `client`'s mailbox.
+    ///
+    /// `missed` is true when the browser reconnected and frames were
+    /// published since the last one it read. The broker keeps no history, so
+    /// the stream cannot replay them; it says `lagged` instead.
+    pub fn new(client: Client, missed: bool) -> Self {
+        let mut preamble = format!(": connected {}\n\n", client.id()).into_bytes();
+        if missed {
+            preamble.extend_from_slice(&lagged(None));
+        }
+        Self {
+            client,
+            preamble: Some(preamble),
+            tail: None,
+            ended: false,
+            ticker: None,
+        }
+    }
+}
+
+/// `event:lagged`, with how many frames were dropped when that is known.
+fn lagged(skipped: Option<u64>) -> Vec<u8> {
+    match skipped {
+        Some(n) => format!("event:lagged\ndata:{n}\n\n").into_bytes(),
+        None => b"event:lagged\ndata:\n\n".to_vec(),
+    }
+}
+
+/// What a mailbox event looks like on the wire.
+fn encoded(event: Event) -> Vec<u8> {
+    match event {
+        // Encoded once by the broker and shared by every subscriber.
+        Event::Frame(frame) => frame.bytes().to_vec(),
+        Event::Lagged { skipped } => lagged(Some(skipped)),
+    }
+}
+
+impl BodyStream for Frames {
+    fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Chunk {
+        if let Some(preamble) = self.preamble.take() {
+            return Poll::Ready(Some(Ok(preamble)));
+        }
+        if let Some(tail) = self.tail.take() {
+            self.ended = true;
+            return Poll::Ready(Some(Ok(tail)));
+        }
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        match self.client.mailbox().poll_recv(cx) {
+            Poll::Ready(Some(event)) => {
+                // A frame is traffic, so the next heartbeat is a full
+                // period away.
+                if let Some(ticker) = &mut self.ticker {
+                    ticker.reset();
+                }
+                return Poll::Ready(Some(Ok(encoded(event))));
+            }
+            // This stream holds the client, so only the overflow policy
+            // closes its mailbox: `disconnect` fired. End; the browser comes
+            // back with `Last-Event-ID` and is told `lagged`.
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => {}
+        }
+        let ticker = self.ticker.get_or_insert_with(|| {
+            let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            ticker
+        });
+        match ticker.poll_tick(cx) {
+            Poll::Ready(_) => Poll::Ready(Some(Ok(b":\n\n".to_vec()))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// The server is stopping: write what is queued, then `event:close`.
+    fn finish(&mut self) {
+        let mut tail = Vec::new();
+        for event in self.client.mailbox().drain() {
+            tail.extend(encoded(event));
+        }
+        tail.extend_from_slice(b"event:close\ndata:\n\n");
+        self.tail = Some(tail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth_events::RowChange;
+    use brocanth_realtime::{Broker, Gate, Subscription, Topic};
+
+    use super::*;
+
+    async fn next(frames: &mut Frames) -> Option<String> {
+        let chunk = std::future::poll_fn(|cx| frames.poll_chunk(cx)).await?;
+        Some(String::from_utf8(chunk.expect("no error")).expect("utf-8"))
+    }
+
+    fn subscribed(broker: &std::sync::Arc<Broker>) -> Client {
+        let client = broker.connect().expect("room");
+        client
+            .subscribe(Subscription::new(
+                Topic::collection("posts").expect("a topic"),
+                Gate::everyone(),
+            ))
+            .expect("subscribed");
+        client
+    }
+
+    #[tokio::test]
+    async fn a_published_change_is_written_as_an_event() {
+        let broker = Broker::new();
+        let mut frames = Frames::new(subscribed(&broker), false);
+        assert_eq!(
+            next(&mut frames).await.as_deref(),
+            Some(": connected 1\n\n")
+        );
+
+        broker.publish_change(&RowChange::created("posts", 42i64));
+        let frame = next(&mut frames).await.expect("a frame");
+        assert!(frame.starts_with("id:1\nevent:posts/*\n"), "{frame}");
+        assert!(frame.contains("data:id=42\n"), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_that_missed_frames_is_told_so() {
+        let broker = Broker::new();
+        let mut frames = Frames::new(subscribed(&broker), true);
+        let preamble = next(&mut frames).await.expect("the preamble");
+        assert!(preamble.ends_with("event:lagged\ndata:\n\n"), "{preamble}");
+    }
+
+    #[tokio::test]
+    async fn finish_writes_the_queue_then_close_then_ends() {
+        let broker = Broker::new();
+        let mut frames = Frames::new(subscribed(&broker), false);
+        let _ = next(&mut frames).await;
+        broker.publish_change(&RowChange::deleted("posts", 7i64));
+
+        frames.finish();
+        let tail = next(&mut frames).await.expect("the tail");
+        assert!(tail.contains("data:id=7\n"), "{tail}");
+        assert!(tail.ends_with("event:close\ndata:\n\n"), "{tail}");
+        assert_eq!(next(&mut frames).await, None);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_frees_the_subscriber() {
+        let broker = Broker::new();
+        let frames = Frames::new(subscribed(&broker), false);
+        assert_eq!(broker.clients(), 1);
+        drop(frames);
+        assert_eq!(broker.clients(), 0);
+    }
+}
+"#;
+
+/// `src/pages/realtime/events.rs`: the route, and who may follow what.
+const EVENTS_RS: &str = r#"//! `GET /realtime/events?topics=posts/*,posts/42` -- the broker's frames, as
+//! server-sent events.
+//!
+//! ```js
+//! const events = new EventSource("/realtime/events?topics=posts/*");
+//! events.addEventListener("posts/*", (e) => console.log(e.data));
+//! events.addEventListener("lagged", () => location.reload());
+//! ```
+//!
+//! The topics are in the query because an `EventSource` sends no body and
+//! no headers of its own; the cookie goes with it, so a session reads as on
+//! any other page. Every topic passes `authorise` before it is filed, and
+//! one refusal refuses the request: a stream that quietly follows fewer
+//! topics than it asked for is a bug nobody sees.
+//!
+//! The transport is `crate::plugins::realtime_sse`.
+
+use brocanth_realtime::{Gate, Subscription, Topic};
+
+use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::Broadcast;
+use crate::plugins::realtime_sse::Frames;
+
+/// Collections any visitor may follow: every row, every change.
+///
+/// Empty, so nothing is public until somebody says so here.
+const PUBLIC: &[&str] = &[];
+
+/// Whether this request may follow `topic`, and gated by what.
+///
+/// The one place a topic is authorised, and the place to edit. A public
+/// collection takes `Gate::everyone()`. Rows that a policy decides take the
+/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
+/// with the view rule, and the broker inverts the rule into an index key, so
+/// a write is a map lookup and not a check per subscriber.
+///
+/// ```ignore
+/// let subject = /* who is asking: the session's user id */;
+/// return Ok(Subscription::from_policy(topic, &PostPolicy, &subject));
+/// ```
+fn authorise(_ctx: &Ctx, topic: Topic) -> Result<Subscription, Error> {
+    if PUBLIC.contains(&topic.collection_name()) {
+        return Ok(Subscription::new(topic, Gate::everyone()));
+    }
+    Err(Error::new(
+        403,
+        format!("no rule lets this request follow {topic}; add one to `authorise` in src/pages/realtime/events.rs"),
+    ))
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let mut subscriptions = Vec::new();
+    for topic in topics(&ctx.query)? {
+        subscriptions.push(authorise(ctx, topic)?);
+    }
+    let broker = &ctx
+        .provided::<Broadcast, _>()
+        .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
+        .broker;
+
+    // A browser that reconnects sends the id of the last frame it read. The
+    // broker keeps no history to replay, so the honest answer to "did I miss
+    // anything" is yes whenever a frame was published since.
+    let missed = ctx
+        .header("last-event-id")
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
+
+    // At the cap the broker refuses rather than evicting somebody. The
+    // browser retries on its own; `retry-after` says when.
+    let client = broker
+        .connect()
+        .map_err(|e| Error::new(503, e.to_string()).with_header("retry-after", "5"))?;
+    for subscription in subscriptions {
+        client
+            .subscribe(subscription)
+            .map_err(|e| Error::new(400, e.to_string()))?;
+    }
+    Ok(Response::events(Frames::new(client, missed)))
+}
+
+/// Every `topics=` in the query, split at commas and parsed.
+fn topics(query: &str) -> Result<Vec<Topic>, Error> {
+    let mut out = Vec::new();
+    for pair in query.split('&') {
+        let Some(("topics", value)) = pair.split_once('=') else {
+            continue;
+        };
+        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
+            let topic =
+                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
+            out.push(topic);
+        }
+    }
+    if out.is_empty() {
+        return Err(Error::new(
+            400,
+            "name what to follow: ?topics=posts/* for a collection, posts/42 for a row",
+        ));
+    }
+    Ok(out)
+}
+
+/// A query value with its `%XX` and `+` undone.
+fn decoded(value: &str) -> Result<String, Error> {
+    let bad = || {
+        Error::new(
+            400,
+            format!("the query value {value:?} is not percent-encoded UTF-8"),
+        )
+    };
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
+                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
+                u8::from_str_radix(hex, 16).map_err(|_| bad())?
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::*;
+
+    async fn status(target: &str) -> u16 {
+        let app = crate::app::build().expect("the application builds");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let mut request = Request::new(Verb::Get, path);
+        request.query = query.to_string();
+        crate::app::handle(&app, request).await.status
+    }
+
+    #[test]
+    fn topics_are_read_from_the_query_encoded_or_not() {
+        let read = topics("topics=posts/*,posts%2F42&x=1&topics=users%2F*").expect("three");
+        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["posts/*", "posts/42", "users/*"]);
+        assert!(
+            topics("").is_err(),
+            "no topic is a 400, not a silent stream"
+        );
+        assert!(topics("topics=posts").is_err(), "a topic has a slash");
+    }
+
+    #[tokio::test]
+    async fn a_request_without_topics_is_a_bad_request() {
+        assert_eq!(status("/realtime/events").await, 400);
+    }
+
+    #[tokio::test]
+    async fn a_topic_no_rule_allows_is_refused() {
+        assert_eq!(status("/realtime/events?topics=posts/*").await, 403);
+    }
+}
+"#;
+
+/// The `AGENTS.md` section: publishing, and reading it in a browser.
+const AGENTS: &str = r#"
+## Realtime over server-sent events
+
+`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
+to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
+`src/pages/realtime/events.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+  Nothing is public until it is listed in `PUBLIC` or gated there by a
+  policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Publish from a page after the write, with the row you already hold:
+
+  ```rust
+  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
+  let row = brocanth_realtime::Row::new().with("author_id", author);
+  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
+  ```
+
+- Read it in the browser. The event name is the topic. `lagged` means the
+  view may be stale: fetch it again.
+
+  ```js
+  const events = new EventSource("/realtime/events?topics=posts/*");
+  events.addEventListener("posts/*", (e) => console.log(e.data));
+  events.addEventListener("lagged", () => location.reload());
+  ```
+"#;
 
 /// Websockets, listed and not available.
 ///
@@ -223,22 +656,23 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # Reading
 //!
-//! The broker stops one layer short of the socket. The core can stream a
-//! response body now: a response hook sees the headers of a stream and is
-//! never handed an unfinished body. The transport that writes the broker's
-//! frames to such a body, `realtime-sse`, is not written yet.
+//! The broker stops one layer short of the socket. Four things read a
+//! mailbox:
 //!
-//! Three things read a mailbox today, none of them needing a transport:
-//!
-//! 1. **In process.** `Broker::connect`, one subscription, and a thread on
+//! 1. **A browser, over server-sent events.** The `realtime-sse` module
+//!    writes `GET /realtime/events?topics=posts/*` and the stream behind it
+//!    (`src/plugins/realtime_sse/mod.rs`): one `Client` per connection, a
+//!    heartbeat, `lagged` when frames were dropped, and an end on shutdown.
+//!    `brocanth add realtime-sse` adds it.
+//! 2. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
 //!    transport at all.
-//! 2. **Long polling.** Keep the `Client` in the session; each request calls
+//! 3. **Long polling.** Keep the `Client` in the session; each request calls
 //!    `Mailbox::recv_timeout` for a few seconds, then `Mailbox::drain`, and
 //!    returns the frames as one finished body. Every hook runs exactly as
 //!    specified. It costs a request per interval and a little latency.
-//! 3. **Nothing.** The index costs what it holds, and an application that
+//! 4. **Nothing.** The index costs what it holds, and an application that
 //!    publishes without subscribers pays for a map lookup that finds no one.
 
 use std::sync::Arc;

@@ -604,6 +604,17 @@ impl Broker {
         })
     }
 
+    /// The id of the last frame this broker published, or 0 before the
+    /// first.
+    ///
+    /// A transport compares it with the `Last-Event-ID` a reconnecting
+    /// browser sends: equal means nothing was published in between. The
+    /// broker keeps no history, so a difference cannot be replayed, only
+    /// reported. The ids restart with the process.
+    pub fn last_frame_id(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
     /// How many connections are open.
     pub fn clients(&self) -> usize {
         self.read().clients.len()

@@ -2064,7 +2064,7 @@ request.
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `admin-model`, `realtime`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2127,7 +2127,7 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
 
-<!-- brocanth-digest: f6b359cdb34ac3a0 -->
+<!-- brocanth-digest: 4ea5470cd3ea6613 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
