@@ -22,7 +22,7 @@
 //! And three edits, each made once and only when missing: `rsx` in
 //! `[dependencies]` (an ejected screen is a template the project compiles),
 //! `mod ejected;` in `src/plugins/admin/mod.rs`, and
-//! `let config = ejected::apply(config);` before `Admin::new` in `mount`.
+//! `let config = ejected::apply(config);` before `let admin` in `mount`.
 //!
 //! `ejected.rs` is rebuilt from the `.rsx` files on disk, so the files are
 //! the record of what was ejected. Delete one and run any eject again to
@@ -76,8 +76,10 @@ const PLUGIN: &str = "src/plugins/admin/mod.rs";
 const SCREENS: &str = "src/plugins/admin/screens";
 const WIRING: &str = "src/plugins/admin/ejected.rs";
 
-/// The line in the generated `mount` the install goes in front of.
-const ANCHOR: &str = "let admin = Arc::new(Admin::new(";
+/// The line in the generated `mount` the install goes in front of: the
+/// admin built over an empty source, or the `OverOrm` that builds it over
+/// the ORM.
+const ANCHOR: &str = "let admin = Arc::new(";
 const INSTALL: &str = "let config = ejected::apply(config);";
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: AdminArgs) -> Outcome {

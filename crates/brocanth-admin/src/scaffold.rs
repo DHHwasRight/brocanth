@@ -27,14 +27,15 @@
 //! asserts exactly that, which proves the routes are in the table and that
 //! nothing was opened on the developer's behalf.
 //!
-//! # Why `admin-model` is listed and not available
+//! # `admin-model`: the rows through the ORM
 //!
-//! `brocanth-admin-model` reads rows over a SeaORM `DatabaseConnection`, and
-//! the generated `model` plugin opens none: it publishes a URL and no pool.
-//! It also takes `brocanth-model` with its default driver, which is Postgres,
-//! while the generated config names a SQLite file. A module that wrote
-//! `admin_source!` over that would compile and fail on the first request.
-//! The reason is on its row until the model plugin opens a pool.
+//! `brocanth-admin-model` reads rows over a SeaORM `DatabaseConnection`. The
+//! generated `model` plugin publishes one, `brocanth_model::Orm`, over the
+//! pool the `db` plugin opens. That happens in `before_start`, after the
+//! route table is built, so `mount` cannot build the admin over it. The
+//! generated `OverOrm` builds it on the first request that carries the ORM,
+//! once. The entities are listed in `src/plugins/admin/models.rs`, which
+//! starts empty.
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
@@ -63,6 +64,10 @@ impl Module for Backoffice {
         )
         .adapts_to("middleware-csrf", "every form carries the CSRF token")
         .adapts_to(
+            "admin-model",
+            "the rows are read through the ORM, from `src/plugins/admin/models.rs`",
+        )
+        .adapts_to(
             "commands",
             "the binary gets `admin eject`, which runs `brocanth admin eject` in the project",
         )
@@ -83,9 +88,32 @@ impl Module for Backoffice {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let title = format!("{} admin", project.title);
         let (derive, note) = settings_derive(project, "admin");
+        // With `admin-model`, the rows come through the ORM, which exists
+        // only once the application has started.
+        let over_orm = project.has("admin-model");
+        let pick = |with: &'static str, without: &'static str| {
+            if over_orm {
+                with
+            } else {
+                without
+            }
+        };
         s.file(
             "src/plugins/admin/mod.rs",
             ADMIN_RS
+                .replace("@MODELS_DOC@", pick(MODELS_DOC_ORM, MODELS_DOC))
+                .replace("@MODELS_MOD@", pick("\nmod models;\n", ""))
+                .replace("@HOLD@", pick(HOLD_ORM, HOLD))
+                .replace("@OVER_ORM@", pick(OVER_ORM, ""))
+                .replace("@HELD@", pick("OverOrm", "Admin"))
+                .replace(
+                    "@SYNC@",
+                    pick("Arc, Mutex, OnceLock, PoisonError", "Arc, OnceLock"),
+                )
+                .replace(
+                    "@PICK@",
+                    pick("            let admin = admin.for_request(ctx);\n", ""),
+                )
                 .replace("@TITLE@", &format!("{title:?}"))
                 .replace("@DERIVE@", &derive)
                 .replace("@NOTE@", &note)
@@ -304,7 +332,7 @@ fn settings(title: &str) -> Vec<Setting> {
     ]
 }
 
-/// The admin over SeaORM, listed and not available.
+/// The admin over SeaORM: its rows through the `model` plugin's ORM.
 pub struct BackofficeModels;
 
 impl Module for BackofficeModels {
@@ -321,19 +349,120 @@ impl Module for BackofficeModels {
             "model",
             "it reads rows through the ORM, and without `model` there is none",
         )
-        .blocked("the generated model plugin opens no pool, so there is no connection to read")
+        .krate(Dep::brocanth("brocanth-admin-model"))
+        .absent(
+            "brocanth-admin-model",
+            "the admin reads no table; its data source is an empty fixture",
+        )
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        // Never reached while the CLI honours `Manifest::blocked`.
-        s.refuse(
-            "admin-model cannot be scaffolded: `brocanth_admin_model::admin_source!` takes a \
-             SeaORM `DatabaseConnection`, and the generated `model` plugin opens none. Write \
-             the source by hand over your own connection and pass it to `Admin::new` in \
-             `src/plugins/admin/mod.rs`",
-        );
+        // The list of entities. `src/plugins/admin/mod.rs` builds the admin
+        // over it, with the ORM the `model` plugin publishes.
+        s.file("src/plugins/admin/models.rs", MODELS_RS.to_string());
     }
 }
+
+/// `src/plugins/admin/models.rs`: the entities the admin shows.
+const MODELS_RS: &str = r#"//! The models the admin shows: one line per entity.
+//!
+//! This file is yours. A model is in the admin when it is listed here, and
+//! not because it compiled: a screen with a delete button on it shows what
+//! somebody chose. Each line is the module path SeaORM's registry reports,
+//! and the entity:
+//!
+//! ```ignore
+//! "my_app::models::post" => crate::models::post::Entity,
+//! ```
+//!
+//! A listed model still answers 403 until it has a row policy:
+//! `AdminConfig::resource(..)` in `mount`.
+
+brocanth_admin_model::admin_source! {
+    /// Every model this admin shows, over the ORM's connection.
+    pub struct Models;
+}
+"#;
+
+/// The doc paragraph without `admin-model`.
+const MODELS_DOC: &str = "\
+//! It has no models yet. A model needs a data source that reads its rows and
+//! a row policy: `AdminConfig::resource(..)`, one per model. A model with no
+//! resource answers 403 on every screen. `brocanth_admin::rows` has the
+//! worked example, and `brocanth-admin-model` is the data source over
+//! SeaORM.";
+
+/// The doc paragraph with `admin-model`.
+const MODELS_DOC_ORM: &str = "\
+//! It reads rows through the ORM the `model` plugin publishes. A model is in
+//! the admin when `models.rs` lists it, and it needs a row policy:
+//! `AdminConfig::resource(..)`, one per model. A model with no resource
+//! answers 403 on every screen. `brocanth_admin::rows` has the worked
+//! example.";
+
+/// The admin `mount` builds, over an empty source.
+const HOLD: &str = r#"    let admin = Arc::new(Admin::new(
+        // An empty in-memory source: no models, so no rows to read. Put
+        // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
+        // over your database connection.
+        Arc::new(Fixture::new()),
+        config,
+    ));
+"#;
+
+/// What `mount` holds with `admin-model`: the admin, built later.
+const HOLD_ORM: &str = r#"    // Built by the first request, over the ORM: see `OverOrm`.
+    let admin = Arc::new(OverOrm::new(config));
+"#;
+
+/// The admin over the ORM, built on the first request.
+const OVER_ORM: &str = r#"
+/// The admin over the ORM, built once, by the first request.
+///
+/// `mount` runs when the route table is built, and the plugins start after
+/// that: the `db` plugin opens the pool in `before_start`, and the `model`
+/// plugin wraps it. So the admin cannot be built in `mount`. The first
+/// request after the start carries the ORM on its context, and the admin is
+/// built from it then. A row policy for a model that is not listed therefore
+/// panics on that first request, not at startup.
+///
+/// One per route table. The table `src/app.rs` builds only ever sees a
+/// request the application dispatched. A table a test builds sees a `Ctx`
+/// built by hand, which has no ORM: that admin is built over an empty
+/// source, with the same configuration, and shows no rows.
+struct OverOrm {
+    config: Mutex<Option<AdminConfig>>,
+    built: OnceLock<Arc<Admin>>,
+}
+
+impl OverOrm {
+    fn new(config: AdminConfig) -> Self {
+        Self {
+            config: Mutex::new(Some(config)),
+            built: OnceLock::new(),
+        }
+    }
+
+    /// The admin, built by the first request that asks.
+    fn for_request(&self, ctx: &Ctx) -> Arc<Admin> {
+        Arc::clone(self.built.get_or_init(|| {
+            let config = self
+                .config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("the admin is built once");
+            match ctx.provided::<brocanth_model::Orm, _>() {
+                Some(orm) => Arc::new(Admin::new(
+                    Arc::new(models::Models::new(orm.connection().clone())),
+                    config,
+                )),
+                None => Arc::new(Admin::new(Arc::new(Fixture::new()), config)),
+            }
+        }))
+    }
+}
+"#;
 
 /// `src/plugins/admin/mod.rs`. `@TITLE@` is the quoted title.
 const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
@@ -347,17 +476,13 @@ const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
 //! 2. **Who is asking.** [`principal`] returns an anonymous principal until
 //!    it reads your user off the request.
 //!
-//! It has no models yet. A model needs a data source that reads its rows and
-//! a row policy: `AdminConfig::resource(..)`, one per model. A model with no
-//! resource answers 403 on every screen. `brocanth_admin::rows` has the
-//! worked example, and `brocanth-admin-model` is the data source over
-//! SeaORM.
+@MODELS_DOC@
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
 //! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
 //! therefore a build error, not a race.
-
-use std::sync::{Arc, OnceLock};
+@MODELS_MOD@
+use std::sync::{@SYNC@};
 
 use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
@@ -442,31 +567,24 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-    let admin = Arc::new(Admin::new(
-        // An empty in-memory source: no models, so no rows to read. Put
-        // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
-        // over your database connection.
-        Arc::new(Fixture::new()),
-        config,
-    ));
-    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
         routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
         routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
     }
     Ok(())
 }
-
+@OVER_ORM@
 /// One handler for every screen. The admin reads the path and decides.
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<@HELD@>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
         Box::pin(async move {
             let ctx = &*ctx;
-            // HEAD reaches the GET handler, and the admin knows two verbs.
+@PICK@            // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
                 _ => "GET",

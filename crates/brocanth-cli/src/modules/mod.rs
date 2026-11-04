@@ -124,8 +124,8 @@ pub const ALL: &[&dyn Module] = &[
     // and a new project has none to name.
     &brocanth_resource::scaffold::Records,
     // The backoffice, mounted at `/admin` through `Slot::RouterMounts` and
-    // locked until the application says who may in. Its SeaORM source is
-    // listed and not available: the generated model plugin opens no pool.
+    // locked until the application says who may in. Its SeaORM source
+    // reads rows through the ORM the model plugin builds on the `db` pool.
     &brocanth_admin::scaffold::Backoffice,
     &brocanth_admin::scaffold::BackofficeModels,
     // The broker, and no transport: see its own module documentation for
