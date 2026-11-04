@@ -179,7 +179,12 @@ impl Plugin for Cache {{
                 let key = brocanth_cache::Namespace::new("brocanth.readyz")
                     .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
                     .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| e.to_string())
+                probe.get(&key).await.map(drop).map_err(|e| {{
+                    format!(
+                        "{{e}}\nhelp: check `[cache] url`, and that the `brocanth_cache` table \
+                         exists: `PgCache::schema_sql()` has the statements for a migration"
+                    )
+                }})
             }}
         }});
         self.handle = Some(CacheHandle::new(cache));
