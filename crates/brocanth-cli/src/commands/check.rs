@@ -13,6 +13,7 @@
 //! | Id | Severity | When |
 //! |---|---|---|
 //! | `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` |
+//! | `check/recommended` | warning | a module in `brocanth.toml` recommends one that is not there |
 //! | `deploy/env` | warning | `--deploy` on `development` or `test` |
 //! | `deploy/no-config` | warning | no file and no variable configures this environment |
 //! | `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |
@@ -230,6 +231,17 @@ fn get<'a>(config: &'a Config, path: &str) -> Option<&'a Value> {
 /// The checks that hold in every environment.
 pub fn always(project: &Project, config: &Config) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // What the modules recommend and the project lacks. A warning and never
+    // an error: the project builds and runs without it, and leaving it out
+    // is the person's call. `--allow check/recommended` records that call.
+    let modules: Vec<&str> = project.modules.iter().map(String::as_str).collect();
+    for wanted in crate::questions::wanted(&modules) {
+        out.push(
+            wanted
+                .diagnostic("check/recommended", &modules)
+                .at("brocanth.toml"),
+        );
+    }
     if let (Some(url), Some(dialect)) = (get(config, "db.url"), get(config, "policy.dialect")) {
         let backend = url.as_str().and_then(backend_of);
         let said = dialect.as_str().unwrap_or_default();
@@ -678,6 +690,24 @@ secret = "development only: replace before anything is uploaded in anger"
                 d.render()
             );
         }
+    }
+
+    #[test]
+    fn a_recommended_module_that_is_absent_is_a_warning_with_the_command_to_add_it() {
+        let config = Config::from_toml("shop", "development", "").unwrap();
+        let found = always(&project(&["config", "db", "docker"]), &config);
+        let ids = ids(&found);
+        assert_eq!(ids, ["check/recommended", "check/recommended"]);
+        assert!(found.iter().all(|d| d.severity == Severity::Warning));
+        let said: String = found.iter().map(Diagnostic::render).collect();
+        assert!(said.contains("observability-logs"), "{said}");
+        assert!(
+            said.contains("brocanth add observability observability-health"),
+            "{said}"
+        );
+
+        let full = project(&["db", "observability", "observability-health"]);
+        assert!(always(&full, &config).is_empty());
     }
 
     #[test]

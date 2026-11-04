@@ -82,6 +82,16 @@ pub struct CreateArgs {
     /// Write into a directory that already exists
     #[arg(long)]
     pub force: bool,
+    /// Print the chooser's questions, options and defaults, and create nothing
+    ///
+    /// The same questions the chooser asks, read from the same manifests,
+    /// with each module's needs, conflicts and recommendations. An agent
+    /// puts these to the person before it runs `create --with`.
+    #[arg(long, conflicts_with_all = ["name", "with", "core_only"])]
+    pub questions: bool,
+    /// With --questions: print JSON instead of text
+    #[arg(long, requires = "questions")]
+    pub json: bool,
 }
 
 /// Every module this CLI has, as clap's possible values.
@@ -128,7 +138,7 @@ pub fn offered() -> clap::builder::PossibleValuesParser {
 /// request log a machine reads, a probe that tells ready from alive, and
 /// counters. Traces wait for a collector. The image and the checks on every
 /// push come too, each a choice the wizard can untick.
-const DEFAULT: [&str; 11] = [
+pub const DEFAULT: [&str; 11] = [
     "observability",
     "observability-logs",
     "observability-health",
@@ -255,6 +265,12 @@ impl Answers {
 }
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
+    if args.questions {
+        crate::questions::print(ui, args.json, &DEFAULT, None);
+        return Ok(ExitCode::SUCCESS);
+    }
+    // A name on the command line means nobody was asked: see `ask`.
+    let driven = args.name.is_some();
     let answers = ask(ui, &args)?;
     // `-C` is where to create it. Everywhere else it means "the package root",
     // and here there is no package yet, so it is the directory to put one in.
@@ -336,6 +352,13 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
         ]);
     }
     ui.table_note(&contents);
+
+    // The chooser put every question to a person. A run driven by flags
+    // asked nobody, so what the chosen modules recommend is said here,
+    // where the agent that typed the flags reads it.
+    if driven {
+        crate::questions::warn_wanted(ui, &answers.picks);
+    }
 
     ui.gap();
     ui.done(format!(
@@ -1204,8 +1227,10 @@ fn agents_md(a: &Answers) -> String {
     let commands = if a.has("commands") {
         let mut out = String::from(
             "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
-             `src/commands/`, plus a `mod` line. It becomes a subcommand automatically —\n\
-             registration happens at link time and there is no list to add it to.\n\n\
+             `src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,\n\
+             below the line that starts `// Your commands`. `brocanth add` rewrites the\n\
+             lines above it and keeps yours. The command becomes a subcommand\n\
+             automatically — registration happens at link time.\n\n\
              ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n",
         );
         if a.has("rsx-tailwind") {
@@ -1223,6 +1248,29 @@ fn agents_md(a: &Answers) -> String {
     } else {
         String::new()
     };
+
+    // The modules are the person's decisions. An agent that adds one in
+    // silence made a choice that was not its own, so the brief says so,
+    // and lists what the modules here recommend and the project lacks.
+    let mut decisions = String::from(
+        "\n## Decisions that belong to the person\n\n\
+         The modules in this project are the person's choice. Do not add or\n\
+         remove one on your own. Before you run `brocanth add`, show the person\n\
+         the question: `brocanth add --questions` lists each module with its\n\
+         default, what it needs and what it recommends. Give your\n\
+         recommendation, and wait for the answer.\n",
+    );
+    let wanted = crate::questions::wanted(&a.picks);
+    if !wanted.is_empty() {
+        decisions.push_str(
+            "\nNot chosen, and recommended by a module that is here. Ask about each:\n\n",
+        );
+        for w in &wanted {
+            for (by, why) in &w.by {
+                decisions.push_str(&format!("- `{}`, for `{by}`: {why}\n", w.key));
+            }
+        }
+    }
 
     format!(
         "# Working in {name}\n\
@@ -1285,6 +1333,7 @@ fn agents_md(a: &Answers) -> String {
          unlikely.\n\
          {views}\
          {commands}\
+         {decisions}\
          \n\
          ## House style\n\
          \n\
@@ -1310,6 +1359,7 @@ fn agents_md(a: &Answers) -> String {
         absent = absent,
         views = views,
         commands = commands,
+        decisions = decisions,
     )
 }
 
@@ -6084,6 +6134,8 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
             git: false,
             no_git: true,
             force: false,
+            questions: false,
+            json: false,
         };
         assert_eq!(picked(&args), vec!["rsx"]);
     }
