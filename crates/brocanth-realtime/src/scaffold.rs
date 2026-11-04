@@ -67,10 +67,8 @@ impl Module for Realtime {
         // its first build is a bad first minute.
         s.at(Slot::AppContext).block(
             "    let realtime: &crate::plugins::realtime::Broadcast = cx.extract();\n\
-            \x20   eprintln!(\n\
-            \x20       \"realtime: up to {} clients\",\n\
-            \x20       realtime.broker.config().max_clients\n\
-            \x20   );"
+            \x20   let max_clients = realtime.broker.config().max_clients;\n\
+            \x20   crate::plugins::say!(info, \"realtime: up to {max_clients} clients\"; max_clients);"
                 .to_string(),
         );
         if !project.has("config") {
