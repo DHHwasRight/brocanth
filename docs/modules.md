@@ -212,8 +212,10 @@ claim is a `BuildError` at startup. `dispatch` consults that one table.
 `RouteSource` plus `App::mount_routes::<T>("/admin")` is the core's other
 bundle seam, and a generated project does not use it. Its handlers are
 async, take a `RouteCx` over a `Context<E>`, and answer an
-`http::Response`; a generated table holds the project's own synchronous
-`Handler`, and the generated `Ctx` does not lend out its context.
+`http::Response`; a generated table holds the project's own `Handler`
+over its own `Ctx`, and the generated `Ctx` does not lend out its context.
+Both kinds are async now, so the wall is the context and the response
+type, not the handler's kind.
 `brocanth-resource` measured those walls (`c50fc1e`) and answered with a
 page-shaped `pages::mount`. The admin answers the same way, with the
 adapter written into the project: `src/plugins/admin/mod.rs` registers

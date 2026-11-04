@@ -175,6 +175,42 @@ The verb comes off the handler's name — `handle` is GET, then `handle_head`,
 handle_*` outside that list is a build error naming the list; a page with no
 handler is a build error; a private `fn handle_*` is a helper.
 
+**A handler may be `async`.** `pub fn handle` and `pub async fn handle` are
+both handlers, and so are the other verbs; `pages!` reads `async` off the
+signature and awaits that one. Write `async` when the page waits on
+something — a database, another service — so the wait holds no thread:
+
+```rust
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    // `ctx.db()` is the shape `brocanth-db` will give; any future works.
+    let rows = ctx.db().json(query).await?;
+    Ok(render(rows))
+}
+```
+
+A page that waits on nothing stays a plain `fn`. Both kinds share one
+table, one `Handler` type and one middleware chain. The future must be
+`Send`: do not hold an `Rc`, a `RefCell` borrow or a non-`Send` cursor
+across an `.await`. The compiler error points at the `Box::pin` in the
+`pages!` expansion, not at the value.
+
+**An async handler can be cancelled at any `.await`.** A future is
+droppable, so a client that disconnects can abandon the page mid-request,
+and the code after that `.await` never runs. A sync handler could not be
+stopped; an async one can. So do not leave state half-written across an
+`.await` unless it is correct to stop there. The hard case is cleanup that
+is itself a future: a transaction whose rollback is async does not roll
+back when its future is dropped. Commit or roll back before the next
+unrelated `.await`, or make the cleanup synchronous (`Drop`). A panic in an
+async handler is the same case: a cancellation at the last `.await`, plus
+an unwind. `docs/async-handlers.md` §13.7 has the argument.
+
+**A middleware layer is async too.** A generated project mounts its layers
+on an `AsyncMiddlewareStack`. A layer is a function with a named lifetime.
+It lends the context to the rest of the chain with `next.run(&mut *ctx)`
+and has it back after the `.await`. `src/plugins/logging/mod.rs`, when that
+module is chosen, is the example to copy.
+
 **A command is a struct.** `#[cmd]` on a `clap::Args` struct makes it a
 subcommand of the project's own binary, registered at link time. There is
 no list to add it to.
