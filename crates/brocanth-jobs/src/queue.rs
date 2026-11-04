@@ -126,6 +126,18 @@ impl Queue {
         Ok(Self::from_pool(backend))
     }
 
+    /// Builds a queue from a database URL and opens no connection. The first
+    /// statement opens one.
+    ///
+    /// For a synchronous stage, which must not wait for I/O: a plugin calls
+    /// this in `before_start`, and runs [`Queue::migrate`] and its first
+    /// check later, from async code. The pool spawns its upkeep task, so call
+    /// it inside a Tokio runtime. The backends and their settings are those
+    /// of [`Queue::connect`].
+    pub fn connect_lazy(url: &str) -> Result<Self> {
+        Ok(Self::from_pool(lazy_backend(url)?))
+    }
+
     /// Builds a queue on a pool the application already has.
     ///
     /// This is the path for an application that also uses `brocanth-model`:
@@ -782,11 +794,25 @@ impl<J: Job> Recurring<'_, J> {
 // ---------------------------------------------------------------------------
 
 async fn connect_backend(url: &str) -> Result<Backend> {
+    let backend = lazy_backend(url)?;
+    // One connection now, so a wrong URL or password fails here and not on
+    // the first enqueue.
+    match &backend {
+        #[cfg(feature = "postgres")]
+        Backend::Postgres(pool) => drop(pool.acquire().await?),
+        #[cfg(feature = "sqlite")]
+        Backend::Sqlite(pool) => drop(pool.acquire().await?),
+    }
+    Ok(backend)
+}
+
+/// The pool for `url`, with no connection open yet.
+fn lazy_backend(url: &str) -> Result<Backend> {
     let scheme = url.split(':').next().unwrap_or("");
     match scheme {
         #[cfg(feature = "postgres")]
         "postgres" | "postgresql" => Ok(Backend::Postgres(
-            sqlx::postgres::PgPoolOptions::new().connect(url).await?,
+            sqlx::postgres::PgPoolOptions::new().connect_lazy(url)?,
         )),
         #[cfg(not(feature = "postgres"))]
         "postgres" | "postgresql" => Err(Error::Backend(
@@ -808,7 +834,7 @@ async fn connect_backend(url: &str) -> Result<Backend> {
                 .busy_timeout(Duration::from_secs(5))
                 .foreign_keys(true);
             Ok(Backend::Sqlite(
-                SqlitePoolOptions::new().connect_with(options).await?,
+                SqlitePoolOptions::new().connect_lazy_with(options),
             ))
         }
         #[cfg(not(feature = "sqlite"))]

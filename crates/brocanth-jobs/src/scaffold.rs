@@ -1,8 +1,9 @@
 //! `jobs` -- what `brocanth create` writes when somebody asks for a queue.
 //!
 //! The module is here rather than in the CLI because everything it writes is
-//! a statement about this crate: that [`Queue::connect`](crate::Queue) is
-//! async while `Plugin::new` is not, that a worker needs a registry of job
+//! a statement about this crate: that a pool opens asynchronously while the
+//! lifecycle stages are not, so [`Queue::connect_lazy`](crate::Queue) builds
+//! it and the readiness check migrates and checks it, that a worker needs a registry of job
 //! types the project owns, that [`JobsConfig`](crate::JobsConfig) holds a
 //! live queue and therefore cannot be read out of a TOML file. Those move
 //! when this crate moves.
@@ -14,8 +15,8 @@
 //! `Plugin::new` is not. That is right for an application that builds its
 //! queue in `main` -- a shared pool, a second database, a worker process
 //! with no web server. A new project has one URL in a config file, so the
-//! generated plugin takes the URL, opens the pool at `before_start`, starts
-//! the worker and publishes the same `Queue`. Swapping to `JobsPlugin` is a
+//! generated plugin takes the URL, builds the pool at `before_start`, starts
+//! the worker at `start` and publishes the same `Queue`. Swapping to `JobsPlugin` is a
 //! change in one generated file.
 //!
 //! # Why it does not need `model`
@@ -175,6 +176,8 @@ fn plugin_rs(project: &Project) -> String {
 //! shared pool or a worker-only process wants. This one takes a URL, because
 //! a new project has a URL.
 
+use std::sync::Arc;
+
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};
 use brocanth_jobs::{{Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle}};
@@ -288,56 +291,39 @@ impl Plugin for Jobs {{
     }}
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        // The lifecycle hooks are synchronous and opening a pool is not. A
-        // server process has a runtime, `block_in_place` is wrong on a
-        // current-thread one, so take the handle and block the builder on a
-        // scoped thread. This is startup, where blocking is expected.
+        // The lifecycle hooks are synchronous and opening a pool is not, so
+        // the pool opens lazily and nothing here waits. Waiting would hang a
+        // current-thread runtime, where this thread drives the I/O. The pool
+        // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {{
             PluginError::new(format!(
                 "[jobs] needs a Tokio runtime at startup to open its pool ({{e}})"
             ))
         }})?;
-
-        let url = self.settings.url.clone();
-        let migrate = self.settings.migrate;
-        let queue = std::thread::scope(|scope| {{
-            scope
-                .spawn(|| {{
-                    runtime.block_on(async move {{
-                        let queue = Queue::connect(&url).await?;
-                        if migrate {{
-                            queue.migrate().await?;
-                        }}
-                        Ok::<_, brocanth_jobs::Error>(queue)
-                    }})
-                }})
-                .join()
-                .map_err(|_| PluginError::new("the jobs connection thread panicked"))?
-                .map_err(|e| PluginError::new(format!("[jobs] connecting: {{e}}")))
-        }})?;
-
-        if self.settings.worker {{
-            // `enter` so that `start` finds the runtime to spawn on. The
-            // worker is woken by the enqueue itself on Postgres rather than
-            // polling; see `brocanth_jobs::listen`.
-            let _guard = runtime.enter();
-            self.worker = Some(
-                Worker::builder(&queue)
-                    .registry(registry())
-                    .queues(self.settings.queues.clone())
-                    .concurrency(self.settings.concurrency)
-                    .start()
-                    .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {{e}}")))?,
-            );
-        }}
+        let queue = {{
+            let _entered = runtime.enter();
+            Queue::connect_lazy(&self.settings.url)
+                .map_err(|e| PluginError::new(format!("[jobs] {{e}}")))?
+        }};
 
         // Ready when the jobs table answers, as `JobsPlugin` does: a lookup
         // by primary key, so a probe costs one index read however long the
-        // queue is.
+        // queue is. With `migrate`, the first check creates the tables, and
+        // the first check is the one `serve` awaits before it listens: an
+        // unreachable database stops the start there.
         let probe = queue.clone();
+        let migrate = self.settings.migrate;
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {{
             let probe = probe.clone();
+            let migrated = Arc::clone(&migrated);
             async move {{
+                if migrate {{
+                    migrated
+                        .get_or_try_init(|| probe.migrate())
+                        .await
+                        .map_err(|e| format!("creating the jobs tables: {{e}}"))?;
+                }}
                 probe
                     .inspect(brocanth_jobs::JobId(0))
                     .await
@@ -347,6 +333,26 @@ impl Plugin for Jobs {{
         }});
 
         self.queue = Some(queue);
+        Ok(())
+    }}
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        // Here and not in `before_start`: `serve` runs this after its
+        // startup gate, so the tables exist, and inside the runtime, so the
+        // worker has somewhere to spawn. A build that never serves -- a test,
+        // a command -- starts no worker. The worker is woken by the enqueue
+        // itself on Postgres rather than polling; see `brocanth_jobs::listen`.
+        let (Some(queue), true) = (&self.queue, self.settings.worker) else {{
+            return Ok(());
+        }};
+        self.worker = Some(
+            Worker::builder(queue)
+                .registry(registry())
+                .queues(self.settings.queues.clone())
+                .concurrency(self.settings.concurrency)
+                .start()
+                .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {{e}}")))?,
+        );
         Ok(())
     }}
 
