@@ -49,7 +49,8 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Poll, Waker};
 
 use crate::plugin_routes::BoxFuture;
 
@@ -134,6 +135,8 @@ impl fmt::Debug for Check {
 struct Inner {
     checks: RwLock<Vec<Check>>,
     draining: AtomicBool,
+    /// Who awaits [`Readiness::draining`]. Woken once, by `drain`.
+    waiting: Mutex<Vec<Waker>>,
 }
 
 /// The application's readiness checks, and the bit that shutdown flips.
@@ -214,6 +217,47 @@ impl Readiness {
     /// calls it before `begin_shutdown`.
     pub fn drain(&self) {
         self.inner.draining.store(true, Ordering::SeqCst);
+        let waiting = std::mem::take(
+            &mut *self
+                .inner
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for waker in waiting {
+            waker.wake();
+        }
+    }
+
+    /// Resolves when [`Readiness::drain`] is called, or at once if it was.
+    ///
+    /// For a plugin that must stop taking work the moment the process
+    /// begins to stop, before its own `begin_shutdown` runs: a job worker
+    /// stops claiming here, while the listener still drains. The generated
+    /// `serve` calls `drain` as soon as SIGTERM arrives.
+    ///
+    /// A future and no runtime: the waker of whoever polls it is kept and
+    /// woken by `drain`.
+    pub fn draining(&self) -> BoxFuture<'static, ()> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(std::future::poll_fn(move |cx| {
+            if inner.draining.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            let mut waiting = inner
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Again under the lock: `drain` sets the bit before it takes
+            // the lock, so a waker pushed here is always woken.
+            if inner.draining.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            if !waiting.iter().any(|w| w.will_wake(cx.waker())) {
+                waiting.push(cx.waker().clone());
+            }
+            Poll::Pending
+        }))
     }
 
     /// Whether [`Readiness::drain`] was called.
@@ -286,7 +330,40 @@ mod tests {
             failed.to_string(),
             "[db] the server refused the password\nhelp: check the URL"
         );
-        assert_eq!(after.load(Ordering::SeqCst), 0, "the gate stops at the first failure");
+        assert_eq!(
+            after.load(Ordering::SeqCst),
+            0,
+            "the gate stops at the first failure"
+        );
+    }
+
+    #[test]
+    fn draining_resolves_when_drain_is_called() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::Wake;
+
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let readiness = Readiness::new();
+        let woken = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut cx = Context::from_waker(&waker);
+        let mut waiting = readiness.draining();
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+
+        readiness.clone().drain();
+        assert_eq!(woken.0.load(Ordering::SeqCst), 1, "drain wakes the waiter");
+        assert!(waiting.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(
+            ready_now(readiness.draining()),
+            (),
+            "and later ones at once"
+        );
     }
 
     #[test]
