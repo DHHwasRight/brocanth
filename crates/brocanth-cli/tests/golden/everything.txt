@@ -28,7 +28,7 @@ brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
-brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "i18n"] }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
@@ -40,11 +40,15 @@ brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
+
+[build-dependencies]
+brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 ===== .gitignore =====
 /target
 /var/uploads
@@ -1840,6 +1844,7 @@ pub mod admin;
 pub mod auth;
 pub mod cache;
 pub mod db;
+pub mod i18n;
 pub mod jobs;
 pub mod model;
 pub mod observability;
@@ -1949,11 +1954,25 @@ macro_rules! register {
         // /admin never gets the tag. Off until production turns it on:
         // `enabled = true` and `measurement_id` under
         // [gtag] in config/production.toml.
+        //
+        // The banner's words are the [gtag.banner] keys of
+        // locales/*.toml, in the request's locale. The
+        // `banner.*` settings are the fallback.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_gtag::Gtag>("gtag")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-i18n: a locale per request --------------------------
+        //
+        // Reads `?locale=`, then the `locale` cookie, then Accept-Language,
+        // and gives the page the locale (`i18n::locale(ctx)`). Says
+        // Content-Language and Vary on the way out. The default locale and
+        // the offered ones are settings, under [i18n] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<crate::plugins::i18n::I18n>("i18n")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
@@ -2076,7 +2095,8 @@ pub(crate) use register;
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithGtag = After<brocanth_gtag::Gtag, WithSessions>;
 type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
-type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
+type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
+type WithObservability = After<crate::plugins::observability::Observe, WithI18n>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
@@ -2095,7 +2115,8 @@ type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>
 pub type Installed = WithMiddlewareRateLimit;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedGtag>;
+type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
 type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
 type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
@@ -2331,6 +2352,13 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "gtag.banner.policy",
+        help: "The text of that link.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "admin.title",
         help: "The end of every <title>, and the header and index heading unless set.",
         flag: true,
@@ -2364,6 +2392,34 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "i18n.query",
+        help: "The query parameter that names a locale: `?locale=fr`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.cookie",
+        help: "The cookie that names a locale. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.default",
+        help: "The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.remember",
+        help: "A `?locale=` choice sets the cookie, so the next page keeps it.",
+        flag: true,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "observability.format",
@@ -3062,6 +3118,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
     let gtag = brocanth_gtag::GtagConfig::default();
     let admin = crate::plugins::admin::Settings::default();
+    let i18n = brocanth_i18n::NegotiatorConfig::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
@@ -3097,11 +3154,16 @@ fn defaults() -> Vec<(&'static str, String)> {
             "gtag.banner.policy_url",
             format!("{:?}", gtag.banner.policy_url),
         ),
+        ("gtag.banner.policy", format!("{:?}", gtag.banner.policy)),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
         ("admin.site_url", format!("{:?}", admin.site_url)),
         ("admin.stylesheet", format!("{:?}", admin.stylesheet)),
+        ("i18n.query", format!("{:?}", i18n.query)),
+        ("i18n.cookie", format!("{:?}", i18n.cookie)),
+        ("i18n.default", format!("{:?}", i18n.default)),
+        ("i18n.remember", format!("{:?}", i18n.remember)),
         (
             "observability.format",
             format!("{:?}", observability.format),
@@ -3387,7 +3449,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4119a3f3ad59191c
+// brocanth-digest: 20f6f4d937759538
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3479,6 +3541,8 @@ refuse = "Refuse"
 manage = "Cookie settings"
 # A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
 # policy_url = ""
+# The text of that link.
+policy = "Privacy policy"
 
 [admin]
 # The end of every <title>, and the header and index heading unless set.
@@ -3491,6 +3555,20 @@ title = "My Blog admin"
 # site_url = "/"
 # A stylesheet every screen links after the shipped one: the theme. Empty means none.
 # stylesheet = "/admin-theme.css"
+
+[i18n]
+# The query parameter that names a locale: `?locale=fr`. Empty means none.
+# query = "locale"
+# The cookie that names a locale. Empty means none.
+# cookie = "locale"
+# The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.
+# A static export sends no Accept-Language, so this is the language of every exported page.
+# default = ""
+# The locales a request may get, by tag. Empty: every file in locales/.
+# A catalog left out still compiles, so a translation in progress ships unseen.
+available = []
+# A `?locale=` choice sets the cookie, so the next page keeps it.
+remember = true
 
 [observability]
 # json or text. Empty: json in production, text elsewhere.
@@ -3995,6 +4073,17 @@ CMD ["/app/my-blog", "serve"]
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
+===== build.rs =====
+//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
+//! which `src/plugins/i18n/mod.rs` includes.
+//!
+//! The second argument is the default catalog: every other one is checked
+//! against it, and a key it lacks is a build error. A key a translation
+//! lacks is a warning, and that locale shows the default's text.
+
+fn main() {
+    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
+}
 ===== deploy/kubernetes.yaml =====
 # A minimal deployment of this image. Change the image, the replica count
 # and the secrets; keep the probes and the timings in step.
@@ -4059,6 +4148,49 @@ spec:
     - name: http
       port: 80
       targetPort: http
+===== locales/en.toml =====
+# The default catalog. Every key is here; `build.rs` names this file.
+#
+# A key is a function: `welcome` is `t::welcome(locale)`. `{name}` is an
+# argument, and a table with `one` and `other` is a plural. A misspelt key
+# or a missing argument is a compile error at the call. See the
+# `brocanth-i18n` README.
+
+welcome = "Welcome"
+greeting = "Hello, {name}!"
+
+[items]
+"=0" = "No items"
+one = "{count} item"
+other = "{count} items"
+
+# The consent banner of the `gtag` module. Its hook reads these keys in the
+# request's locale. A key left out of every catalog falls back to the
+# `[gtag.banner]` setting.
+[gtag.banner]
+text = "We would like to measure visits with Google Analytics. It sets cookies only if you accept."
+accept = "Accept"
+refuse = "Refuse"
+manage = "Cookie settings"
+policy = "Privacy policy"
+===== locales/fr.toml =====
+# French. A key left out here shows the English text, and the build
+# says which.
+
+welcome = "Bienvenue"
+greeting = "Bonjour, {name} !"
+
+[items]
+"=0" = "Aucun article"
+one = "{count} article"
+other = "{count} articles"
+
+[gtag.banner]
+text = "Nous aimerions mesurer les visites avec Google Analytics. Il ne dépose de cookies que si vous acceptez."
+accept = "Accepter"
+refuse = "Refuser"
+manage = "Gérer les cookies"
+policy = "Politique de confidentialité"
 ===== migrations/mod.rs =====
 //! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
 //! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
@@ -6296,6 +6428,89 @@ impl Plugin for Database {
         }
     }
 }
+===== src/plugins/i18n/mod.rs =====
+//! Written by `brocanth`. The catalogs in `locales/`, compiled by
+//! `build.rs`, and the locale of a request.
+//!
+//! A page reads the locale and calls a key:
+//!
+//! ```ignore
+//! use crate::plugins::i18n::{self, t};
+//!
+//! let locale = i18n::locale(ctx);
+//! let title = t::welcome(locale);
+//! ```
+
+use brocanth_i18n::{Locales, Negotiated};
+
+use crate::pages::Ctx;
+
+// A key that no code calls yet is not a warning: a new project calls
+// none. Remove the `allow` lines here to find what nothing uses.
+#[allow(dead_code)]
+mod catalog {
+    include!(concat!(env!("OUT_DIR"), "/i18n.rs"));
+}
+
+#[allow(unused_imports)]
+pub use catalog::t;
+pub use catalog::Locale;
+
+/// The plugin `src/plugins/mod.rs` registers. It negotiates in a request
+/// hook, before the page runs.
+pub type I18n = brocanth_i18n::I18nHook<Locale>;
+
+/// The locale the `i18n` hook chose for this request.
+///
+/// The hook reads `?locale=`, then the cookie, then `Accept-Language`,
+/// then the `default` setting. The fallback here is only for a context
+/// the hook did not see, such as a test that builds a `Ctx` by hand.
+#[allow(dead_code)]
+pub fn locale(ctx: &Ctx) -> Locale {
+    ctx.hooked::<Negotiated<Locale>>()
+        .map_or(Locale::DEFAULT, |negotiated| negotiated.locale)
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::{t, Locale};
+
+    async fn get(request: Request) -> brocanth_server::Response {
+        let app = crate::app::build().expect("the application builds");
+        crate::app::handle(&app, request).await
+    }
+
+    #[tokio::test]
+    async fn a_page_answers_in_the_language_the_browser_asks_for() {
+        let french = Request::new(Verb::Get, "/").with_header("accept-language", "fr-CH");
+        let response = get(french).await;
+        assert_eq!(response.header("content-language"), Some("fr"));
+        let response = get(Request::new(Verb::Get, "/")).await;
+        assert_eq!(response.header("content-language"), Some("en"));
+    }
+
+    #[tokio::test]
+    async fn a_link_with_a_locale_wins_and_is_remembered() {
+        let mut request = Request::new(Verb::Get, "/").with_header("accept-language", "en");
+        request.query = "locale=fr".to_string();
+        let response = get(request).await;
+        assert_eq!(response.header("content-language"), Some("fr"));
+        let cookie = response.header("set-cookie").unwrap_or_default();
+        assert!(cookie.starts_with("locale=fr;"), "{cookie}");
+    }
+
+    #[test]
+    fn every_locale_has_the_keys_with_its_own_plural_rules() {
+        assert_eq!(t::welcome(Locale::Fr), "Bienvenue");
+        assert_eq!(t::items(Locale::En, 0), "No items");
+        assert_eq!(t::items(Locale::En, 1), "1 item");
+        assert_eq!(t::items(Locale::Fr, 1), "1 article");
+        assert_eq!(t::greeting(Locale::En, "Ada"), "Hello, Ada!");
+    }
+}
 ===== src/plugins/jobs/mod.rs =====
 //! Background jobs, as this application registers them.
 //!
@@ -8483,6 +8698,7 @@ request.
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
+- `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -8710,6 +8926,10 @@ The choice lives in the visitor's browser. To keep a record of it on
 the server, set `consent_log` to a file: each choice is one JSON line
 with no address and no user agent.
 
+The banner speaks the request's locale. Its words are the
+`[gtag.banner]` keys of `locales/*.toml`; change them there, in every
+catalog. The `banner.*` settings are only the fallback.
+
 ## The admin
 
 `src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
@@ -8747,6 +8967,37 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
   events.addEventListener("posts/*", (e) => console.log(e.data));
   events.addEventListener("lagged", () => location.reload());
   ```
+
+## Translations
+
+Text a visitor reads lives in `locales/<tag>.toml`, one file per
+locale. `locales/en.toml` is the default and has every key. `build.rs`
+compiles the files: each key is a function, `t::welcome(locale)`, so a
+misspelt key or a missing argument does not compile. Do not write
+visible text as a literal in a page: add the key to `en.toml`, then to
+each translation. A key a translation lacks is a build warning, and
+that locale shows the English text.
+
+A page reads the locale with `crate::plugins::i18n::locale(ctx)`. The
+hook in `src/plugins/i18n/mod.rs` chose it from `?locale=`, the
+`locale` cookie, then `Accept-Language`. A link with `?locale=fr` is a
+language switcher: the hook remembers the choice in the cookie.
+
+A hook in another crate cannot name `Locale`. It reads
+`brocanth_i18n::Current` from the request state and calls
+`current.text("key.path")`, which answers keys with no argument.
+
+In an `.rsx` page, take the locale as a parameter (`locale: Locale`)
+and write `{t::welcome(locale)}`: rsx escapes it like any value. The
+layout cannot see the request, so it says `lang="en"`; put
+`lang={locale}` on the page's own root element.
+
+In a `.jt` template, `"title": t::welcome(locale)` writes the
+translation as a JSON string.
+
+The consent banner's text is the `[gtag.banner]` table of each catalog.
+The `banner.*` settings of `gtag` are the fallback for a key no catalog
+has. Change the wording in the catalogs.
 
 ## The database
 
@@ -8865,7 +9116,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 18eeee30c291c47e -->
+<!-- brocanth-digest: 03973ccfed8d61ec -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -8877,7 +9128,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -9031,7 +9282,7 @@ kind = ["middleware"]
 files = []
 config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
-adapted_to = ["config"]
+adapted_to = ["config", "i18n"]
 
 [modules.openapi]
 kind = ["routes", "enhancer"]
@@ -9124,6 +9375,13 @@ config = ["robots"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "admin"]
 
+[modules.i18n]
+kind = ["middleware"]
+files = ["build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
+config = ["i18n"]
+crates = ["brocanth-i18n"]
+adapted_to = ["config", "gtag", "rsx", "jt"]
+
 [modules.docker]
 kind = ["external"]
 files = [".dockerignore", "Dockerfile"]
@@ -9152,4 +9410,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: d21d641765683cbb
+# brocanth-digest: 4831568ccba558ce

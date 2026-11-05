@@ -160,6 +160,9 @@ pub const ALL: &[&dyn Module] = &[
     // A robots.txt from settings. `outside_runtime`, so the static preset
     // takes it: the export writes `/robots.txt` as a file.
     &brocanth_robots::scaffold::Robots,
+    // Translations checked at build time and a locale per request. Last
+    // in the pages question: a language is a choice made after the shape.
+    &brocanth_i18n::scaffold::I18n,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

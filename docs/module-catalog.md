@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 43 modules. Each name links to its own page
+what to build next. There are 44 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,13 +23,14 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (15)
+### Middleware (16)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`analytics`](modules/analytics.md) | Page views counted on the server: no cookie, no script, no third party; rows in your Postgres |  |  | needs `db`: the views are rows in the database the `db` module opens |  |
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
+| [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
 | [`gtag`](modules/gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts |  |  |  | static-site safe |
 | [`logging`](modules/logging.md) | A line per request; the core assumes no log layer |  |  |  |  |
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |
@@ -122,15 +123,12 @@ shutdown_grace_secs` has a flag and a variable in every project
 
 ### 2. New modules
 
-1. **`i18n`.** `brocanth-i18n` exists, but no module adds it to a project
-   (`docs/i18n.md` §7). It also unblocks translated banners in `gtag`,
-   which needs a catalogue a hook can read.
-2. **`sitemap`.** The next module after `robots`. It needs a site-origin
+1. **`sitemap`.** The next module after `robots`. It needs a site-origin
    setting that no module holds today (`docs/robots.md`).
-3. **Migrations for `db` without `model`.** sea-query has no models to
+2. **Migrations for `db` without `model`.** sea-query has no models to
    diff, so there is no `make`. Plain SQL files are one option; not decided
    (`docs/migrations.md` §5).
-4. **`realtime-websocket`.** Blocked: an upgrade out of the
+3. **`realtime-websocket`.** Blocked: an upgrade out of the
    request/response shape and a frame codec (`docs/modules/realtime-websocket.md`).
 
 ### 3. Module system
@@ -181,7 +179,8 @@ What remains, from `docs/admin-customization.md`, "Open":
 
 For context, not to do: per-module settings with flags and config, the
 manifest rules, `admin eject` (CLI and project command), `robots`,
-`analytics` with `beacon`, `gtag`, `migrate` and `dbshell` as project
+`analytics` with `beacon`, `gtag`, `i18n` (with the `gtag` banner in the
+request's locale, `docs/i18n.md` §7), `migrate` and `dbshell` as project
 commands, and a CLI with no module runtime.
 
 Also done: a test harness for out-of-tree modules

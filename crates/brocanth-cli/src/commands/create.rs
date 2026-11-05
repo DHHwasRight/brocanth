@@ -1187,11 +1187,14 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
             files = quoted(&attributed(a, files, key)),
             sections = quoted(&sections_of(built, key)),
             crates = quoted(
-                &about(key)
-                    .crates
-                    .iter()
-                    .map(|dep| dep.name.to_string())
-                    .collect::<Vec<_>>()
+                &about(key).crates.iter().fold(Vec::new(), |mut names, dep| {
+                    // A crate the binary and the build script both take
+                    // is one crate.
+                    if !names.iter().any(|n: &String| n == dep.name) {
+                        names.push(dep.name.to_string());
+                    }
+                    names
+                })
             ),
         ));
     }
@@ -1741,7 +1744,12 @@ fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
     let mut out: Vec<Dep> = Vec::new();
     for pick in picks {
         for dep in about(pick).crates {
-            match out.iter_mut().find(|held| held.name == dep.name) {
+            // A build dependency is another line in another table, so it
+            // merges only with its own kind.
+            match out
+                .iter_mut()
+                .find(|held| held.name == dep.name && held.build == dep.build)
+            {
                 None => out.push(dep),
                 Some(held) => {
                     // Two sources for one crate is not a merge, it is two
@@ -1782,6 +1790,20 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // serde is the one registry crate that both a module and this file may
     // ask for, so it is held back and written once, after the others.
     let serde = serde_dep(&mut picked, needs_serde(a, built));
+    // What a module's `build.rs` uses, in a table of its own.
+    let (for_build, picked): (Vec<Dep>, Vec<Dep>) = picked.into_iter().partition(|d| d.build);
+    let build_deps = if for_build.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n[build-dependencies]\n{}\n",
+            for_build
+                .iter()
+                .map(|dep| source_of(a, dep))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     for mut dep in picked {
         // Accounts go to Postgres when the project already has a Postgres
         // database. A manifest is static, so this one feature depends on
@@ -1897,8 +1919,10 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
          {absent}\
          [dependencies]\n\
          {deps}\n\
+         {build_deps}\
          {bins}",
         name = a.name,
+        build_deps = build_deps,
         bins = bins,
         default_run = default_run,
         deps = deps.join("\n"),
@@ -5297,6 +5321,12 @@ mod tests {
                 "gtag",
                 vec!["middleware", "middleware-security-headers", "gtag"],
             ),
+            // Translations with the consent banner and rsx, and no config
+            // file: a `build.rs`, a `[build-dependencies]` table, the
+            // banner's keys in the catalogs and `gtag`'s `i18n` feature.
+            ("i18n", vec!["rsx", "gtag", "i18n"]),
+            // With a config file and jt: the `[i18n]` section.
+            ("i18n-config", vec!["config", "jt", "i18n"]),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin
             // has to translate. No config file either, so the literal

@@ -35,6 +35,7 @@ default-run = "my-blog"
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
+#   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics"], default-features = false }
@@ -2662,7 +2663,7 @@ request.
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 
-**Absent:** `logging`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `i18n`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2759,7 +2760,7 @@ HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
 is in front. Set `include_subdomains` or `preload` only when the
 person who owns the domain says so.
 
-<!-- brocanth-digest: 26e769aaff4202fb -->
+<!-- brocanth-digest: 49346cc14763d8cb -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

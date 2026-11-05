@@ -35,6 +35,7 @@ edition = "2021"
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
+#   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 #   serde                 nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1714,6 +1715,13 @@ pub const SETTINGS: &[Setting] = &[
         env: "MY_BLOG_GTAG__BANNER__POLICY_URL",
     },
     Setting {
+        path: "gtag.banner.policy",
+        help: "The text of that link.",
+        flag: true,
+        none_as: None,
+        env: "MY_BLOG_GTAG__BANNER__POLICY",
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -1942,6 +1950,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "gtag.banner.policy_url",
             format!("{:?}", gtag.banner.policy_url),
         ),
+        ("gtag.banner.policy", format!("{:?}", gtag.banner.policy)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -2021,6 +2030,7 @@ pub fn gtag_settings(given: &[Given]) -> Result<brocanth_gtag::GtagConfig, Strin
             "gtag.banner.refuse" => settings.banner.refuse = parsed(given)?,
             "gtag.banner.manage" => settings.banner.manage = parsed(given)?,
             "gtag.banner.policy_url" => settings.banner.policy_url = optional(given)?,
+            "gtag.banner.policy" => settings.banner.policy = parsed(given)?,
             _ => {}
         }
     }
@@ -2105,6 +2115,7 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
             "gtag.banner.policy_url",
             format!("{:?}", gtag.banner.policy_url),
         ),
+        ("gtag.banner.policy", format!("{:?}", gtag.banner.policy)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -2216,7 +2227,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: ea5713cd34bb52e0
+// brocanth-digest: 68fc6d4cca077dc6
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2275,7 +2286,7 @@ request.
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2375,7 +2386,7 @@ The choice lives in the visitor's browser. To keep a record of it on
 the server, set `consent_log` to a file: each choice is one JSON line
 with no address and no user agent.
 
-<!-- brocanth-digest: e52c1cbf70b64935 -->
+<!-- brocanth-digest: 1f9fabbe98594919 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

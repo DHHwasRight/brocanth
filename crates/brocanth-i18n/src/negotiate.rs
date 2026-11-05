@@ -14,7 +14,6 @@
 //! a locale the application dropped must not fail the request.
 
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// The locales an application has catalogs for.
@@ -40,18 +39,51 @@ pub trait Locales: Copy + Eq + fmt::Debug + Send + Sync + 'static {
     fn from_tag(tag: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|l| same_tag(l.tag(), tag))
     }
+
+    /// The text of a key with no placeholder and no plural, by its dotted
+    /// name: `"title"`, `"gtag.banner.text"`. `None` for a key the catalog
+    /// does not have, or one that takes an argument.
+    ///
+    /// This is the door for code that cannot name the application's
+    /// `Locale` type: a hook in a library crate reads [`Current`] and asks
+    /// it. A page names the key as a function, `t::title(locale)`, which
+    /// the compiler checks. The build script writes this method; the
+    /// default has no catalog.
+    fn message(self, key: &str) -> Option<String> {
+        let _ = key;
+        None
+    }
 }
 
-/// Where the query parameter and the cookie are looked for.
+/// Where the query parameter and the cookie are looked for, and which
+/// locales a request may get.
 ///
 /// `None` turns a source off. The default reads `locale` in both, and says
 /// so here rather than in a constant somewhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "config",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default, deny_unknown_fields)
+)]
 pub struct NegotiatorConfig {
     /// The query parameter that names a locale: `?locale=fr`.
     pub query: Option<String>,
     /// The cookie that names a locale.
     pub cookie: Option<String>,
+    /// The locale a request gets when it asks for none that is offered.
+    /// `None`: the catalog's default, the locale the build script names.
+    /// A static export sends no `Accept-Language`, so this is the language
+    /// of every exported page.
+    pub default: Option<String>,
+    /// The locales a request may get, by tag. Empty: every catalog. A
+    /// catalog left out still compiles and still backs a fallback, so a
+    /// translation in progress ships without being offered.
+    pub available: Vec<String>,
+    /// A `?locale=` choice sets the cookie, so the next page keeps it. Only
+    /// when both the query and the cookie are on. The cookie holds the
+    /// choice the visitor made and nothing else, so it needs no consent.
+    pub remember: bool,
 }
 
 impl Default for NegotiatorConfig {
@@ -59,6 +91,9 @@ impl Default for NegotiatorConfig {
         Self {
             query: Some("locale".to_string()),
             cookie: Some("locale".to_string()),
+            default: None,
+            available: Vec::new(),
+            remember: true,
         }
     }
 }
@@ -131,18 +166,77 @@ pub struct Negotiated<L> {
     pub source: Source,
 }
 
+/// The negotiated locale, for code that cannot name the application's
+/// `Locale` type.
+///
+/// [`I18nHook`](crate::I18nHook) puts one in the request state beside the
+/// typed [`Negotiated`]. A hook in a library crate reads it with
+/// `state.get::<Current>()` and asks it for a key's text. A page has the
+/// typed value and calls `t::key(locale)` instead, which the compiler
+/// checks.
+#[derive(Clone, Copy)]
+pub struct Current {
+    tag: &'static str,
+    source: Source,
+    message: fn(&'static str, &str) -> Option<String>,
+}
+
+impl Current {
+    /// The type-erased form of a negotiated locale.
+    pub fn of<L: Locales>(negotiated: Negotiated<L>) -> Self {
+        Self {
+            tag: negotiated.locale.tag(),
+            source: negotiated.source,
+            message: message_of::<L>,
+        }
+    }
+
+    /// The BCP 47 tag: `en`, `fr-CA`.
+    pub fn tag(&self) -> &'static str {
+        self.tag
+    }
+
+    /// Which source decided.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The text of a key with no placeholder, in this locale, with the
+    /// catalog's fallback applied. `None` when the catalog has no such key.
+    pub fn text(&self, key: &str) -> Option<String> {
+        (self.message)(self.tag, key)
+    }
+}
+
+impl fmt::Debug for Current {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Current")
+            .field("tag", &self.tag)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+fn message_of<L: Locales>(tag: &'static str, key: &str) -> Option<String> {
+    L::from_tag(tag)?.message(key)
+}
+
 /// Picks a locale for a request. Cheap to clone: the configuration is
 /// shared.
 pub struct Negotiator<L> {
     config: Arc<NegotiatorConfig>,
-    _locales: PhantomData<fn() -> L>,
+    /// The locales a request may get. Never empty.
+    offered: Arc<[L]>,
+    /// The locale a request that asks for nothing offered gets.
+    default: L,
 }
 
-impl<L> Clone for Negotiator<L> {
+impl<L: Copy> Clone for Negotiator<L> {
     fn clone(&self) -> Self {
         Self {
             config: Arc::clone(&self.config),
-            _locales: PhantomData,
+            offered: Arc::clone(&self.offered),
+            default: self.default,
         }
     }
 }
@@ -157,15 +251,93 @@ impl<L> fmt::Debug for Negotiator<L> {
 }
 
 impl<L: Locales> Negotiator<L> {
+    /// A negotiator for this configuration. A tag in `default` or
+    /// `available` that names no catalog is left out here, and
+    /// [`Negotiator::check`] says so: the plugins call it at start-up.
     pub fn new(config: NegotiatorConfig) -> Self {
+        let mut offered: Vec<L> = config
+            .available
+            .iter()
+            .filter_map(|tag| L::from_tag(tag))
+            .collect();
+        if offered.is_empty() {
+            offered = L::ALL.to_vec();
+        }
+        let fallback = if offered.contains(&L::DEFAULT) {
+            L::DEFAULT
+        } else {
+            offered[0]
+        };
+        let default = config
+            .default
+            .as_deref()
+            .and_then(L::from_tag)
+            .filter(|l| offered.contains(l))
+            .unwrap_or(fallback);
         Self {
             config: Arc::new(config),
-            _locales: PhantomData,
+            offered: offered.into(),
+            default,
         }
     }
 
     pub fn config(&self) -> &NegotiatorConfig {
         &self.config
+    }
+
+    /// The locales a request may get, in catalog order.
+    pub fn offered(&self) -> &[L] {
+        &self.offered
+    }
+
+    /// The locale a request gets when it asks for nothing offered.
+    pub fn default_locale(&self) -> L {
+        self.default
+    }
+
+    /// Refuses a configuration that cannot run: a name no client can send,
+    /// a tag with no catalog, a default that is not offered.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the setting and the value, with a `help:` line.
+    pub fn check(&self) -> Result<(), String> {
+        self.config.check()?;
+        let known = || {
+            L::ALL
+                .iter()
+                .map(|l| format!("`{}`", l.tag()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        for tag in &self.config.available {
+            if L::from_tag(tag).is_none() {
+                return Err(format!(
+                    "[i18n] available names {tag:?}, and there is no catalog for it. \
+                     help: add `locales/{tag}.toml`, or use one of {}",
+                    known()
+                ));
+            }
+        }
+        if let Some(tag) = &self.config.default {
+            match L::from_tag(tag) {
+                None => {
+                    return Err(format!(
+                        "[i18n] default = {tag:?}, and there is no catalog for it. \
+                         help: use one of {}",
+                        known()
+                    ));
+                }
+                Some(l) if !self.offered.contains(&l) => {
+                    return Err(format!(
+                        "[i18n] default = {tag:?}, and `available` leaves it out. \
+                         help: add {tag:?} to `available`"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
 
     /// The locale for one request.
@@ -186,7 +358,7 @@ impl<L: Locales> Negotiator<L> {
         accept_language: impl Iterator<Item = &'a str>,
     ) -> Negotiated<L> {
         if let Some(name) = &self.config.query {
-            if let Some(locale) = query_values(query, name).find_map(best_match::<L>) {
+            if let Some(locale) = query_values(query, name).find_map(|t| self.best(t)) {
                 return Negotiated {
                     locale,
                     source: Source::Query,
@@ -196,7 +368,7 @@ impl<L: Locales> Negotiator<L> {
         if let Some(name) = &self.config.cookie {
             let found = cookies
                 .flat_map(|header| cookie_values(header, name))
-                .find_map(best_match::<L>);
+                .find_map(|t| self.best(t));
             if let Some(locale) = found {
                 return Negotiated {
                     locale,
@@ -210,29 +382,38 @@ impl<L: Locales> Negotiator<L> {
         }
         // Stable, so two ranges with the same weight keep the client's order.
         ranges.sort_by(|a, b| b.1.total_cmp(&a.1));
-        if let Some(locale) = ranges.into_iter().find_map(|(tag, _)| best_match::<L>(tag)) {
+        if let Some(locale) = ranges.into_iter().find_map(|(tag, _)| self.best(tag)) {
             return Negotiated {
                 locale,
                 source: Source::AcceptLanguage,
             };
         }
         Negotiated {
-            locale: L::DEFAULT,
+            locale: self.default,
             source: Source::Default,
         }
+    }
+
+    fn best(&self, tag: &str) -> Option<L> {
+        best_match(tag, &self.offered)
     }
 }
 
 /// `fr-CH` → `fr-CH`, then `fr`; then `fr` against `fr-CA` by language.
-pub(crate) fn best_match<L: Locales>(tag: &str) -> Option<L> {
+/// Only among `offered`.
+pub(crate) fn best_match<L: Locales>(tag: &str, offered: &[L]) -> Option<L> {
     let tag = tag.trim();
     if tag.is_empty() || tag == "*" {
         return None;
     }
     let mut candidate = tag;
     loop {
-        if let Some(found) = L::from_tag(candidate) {
-            return Some(found);
+        let exact = offered
+            .iter()
+            .copied()
+            .find(|l| same_tag(l.tag(), candidate));
+        if exact.is_some() {
+            return exact;
         }
         match candidate.rfind(['-', '_']) {
             Some(cut) => candidate = &candidate[..cut],
@@ -241,7 +422,7 @@ pub(crate) fn best_match<L: Locales>(tag: &str) -> Option<L> {
     }
     // `candidate` is the language subtag now. A catalog for one region of it
     // is a better answer than the default in another language.
-    L::ALL
+    offered
         .iter()
         .copied()
         .find(|l| language(l.tag()).eq_ignore_ascii_case(candidate))
@@ -458,6 +639,7 @@ mod tests {
         let n = Negotiator::<L>::new(NegotiatorConfig {
             query: None,
             cookie: Some("lang".into()),
+            ..NegotiatorConfig::default()
         });
         let got = n.negotiate(Asked {
             query: "locale=fr",
@@ -472,8 +654,70 @@ mod tests {
         let bad = NegotiatorConfig {
             query: None,
             cookie: Some("a b".into()),
+            ..NegotiatorConfig::default()
         };
         assert!(bad.check().is_err());
         assert!(NegotiatorConfig::default().check().is_ok());
+    }
+
+    fn with(default: Option<&str>, available: &[&str]) -> Negotiator<L> {
+        Negotiator::new(NegotiatorConfig {
+            default: default.map(String::from),
+            available: available.iter().map(|t| t.to_string()).collect(),
+            ..NegotiatorConfig::default()
+        })
+    }
+
+    #[test]
+    fn the_default_setting_answers_a_request_that_asks_for_nothing() {
+        let n = with(Some("fr"), &[]);
+        assert!(n.check().is_ok());
+        let got = n.negotiate(Asked::default());
+        assert_eq!((got.locale, got.source), (L::Fr, Source::Default));
+        let got = n.negotiate(Asked {
+            accept_language: Some("de"),
+            ..Asked::default()
+        });
+        assert_eq!(got.locale, L::Fr, "a language nobody has");
+    }
+
+    #[test]
+    fn a_locale_left_out_of_available_is_never_given() {
+        let n = with(None, &["en", "fr"]);
+        assert!(n.check().is_ok());
+        let got = n.negotiate(Asked {
+            accept_language: Some("fr-CA, pt;q=0.9"),
+            ..Asked::default()
+        });
+        assert_eq!(got.locale, L::Fr, "fr-CA is compiled, not offered");
+        let got = n.negotiate(Asked {
+            query: "locale=pt-BR",
+            ..Asked::default()
+        });
+        assert_eq!(got.source, Source::Default);
+    }
+
+    #[test]
+    fn a_tag_with_no_catalog_or_a_default_not_offered_stops_the_start() {
+        let unknown = with(Some("de"), &[]).check().unwrap_err();
+        assert!(
+            unknown.contains("help:") && unknown.contains("`fr-CA`"),
+            "{unknown}"
+        );
+        assert!(with(None, &["xx"]).check().is_err());
+        let hidden = with(Some("pt-BR"), &["en"]).check().unwrap_err();
+        assert!(hidden.contains("available"), "{hidden}");
+    }
+
+    #[test]
+    fn current_reads_the_catalog_without_naming_the_locale_type() {
+        let current = Current::of(Negotiated {
+            locale: L::Fr,
+            source: Source::Cookie,
+        });
+        assert_eq!(current.tag(), "fr");
+        assert_eq!(current.source(), Source::Cookie);
+        // This test type has no catalog, so the trait's default answers.
+        assert_eq!(current.text("title"), None);
     }
 }

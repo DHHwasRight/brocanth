@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 43. For all
+One page per module that `brocanth create` offers. There are 44. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -77,6 +77,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`middleware-csrf`](middleware-csrf.md) | a double-submit cookie, checked on every verb that is not a read | Middleware | middleware |
 | [`middleware-security-headers`](middleware-security-headers.md) | HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash | Middleware | middleware |
 | [`middleware-rate-limit`](middleware-rate-limit.md) | a fixed window per address, session or user, per group of routes; 429 with Retry-After | Middleware | middleware |
+| [`i18n`](i18n.md) | translations checked at build time; a locale per request from the query, a cookie or Accept-Language | Middleware |  |
 | [`gtag`](gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts | Middleware |  |
 | [`openapi`](openapi.md) | an OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Routes, Enhancer |  |
 | [`validation`](validation.md) | a zod-shaped vocabulary; a handler takes Valid<T> or does not compile | Middleware |  |

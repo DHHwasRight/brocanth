@@ -88,6 +88,8 @@ pub struct Banner {
     pub manage: String,
     /// A link to the privacy policy, or `None` for no link.
     pub policy_url: Option<String>,
+    /// The text of that link.
+    pub policy: String,
 }
 
 impl Default for Banner {
@@ -100,6 +102,53 @@ impl Default for Banner {
             refuse: "Refuse".into(),
             manage: "Cookie settings".into(),
             policy_url: None,
+            policy: "Privacy policy".into(),
+        }
+    }
+}
+
+/// The catalog keys the banner reads with the `i18n` feature, beside the
+/// field each one replaces. A key the catalog lacks keeps the setting.
+pub const BANNER_KEYS: [&str; 5] = [
+    "gtag.banner.text",
+    "gtag.banner.accept",
+    "gtag.banner.refuse",
+    "gtag.banner.manage",
+    "gtag.banner.policy",
+];
+
+impl Banner {
+    /// A short fingerprint of what the banner says, recorded with each
+    /// choice, so a record names the text the visitor answered.
+    pub fn version(&self) -> String {
+        // FNV-1a over the fields, each followed by a separator byte.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for field in [
+            self.text.as_str(),
+            self.accept.as_str(),
+            self.refuse.as_str(),
+            self.policy_url.as_deref().unwrap_or(""),
+        ] {
+            for byte in field.bytes().chain([0xff]) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        format!("{:08x}", hash >> 32)
+    }
+
+    /// This banner with each string a catalog has for `text(key)`. The
+    /// keys are [`BANNER_KEYS`]. The link's address is a setting only: a
+    /// translator changes words, not where a link goes.
+    pub fn translated(&self, text: impl Fn(&str) -> Option<String>) -> Banner {
+        let [t, a, r, m, p] = BANNER_KEYS.map(text);
+        Banner {
+            text: t.unwrap_or_else(|| self.text.clone()),
+            accept: a.unwrap_or_else(|| self.accept.clone()),
+            refuse: r.unwrap_or_else(|| self.refuse.clone()),
+            manage: m.unwrap_or_else(|| self.manage.clone()),
+            policy_url: self.policy_url.clone(),
+            policy: p.unwrap_or_else(|| self.policy.clone()),
         }
     }
 }
@@ -269,17 +318,26 @@ impl GtagConfig {
     /// The markup the hook inserts before `</body>`: the banner, the
     /// settings as JSON, and [`SCRIPT`].
     pub fn markup(&self) -> String {
-        let b = &self.banner;
+        self.markup_with(&self.banner, None)
+    }
+
+    /// The markup with another banner, in the language `lang` names. The
+    /// hook calls it with the banner [`Banner::translated`] gives for the
+    /// request's locale.
+    pub fn markup_with(&self, b: &Banner, lang: Option<&str>) -> String {
+        let lang = lang
+            .map(|tag| format!(r#" lang="{}""#, escape(tag)))
+            .unwrap_or_default();
         let button = "font:inherit;padding:.5em 1em;border:1px solid currentColor;\
                       border-radius:.25em;background:Canvas;color:CanvasText;cursor:pointer";
         let policy = b
             .policy_url
             .as_deref()
-            .map(|url| format!(r#" <a href="{}">Privacy policy</a>"#, escape(url)))
+            .map(|url| format!(r#" <a href="{}">{}</a>"#, escape(url), escape(&b.policy)))
             .unwrap_or_default();
         format!(
             concat!(
-                r#"<div id="brocanth-consent" role="dialog" aria-modal="false" "#,
+                r#"<div id="brocanth-consent"{lang} role="dialog" aria-modal="false" "#,
                 r#"aria-labelledby="brocanth-consent-text" hidden "#,
                 r#"style="position:fixed;inset:auto 1em 1em 1em;z-index:2147483647;"#,
                 r#"padding:1em;border:1px solid currentColor;border-radius:.5em;"#,
@@ -294,13 +352,14 @@ impl GtagConfig {
                 r#"<script type="application/json" id="brocanth-gtag">{json}</script>"#,
                 r#"<script>{script}</script>"#,
             ),
+            lang = lang,
             text = escape(&b.text),
             policy = policy,
             button = button,
             refuse = escape(&b.refuse),
             accept = escape(&b.accept),
             manage = escape(&b.manage),
-            json = self.json(),
+            json = self.json(b),
             script = SCRIPT,
         )
     }
@@ -308,25 +367,11 @@ impl GtagConfig {
     /// A short fingerprint of what the banner says, recorded with each
     /// choice, so a record names the text the visitor answered.
     pub fn banner_version(&self) -> String {
-        let b = &self.banner;
-        // FNV-1a over the fields, each followed by a separator byte.
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for field in [
-            b.text.as_str(),
-            b.accept.as_str(),
-            b.refuse.as_str(),
-            b.policy_url.as_deref().unwrap_or(""),
-        ] {
-            for byte in field.bytes().chain([0xff]) {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
-            }
-        }
-        format!("{:08x}", hash >> 32)
+        self.banner.version()
     }
 
     /// What the script reads, as JSON safe inside `<script>`.
-    fn json(&self) -> String {
+    fn json(&self, banner: &Banner) -> String {
         let allow: Vec<String> = self.allow_params.iter().map(|p| json_string(p)).collect();
         let domain = self
             .cookie_domain
@@ -345,7 +390,7 @@ impl GtagConfig {
             allow.join(","),
             domain,
             self.consent_log.is_some(),
-            json_string(&self.banner_version()),
+            json_string(&banner.version()),
         )
     }
 }
@@ -548,6 +593,30 @@ mod tests {
         config.allow_params = vec!["</script><script>x".into()];
         let markup = config.markup();
         assert_eq!(markup.matches("</script>").count(), 2, "{markup}");
+    }
+
+    #[test]
+    fn a_translation_replaces_the_words_and_keeps_the_link() {
+        let mut config = GtagConfig::default().measuring("G-ABC123");
+        config.banner.policy_url = Some("/privacy".into());
+        let fr = config.banner.translated(|key| match key {
+            "gtag.banner.accept" => Some("Accepter".into()),
+            "gtag.banner.policy" => Some("Confidentialité".into()),
+            _ => None,
+        });
+        assert_eq!(fr.accept, "Accepter");
+        assert_eq!(
+            fr.refuse, "Refuse",
+            "a key the catalog lacks keeps the setting"
+        );
+        assert_ne!(fr.version(), config.banner.version());
+        let markup = config.markup_with(&fr, Some("fr"));
+        assert!(
+            markup.contains(r#"<div id="brocanth-consent" lang="fr""#),
+            "{markup}"
+        );
+        assert!(markup.contains(r#"<a href="/privacy">Confidentialité</a>"#));
+        assert!(markup.contains(&format!(r#""version":"{}""#, fr.version())));
     }
 
     #[test]

@@ -17,6 +17,11 @@ description = "Google Analytics 4 behind a consent banner: nothing sent before c
 brocanth = { workspace = true, optional = true }
 http = { version = "1", optional = true }
 
+# `i18n`: the banner reads its strings from the application's catalogs, in
+# the request's locale. No default features: the hook needs only
+# `brocanth_i18n::Current`, which links no CLDR data and no parser.
+brocanth-i18n = { path = "../brocanth-i18n", version = "0.1.0", default-features = false, optional = true }
+
 # `config`: the configuration types deserialise, so an `[gtag]` section
 # of a brocanth-config file builds one. Off, so an application that builds
 # its configuration in code links no serde.
@@ -32,7 +37,9 @@ brocanth-test.workspace = true
 brocanth-middleware.workspace = true
 # This crate with `config` on, so `cargo test -p brocanth-gtag` runs
 # the configuration test rather than compiling it out.
-brocanth-gtag = { path = ".", features = ["config"] }
+brocanth-gtag = { path = ".", features = ["config", "i18n"] }
+# `tests/i18n.rs` negotiates a locale with the real hook.
+brocanth-i18n = { path = "../brocanth-i18n", features = ["plugin"] }
 brocanth-config.workspace = true
 
 [features]
@@ -41,3 +48,5 @@ default = ["runtime"]
 runtime = ["dep:brocanth", "dep:http"]
 scaffold = ["dep:brocanth-scaffold"]
 config = ["dep:serde"]
+# The banner follows the request's locale, from the `i18n` module's hook.
+i18n = ["runtime", "dep:brocanth-i18n"]

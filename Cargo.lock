@@ -789,6 +789,7 @@ dependencies = [
  "brocanth-config",
  "brocanth-db",
  "brocanth-gtag",
+ "brocanth-i18n",
  "brocanth-input",
  "brocanth-jobs",
  "brocanth-middleware",
@@ -889,6 +890,7 @@ dependencies = [
  "brocanth",
  "brocanth-config",
  "brocanth-gtag",
+ "brocanth-i18n",
  "brocanth-middleware",
  "brocanth-scaffold",
  "brocanth-test",
@@ -902,6 +904,8 @@ version = "0.1.0"
 dependencies = [
  "brocanth",
  "brocanth-i18n",
+ "brocanth-scaffold",
+ "brocanth-test",
  "http",
  "icu_calendar",
  "icu_datetime",
@@ -911,6 +915,7 @@ dependencies = [
  "icu_provider",
  "jt",
  "rsx",
+ "serde",
  "serde_spanned",
  "toml",
 ]
