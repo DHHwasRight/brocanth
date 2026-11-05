@@ -79,6 +79,10 @@ pub const ALL: &[&dyn Module] = &[
     // Page views, counted by a hook on the server and kept in the `db`
     // module's database. No script, no cookie, no third party.
     &brocanth_analytics::scaffold::PageViews,
+    // Its static side: a snippet in exported pages that reports to a
+    // server with `analytics`. Outside the runtime, so a static site can
+    // take it.
+    &brocanth_analytics::scaffold::StaticBeacon,
     &config::Config,
     &sessions::Sessions,
     // The pool, from the crate that is the pool. Before `model`, which is

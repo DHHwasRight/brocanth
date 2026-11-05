@@ -83,7 +83,11 @@ impl Module for PageViews {
 
 fn settings(project: &Project) -> Vec<Setting> {
     vec![
-        Setting::bool("enabled", true, "Count page views. Off installs no hook."),
+        Setting::bool("enabled", false, "Count page views. Off installs no hook.").note(
+            "False here because this file is the development one: your own visits\n\
+             are not the audience. Production reads the plugin's default, true,\n\
+             unless its own file says otherwise.",
+        ),
         Setting::text(
             "site",
             project.name,
@@ -127,8 +131,109 @@ fn settings(project: &Project) -> Vec<Setting> {
             "Create the two tables on the first readiness check.",
         )
         .note("Off, for a project that keeps brocanth_analytics::PgStore::SCHEMA in a migration."),
+        Setting::text(
+            "collector_path",
+            "/_a/v",
+            "The path that counts page views a static site sends with the `beacon` module.",
+        ),
+        Setting::list(
+            "collector_origins",
+            &[],
+            "The static sites allowed to send them: \"https://docs.example.com\". Empty, no collector.",
+        )
+        .note("A beacon from any other origin is answered 204 and not counted."),
     ]
 }
+
+/// The snippet a static site carries, as a choice on the menu.
+///
+/// Its own module and not a child of `analytics`, because the two live in
+/// different projects. The static site is exported to files and cannot hold
+/// `analytics`, which needs a running server and a database; a child cannot
+/// be chosen without its parent, so a child would be refused by the very
+/// preset it exists for. `beacon` is `outside_runtime`: what it adds runs
+/// when the export renders a page, and in the visitor's browser.
+pub struct StaticBeacon;
+
+impl Module for StaticBeacon {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "beacon",
+            "a few lines of script that report each page view to an analytics server; no cookie",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .asked_in(
+            "operations",
+            "Report page views of these pages to a brocanth server with `analytics`",
+        )
+        .conflicts(
+            "analytics",
+            "both would count one page: the hook on the server, and the beacon in the browser",
+        )
+        .krate(
+            Dep::brocanth("brocanth-analytics")
+                .no_default_features()
+                .feature("runtime")
+                .feature_with("config", "config")
+                .note("the beacon snippet, without the store"),
+        )
+        // No `absent` line: its crate is `analytics`'s too, so "not here"
+        // would be untrue in a project that counts on the server.
+        .outside_runtime()
+    }
+
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        configurable_hooking(
+            s,
+            project,
+            Hooking {
+                key: "beacon",
+                section: "beacon",
+                ty: "brocanth_analytics::Beacon",
+                config_ty: "brocanth_analytics::BeaconConfig",
+                prelude: BEACON_PRELUDE.to_string(),
+                adjust: None,
+            },
+            vec![
+                Setting::text(
+                    "collector",
+                    "https://app.example.com/_a/v",
+                    "The analytics server's collector URL. Unset, no page carries the snippet.",
+                )
+                .optional()
+                .note("That server lists this site in `[analytics] collector_origins`."),
+                Setting::bool(
+                    "respect_gpc",
+                    false,
+                    "Send nothing from a browser with Global Privacy Control or Do Not Track on.",
+                ),
+            ],
+        );
+        s.at(Slot::AgentsSections).block(BEACON_AGENTS.to_string());
+    }
+}
+
+const BEACON_PRELUDE: &str = r#"
+        // -- brocanth-analytics: the beacon ---------------------------------
+        //
+        // A response hook that puts a few lines of script before `</body>`
+        // of every HTML page, the exported files included. The script tells
+        // `[beacon] collector` that a page was read: no cookie, nothing
+        // stored in the browser.
+"#;
+
+const BEACON_AGENTS: &str = "\n\
+    ## The beacon\n\
+    \n\
+    `brocanth_analytics::Beacon` puts a short script in every HTML page\n\
+    once `[beacon] collector` names an analytics server. Do not copy the\n\
+    script into a template: the hook adds it, and the export writes it\n\
+    into each file. The server must list this site's origin in\n\
+    `[analytics] collector_origins`, or every beacon is ignored.\n";
 
 /// The comment above the registration.
 const PRELUDE: &str = r#"

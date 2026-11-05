@@ -696,6 +696,7 @@ dependencies = [
  "brocanth-analytics",
  "brocanth-config",
  "brocanth-db",
+ "brocanth-middleware",
  "brocanth-scaffold",
  "brocanth-test",
  "getrandom 0.4.3",

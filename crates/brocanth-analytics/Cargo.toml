@@ -9,25 +9,33 @@ readme = "README.md"
 # Every dependency below is already in the workspace tree. The hook is
 # synchronous and stores nothing personal, so what it needs is a digest,
 # a random salt and a clock; the database is behind a feature.
+#
+# Everything the application runs is behind `runtime`, on by default. The
+# CLI takes this crate with `default-features = false, features =
+# ["scaffold"]`, so the generator links no core, no tokio and no driver.
 [dependencies]
-brocanth.workspace = true
-http = "1"
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
 
 # The visitor hash. The same version `brocanth-middleware`, `brocanth-auth`
 # and `brocanth-storage` take, so this adds no second copy.
-sha2 = "0.11"
+sha2 = { version = "0.11", optional = true }
 
 # The daily salt comes from the OS CSPRNG. A salt a visitor can predict
 # makes the hash a lookup table of addresses. Same version as the
 # middleware's CSRF tokens.
-getrandom = "0.4"
+getrandom = { version = "0.4", optional = true }
 
 # The store is a trait object behind an `Arc`, so its methods are boxed
 # futures. The same crate `brocanth-cache` and `brocanth-admin` use.
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 
 # The flusher: one task, a timer, and the runtime a server already has.
-tokio = { version = "1", default-features = false, features = ["rt", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "time",
+    "sync",
+], optional = true }
 
 # `postgres`: `PgStore`, two tables in the database the `db` module opened.
 brocanth-db = { workspace = true, optional = true }
@@ -49,12 +57,25 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # runs the panel and Postgres tests instead of compiling them out.
 brocanth-analytics = { path = ".", features = ["postgres", "config", "admin"] }
 brocanth-config.workspace = true
+# `tests/collector.rs`: a beacon is a cross-site POST with no token, so the
+# collector must answer it before the CSRF hook refuses it.
+brocanth-middleware.workspace = true
 
 [features]
-default = ["postgres"]
-postgres = ["dep:brocanth-db"]
-config = ["dep:serde"]
-admin = ["dep:brocanth-admin"]
+default = ["runtime", "postgres"]
+# The plugin, the hook, the collector, the beacon and the stores: what an
+# application links.
+runtime = [
+    "dep:brocanth",
+    "dep:http",
+    "dep:sha2",
+    "dep:getrandom",
+    "dep:async-trait",
+    "dep:tokio",
+]
+postgres = ["runtime", "dep:brocanth-db"]
+config = ["runtime", "dep:serde"]
+admin = ["runtime", "dep:brocanth-admin"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]

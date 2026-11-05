@@ -29,7 +29,9 @@ brocanth-db = { path = "../brocanth-db", version = "0.1.0", default-features = f
 
 # First-party page-view counts, for its scaffold module alone, on the same
 # terms.
-brocanth-analytics = { workspace = true, features = ["scaffold"] }
+brocanth-analytics = { workspace = true, default-features = false, features = [
+    "scaffold",
+] }
 
 # The broker, on the same terms. It offers `realtime` and no transport: the
 # core's `Response` is a finished `Vec<u8>` and every response hook is

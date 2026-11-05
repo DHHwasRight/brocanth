@@ -44,6 +44,13 @@ pub struct AnalyticsConfig {
     /// Create the two tables on the first readiness check. Off, for a
     /// project that keeps `PgStore::SCHEMA` in a reviewed migration.
     pub migrate: bool,
+    /// The path the collector answers at, for page views a static site
+    /// sends with the `beacon` snippet.
+    pub collector_path: String,
+    /// The origins allowed to send to the collector:
+    /// `https://docs.example.com`. Empty, the default, installs no
+    /// collector at all.
+    pub collector_origins: Vec<String>,
 }
 
 impl Default for AnalyticsConfig {
@@ -67,6 +74,8 @@ impl Default for AnalyticsConfig {
             ip_header: None,
             country_header: None,
             migrate: true,
+            collector_path: "/_a/v".to_string(),
+            collector_origins: Vec::new(),
         }
     }
 }

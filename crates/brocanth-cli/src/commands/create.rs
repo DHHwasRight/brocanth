@@ -5101,12 +5101,13 @@ mod tests {
     /// one, the default, and each way the rsx family can be asked for.
     /// Every module that can stand together. `logging` is the one module
     /// `observability-logs` replaces, and `static` refuses every module that
-    /// needs a server, so neither is in it. `available()` is not a project:
+    /// needs a server, so neither is in it, nor `beacon`, which counts what
+    /// `analytics` counts. `available()` is not a project:
     /// the generator refuses it.
     fn everything() -> Vec<&'static str> {
         available()
             .into_iter()
-            .filter(|key| *key != "logging" && *key != "static")
+            .filter(|key| !["logging", "static", "beacon"].contains(key))
             .collect()
     }
 
@@ -5177,6 +5178,9 @@ mod tests {
             // `mount` carries the analytics tab and the hook record names a
             // plugin from a library crate.
             ("analytics", vec!["config", "db", "analytics", "admin"]),
+            // Its static side: a site exported to files whose pages carry
+            // the beacon snippet.
+            ("beacon", vec!["static", "config", "commands", "beacon"]),
             // The two modules that mount routes, and nothing else: no
             // config file and no renderer, so the admin's own rsx is the
             // only template engine in the tree and `mounted` is written
@@ -6109,7 +6113,10 @@ mod tests {
             .find(|(p, _)| p == "AGENTS.md")
             .expect("an agent brief")
             .1;
-        assert!(full.contains("**Absent:** `logging`, `static` —"), "{full}");
+        assert!(
+            full.contains("**Absent:** `logging`, `beacon`, `static` —"),
+            "{full}"
+        );
     }
 
     #[test]
@@ -6694,6 +6701,54 @@ mod tests {
         let written = std::fs::read_to_string(root.join("dist/robots.txt"))
             .expect("the export wrote dist/robots.txt");
         assert_eq!(written, "User-agent: *\nDisallow:\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The beacon reaches the exported files once a collector is set: the
+    /// export runs each page through the hooks, the beacon's included.
+    #[test]
+    #[ignore = "runs cargo build and the export over a generated application"]
+    fn the_static_export_carries_the_beacon() {
+        let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-beacon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            local: Some(brocanth.display().to_string()),
+            ..answers(&["static", "config", "commands", "beacon"])
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let config = root.join("config/development.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        let text = text.replace(
+            "# collector = \"https://app.example.com/_a/v\"",
+            "collector = \"https://app.example.com/_a/v\"",
+        );
+        std::fs::write(&config, text).unwrap();
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["run", "-q", "--", "export"])
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the export failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let index = std::fs::read_to_string(root.join("dist/index.html"))
+            .expect("the export wrote dist/index.html");
+        assert!(
+            index.contains("<script data-collector=\"https://app.example.com/_a/v\">"),
+            "{index}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

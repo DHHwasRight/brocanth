@@ -31,6 +31,28 @@ impl Day {
         Day(self.0.saturating_add(i32::try_from(n).unwrap_or(i32::MAX)))
     }
 
+    /// Reads `2026-11-04`. `None` for anything else, an impossible date
+    /// included.
+    pub fn parse(text: &str) -> Option<Day> {
+        let mut parts = text.trim().splitn(3, '-');
+        let y: i64 = parts.next()?.parse().ok()?;
+        let m: i64 = parts.next()?.parse().ok()?;
+        let d: i64 = parts.next()?.parse().ok()?;
+        if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1970..=9999).contains(&y) {
+            return None;
+        }
+        // Hinnant's `days_from_civil`.
+        let yy = if m <= 2 { y - 1 } else { y };
+        let era = yy.div_euclid(400);
+        let yoe = yy - era * 400;
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let day = Day(i32::try_from(era * 146_097 + doe - 719_468).ok()?);
+        // 2026-02-30 computes a day in March; the round trip catches it.
+        (day.ymd() == (y as i32, m as u32, d as u32)).then_some(day)
+    }
+
     /// The day as `(year, month, day)`.
     ///
     /// Howard Hinnant's `civil_from_days`, which is exact for every day an
@@ -73,6 +95,16 @@ mod tests {
         assert_eq!(Day(0).to_string(), "1970-01-01");
         assert_eq!(Day(20_396).to_string(), "2025-11-04");
         assert_eq!(Day(19_782).to_string(), "2024-02-29");
+    }
+
+    #[test]
+    fn a_date_reads_back_as_the_day_it_prints() {
+        for day in [Day(0), Day(19_782), Day(20_396), Day(30_000)] {
+            assert_eq!(Day::parse(&day.to_string()), Some(day));
+        }
+        assert_eq!(Day::parse("2026-02-30"), None);
+        assert_eq!(Day::parse("2026-13-01"), None);
+        assert_eq!(Day::parse("yesterday"), None);
     }
 
     #[test]

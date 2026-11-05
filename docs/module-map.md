@@ -77,7 +77,8 @@ the file, or a literal in code.
 | `observability-metrics` | **Routes** | `/metrics`, on a side listener | observability | | |
 | `observability-tracing` | **Middleware** | (parent's plugin) | observability (off) | | |
 | `analytics` | **Middleware** | PluginsHooks (an after-dispatch request hook), Services (reads `brocanth_db::Db`) ★ | | `db` | |
-| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 18 modules ★ |
+| `beacon` | **Middleware** | PluginsHooks (a response hook that adds a script to each page) ★; outside the runtime | | | refused with `analytics` |
+| `config` | **Enhancer** | Cargo dep only: its `contribute` is empty, and `create.rs` writes `config/<env>.toml` | | | used by 19 modules ★ |
 | `sessions` | **Middleware** | Layers, AppContext ★ | | | |
 | `db` | **Enhancer**, Middleware, Renderer | AppContext, PagesItems (`ctx.db()`), Services (`brocanth_db::Db`) ★ | | | |
 | `model` | **Enhancer**, Middleware, Renderer | PagesItems (`ctx.orm()`), Services (`brocanth_model::Orm`), CommandsMod (`migrate`) ★ | | `db` | `commands` |

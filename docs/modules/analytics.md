@@ -14,7 +14,7 @@ The wizard calls it: *Count page views on the server: no cookie, no script, no t
 | Needs | [`db`](db.md): the views are rows in the database the `db` module opens |
 | After | [`db`](db.md) |
 | Adapts to | [`config`](config.md) |
-| Conflicts | [`static`](static.md): this module needs a running server |
+| Conflicts | [`beacon`](beacon.md): both would count one page: the hook on the server, and the beacon in the browser; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-analytics` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no page-view counts; nothing is measured, so nothing needs consent |
@@ -46,6 +46,9 @@ Slots:
 - The hook only queues. A task writes the queue every `flush_interval`
   seconds. A failed write keeps its batch for the next try and never
   reaches a request.
+- With `collector_origins`, a second hook answers `collector_path` for a
+  static site's [`beacon`](beacon.md): it counts a beacon from a listed
+  origin with the same rules, and always answers 204 or a 1×1 GIF.
 - `before_start` takes the `brocanth_db::Db` the `db` plugin put in the
   services. With `migrate`, the first readiness check creates the tables.
 
@@ -55,7 +58,7 @@ Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `-
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `enabled` | bool | `true` | `--analytics.enabled` | Count page views. Off installs no hook. |
+| `enabled` | bool | `false` (the development file; the plugin's default is `true`) | `--analytics.enabled` | Count page views. Off installs no hook. |
 | `site` | text | the project name | `--analytics.site` | The site name on every row, and part of the visitor hash. |
 | `exclude` | list | `["/admin"]` | none (list) | Paths never counted, each with everything under it. |
 | `query_allow` | list | the five `utm_*` | none (list) | Query parameters kept on the stored path. Every other one is dropped. |
@@ -65,6 +68,8 @@ Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `-
 | `ip_header` | text, optional | commented out | `--analytics.ip_header` | A header the edge sets to the client address. Unset, the socket's. |
 | `country_header` | text, optional | commented out | `--analytics.country_header` | A header the edge sets to a two-letter country code. Unset, no country. |
 | `migrate` | bool | `true` | `--analytics.migrate` | Create the two tables on the first readiness check. |
+| `collector_path` | text | `"/_a/v"` | `--analytics.collector_path` | The path that counts page views a static site sends with the `beacon` module. |
+| `collector_origins` | list | `[]` | none (list) | The static sites allowed to send them: "https://docs.example.com". Empty, no collector. |
 
 ## Read more
 

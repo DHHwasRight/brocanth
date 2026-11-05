@@ -82,15 +82,10 @@ impl Panel for AnalyticsPanel {
                 ),
             )));
         };
-        let days = r
-            .param("days")
-            .and_then(|d| d.parse::<u32>().ok())
-            .filter(|d| RANGES.contains(d))
-            .unwrap_or(30);
-        let to = recorder.today();
-        let from = to.minus(days - 1);
+        let today = recorder.today();
+        let (from, to, current) = range(&r, today);
         let mut html = String::new();
-        html.push_str(&ranges(&r, days));
+        html.push_str(&ranges(&r, current, from, to));
         match recorder.report(from, to).await {
             Ok(report) => html.push_str(&screen(&report, from, to)),
             Err(e) => html.push_str(&format!(
@@ -104,12 +99,39 @@ impl Panel for AnalyticsPanel {
     }
 }
 
-fn ranges(r: &PanelRequest<'_>, current: u32) -> String {
+/// The longest custom range, in days: two years, so one request cannot
+/// ask the database for a decade.
+pub const MAX_RANGE: u32 = 731;
+
+/// The range asked for: `from` and `to` as dates when both read and make a
+/// range of at most [`MAX_RANGE`] days, else `days` (7, 30 or 90) ending
+/// today, else 30 days. The third value is the preset in use, if any.
+fn range(r: &PanelRequest<'_>, today: Day) -> (Day, Day, Option<u32>) {
+    let custom = r
+        .param("from")
+        .and_then(|f| Day::parse(&f))
+        .zip(r.param("to").and_then(|t| Day::parse(&t)));
+    if let Some((from, to)) = custom {
+        if from <= to && to.0 - from.0 < MAX_RANGE as i32 {
+            return (from, to, None);
+        }
+    }
+    let days = r
+        .param("days")
+        .and_then(|d| d.parse::<u32>().ok())
+        .filter(|d| RANGES.contains(d))
+        .unwrap_or(30);
+    (today.minus(days - 1), today, Some(days))
+}
+
+/// The three presets as links, then a form for any two dates. The form is
+/// a GET, so it changes nothing and needs no token.
+fn ranges(r: &PanelRequest<'_>, current: Option<u32>, from: Day, to: Day) -> String {
     let links: Vec<String> = RANGES
         .iter()
         .map(|&d| {
             let label = format!("{d} days");
-            if d == current {
+            if Some(d) == current {
                 format!("<strong>{label}</strong>")
             } else {
                 format!(
@@ -120,7 +142,18 @@ fn ranges(r: &PanelRequest<'_>, current: u32) -> String {
             }
         })
         .collect();
-    format!("<p class=\"{}\">{}</p>", parts::bar(), links.join(" · "))
+    format!(
+        "<p class=\"{bar}\">{links}</p>\
+         <form method=\"get\" action=\"{action}\" class=\"{bar}\">\
+         <label>From <input type=\"date\" name=\"from\" value=\"{from}\" class=\"{control}\" required></label> \
+         <label>To <input type=\"date\" name=\"to\" value=\"{to}\" class=\"{control}\" required></label> \
+         <button type=\"submit\" class=\"{button}\">Show</button></form>",
+        bar = parts::bar(),
+        links = links.join(" · "),
+        action = escape(&r.url("")),
+        control = parts::control(),
+        button = parts::button(),
+    )
 }
 
 fn screen(report: &Report, from: Day, to: Day) -> String {
@@ -150,8 +183,10 @@ fn chart(report: &Report, from: Day, to: Day) -> String {
         .max()
         .unwrap_or(0)
         .max(1);
-    let (width, height) = (600usize, 120usize);
-    let slot = width / span;
+    // At least one unit per day, so a two-year range still draws a bar for
+    // each; the SVG scales to the card either way.
+    let (width, height) = (600usize.max(span), 120usize);
+    let slot = (width / span).max(1);
     let bar = slot.saturating_sub(1).max(1);
     let mut rects = String::new();
     for (day, views, visitors) in &report.days {

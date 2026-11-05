@@ -228,14 +228,29 @@ impl HookSource for Analytics {
     type Families = OnRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        if self.config.enabled {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        registrar.request(
+            "count",
+            Order::new(),
+            Count {
+                config: self.config.clone(),
+                recorder: self.recorder.clone(),
+            },
+        );
+        if !self.config.collector_origins.is_empty() {
+            // Before the CSRF check: a beacon is a cross-site POST with no
+            // token, and it writes nothing a forged form could abuse. After
+            // the proxy reader and the rate limiter, when present, so the
+            // edge's address is read and a flood is refused first.
             registrar.request(
-                "count",
-                Order::new(),
-                Count {
-                    config: self.config.clone(),
-                    recorder: self.recorder.clone(),
-                },
+                "collect",
+                Order::new()
+                    .before_if_present("csrf.check")
+                    .after_if_present("proxy-headers.read")
+                    .after_if_present("rate_limit.count"),
+                crate::collector::Collect::new(self.config.clone(), self.recorder.clone()),
             );
         }
         Ok(())
@@ -278,80 +293,101 @@ impl Count {
         if !html {
             return None;
         }
-        let path = request.uri().path();
-        if self.config.excludes(path) {
-            return None;
-        }
-        let headers = request.headers();
-        let text = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-        };
         // A prefetch is a guess the browser made, not a visit.
         let purpose = format!(
             "{} {} {}",
-            text("sec-purpose"),
-            text("purpose"),
-            text("x-moz")
+            header(request, "sec-purpose"),
+            header(request, "purpose"),
+            header(request, "x-moz")
         );
         if purpose.to_ascii_lowercase().contains("prefetch") {
             return None;
         }
-        let ua = text("user-agent");
-        if is_bot(ua) {
-            return None;
-        }
-        if self.config.respect_gpc && (text("sec-gpc").trim() == "1" || text("dnt").trim() == "1") {
-            return None;
-        }
-        let address = self.address(request);
-        let class = ua_class(ua);
-        let host = headers
+        let host = request
+            .headers()
             .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .or_else(|| request.uri().authority().map(|a| a.as_str()));
-        Some(Pending {
-            day: self.recorder.today(),
-            prehash: self.recorder.prehash(&address, ua),
-            path: clean_path(path),
-            query: clean_query(
-                request.uri().query().unwrap_or(""),
-                &self.config.query_allow,
-            ),
-            referrer: referrer_origin(text("referer"), host).unwrap_or_default(),
-            browser: class.browser,
-            os: class.os,
-            device: class.device,
-            country: self
-                .config
-                .country_header
-                .as_deref()
-                .and_then(|name| country(text(name)))
-                .unwrap_or_default(),
-        })
+        visit(
+            &self.config,
+            &self.recorder,
+            request,
+            request.uri().path(),
+            request.uri().query().unwrap_or(""),
+            header(request, "referer"),
+            host,
+        )
     }
+}
 
-    /// The client address as text: the edge's header when one is named,
-    /// else the socket's. Only ever hashed.
-    fn address(&self, request: &Request) -> String {
-        if let Some(name) = &self.config.ip_header {
-            if let Some(value) = request
-                .headers()
-                .get(name.as_str())
-                .and_then(|v| v.to_str().ok())
-            {
-                let first = value.split(',').next().unwrap_or("").trim();
-                if !first.is_empty() {
-                    return first.to_string();
-                }
-            }
-        }
-        request
-            .extensions()
-            .get::<std::net::SocketAddr>()
-            .map(|peer| peer.ip().to_string())
-            .unwrap_or_default()
+/// One header as text, or `""`.
+pub(crate) fn header<'r>(request: &'r Request, name: &str) -> &'r str {
+    request
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
+/// A page view from the parts of a request that are kept, after the rules
+/// the hook and the collector share: no bot, no signal when the site
+/// respects it, no excluded path, and every field reduced.
+///
+/// `path` and `query` are the visited page's, `referer` is where the
+/// visitor came from, and `host` is the visited site, so a referrer from
+/// the site itself is dropped.
+pub(crate) fn visit(
+    config: &AnalyticsConfig,
+    recorder: &Recorder,
+    request: &Request,
+    path: &str,
+    query: &str,
+    referer: &str,
+    host: Option<&str>,
+) -> Option<Pending> {
+    let ua = header(request, "user-agent");
+    if is_bot(ua) {
+        return None;
     }
+    if config.respect_gpc
+        && (header(request, "sec-gpc").trim() == "1" || header(request, "dnt").trim() == "1")
+    {
+        return None;
+    }
+    let path = clean_path(path);
+    if config.excludes(&path) {
+        return None;
+    }
+    let class = ua_class(ua);
+    Some(Pending {
+        day: recorder.today(),
+        prehash: recorder.prehash(&address(config, request), ua),
+        path,
+        query: clean_query(query, &config.query_allow),
+        referrer: referrer_origin(referer, host).unwrap_or_default(),
+        browser: class.browser,
+        os: class.os,
+        device: class.device,
+        country: config
+            .country_header
+            .as_deref()
+            .and_then(|name| country(header(request, name)))
+            .unwrap_or_default(),
+    })
+}
+
+/// The client address as text: the edge's header when one is named, else
+/// the socket's. Only ever hashed.
+fn address(config: &AnalyticsConfig, request: &Request) -> String {
+    if let Some(name) = &config.ip_header {
+        let first = header(request, name).split(',').next().unwrap_or("").trim();
+        if !first.is_empty() {
+            return first.to_string();
+        }
+    }
+    request
+        .extensions()
+        .get::<std::net::SocketAddr>()
+        .map(|peer| peer.ip().to_string())
+        .unwrap_or_default()
 }

@@ -1,9 +1,11 @@
 # Analytics
 
 `brocanth-analytics` counts page views on the server. It is the `analytics`
-module. It runs no script in the page, sets no cookie, and sends nothing to
+module. It runs no script in its pages, sets no cookie, and sends nothing to
 a third party. The numbers go in two tables of the database the `db` module
-opens, and the admin shows them at `/admin/analytics`.
+opens, and the admin shows them at `/admin/analytics`. A static site is
+counted through the same server: its pages carry the `beacon` module's
+snippet, and the server's collector reads what it sends.
 
 This page records the design and the reason for each decision. Status:
 draft, for review.
@@ -41,8 +43,9 @@ module needs no list of asset paths.
 `DP-Partial` that replaces a full page load. Each navigation is one request,
 either full or partial, so counting both counts each navigation once.
 
-**No route of its own.** The module adds no page and no endpoint, so there
-is nothing of its own to exclude and nothing to secure.
+**No route of its own,** except the collector for static sites (decision
+7), which is off until `collector_origins` names one. The collector answers
+a 204 or an image, never HTML, so the hook never counts it.
 
 ### 2. Privacy by construction
 
@@ -139,8 +142,12 @@ With `admin`, the admin module writes one line in its `mount`:
 config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
 ```
 
-The tab shows visitors and views over 7, 30 or 90 days, a bar per day, and
-the top 10 pages, referrers, browsers, systems, devices and countries. It is
+The tab shows visitors and views over 7, 30 or 90 days, or between any two
+dates (`?from=2026-10-01&to=2026-10-31`, a GET form). A custom range is two
+years at most, so one request cannot ask for a decade; a range that is
+backwards, too long or unreadable falls back to 30 days. Below the totals
+come a bar per day and the top 10 pages, referrers, browsers, systems,
+devices and countries. It is
 rendered on the server with no script. The bars are SVG `<rect>` elements
 with presentation attributes, so the screen needs nothing from the
 Content-Security-Policy. It is behind the admin's policy like every tab:
@@ -161,28 +168,93 @@ WHERE site = 'my-site' AND day >= current_date - 29
 GROUP BY path ORDER BY views DESC LIMIT 10;
 ```
 
-### 7. Static sites: not supported
+### 7. Static sites: a collector on the server, a beacon in the pages
 
-A static host serves the files `brocanth export` wrote and never runs this
-hook. The module is not `outside_runtime`, so the static preset refuses it
-through the manifest rule. That is better than shipping a counter that
-counts nothing.
+A static host serves the files `brocanth export` wrote and never runs the
+hook. So `analytics` stays **not** `outside_runtime`, and the static preset
+refuses it. A static site is counted by a brocanth server that has it, in
+two halves:
 
-**Follow-up, not built:** a collector route on a brocanth server, fed by a
-1×1 image or `navigator.sendBeacon` from the static pages. It would reuse
-the recorder and the store; the static site would need one tag.
+**The collector, in `analytics`.** A second request hook on one path,
+`collector_path` (default `/_a/v`). It is installed only when
+`collector_origins` lists at least one origin. It reads a page view a
+static page sends and counts it with the same rules as the hook:
 
-### 8. Enabled everywhere by default
+- the visitor hash comes from the beacon request's own address and user
+  agent, which are the visitor's, because the browser sends the beacon. A
+  page view on the server and a beacon from one browser are one visitor;
+- the page is the `p` value of the payload, reduced by `clean_path` and
+  `clean_query`; the referrer is the `r` value, kept as its origin, and
+  dropped when it is the static site's own;
+- bots, excluded paths and (with `respect_gpc`) GPC/DNT are dropped.
 
-Decision: `enabled = true` in every environment. Reason: the data stays in
-your own database, and seeing the numbers move in development is the test
-that the module works. A project that does not want development counts sets
-`enabled = false` in `config/development.toml`.
+Abuse, because anybody can send to a public URL:
+
+- **Origin check.** Only an origin in `collector_origins` counts, read from
+  `Origin` (`sendBeacon` sends it), or from the origin of `Referer` when
+  there is none (an image request sends no `Origin`). Neither header is
+  proof, and the doc says so: they keep a careless site and a casual
+  script out, not a determined forger, who could also just open the pages.
+- **Size.** A query or a body over 2 KiB is ignored; `clean_path` caps the
+  stored path at 512 bytes.
+- **Rate limits.** The path is fixed, so a `rate-limit` rule can name it,
+  and the collector runs after the rate limiter when both are present.
+- **One answer.** Counted or not, the collector answers 204, or a 1×1 GIF
+  to a GET, with `Cache-Control: no-store`. Never a 5xx and never a reason:
+  a beacon cannot read it, and a prober learns nothing.
+- **CSRF.** The collector runs before the CSRF check (`before_if_present
+  ("csrf.check")`): a beacon is a cross-site POST with no token, and it
+  writes nothing a forged form could abuse. Every other POST still meets
+  the check; a test holds both.
+
+The path is `/_a/v` and not `/collect` or `/analytics`, which are on the
+lists content blockers use. Hiding from a blocker is not the aim: a person
+who blocks it has said no. The aim is not to be caught by a rule written
+for third-party trackers.
+
+**The beacon, a module of its own: `beacon`.** A response hook that puts a
+`<script>` before the last `</body>` of every HTML page (at its end when
+`</body>` is left out, which HTML allows; never in a dp-swap partial) once
+`[beacon] collector` names a collector URL. The export runs every page
+through the hooks, so every exported file carries it.
+
+- Decision: its own top-level module, not `analytics-beacon`. Reason: the
+  static site and the counting server are two projects. A static site
+  cannot hold `analytics`, and a child cannot be chosen without its parent,
+  so a child would be refused by the very preset it exists for. `beacon` is
+  `outside_runtime`: what it adds runs at export time and in the browser.
+- It conflicts with `analytics`: in one project the two would count each
+  page twice.
+- The script is about 600 bytes, the same text on every page; the URL and
+  the GPC choice are `data-` attributes on the `<script>` element. It sends
+  `p` (path and query) and `r` (`document.referrer`) with
+  `navigator.sendBeacon` and a form body, a CORS-safelisted type that needs
+  no preflight, or with a 1×1 image when the browser has no beacon. It
+  wraps `history.pushState`, so a dp-swap navigation sends again, and
+  listens to `popstate`. It sets no cookie and uses no storage; a test
+  checks the text for both.
+- With `[beacon] respect_gpc`, a browser with Global Privacy Control or Do
+  Not Track on sends nothing.
+
+Wiring the two: set `[beacon] collector = "https://app.example.com/_a/v"`
+on the static site, and `[analytics] collector_origins =
+["https://docs.example.com"]` on the server. Beacon rows carry the server's
+`site`, so the server's dashboard shows the static site's pages beside its
+own. Two static sites feeding one server are one site in the numbers.
+
+### 8. Off in development, on in production
+
+Decision: the generated `config/development.toml` writes `enabled = false`;
+the plugin's default stays `true`, so production counts unless its own file
+says otherwise. Reason: your own visits while you build are not the
+audience, and they would sit in the numbers for 25 months. To check the
+module works, set `enabled = true` locally and open `/admin/analytics`.
 
 ## Settings
 
-See [`modules/analytics.md`](modules/analytics.md) for the table. Lists
-(`exclude`, `query_allow`) are file-only, like every list.
+See [`modules/analytics.md`](modules/analytics.md) and
+[`modules/beacon.md`](modules/beacon.md) for the tables. Lists (`exclude`,
+`query_allow`, `collector_origins`) are file-only, like every list.
 
 ## Privacy reasoning, and its limits
 
@@ -236,13 +308,17 @@ audience-measurement tool from consent:
   `hash(daily_salt + domain + ip + user_agent)` method this module follows,
   with daily salt deletion).
 
+## Decided in review
+
+1. Static sites: the collector and the `beacon` module (decision 7).
+2. The dashboard takes any two dates as well as 7, 30 and 90 days
+   (decision 6).
+3. `config/development.toml` writes `enabled = false` (decision 8).
+4. Bot detection stays a word list (`classify::BOT_WORDS`). Detecting a
+   client that never loads the page's assets needs a script on the server's
+   own pages, which this module does not ship.
+
 ## Open questions
 
-1. A collector route for static sites (decision 7): build it next, or leave
-   static sites without analytics?
-2. Should the dashboard offer a custom date range, or are 7/30/90 days
-   enough?
-3. Should `enabled` default to `false` in `config/development.toml`, as the
-   robots module closes indexing there?
-4. Bot detection: keep the word list, or also drop clients that never load
-   a page's assets (needs a beacon, so it conflicts with "no script")?
+1. Beacon rows carry the server's `site`. Should each collector origin be
+   a site of its own on the dashboard?

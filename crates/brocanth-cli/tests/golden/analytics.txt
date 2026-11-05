@@ -1681,6 +1681,13 @@ pub const SETTINGS: &[Setting] = &[
         none_as: None,
         text: false,
     },
+    Setting {
+        path: "analytics.collector_path",
+        help: "The path that counts page views a static site sends with the `beacon` module.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
 ];
 
 /// One value this run was given, above the defaults.
@@ -1918,6 +1925,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", analytics.country_header),
         ),
         ("analytics.migrate", format!("{:?}", analytics.migrate)),
+        (
+            "analytics.collector_path",
+            format!("{:?}", analytics.collector_path),
+        ),
     ]
 }
 
@@ -1987,7 +1998,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 16becd6a00aff392
+// brocanth-digest: 16994be46e4d17e6
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2076,7 +2087,10 @@ application_name = "my-blog"
 
 [analytics]
 # Count page views. Off installs no hook.
-enabled = true
+# False here because this file is the development one: your own visits
+# are not the audience. Production reads the plugin's default, true,
+# unless its own file says otherwise.
+enabled = false
 # The site name on every row, and part of the visitor hash.
 site = "my-blog"
 # Paths never counted, each with everything under it.
@@ -2100,6 +2114,11 @@ respect_gpc = false
 # Create the two tables on the first readiness check.
 # Off, for a project that keeps brocanth_analytics::PgStore::SCHEMA in a migration.
 migrate = true
+# The path that counts page views a static site sends with the `beacon` module.
+collector_path = "/_a/v"
+# The static sites allowed to send them: "https://docs.example.com". Empty, no collector.
+# A beacon from any other origin is answered 204 and not counted.
+collector_origins = []
 ===== src/plugins/admin/mod.rs =====
 //! The backoffice, at `/admin`.
 //!
@@ -2535,7 +2554,7 @@ request.
 - `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2672,7 +2691,7 @@ or an account number is not. Do not add a column to
 With the admin, the numbers are at `/admin/analytics`, behind the
 admin's policy like every tab.
 
-<!-- brocanth-digest: 2a730a151eb404e4 -->
+<!-- brocanth-digest: 64663faa40fed91c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

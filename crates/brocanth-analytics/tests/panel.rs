@@ -98,6 +98,31 @@ fn the_range_is_one_of_three_and_narrows_the_numbers() {
 }
 
 #[test]
+fn any_two_dates_make_a_range() {
+    let (_, html) = get(&admin(recorder(), true), "from=2024-10-03&to=2024-10-03");
+    let page = Html::new(html);
+    page.assert_text("2024-10-03 to 2024-10-03");
+    page.assert_text("1 visitors");
+    page.assert_text("1 page views");
+    // The form shows the range it drew.
+    let from = page.field("from").expect("a from field");
+    assert_eq!(from.attr("value"), Some("2024-10-03"));
+}
+
+#[test]
+fn a_range_backwards_too_long_or_unreadable_falls_back_to_30_days() {
+    for query in [
+        "from=2024-10-04&to=2024-10-01",
+        "from=2020-01-01&to=2024-10-04",
+        "from=yesterday&to=2024-10-04",
+        "from=2024-02-30&to=2024-10-04",
+    ] {
+        let (_, html) = get(&admin(recorder(), true), query);
+        Html::new(html).assert_text("2024-09-05 to 2024-10-04");
+    }
+}
+
+#[test]
 fn the_tab_is_locked_like_every_other() {
     let (status, html) = get(&admin(recorder(), false), "");
     assert_eq!(status, 403);

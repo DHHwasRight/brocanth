@@ -11,8 +11,9 @@ every day, and the salt that made it is deleted when the day ends.
 
 Use it to answer "how many people read this page, and where did they
 come from". Do not use it to follow one person: it cannot, by design.
-It also cannot see a static site served by another host, because it
-runs in the server.
+The hook runs in the server, so a static site served by another host is
+counted through a collector on this server, fed by the `beacon` module's
+snippet in the exported pages (below).
 
 ## Getting started
 
@@ -32,6 +33,11 @@ By hand:
 [dependencies]
 brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }
 ```
+
+Features: `runtime` (the plugin, the hook, the collector, the beacon and
+the stores) and `postgres` are on by default; `config` and `admin` are off.
+The `brocanth` CLI takes the crate with `default-features = false,
+features = ["scaffold"]`, so the generator links none of the runtime.
 
 The plugin is registered after the `db` plugin, so it finds the pool in
 the application's services:
@@ -59,7 +65,7 @@ let app = AppBuilder::new()
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Count page views. `false` installs no hook. |
+| `enabled` | `true` (`false` in the generated development file) | Count page views. `false` installs no hook. |
 | `site` | the project name | The site on every row, and part of the hash. |
 | `exclude` | `["/admin"]` | Paths never counted, with everything under them. File only. |
 | `query_allow` | the five `utm_*` | Query parameters kept on the path. File only. |
@@ -69,6 +75,31 @@ let app = AppBuilder::new()
 | `ip_header` | unset | A header the edge sets to the client address. |
 | `country_header` | unset | A header the edge sets to a country code, such as `cf-ipcountry`. |
 | `migrate` | `true` | Create the two tables on the first readiness check. |
+| `collector_path` | `/_a/v` | The path that counts what a static site's beacon sends. |
+| `collector_origins` | `[]` | Origins allowed to send beacons. Empty, no collector. File only. |
+
+## Static sites: the beacon
+
+A static host never runs the hook. A static site is counted by a brocanth
+server with `analytics`:
+
+1. On the server, list the site: `collector_origins = ["https://docs.example.com"]`
+   under `[analytics]`. That installs a collector at `/_a/v`.
+2. On the static site, choose the `beacon` module and set
+   `collector = "https://app.example.com/_a/v"` under `[beacon]`. Every
+   exported page then carries a short script that reports the view with
+   `navigator.sendBeacon`, or a 1×1 image. No cookie, no storage.
+
+The collector counts a beacon only from a listed origin, ignores payloads
+over 2 KiB, and always answers 204 (or the image), never a 5xx.
+
+```rust
+use brocanth_analytics::beacon::insert;
+
+let mut page = b"<html><body><h1>Docs</h1></body></html>".to_vec();
+insert(&mut page, "<script>/* the beacon */</script>");
+assert_eq!(page, b"<html><body><h1>Docs</h1><script>/* the beacon */</script></body></html>");
+```
 
 ## Examples
 
