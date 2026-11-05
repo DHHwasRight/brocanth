@@ -243,8 +243,8 @@ four routes that call `Admin::dispatch`. Both crates keep their
 worker, migrations, `api` from `brocanth-client`.
 
 Seams: `Slot::CommandsMod`, `Slot::MiseTasks`, `Slot::NodeDependencies`,
-`Scaffold::binary`. `CommandsMod` and `MiseTasks` are read.
-`NodeDependencies` is declared and unread.
+`Scaffold::binary`. All three slots are read. The generator writes
+`package.json` from `NodeDependencies`.
 
 ---
 
@@ -615,7 +615,7 @@ generated projects, and all ten are clean.
 | `GitIgnore`, `AgentsSections` | read |
 | `CargoExtra`, `AppItems`, `AppBeforeRouter` | **deleted**: no module had a use. `src/app.rs` is the developer's file, so a module writes its own file under `src/plugins/<key>/`; an answer before the router is a route in the one table |
 | `MiseTasks` | read — `rsx-tailwind` was its first customer |
-| `NodeDependencies` | **declared, never read** — `rsx-tailwind` wants it |
+| `NodeDependencies` | read — the generator writes `package.json` from it; `rsx-tailwind` is its first customer |
 | `PagesRenderers` | read — the renderer seam, §5 |
 | `PagesRoutes` | read — a module's page joins the table's own test, §6b |
 | `RouterMounts` | read — a module's `mount`, called from `pages::mounted` (§4.6). `resource` and `admin` are its customers |
@@ -812,10 +812,9 @@ direction: it never mistakes an edit for the generator's text.
    and an empty list of resources at `/api`; `admin` mounts the backoffice
    at `/admin`, locked. `admin-model` reads its rows through the
    `brocanth_model::Orm` the model plugin builds on the `db` pool.
-5. ~~**Read the unread slots, or delete them.**~~ **Done**, except one.
-   `MiseTasks` is read. `CargoExtra`, `AppItems` and `AppBeforeRouter` are
-   deleted. `NodeDependencies` is still unread: `rsx-tailwind` writes the
-   whole `package.json` itself.
+5. ~~**Read the unread slots, or delete them.**~~ **Done.**
+   `MiseTasks` and `NodeDependencies` are read. `CargoExtra`, `AppItems`
+   and `AppBeforeRouter` are deleted.
 
 Steps 1 and 2 are one piece of work and should be one branch. Step 3 is
 independent. Step 4 is independent. Step 5 is small and can ride with any of

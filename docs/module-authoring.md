@@ -331,31 +331,31 @@ impl Module for Correlation {
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
         // Three slots from one call: the registration, the provider list
         // and the hook record. They must agree, so one function writes all
-        // three.
+        // three. `hooking_line` writes the statement in rustfmt's shape.
         snippet::hooking(
             s,
             "correlation",
-            "brocanth_correlation::Correlation",
-            REGISTRATION.to_string(),
+            TYPE,
+            format!(
+                "{COMMENT}{}",
+                snippet::hooking_line(TYPE, "brocanth_correlation::CorrelationConfig::default()")
+            ),
         );
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
 
-/// The registration. It lands inside `plugins::register!`, so it is
-/// indented for that block and already in rustfmt's shape.
-const REGISTRATION: &str = r#"
+const TYPE: &str = "brocanth_correlation::Correlation";
+
+/// The comment above the registration. It lands inside
+/// `plugins::register!`, so it is indented 8 columns.
+const COMMENT: &str = "
         // -- brocanth-correlation -----------------------------------------
         //
         // Reads `x-request-id`, or makes one, and sends it back. A page
         // reads it with `ctx.hooked::<brocanth_correlation::CorrelationId>()`.
         //
-        let builder = builder.plugin_hooking(
-            <brocanth_correlation::Correlation as brocanth::plugin_api::Plugin>::new(
-                brocanth_correlation::CorrelationConfig::default(),
-            ),
-        );
-"#;
+";
 
 const AGENTS: &str = "\n\
     ## Request ids\n\
@@ -366,9 +366,11 @@ const AGENTS: &str = "\n\
     second id in a page.\n";
 ```
 
-The registration is a literal string because the generated file must pass
-its first `cargo fmt` unchanged (§4). Write the block in the shape rustfmt
-gives it, with 8 spaces of indent.
+The generated file must pass its first `cargo fmt` unchanged (§4).
+`snippet::hooking_line(ty, config)` writes the statement in rustfmt's
+shape: it picks one of the three forms rustfmt gives the call by the
+length of the type. Write only the comment by hand, with 8 spaces of
+indent.
 
 ### Step 4: register it in the CLI
 
@@ -437,10 +439,20 @@ through `snippet::hooking` (`lib.rs:1030`):
 
 ```rust
 pub fn hooking(s: &mut Scaffold, key: &str, ty: &str, block: String)
+pub fn hooking_line(ty: &str, config: &str) -> String
 ```
 
 `block` is the full statement, and it must call `plugin_hooking` on
-`builder`. See the walkthrough for an example.
+`builder`. Build it with `hooking_line`, and put a comment before it if
+you want one. `config` is one expression at column 0; a line after the
+first keeps its indent relative to the first, so a broken chain is
+`"Config::default()\n    .a(1)\n    .b(2)"`. See the walkthrough for an
+example.
+
+`hooking_line` takes no `Project`: the statement is the same with and
+without `config`. A plugin whose configuration comes from the file uses
+`configurable_hooking`, which calls `hooking_line` for its literal
+branch.
 
 A hooking plugin with settings uses `snippet::configurable_hooking`
 instead. It takes a `Hooking { key, section, ty, config_ty, prelude,
@@ -878,7 +890,7 @@ A second `[[bin]]`. Write the source with `s.file`, then
 |---|---|---|
 | `MiseTasks` | `mise.toml` | one `[tasks.x]` table, with `block` |
 | `GitIgnore` | `.gitignore` | one path per `line` |
-| `NodeDependencies` | `package.json` | **not read**. `rsx-tailwind` writes the whole `package.json` with `s.file` |
+| `NodeDependencies` | `package.json` | one package per `snippet::node_dependency(s, name, version)` |
 
 Anything else is a whole file: `Dockerfile`, `.github/workflows/ci.yml`.
 Write it with `s.file`. An external module is nearly always
@@ -889,7 +901,16 @@ s.at(Slot::MiseTasks).block(
     "\n[tasks.css]\nrun = \"npx @tailwindcss/cli -i src/app.css -o public/app.css\"\n".to_string(),
 );
 s.at(Slot::GitIgnore).line("/node_modules");
+snippet::node_dependency(s, "@tailwindcss/cli", "^4.1.14");
 ```
+
+The generator writes `package.json` when a module names a package. Every
+package goes under `devDependencies`, sorted by name: node builds an
+asset, and the binary that ships runs without it. Two modules may name
+one package at one version. Two versions of one package is an error that
+names both modules. Do not write `package.json` with `s.file`: the
+generator refuses it, because a second node module would clash on the
+file.
 
 ### 3.6 Every category: `Slot::AgentsSections`
 
@@ -953,6 +974,64 @@ A module in `ALL` must pass these:
   the developer owns goes through while that file is unedited, and is
   refused once the developer has edited it. Keep writes in your own files
   and in slots, so the refusal stays rare.
+
+### Testing a module outside this repository
+
+A module crate tests itself with `brocanth_scaffold::testing` and the
+generator in `brocanth_cli::testing`. It needs no fork of the CLI.
+
+```toml
+[dev-dependencies]
+brocanth-scaffold = { version = "0.1", features = ["testing"] }
+brocanth-cli = { git = "https://github.com/DHHwasRight/brocanth" }
+```
+
+```rust
+use brocanth_scaffold::testing;
+
+#[test]
+fn the_module_writes_this_project() {
+    let files = brocanth_cli::testing::generate(
+        "my-blog",
+        &["config", "correlation"],
+        &[&brocanth_correlation::scaffold::Correlation],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    testing::assert_formatted(&files);
+    testing::golden(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/correlation.txt"),
+        &testing::snapshot(&files),
+    );
+    if testing::building() {
+        let files = brocanth_cli::testing::generate_for_build(
+            "my-blog",
+            &["config", "correlation"],
+            &[&brocanth_correlation::scaffold::Correlation],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        testing::build(&files).unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+```
+
+| Function | Does |
+|---|---|
+| `brocanth_cli::testing::generate(name, picks, extra)` | What `create` writes for `picks`, with each `&dyn Module` in `extra` beside the CLI's modules. A module in `extra` replaces the CLI's module with the same key. The brocanth crates come from the repository, so the result fits a golden. |
+| `brocanth_cli::testing::generate_for_build(..)` | The same, with path dependencies on the checkout the CLI was compiled from. |
+| `testing::assert_formatted(files)` | Fails when rustfmt changes a generated `.rs` file. Skips when rustfmt is not on `PATH`. |
+| `testing::snapshot(files)` | The project as one text, in the CLI's golden format. |
+| `testing::golden(path, text)` | Compares with the file, or writes it under `BROCANTH_BLESS=1`. |
+| `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo build` in a temporary directory and deletes it when the build passes. |
+
+`crates/brocanth-robots/tests/scaffold.rs` uses it: the two `robots`
+shapes and their goldens moved there from the CLI. It also generates a
+module that the CLI does not list.
+
+`brocanth-cli` is a binary and a library. The library compiles the same
+modules and exposes only `testing`; its unit tests run in the binary. A
+module crate in this repository takes the CLI as a dev-dependency, and
+the CLI takes the module's `scaffold` side. Cargo allows that cycle
+through dev-dependencies.
 
 Then generate a project and build it. A golden proves only the text:
 
@@ -1023,7 +1102,7 @@ without a change to the CLI.
    stand beside.
 4. `absent` that says what the project lacks without the module.
 5. Plugins in `src/plugins/<key>/mod.rs`, registered through
-   `snippet::plugin` or `snippet::hooking`.
+   `snippet::plugin`, or `snippet::hooking` with `snippet::hooking_line`.
 6. Settings through `snippet::configurable`; `Deserialize` only when
    `project.has("config")`.
 7. A `PagesRoutes` line for each route the module adds.
@@ -1031,7 +1110,8 @@ without a change to the CLI.
 9. `outside_runtime()` when the module does not run in the server.
 10. No stage waits for async work: a lazy pool and a readiness check.
 11. Two lines in the CLI, the goldens blessed and read, a generated
-    project built.
+    project built. Outside this repository: `brocanth_scaffold::testing`
+    in the module's own tests.
 
 ## 5. Gaps
 
@@ -1049,28 +1129,30 @@ Found while writing this guide. Input for the module-design discussion.
    listed as `adapted_to` in `brocanth.toml`.
 4. ~~**No category field.**~~ Closed: `Manifest::category`. A test holds
    each module to the slots its categories open, and `--with`'s help
-   leads with the categories. The chooser does not group by it yet.
+   leads with the categories. The chooser's expert view groups the rows
+   by main category.
 5. ~~**No config form for a hooking plugin.**~~ Closed:
    `brocanth-config` has `plugin_hooking_from_config` and
    `plugin_hooking_from_config_with`, and `snippet::configurable_hooking`
    declares a hooking plugin's settings. `csrf`, `security-headers` and
    `rate-limit` read `[csrf]`, `[security_headers]` and `[rate_limit]`.
    See `docs/module-flags.md`.
-6. **The hooking registration is hand-formatted text.** `snippet::plugin`
-   writes the statement for you. `snippet::hooking` takes the whole
-   statement as a string, so each module repeats the rustfmt shape and the
-   `<T as Plugin>::new(..)` form. A `snippet::hooking_line(project, ty,
-   config_expr)` would remove that.
+6. ~~**The hooking registration is hand-formatted text.**~~ Closed:
+   `snippet::hooking_line(ty, config)` writes the statement in rustfmt's
+   shape, and `configurable_hooking` uses it for its literal branch. It
+   takes no `Project`, because the statement does not change with the
+   module set.
 7. ~~**A config section is parsed back from text.**~~ Closed: a
    declared setting names its section, and `snippet::configurable` writes
    it. `docs/module-flags.md` has the design.
-8. **An out-of-tree module has no test harness.** The goldens and the
-   formatting test live in the CLI crate. A third-party author must fork
-   the CLI to run them. A `brocanth_scaffold::testing` helper (generate a
-   project with these keys, run rustfmt over it, compare a golden) would
-   let a module crate test itself.
-9. **`NodeDependencies` is still unread.** `rsx-tailwind` writes the
-   whole `package.json`. A second node module would collide on that file.
+8. ~~**An out-of-tree module has no test harness.**~~ Closed:
+   `brocanth_scaffold::testing` (rustfmt, goldens, a build) and
+   `brocanth_cli::testing::generate`, which takes the module as a
+   `&dyn Module`. See "Testing a module outside this repository" in §4.
+   `brocanth-robots` tests itself this way.
+9. ~~**`NodeDependencies` is still unread.**~~ Closed: the generator writes
+   `package.json` from the slot, and `rsx-tailwind` names its package
+   through `snippet::node_dependency`.
 10. **`Plugin::provide` cannot see the request.** A context value cannot
     depend on a cookie or a header. Today that value goes through a
     request hook and `ctx.hooked`, which skips the compile-time check

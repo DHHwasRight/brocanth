@@ -141,20 +141,14 @@ shutdown_grace_secs` has a flag and a variable in every project
 2. **Module versions.** Nothing records which version of a module wrote
    which files, so an upgrade cannot show what changed. The admin eject
    header names a version, and is the only place that does.
-3. **A test harness for out-of-tree modules.** The goldens and the
-   rustfmt check live in the CLI crate, so a third-party module must fork
-   the CLI to test itself (`docs/module-authoring.md`, gap 8).
-4. **A `ServerWrap` slot.** Only `observability` can wrap the server
+3. **A `ServerWrap` slot.** Only `observability` can wrap the server
    (`wrap`, `side_listeners`, `stop_accepting`). A tracer or an access log
-   cannot (gap 1).
-5. **The chooser groups modules by category.** The categories are in the
-   manifests, `--help` and `brocanth.toml`, but the chooser still lists
-   modules in `ALL` order.
-6. **Smaller seams:** `snippet::hooking` takes hand-formatted text
-   (gap 6); `NodeDependencies` is not read, so a second node module would
-   collide with `rsx-tailwind` on `package.json` (gap 9);
-   `Plugin::provide` cannot see the request (gap 10); sixteen `rsx`
-   branches remain in `create.rs` (gap 11).
+   cannot (`docs/module-authoring.md`, gap 1).
+4. **Smaller seams:** `Plugin::provide` cannot see the request (gap 10);
+   sixteen `rsx` branches remain in `create.rs` (gap 11).
+5. **More module crates on the harness.** `brocanth-robots` keeps its
+   shapes and goldens in its own crate through `brocanth_scaffold::testing`.
+   The other module crates still rely on the CLI's goldens.
 
 ### 4. Admin
 
@@ -189,3 +183,9 @@ For context, not to do: per-module settings with flags and config, the
 manifest rules, `admin eject` (CLI and project command), `robots`,
 `analytics` with `beacon`, `gtag`, `migrate` and `dbshell` as project
 commands, and a CLI with no module runtime.
+
+Also done: a test harness for out-of-tree modules
+(`brocanth_scaffold::testing` with `brocanth_cli::testing::generate`,
+gap 8), a chooser that groups modules by main category, a structured
+`snippet::hooking_line` (gap 6), and `package.json` from
+`Slot::NodeDependencies` (gap 9).

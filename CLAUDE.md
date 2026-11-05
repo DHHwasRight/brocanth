@@ -53,7 +53,9 @@ Also run `cargo fmt --check` before a commit.
 - CLI golden files live in `crates/brocanth-cli/tests/golden/`. When the
   generator changes, run
   `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- generator_writes`
-  and read the diff before you commit it.
+  and read the diff before you commit it. A module crate can keep its own
+  goldens through `brocanth_scaffold::testing` (`brocanth-robots` does):
+  bless them with `BROCANTH_BLESS=1 cargo test -p <crate>`.
 - Use `brocanth-test` (`TestClient`, HTML reader) to test a screen. Assert on
   behaviour, not on CSS class names.
 
