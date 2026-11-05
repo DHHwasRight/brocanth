@@ -37,6 +37,7 @@ edition = "2021"
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
+#   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -68,7 +69,7 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -105,7 +106,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: b5f00348e17ca817
+// brocanth-digest: 32a281d6f318fea8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -587,7 +588,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -1310,7 +1311,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1796,7 +1797,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: d5640076aaf06306
+// brocanth-digest: 649f865f1f154395
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2066,7 +2067,9 @@ mod tests {
 //!    writes `GET /realtime/events?topics=posts/*` and the stream behind it
 //!    (`src/plugins/realtime_sse/mod.rs`): one `Client` per connection, a
 //!    heartbeat, `lagged` when frames were dropped, and an end on shutdown.
-//!    `brocanth add realtime-sse` adds it.
+//!    `brocanth add realtime-sse` adds it. `realtime-websocket` is the
+//!    duplex form: `GET /realtime/socket`, frames out and `subscribe`
+//!    commands in.
 //! 2. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
@@ -2426,7 +2429,7 @@ mod tests {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2455,7 +2458,7 @@ request.
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2490,6 +2493,32 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Realtime over server-sent events
+
+`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
+to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
+`src/pages/realtime/events.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+  Nothing is public until it is listed in `PUBLIC` or gated there by a
+  policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Publish from a page after the write, with the row you already hold:
+
+  ```rust
+  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
+  let row = brocanth_realtime::Row::new().with("author_id", author);
+  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
+  ```
+
+- Read it in the browser. The event name is the topic. `lagged` means the
+  view may be stale: fetch it again.
+
+  ```js
+  const events = new EventSource("/realtime/events?topics=posts/*");
+  events.addEventListener("posts/*", (e) => console.log(e.data));
+  events.addEventListener("lagged", () => location.reload());
+  ```
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -2518,36 +2547,10 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## Realtime over server-sent events
-
-`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
-to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
-`src/pages/realtime/events.rs` is the route.
-
-- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
-  Nothing is public until it is listed in `PUBLIC` or gated there by a
-  policy (`Subscription::from_policy`). Never filter frames after delivery.
-- Publish from a page after the write, with the row you already hold:
-
-  ```rust
-  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
-  let row = brocanth_realtime::Row::new().with("author_id", author);
-  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
-  ```
-
-- Read it in the browser. The event name is the topic. `lagged` means the
-  view may be stale: fetch it again.
-
-  ```js
-  const events = new EventSource("/realtime/events?topics=posts/*");
-  events.addEventListener("posts/*", (e) => console.log(e.data));
-  events.addEventListener("lagged", () => location.reload());
-  ```
-
-<!-- brocanth-digest: 22e9ac64ddff9239 -->
+<!-- brocanth-digest: 7a83d2fbcc733161 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2559,6 +2562,7 @@ title = "My Blog"
 enabled = ["config", "realtime", "realtime-sse"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
@@ -2566,6 +2570,7 @@ crates = ["brocanth-config"]
 adapted_to = []
 
 [modules.realtime]
+version = "0.1.0"
 kind = ["enhancer", "middleware"]
 files = ["src/plugins/realtime/"]
 config = ["realtime"]
@@ -2573,10 +2578,11 @@ crates = ["brocanth-realtime"]
 adapted_to = ["config"]
 
 [modules.realtime-sse]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/realtime/events.rs", "src/plugins/realtime_sse/"]
 config = []
 crates = ["brocanth-events"]
 adapted_to = []
 
-# brocanth-digest: 86592434d12b8c8c
+# brocanth-digest: 709af9df8eab3981

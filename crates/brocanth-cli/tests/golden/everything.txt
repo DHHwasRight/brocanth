@@ -28,7 +28,7 @@ brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
-brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "i18n"] }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
@@ -39,12 +39,16 @@ brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
-brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
+brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
+brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge", "websocket"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
+
+[build-dependencies]
+brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 ===== .gitignore =====
 /target
 /var/uploads
@@ -77,7 +81,7 @@ run = "cargo run -- css"
 description = "the same, again on each change"
 run = "cargo run -- css --watch"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -117,7 +121,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: 470bfa3bd0d4d786
+// brocanth-digest: a4c0d834f4f0578f
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -259,58 +263,6 @@ fn headers(request: &hooks::Request) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The file a request named, or `None` to let the router answer.
-///
-/// Checked before the route table, which is also the order of surprise: a
-/// page at the same path as a file would be shadowed, and a path under
-/// `/assets` or `/public` is not a route anybody writes by hand.
-fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
-    if !matches!(
-        request.verb,
-        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
-    ) {
-        return None;
-    }
-    let asset = crate::assets::lookup(&request.path)?;
-
-    // The ETag is the content hash, so it is strong and a match means the
-    // bytes are identical. 304 is the whole point of serving `public/`
-    // without a fingerprint in the name.
-    if request.header("if-none-match") == Some(asset.etag) {
-        return Some(
-            brocanth_server::Response::new(304, asset.content_type, &[][..])
-                .with_header("etag", asset.etag)
-                .with_header("cache-control", asset.cache_control()),
-        );
-    }
-
-    Some(
-        brocanth_server::Response::new(200, asset.content_type, asset.body)
-            .with_header("etag", asset.etag)
-            .with_header("cache-control", asset.cache_control()),
-    )
-}
-
-/// How many layout layers the client already has, from `DP-Partial`.
-///
-/// `html!` leaves out that many layouts, counting from the root, so a
-/// navigation inside a section sends the section's contents and not the
-/// document around them. dp-swap sends the number; the header is absent on
-/// a first load, for a crawler, and whenever JavaScript is off, and then
-/// this is zero and the whole document goes out.
-///
-/// `true` is dp-swap's word for "a fragment, I did not count", which is one
-/// layer. Anything that does not parse is zero: a client that cannot say
-/// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &hooks::Request) -> u32 {
-    let header = request.headers().get("dp-partial");
-    match header.and_then(|value| value.to_str().ok()) {
-        None => 0,
-        Some("true") => 1,
-        Some(value) => value.parse().unwrap_or(0),
-    }
-}
-
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
@@ -413,12 +365,7 @@ async fn run(
         let app = Arc::clone(&app);
         move |request| {
             let app = Arc::clone(&app);
-            async move {
-                match serve_asset(&request) {
-                    Some(file) => file,
-                    None => handle(&app, request).await,
-                }
-            }
+            async move { handle(&app, request).await }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -655,8 +602,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .holding(holding(request))
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -1026,11 +972,6 @@ pub struct Ctx {
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
     state: RequestState,
-    /// How many layout layers the client says it already holds.
-    ///
-    /// Zero unless a request asked for less, so a first load, a crawler
-    /// and a reader with JavaScript off all get the whole document.
-    partial: u32,
 }
 
 impl Ctx {
@@ -1047,7 +988,6 @@ impl Ctx {
             headers: Vec::new(),
             plugins: None,
             state: RequestState::new(),
-            partial: 0,
         }
     }
 
@@ -1126,21 +1066,6 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }
-
-    /// The same, for a request that said how much of the page it has.
-    #[must_use]
-    pub fn holding(mut self, layers: u32) -> Self {
-        self.partial = layers;
-        self
-    }
-
-    /// What `html!` asks, to leave out the layouts the client has.
-    ///
-    /// A method rather than a public field so the number has one
-    /// meaning: layers to skip, counted from the root.
-    pub fn partial_depth(&self) -> u32 {
-        self.partial
     }
 
     /// A route parameter, or `None`.
@@ -1278,6 +1203,44 @@ pub fn page_async(
     Box::new(handler)
 }
 
+/// Every JSON template in this application.
+///
+/// The `.jt` files sit next to the pages they answer -- `status.jt` beside
+/// `status.rs` -- and `load_dir!` compiles the tree while this crate is
+/// being compiled. Nothing is parsed when a request arrives, and a template
+/// that does not parse is a compile error on its own line.
+///
+/// A module of their own, for the same reason the templates have one:
+/// `load_dir!` emits a `pub mod status` for `status.jt` and `pages!` emits
+/// one for `status.rs`, so unnested they collide. The path is relative to
+/// the package root and not to this file, because a proc macro cannot learn
+/// where it was written on stable Rust.
+///
+/// A file whose name is not an identifier gets the nearest one, by the same
+/// rule the templates and the route table use: `[id].jt` is
+/// `payload::users::_id_`.
+pub mod payload {
+    jt::load_dir!("src/pages");
+}
+
+/// Renders a JSON template as the answer.
+///
+/// The counterpart of `render` above, and deliberately a second function
+/// rather than a second `impl IntoResponse`: a template is an ordinary
+/// value, so a blanket impl would claim types that are not answers.
+///
+/// It returns the handler's own `Result` so a page reads the same whichever
+/// engine it uses. For another status or a header, compose:
+/// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
+///
+/// To override the type this sets, reach for `set_header` and not
+/// `with_header`: the second appends, so two `content-type` values would
+/// reach the wire and the client would pick between them.
+pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
+    // Into its own String first, so a page that fails half way through
+    // leaves nothing behind. Same property the HTML path has.
+    Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
+}
 /// The application's name, as the root layout writes it.
 pub const TITLE: &str = "My Blog";
 
@@ -1416,43 +1379,27 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     Ok(Response::ok(content.render_to_string()?))
 }
 
-/// Every JSON template in this application.
-///
-/// The `.jt` files sit next to the pages they answer -- `status.jt` beside
-/// `status.rs` -- and `load_dir!` compiles the tree while this crate is
-/// being compiled. Nothing is parsed when a request arrives, and a template
-/// that does not parse is a compile error on its own line.
-///
-/// A module of their own, for the same reason the templates have one:
-/// `load_dir!` emits a `pub mod status` for `status.jt` and `pages!` emits
-/// one for `status.rs`, so unnested they collide. The path is relative to
-/// the package root and not to this file, because a proc macro cannot learn
-/// where it was written on stable Rust.
-///
-/// A file whose name is not an identifier gets the nearest one, by the same
-/// rule the templates and the route table use: `[id].jt` is
-/// `payload::users::_id_`.
-pub mod payload {
-    jt::load_dir!("src/pages");
-}
-
-/// Renders a JSON template as the answer.
-///
-/// The counterpart of `render` above, and deliberately a second function
-/// rather than a second `impl IntoResponse`: a template is an ordinary
-/// value, so a blanket impl would claim types that are not answers.
-///
-/// It returns the handler's own `Result` so a page reads the same whichever
-/// engine it uses. For another status or a header, compose:
-/// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
-///
-/// To override the type this sets, reach for `set_header` and not
-/// `with_header`: the second appends, so two `content-type` values would
-/// reach the wire and the client would pick between them.
-pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
-    // Into its own String first, so a page that fails half way through
-    // leaves nothing behind. Same property the HTML path has.
-    Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
+impl Ctx {
+    /// How many layout layers the client already holds, from `DP-Partial`.
+    /// `html!` asks it, and leaves out that many layouts, counted from the
+    /// root.
+    ///
+    /// A navigation inside a section sends the section's contents and not
+    /// the document around them. dp-swap sends the number; the header is
+    /// absent on a first load, for a crawler, and whenever JavaScript is
+    /// off, and then this is zero and the whole document goes out.
+    ///
+    /// `true` is dp-swap's word for "a fragment, I did not count", which is
+    /// one layer. Anything that does not parse is zero: a client that cannot
+    /// say what it holds gets everything, which is always correct and only
+    /// slower.
+    pub fn partial_depth(&self) -> u32 {
+        match self.header("dp-partial") {
+            None => 0,
+            Some("true") => 1,
+            Some(value) => value.parse().unwrap_or(0),
+        }
+    }
 }
 
 /// Every route this project did not read off `src/pages`.
@@ -1724,6 +1671,7 @@ mod tests {
                 "/openapi.json",
                 "/openapi.yaml",
                 "/realtime/events",
+                "/realtime/socket",
                 "/robots.txt",
                 "/sitemap.xml",
                 "/status",
@@ -1823,7 +1771,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1841,6 +1789,7 @@ pub mod admin;
 pub mod auth;
 pub mod cache;
 pub mod db;
+pub mod i18n;
 pub mod jobs;
 pub mod model;
 pub mod observability;
@@ -1848,10 +1797,12 @@ pub mod openapi;
 pub mod policy;
 pub mod realtime;
 pub mod realtime_sse;
+pub mod realtime_websocket;
 pub mod resource;
 pub mod robots;
 pub mod sessions;
 pub mod sitemap;
+pub mod static_files;
 pub mod storage;
 pub mod validation;
 
@@ -1951,11 +1902,25 @@ macro_rules! register {
         // /admin never gets the tag. Off until production turns it on:
         // `enabled = true` and `measurement_id` under
         // [gtag] in config/production.toml.
+        //
+        // The banner's words are the [gtag.banner] keys of
+        // locales/*.toml, in the request's locale. The
+        // `banner.*` settings are the fallback.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_gtag::Gtag>("gtag")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-i18n: a locale per request --------------------------
+        //
+        // Reads `?locale=`, then the `locale` cookie, then Accept-Language,
+        // and gives the page the locale (`i18n::locale(ctx)`). Says
+        // Content-Language and Vary on the way out. The default locale and
+        // the offered ones are settings, under [i18n] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<crate::plugins::i18n::I18n>("i18n")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
@@ -2081,7 +2046,8 @@ pub(crate) use register;
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithGtag = After<brocanth_gtag::Gtag, WithSessions>;
 type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
-type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
+type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
+type WithObservability = After<crate::plugins::observability::Observe, WithI18n>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
@@ -2101,7 +2067,8 @@ type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>
 pub type Installed = WithMiddlewareRateLimit;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedGtag>;
+type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
 type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
 type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
@@ -2337,6 +2304,13 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "gtag.banner.policy",
+        help: "The text of that link.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "admin.title",
         help: "The end of every <title>, and the header and index heading unless set.",
         flag: true,
@@ -2370,6 +2344,34 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "i18n.query",
+        help: "The query parameter that names a locale: `?locale=fr`. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.cookie",
+        help: "The cookie that names a locale. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.default",
+        help: "The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.remember",
+        help: "A `?locale=` choice sets the cookie, so the next page keeps it.",
+        flag: true,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "observability.format",
@@ -3075,6 +3077,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
     let gtag = brocanth_gtag::GtagConfig::default();
     let admin = crate::plugins::admin::Settings::default();
+    let i18n = brocanth_i18n::NegotiatorConfig::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
@@ -3111,11 +3114,16 @@ fn defaults() -> Vec<(&'static str, String)> {
             "gtag.banner.policy_url",
             format!("{:?}", gtag.banner.policy_url),
         ),
+        ("gtag.banner.policy", format!("{:?}", gtag.banner.policy)),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
         ("admin.site_url", format!("{:?}", admin.site_url)),
         ("admin.stylesheet", format!("{:?}", admin.stylesheet)),
+        ("i18n.query", format!("{:?}", i18n.query)),
+        ("i18n.cookie", format!("{:?}", i18n.cookie)),
+        ("i18n.default", format!("{:?}", i18n.default)),
+        ("i18n.remember", format!("{:?}", i18n.remember)),
         (
             "observability.format",
             format!("{:?}", observability.format),
@@ -3350,9 +3358,42 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 /// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
-/// What `serve` answers a request with: `next`, observed. The `observe`
-/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
-/// counts every other request by its route template.
+/// A handler, as one server wrap hands it to the next.
+pub type Handler = std::sync::Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+/// Something around the whole server: it sees every request, a static
+/// file included, outside the request hooks.
+///
+/// A module writes a type that implements it and names the type in
+/// `Slot::ServerWrap`. Only `wrap` is required.
+pub trait ServerWrap {
+    /// `next`, with this wrap around it.
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler;
+
+    /// Listeners of its own, beside the main one. Called once, after the
+    /// plugins started.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let _ = app;
+        async { Ok(()) }
+    }
+
+    /// Called when a stop begins, before the listener closes. A wrap that
+    /// must keep answering for a while -- a readiness probe that fails
+    /// first -- waits here.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let _ = app;
+        async {}
+    }
+}
+
+/// What `serve` answers a request with: `next`, inside each server wrap.
+/// The first is the outermost: it sees a request first and the response
+/// last.
+///
+/// - `observability::serving::Serving`
+/// - `static_files::StaticFiles`
 pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
     next: F,
@@ -3361,48 +3402,28 @@ where
     F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
 {
-    let routes = std::sync::Arc::clone(app);
-    observer(app).wrap_routed(next, move |request| {
-        routes
-            .router
-            .at(&request.path)
-            .map(|found| found.template().to_string())
-    })
+    let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
+    let next = <static_files::StaticFiles as ServerWrap>::wrap(app, next);
+    let next = <observability::serving::Serving as ServerWrap>::wrap(app, next);
+    move |request| next(request)
 }
 
-/// The probes and `/metrics` on a second listener, when
-/// `[observability] metrics_bind` names one.
+/// Each wrap's own listeners, in order.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let observer = observer(app);
-    let Some(bind) = observer.config().metrics_bind.clone() else {
-        return Ok(());
-    };
-    let server = brocanth_server::Server::bind(&bind)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(async move {
-        let _ = observer.serve_admin(server).await;
-    });
+    <observability::serving::Serving as ServerWrap>::side_listeners(app).await?;
+    <static_files::StaticFiles as ServerWrap>::side_listeners(app).await?;
     Ok(())
 }
 
-/// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observability] drain_delay_secs`
-/// later.
+/// The first half of a stop: each wrap's `before_stop`, in order, then the
+/// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    observer(app).drain_then_stop(stopper).await;
+    <observability::serving::Serving as ServerWrap>::before_stop(app).await;
+    <static_files::StaticFiles as ServerWrap>::before_stop(app).await;
+    stopper.stop();
 }
 
-/// The `Observer` the `observability` plugin published.
-fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
-    app.core
-        .services()
-        .get::<brocanth_observe::Observer>()
-        .cloned()
-        .expect("`observability` is registered in `register!`")
-}
-
-// brocanth-digest: 9c79cfce8f84f67a
+// brocanth-digest: f9a48a61178c05b2
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3494,6 +3515,8 @@ refuse = "Refuse"
 manage = "Cookie settings"
 # A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
 # policy_url = ""
+# The text of that link.
+policy = "Privacy policy"
 
 [admin]
 # The end of every <title>, and the header and index heading unless set.
@@ -3506,6 +3529,20 @@ title = "My Blog admin"
 # site_url = "/"
 # A stylesheet every screen links after the shipped one: the theme. Empty means none.
 # stylesheet = "/admin-theme.css"
+
+[i18n]
+# The query parameter that names a locale: `?locale=fr`. Empty means none.
+# query = "locale"
+# The cookie that names a locale. Empty means none.
+# cookie = "locale"
+# The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.
+# A static export sends no Accept-Language, so this is the language of every exported page.
+# default = ""
+# The locales a request may get, by tag. Empty: every file in locales/.
+# A catalog left out still compiles, so a translation in progress ships unseen.
+available = []
+# A `?locale=` choice sets the cookie, so the next page keeps it.
+remember = true
 
 [observability]
 # json or text. Empty: json in production, text elsewhere.
@@ -3799,7 +3836,7 @@ methods = ["POST"]
 limit = 5
 window_secs = 60
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -3821,7 +3858,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: ed561dbe0c5ec6f9
+// brocanth-digest: 51e3d64c0736bf5e
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -4023,6 +4060,17 @@ CMD ["/app/my-blog", "serve"]
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
+===== build.rs =====
+//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
+//! which `src/plugins/i18n/mod.rs` includes.
+//!
+//! The second argument is the default catalog: every other one is checked
+//! against it, and a key it lacks is a build error. A key a translation
+//! lacks is a warning, and that locale shows the default's text.
+
+fn main() {
+    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
+}
 ===== deploy/kubernetes.yaml =====
 # A minimal deployment of this image. Change the image, the replica count
 # and the secrets; keep the probes and the timings in step.
@@ -4087,6 +4135,49 @@ spec:
     - name: http
       port: 80
       targetPort: http
+===== locales/en.toml =====
+# The default catalog. Every key is here; `build.rs` names this file.
+#
+# A key is a function: `welcome` is `t::welcome(locale)`. `{name}` is an
+# argument, and a table with `one` and `other` is a plural. A misspelt key
+# or a missing argument is a compile error at the call. See the
+# `brocanth-i18n` README.
+
+welcome = "Welcome"
+greeting = "Hello, {name}!"
+
+[items]
+"=0" = "No items"
+one = "{count} item"
+other = "{count} items"
+
+# The consent banner of the `gtag` module. Its hook reads these keys in the
+# request's locale. A key left out of every catalog falls back to the
+# `[gtag.banner]` setting.
+[gtag.banner]
+text = "We would like to measure visits with Google Analytics. It sets cookies only if you accept."
+accept = "Accept"
+refuse = "Refuse"
+manage = "Cookie settings"
+policy = "Privacy policy"
+===== locales/fr.toml =====
+# French. A key left out here shows the English text, and the build
+# says which.
+
+welcome = "Bienvenue"
+greeting = "Bonjour, {name} !"
+
+[items]
+"=0" = "Aucun article"
+one = "{count} article"
+other = "{count} articles"
+
+[gtag.banner]
+text = "Nous aimerions mesurer les visites avec Google Analytics. Il ne dépose de cookies que si vous acceptez."
+accept = "Accepter"
+refuse = "Refuser"
+manage = "Gérer les cookies"
+policy = "Politique de confidentialité"
 ===== migrations/mod.rs =====
 //! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
 //! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
@@ -5203,6 +5294,252 @@ mod tests {
     #[tokio::test]
     async fn a_topic_no_rule_allows_is_refused() {
         assert_eq!(status("/realtime/events?topics=posts/*").await, 403);
+    }
+}
+===== src/pages/realtime/socket.rs =====
+//! `GET /realtime/socket?topics=posts/*,posts/42` -- the broker's frames
+//! over a WebSocket.
+//!
+//! ```js
+//! const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
+//! socket.onmessage = (e) => console.log(e.data); // "id:1\nevent:posts/*\ndata:..."
+//! socket.onopen = () => socket.send("subscribe posts/42");
+//! ```
+//!
+//! Three checks run before the connection switches, and each refusal is a
+//! status the browser can read:
+//!
+//! 1. The handshake: a WebSocket, version 13. Else 426.
+//! 2. The `Origin`. A browser sends the site's cookies with a WebSocket from
+//!    any page, and no CORS rule applies, so the Origin check is this
+//!    route's CSRF check: the page must be on this host, or in
+//!    `ALLOWED_ORIGINS`. Else 403.
+//! 3. Every topic in the URL passes `authorise`, and one refusal refuses
+//!    the socket. Else 403.
+//!
+//! A topic the browser asks for later (`subscribe <topic>`) passes the same
+//! `authorise`. The loop is `crate::plugins::realtime_websocket`.
+
+use brocanth_realtime::{Gate, Subscription, Topic};
+use brocanth_server::websocket::Handshake;
+
+use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::Broadcast;
+use crate::plugins::realtime_websocket::{self, Filed};
+
+/// Collections any visitor may follow: every row, every change.
+///
+/// Empty, so nothing is public until somebody says so here.
+const PUBLIC: &[&str] = &[];
+
+/// Sites other than this host whose pages may open a socket, spelled as a
+/// browser sends its `Origin`: `"https://app.example.com"`.
+const ALLOWED_ORIGINS: &[&str] = &[];
+
+/// Who is asking: what `authorise` needs, read from the request once.
+///
+/// The socket outlives the request, so `authorise` cannot read the request
+/// when the browser subscribes later. Put here what it decides on: the
+/// session's user id, a role.
+pub struct Viewer;
+
+fn viewer(_ctx: &Ctx) -> Viewer {
+    Viewer
+}
+
+/// Whether `viewer` may follow `topic`, and gated by what.
+///
+/// The one place a topic is authorised, and the place to edit. A public
+/// collection takes `Gate::everyone()`. Rows that a policy decides take the
+/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
+/// with the view rule, and the broker inverts the rule into an index key, so
+/// a write is a map lookup and not a check per subscriber.
+///
+/// ```ignore
+/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
+/// ```
+fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
+    if PUBLIC.contains(&topic.collection_name()) {
+        return Ok(Subscription::new(topic, Gate::everyone()));
+    }
+    Err(format!(
+        "no rule lets this socket follow {topic}\n\
+         help: add one to `authorise` in src/pages/realtime/socket.rs"
+    ))
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let handshake = Handshake::read(|name| ctx.header(name), ALLOWED_ORIGINS)
+        .map_err(|refused| Error::new(refused.status(), refused.to_string()))?;
+    let viewer = viewer(ctx);
+    let mut subscriptions = Vec::new();
+    for topic in topics(&ctx.query)? {
+        let name = topic.to_string();
+        let subscription = authorise(&viewer, topic).map_err(|why| Error::new(403, why))?;
+        subscriptions.push((name, subscription));
+    }
+    let broker = &ctx
+        .provided::<Broadcast, _>()
+        .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
+        .broker;
+
+    // A browser that reconnects sends the id of the last frame it read. The
+    // broker keeps no history to replay, so the honest answer to "did I miss
+    // anything" is yes whenever a frame was published since.
+    let missed = value(&ctx.query, "last")
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
+
+    // At the cap the broker refuses rather than evicting somebody.
+    let client = broker
+        .connect()
+        .map_err(|e| Error::new(503, e.to_string()).with_header("retry-after", "5"))?;
+    let mut filed = Filed::new();
+    for (name, subscription) in subscriptions {
+        let subscribed = client
+            .subscribe(subscription)
+            .map_err(|e| Error::new(400, e.to_string()))?;
+        filed.insert(name, subscribed.id);
+    }
+
+    let headers = handshake.headers().into_iter().collect();
+    let rule: realtime_websocket::Authorise = Box::new(move |topic| authorise(&viewer, topic));
+    let stream = handshake
+        .switch(move |socket| realtime_websocket::run(socket, client, rule, filed, missed));
+    Ok(Response {
+        status: 101,
+        headers,
+        stream: Some(stream),
+        ..Default::default()
+    })
+}
+
+/// Every `topics=` in the query, split at commas and parsed. None is
+/// allowed: the browser can subscribe after the socket opens.
+fn topics(query: &str) -> Result<Vec<Topic>, Error> {
+    let mut out = Vec::new();
+    for pair in query.split('&') {
+        let Some(("topics", value)) = pair.split_once('=') else {
+            continue;
+        };
+        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
+            let topic =
+                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
+            out.push(topic);
+        }
+    }
+    Ok(out)
+}
+
+/// The first value of `name` in the query, as sent.
+fn value<'q>(query: &'q str, name: &str) -> Option<&'q str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
+}
+
+/// A query value with its `%XX` and `+` undone.
+fn decoded(value: &str) -> Result<String, Error> {
+    let bad = || {
+        Error::new(
+            400,
+            format!("the query value {value:?} is not percent-encoded UTF-8"),
+        )
+    };
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
+                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
+                u8::from_str_radix(hex, 16).map_err(|_| bad())?
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use brocanth_server::websocket::{self, Incoming};
+    use brocanth_server::{Server, Stopper};
+
+    use super::*;
+
+    /// The whole application on a real port.
+    async fn serve() -> (SocketAddr, Stopper) {
+        let app = Arc::new(crate::app::build().expect("the application builds"));
+        let server = Server::bind("127.0.0.1:0")
+            .await
+            .expect("a port")
+            .with_streams(app.core.streams().clone());
+        let addr = server.local_addr().expect("an address");
+        let stopper = server.stopper();
+        tokio::spawn(server.run(move |request| {
+            let app = Arc::clone(&app);
+            async move { crate::app::handle(&app, request).await }
+        }));
+        (addr, stopper)
+    }
+
+    #[test]
+    fn topics_are_read_from_the_query_encoded_or_not() {
+        let read = topics("topics=posts/*,posts%2F42&x=1").expect("two");
+        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["posts/*", "posts/42"]);
+        assert!(topics("").expect("none is allowed").is_empty());
+        assert!(topics("topics=posts").is_err(), "a topic has a slash");
+        assert_eq!(value("a=1&last=7", "last"), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn a_socket_opens_and_a_topic_no_rule_allows_is_refused_over_it() {
+        let (addr, stopper) = serve().await;
+        let origin = format!("http://{addr}");
+        let mut socket = websocket::connect(addr, "/realtime/socket", Some(&origin))
+            .await
+            .expect("this host may open a socket");
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        let answer = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+            .await
+            .expect("an answer in time");
+        let Incoming::Text(answer) = answer else {
+            panic!("a text answer, not {answer:?}");
+        };
+        assert!(
+            answer.starts_with("event:refused\ndata:posts/*: "),
+            "{answer}"
+        );
+        socket.close(websocket::NORMAL, "done").await;
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_page_on_another_site_is_refused_before_the_switch() {
+        let (addr, stopper) = serve().await;
+        let refused = websocket::connect(addr, "/realtime/socket", Some("https://evil.example"))
+            .await
+            .expect_err("a cross-site socket");
+        assert_eq!(refused.status, Some(403));
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_topic_in_the_url_no_rule_allows_is_refused_before_the_switch() {
+        let (addr, stopper) = serve().await;
+        let refused = websocket::connect(addr, "/realtime/socket?topics=posts/*", None)
+            .await
+            .expect_err("no rule allows posts");
+        assert_eq!(refused.status, Some(403));
+        stopper.stop();
     }
 }
 ===== src/pages/robots.txt.rs =====
@@ -6397,6 +6734,89 @@ impl Plugin for Database {
         }
     }
 }
+===== src/plugins/i18n/mod.rs =====
+//! Written by `brocanth`. The catalogs in `locales/`, compiled by
+//! `build.rs`, and the locale of a request.
+//!
+//! A page reads the locale and calls a key:
+//!
+//! ```ignore
+//! use crate::plugins::i18n::{self, t};
+//!
+//! let locale = i18n::locale(ctx);
+//! let title = t::welcome(locale);
+//! ```
+
+use brocanth_i18n::{Locales, Negotiated};
+
+use crate::pages::Ctx;
+
+// A key that no code calls yet is not a warning: a new project calls
+// none. Remove the `allow` lines here to find what nothing uses.
+#[allow(dead_code)]
+mod catalog {
+    include!(concat!(env!("OUT_DIR"), "/i18n.rs"));
+}
+
+#[allow(unused_imports)]
+pub use catalog::t;
+pub use catalog::Locale;
+
+/// The plugin `src/plugins/mod.rs` registers. It negotiates in a request
+/// hook, before the page runs.
+pub type I18n = brocanth_i18n::I18nHook<Locale>;
+
+/// The locale the `i18n` hook chose for this request.
+///
+/// The hook reads `?locale=`, then the cookie, then `Accept-Language`,
+/// then the `default` setting. The fallback here is only for a context
+/// the hook did not see, such as a test that builds a `Ctx` by hand.
+#[allow(dead_code)]
+pub fn locale(ctx: &Ctx) -> Locale {
+    ctx.hooked::<Negotiated<Locale>>()
+        .map_or(Locale::DEFAULT, |negotiated| negotiated.locale)
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::{t, Locale};
+
+    async fn get(request: Request) -> brocanth_server::Response {
+        let app = crate::app::build().expect("the application builds");
+        crate::app::handle(&app, request).await
+    }
+
+    #[tokio::test]
+    async fn a_page_answers_in_the_language_the_browser_asks_for() {
+        let french = Request::new(Verb::Get, "/").with_header("accept-language", "fr-CH");
+        let response = get(french).await;
+        assert_eq!(response.header("content-language"), Some("fr"));
+        let response = get(Request::new(Verb::Get, "/")).await;
+        assert_eq!(response.header("content-language"), Some("en"));
+    }
+
+    #[tokio::test]
+    async fn a_link_with_a_locale_wins_and_is_remembered() {
+        let mut request = Request::new(Verb::Get, "/").with_header("accept-language", "en");
+        request.query = "locale=fr".to_string();
+        let response = get(request).await;
+        assert_eq!(response.header("content-language"), Some("fr"));
+        let cookie = response.header("set-cookie").unwrap_or_default();
+        assert!(cookie.starts_with("locale=fr;"), "{cookie}");
+    }
+
+    #[test]
+    fn every_locale_has_the_keys_with_its_own_plural_rules() {
+        assert_eq!(t::welcome(Locale::Fr), "Bienvenue");
+        assert_eq!(t::items(Locale::En, 0), "No items");
+        assert_eq!(t::items(Locale::En, 1), "1 item");
+        assert_eq!(t::items(Locale::Fr, 1), "1 article");
+        assert_eq!(t::greeting(Locale::En, "Ada"), "Hello, Ada!");
+    }
+}
 ===== src/plugins/jobs/mod.rs =====
 //! Background jobs, as this application registers them.
 //!
@@ -6792,8 +7212,8 @@ impl Plugin for Model {
 //! of it is compiled. Each piece is its own module: `brocanth add
 //! observability-metrics` and the like.
 //!
-//! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
-//! its handler with it, and stops on SIGTERM through it.
+//! `serving.rs` beside this file reads the `Observer` this plugin
+//! publishes: `serve` wraps its handler with it, and stops through it.
 
 use std::time::Duration;
 
@@ -6801,6 +7221,8 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_observe::{LogFormat, ObserveConfig, ObservePlugin, Observer};
+
+pub mod serving;
 
 /// What this plugin is built from.
 ///
@@ -6918,6 +7340,68 @@ impl Plugin for Observe {
     fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
         self.inner()?.shutdown(sd)
     }
+}
+===== src/plugins/observability/serving.rs =====
+//! The `Observer` around the whole server: a server wrap.
+//!
+//! `src/plugins/mod.rs` composes it with any other wrap. It answers `/up`,
+//! `/readyz` and `/metrics` itself, and logs and counts every other request
+//! by its route template.
+
+use crate::plugins::{Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct Serving;
+
+impl ServerWrap for Serving {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let routes = std::sync::Arc::clone(app);
+        std::sync::Arc::new(observer(app).wrap_routed(
+            move |request| next(request),
+            move |request| {
+                routes
+                    .router
+                    .at(&request.path)
+                    .map(|found| found.template().to_string())
+            },
+        ))
+    }
+
+    /// `/metrics` on a second listener, when `[observability] metrics_bind`
+    /// names one.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let observer = observer(app);
+        async move {
+            let Some(bind) = observer.config().metrics_bind.clone() else {
+                return Ok(());
+            };
+            let server = brocanth_server::Server::bind(&bind)
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::spawn(async move {
+                let _ = observer.serve_admin(server).await;
+            });
+            Ok(())
+        }
+    }
+
+    /// `/readyz` fails at once, so a load balancer stops sending requests;
+    /// the listener closes `[observability] drain_delay_secs` later.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let observer = observer(app);
+        async move { observer.drain().await }
+    }
+}
+
+/// The `Observer` the `observability` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observability` is registered in `register!`")
 }
 ===== src/plugins/openapi/mod.rs =====
 //! The OpenAPI document, as this application derives it.
@@ -7431,7 +7915,9 @@ impl Plugin for Policies {
 //!    writes `GET /realtime/events?topics=posts/*` and the stream behind it
 //!    (`src/plugins/realtime_sse/mod.rs`): one `Client` per connection, a
 //!    heartbeat, `lagged` when frames were dropped, and an end on shutdown.
-//!    `brocanth add realtime-sse` adds it.
+//!    `brocanth add realtime-sse` adds it. `realtime-websocket` is the
+//!    duplex form: `GET /realtime/socket`, frames out and `subscribe`
+//!    commands in.
 //! 2. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
@@ -7788,6 +8274,304 @@ mod tests {
         assert_eq!(broker.clients(), 1);
         drop(frames);
         assert_eq!(broker.clients(), 0);
+    }
+}
+===== src/plugins/realtime_websocket/mod.rs =====
+//! `realtime-websocket`: the broker's frames over a WebSocket, and commands
+//! back.
+//!
+//! The transport is here, in the application, and not in
+//! `brocanth-realtime`, because that crate does not depend on `brocanth`:
+//! nothing in it touches a request, a response or a route.
+//! `src/pages/realtime/socket.rs` is the route; it checks the handshake and
+//! the Origin, authorises the first topics, and hands the socket to [`run`].
+//!
+//! # What the server sends
+//!
+//! One text message per record, in the same format as server-sent events,
+//! so one parser reads both transports:
+//!
+//! ```text
+//! id:12 event:posts/* data:..   each frame the broker addressed to this client
+//! event:lagged data:3           the queue was full and 3 frames were dropped
+//! event:lagged data:            first, when a reconnect may have missed frames
+//! event:subscribed data:posts/42      the answer to `subscribe posts/42`
+//! event:unsubscribed data:posts/42    the answer to `unsubscribe posts/42`
+//! event:refused data:posts/42: why    a command that was not obeyed
+//! ```
+//!
+//! A frame is the broker's bytes as it encoded them, shared by every
+//! subscriber; nothing is encoded twice.
+//!
+//! # What the browser sends
+//!
+//! `subscribe <topic>` and `unsubscribe <topic>`, as text. Each topic passes
+//! the same `authorise` as the topics in the URL. A binary message, or one
+//! larger than `websocket::MAX_MESSAGE` (64 KiB), ends the connection.
+//!
+//! # Back-pressure
+//!
+//! The broker never waits for this socket. Each send waits until the frame
+//! is written, so a browser that reads slowly holds this loop, the loop
+//! stops taking from the mailbox, and `[realtime] overflow` decides what is
+//! lost: `drop-oldest` and `drop-newest` drop frames and the browser reads
+//! `lagged`; `disconnect` closes the mailbox, and this loop closes the
+//! socket with code 1013.
+//!
+//! # Ending
+//!
+//! * The browser closes the socket, or stops answering pings for one
+//!   `HEARTBEAT`. The loop ends, which drops the `Client`, which unsubscribes
+//!   it and closes its mailbox.
+//! * The server stops. The loop sends the frames already queued, then a
+//!   close frame with code 1001, and ends, so a deploy does not wait for a
+//!   subscriber. The browser reconnects with `?last=<id>`.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use brocanth_realtime::{Client, Event, Subscription, SubscriptionId, Topic};
+use brocanth_server::websocket::{self, Incoming, WebSocket};
+use tokio::time::{Instant, MissedTickBehavior};
+
+/// How often the socket pings the browser. A browser that has not answered
+/// by the next ping is gone, so this is also the longest a dead subscriber
+/// holds its mailbox.
+pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Who may follow what: the page's `authorise`, with what it read from the
+/// request already captured.
+pub type Authorise = Box<dyn Fn(Topic) -> Result<Subscription, String> + Send>;
+
+/// The topics this socket follows, by name, so `unsubscribe` can find them.
+pub type Filed = HashMap<String, SubscriptionId>;
+
+/// Serves one socket until the browser leaves or the server stops.
+///
+/// `client` holds the subscriptions the page filed, and `filed` names them.
+/// `missed` is true when the browser reconnected and frames were published
+/// since the last one it read; the broker keeps no history, so the socket
+/// says `lagged` instead.
+pub async fn run(
+    mut socket: WebSocket,
+    client: Client,
+    authorise: Authorise,
+    mut filed: Filed,
+    missed: bool,
+) {
+    if missed && socket.send_text(lagged(None)).await.is_err() {
+        return;
+    }
+    let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            event = client.mailbox().recv() => match event {
+                Some(event) => {
+                    if socket.send_text(encoded(event)).await.is_err() {
+                        return;
+                    }
+                }
+                // This loop holds the client, so only the overflow policy
+                // closes its mailbox: `disconnect` fired.
+                None => {
+                    return socket
+                        .close(websocket::TRY_AGAIN_LATER, "too far behind; reconnect")
+                        .await;
+                }
+            },
+            incoming = socket.recv() => match incoming {
+                Incoming::Text(command) => {
+                    let answer = obey(&client, &authorise, &mut filed, &command);
+                    if socket.send_text(answer).await.is_err() {
+                        return;
+                    }
+                }
+                Incoming::Binary(_) => {
+                    return socket.close(websocket::POLICY, "send text commands").await;
+                }
+                Incoming::Stopping => {
+                    for event in client.mailbox().drain() {
+                        if socket.send_text(encoded(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                    return socket
+                        .close(websocket::GOING_AWAY, "the server is stopping")
+                        .await;
+                }
+                Incoming::Closed(_) => return,
+            },
+            _ = ticker.tick() => {
+                if socket.keepalive().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One command from the browser, obeyed, and the record that answers it.
+fn obey(client: &Client, authorise: &Authorise, filed: &mut Filed, command: &str) -> String {
+    let (verb, name) = command
+        .trim()
+        .split_once(' ')
+        .unwrap_or((command.trim(), ""));
+    let name = name.trim();
+    let topic = match Topic::parse(name) {
+        Ok(topic) => topic,
+        Err(e) => return record("refused", &format!("{name}: {e}")),
+    };
+    match verb {
+        "subscribe" if filed.contains_key(name) => record("subscribed", name),
+        "subscribe" => {
+            let subscription = match authorise(topic) {
+                Ok(subscription) => subscription,
+                Err(why) => return record("refused", &format!("{name}: {why}")),
+            };
+            match client.subscribe(subscription) {
+                Ok(subscribed) => {
+                    filed.insert(name.to_string(), subscribed.id);
+                    record("subscribed", name)
+                }
+                Err(e) => record("refused", &format!("{name}: {e}")),
+            }
+        }
+        "unsubscribe" => {
+            if let Some(id) = filed.remove(name) {
+                client.unsubscribe(id);
+            }
+            record("unsubscribed", name)
+        }
+        other => record(
+            "refused",
+            &format!(
+                "{other:?} is not a command; send `subscribe <topic>` or `unsubscribe <topic>`"
+            ),
+        ),
+    }
+}
+
+/// A record with no id: an event name and one data line.
+fn record(event: &str, data: &str) -> String {
+    let data = data.replace(['\r', '\n'], " ");
+    format!("event:{event}\ndata:{data}\n\n")
+}
+
+/// `event:lagged`, with how many frames were dropped when that is known.
+fn lagged(skipped: Option<u64>) -> String {
+    match skipped {
+        Some(n) => format!("event:lagged\ndata:{n}\n\n"),
+        None => "event:lagged\ndata:\n\n".to_string(),
+    }
+}
+
+/// What a mailbox event looks like on the wire.
+fn encoded(event: Event) -> String {
+    match event {
+        // Encoded once by the broker and shared by every subscriber.
+        Event::Frame(frame) => String::from_utf8_lossy(frame.bytes()).into_owned(),
+        Event::Lagged { skipped } => lagged(Some(skipped)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use brocanth_events::RowChange;
+    use brocanth_realtime::{Broker, Gate};
+    use brocanth_server::websocket::Handshake;
+    use brocanth_server::{Request, Server, Stopper};
+
+    use super::*;
+
+    /// A server whose one route is this loop, with every topic public.
+    async fn open(broker: &Arc<Broker>) -> (WebSocket, Stopper) {
+        let server = Server::bind("127.0.0.1:0").await.expect("a port");
+        let addr = server.local_addr().expect("an address");
+        let stopper = server.stopper();
+        let broker = Arc::clone(broker);
+        tokio::spawn(server.run(move |request: Request| {
+            let broker = Arc::clone(&broker);
+            async move {
+                let handshake =
+                    Handshake::read(|name| request.header(name), &[]).expect("a handshake");
+                let client = broker.connect().expect("room");
+                let everyone: Authorise =
+                    Box::new(|topic| Ok(Subscription::new(topic, Gate::everyone())));
+                handshake.response(move |socket| run(socket, client, everyone, Filed::new(), false))
+            }
+        }));
+        let socket = websocket::connect(addr, "/", None).await.expect("open");
+        (socket, stopper)
+    }
+
+    async fn next(socket: &mut WebSocket) -> Incoming {
+        tokio::time::timeout(Duration::from_secs(5), socket.recv())
+            .await
+            .expect("a message in time")
+    }
+
+    #[tokio::test]
+    async fn a_subscribed_socket_reads_a_published_change_and_a_close_frees_it() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Text("event:subscribed\ndata:posts/*\n\n".into())
+        );
+
+        broker.publish_change(&RowChange::created("posts", 42i64));
+        let Incoming::Text(frame) = next(&mut socket).await else {
+            panic!("a frame");
+        };
+        assert!(frame.starts_with("id:1\nevent:posts/*\n"), "{frame}");
+        assert!(frame.contains("data:id=42\n"), "{frame}");
+
+        socket.close(websocket::NORMAL, "done").await;
+        for _ in 0..500 {
+            if broker.clients() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(broker.clients(), 0, "the loop ended and dropped the client");
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_bad_command_is_refused_and_the_socket_stays_open() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("follow posts/*").await.expect("sent");
+        let Incoming::Text(answer) = next(&mut socket).await else {
+            panic!("an answer");
+        };
+        assert!(answer.starts_with("event:refused\n"), "{answer}");
+        socket
+            .send_text("unsubscribe posts/*")
+            .await
+            .expect("still open");
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Text("event:unsubscribed\ndata:posts/*\n\n".into())
+        );
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_stopping_server_sends_going_away() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        let _ = next(&mut socket).await;
+        stopper.stop();
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Closed(Some(websocket::GOING_AWAY))
+        );
     }
 }
 ===== src/plugins/resource/mod.rs =====
@@ -8326,6 +9110,62 @@ mod tests {
         assert!(error.contains("help:"), "{error}");
     }
 }
+===== src/plugins/static_files/mod.rs =====
+//! The static files, before the router: a server wrap.
+//!
+//! Not a page, and not routed. A page returns a `Response` whose body is a
+//! `String`, which a font is not, so a static file answers before the router
+//! is consulted and never touches the page contract. `src/plugins/mod.rs`
+//! composes this wrap with any other.
+
+use crate::plugins::{Answer, Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct StaticFiles;
+
+impl ServerWrap for StaticFiles {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let _ = app;
+        std::sync::Arc::new(move |request: brocanth_server::Request| -> Answer {
+            match serve_asset(&request) {
+                Some(file) => Box::pin(std::future::ready(file)),
+                None => next(request),
+            }
+        })
+    }
+}
+
+/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
 ===== src/plugins/storage/mod.rs =====
 //! File storage, as this application registers it.
 //!
@@ -8692,7 +9532,7 @@ impl Plugin for Validation {
   }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -8746,6 +9586,7 @@ request.
 - `admin-model`  the admin's rows over SeaORM, one line per entity
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
+- `realtime-websocket`  a duplex socket per subscriber, frames both ways
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
@@ -8753,6 +9594,7 @@ request.
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
+- `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -8792,6 +9634,259 @@ Editing or deleting one is noticed.
 A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
+
+## Reading a body
+
+A handler never parses `ctx.body` itself. It declares a struct with
+`#[derive(zod::Entry)]`, puts the rules on the fields, and calls
+`ctx.body_as()` or `ctx.read()`. The rules are values: a `const`
+shared by two structs is one rule, and `zod::accepts!` makes the
+compiler check a literal against it.
+
+Report every fault, never the first. `Faults` already holds them all
+and `by_name()` groups them per field; a handler that returns after
+the first one makes a person submit the form three times.
+
+Do not write `?` on a `zod::Faults`. The blanket `From` on `Error`
+turns any `std::error::Error` into a 500, and a bad body is a 422.
+`body_as` is the call that gets the status right.
+
+## Edge middleware
+
+`src/plugins/mod.rs` holds five commented registrations from
+`brocanth-middleware`. Each encodes a fact about the deployment --
+which proxy to trust, which host is canonical, which origins may call
+-- so each is turned on by somebody who knows that fact. Do not
+enable them as a set, and do not invent an address or an origin to
+make one compile. To turn one on, copy it to `build()` in
+`src/app.rs` and widen `type Core` by its hook families; the comment
+above the five shows the type.
+
+## Google Analytics
+
+`brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
+Its hook puts a consent banner and Google's tag into every HTML page,
+before `</body>`. Nothing reaches Google before the visitor accepts.
+
+Do not add a second Google tag, and do not send a page view yourself:
+the hook scrubs the URL first. Never put an email address, a name or a
+user id in a URL, a page title or an event: Google's terms forbid it,
+and the scrubber only catches what it can recognise. A link with
+`data-consent-manage` reopens the banner.
+
+The choice lives in the visitor's browser. To keep a record of it on
+the server, set `consent_log` to a file: each choice is one JSON line
+with no address and no user agent.
+
+The banner speaks the request's locale. Its words are the
+`[gtag.banner]` keys of `locales/*.toml`; change them there, in every
+catalog. The `banner.*` settings are only the fallback.
+
+## The admin
+
+`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+locked: the policy is `DenyAll` and `principal` returns an anonymous
+principal, so every screen answers 403. Do not open it with
+`AllowAllUnsafeForDevelopment` outside a test.
+
+A model reaches the admin through `AdminConfig::resource(..)`: a
+`brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
+the model's rows. A model with no resource answers 403. Never filter
+rows after a read; the row policy goes into the query.
+
+## Realtime over server-sent events
+
+`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
+to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
+`src/pages/realtime/events.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+  Nothing is public until it is listed in `PUBLIC` or gated there by a
+  policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Publish from a page after the write, with the row you already hold:
+
+  ```rust
+  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
+  let row = brocanth_realtime::Row::new().with("author_id", author);
+  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
+  ```
+
+- Read it in the browser. The event name is the topic. `lagged` means the
+  view may be stale: fetch it again.
+
+  ```js
+  const events = new EventSource("/realtime/events?topics=posts/*");
+  events.addEventListener("posts/*", (e) => console.log(e.data));
+  events.addEventListener("lagged", () => location.reload());
+  ```
+
+## Realtime over a WebSocket
+
+`GET /realtime/socket?topics=posts/*` upgrades to a WebSocket that carries
+the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
+`src/pages/realtime/socket.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+  It runs for the topics in the URL and for each `subscribe <topic>` the
+  browser sends later, so read what it needs (the user id) into `Viewer`
+  when the socket opens. Never filter frames after delivery.
+- A page on another site is refused by its `Origin`. List a second site of
+  your own in `ALLOWED_ORIGINS`; never turn the check off.
+- Each message is one record in the server-sent-events format: `id:`,
+  `event:` (the topic) and `data:` lines. `lagged` means the view may be
+  stale: fetch it again. A close with code 1001 means the server is
+  stopping: reconnect with `?last=<id>`.
+
+  ```js
+  const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
+  socket.onmessage = (e) => console.log(e.data);
+  socket.onopen = () => socket.send("subscribe posts/42");
+  ```
+
+## Translations
+
+Text a visitor reads lives in `locales/<tag>.toml`, one file per
+locale. `locales/en.toml` is the default and has every key. `build.rs`
+compiles the files: each key is a function, `t::welcome(locale)`, so a
+misspelt key or a missing argument does not compile. Do not write
+visible text as a literal in a page: add the key to `en.toml`, then to
+each translation. A key a translation lacks is a build warning, and
+that locale shows the English text.
+
+A page reads the locale with `crate::plugins::i18n::locale(ctx)`. The
+hook in `src/plugins/i18n/mod.rs` chose it from `?locale=`, the
+`locale` cookie, then `Accept-Language`. A link with `?locale=fr` is a
+language switcher: the hook remembers the choice in the cookie.
+
+A hook in another crate cannot name `Locale`. It reads
+`brocanth_i18n::Current` from the request state and calls
+`current.text("key.path")`, which answers keys with no argument.
+
+In an `.rsx` page, take the locale as a parameter (`locale: Locale`)
+and write `{t::welcome(locale)}`: rsx escapes it like any value. The
+layout cannot see the request, so it says `lang="en"`; put
+`lang={locale}` on the page's own root element.
+
+In a `.jt` template, `"title": t::welcome(locale)` writes the
+translation as a JSON string.
+
+The consent banner's text is the `[gtag.banner]` table of each catalog.
+The `banner.*` settings of `gtag` are the fallback for a key no catalog
+has. Change the wording in the catalogs.
+
+## The database
+
+`src/plugins/db/mod.rs` opens one Postgres pool at startup from `[db] url`.
+A page reads it with `ctx.db()`, a `&brocanth_db::Db`. Build a statement
+with `brocanth_db::sea_query`. Do not format values into SQL text: sea-query
+sends each value as a bound parameter.
+
+```rust
+use brocanth_db::sea_query::{Expr, ExprTrait, Order, Query};
+use brocanth_db::Exec;
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let q = Query::select()
+        .columns(["id", "title"])
+        .from("posts")
+        .and_where(Expr::col("published").eq(true))
+        .order_by("id", Order::Desc)
+        .limit(10)
+        .to_owned();
+    let posts: Vec<(i64, String)> = ctx.db().all(&q).await?;
+    Ok(posts
+        .iter()
+        .map(|(id, title)| format!("{id} {title}\n"))
+        .collect::<String>())
+}
+```
+
+`ctx.db().json(&q).await?` returns each row as a `serde_json::Value`,
+encoded by Postgres. Writes that belong together go in one transaction.
+`Ok` commits, and `Err` rolls back:
+
+```rust
+ctx.db()
+    .transact(async |tx| {
+        tx.execute(&debit).await?;
+        tx.execute(&credit).await?;
+        Ok(())
+    })
+    .await?;
+```
+
+A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
+log, never to the client.
+
+## The client
+
+`src/commands/api.rs` is a command line for this application's own
+API. It is built from `crate::pages::described()` at run time, not
+generated, so there is nothing to regenerate and nothing to keep in
+step: add a page with a typed signature and the client grows a
+subcommand with the right flags.
+
+Do not add validation to it. The server checks the body and answers
+422 with every fault; a client that checked as well would be a second
+opinion, and the two would disagree the first time a rule changed.
+
+## CSRF
+
+`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
+is a double-submit cookie: the hook mints a token, sets it as its own
+cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
+unless the request sends the same value back -- in the `_csrf_token`
+field, or in the `X-CSRF-Token` header.
+
+So every form that posts carries the hidden field. In a page, read
+the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
+write `token.hidden_field()` inside the `<form>`. For HTML this
+project did not template, `token.stamp_forms(html)` adds the field to
+every posting form; the admin uses it.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
+## CSS
+
+```
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
+
+## Analytics
+
+`brocanth_analytics::Analytics` is registered in `src/plugins/mod.rs`.
+It counts every GET answered with `text/html`, except paths under
+`[analytics] exclude`, bots and prefetches. Nothing to add to a page:
+no script, no cookie, no banner.
+
+Do not put personal data in a URL. The path and the allowed query
+parameters are stored; an email-shaped segment is replaced, but a name
+or an account number is not. Do not add a column to
+`brocanth_analytics_views` that identifies a person.
+
+With the admin, the numbers are at `/admin/analytics`, behind the
+admin's policy like every tab.
+
+## Security headers
+
+`brocanth_middleware::SecurityHeaders` is registered in
+`src/plugins/mod.rs`. Its Content-Security-Policy
+allows inline scripts by hash only. To inline a new script, add
+`Csp::default().inline_script(TEXT)` with the exact text between the
+tags. Do not add `'unsafe-inline'` to `script-src`. A value that
+depends on the request goes in a `data-` attribute or a `<meta>` tag,
+not in the script.
+
+HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
+is in front. Set `include_subdomains` or `preload` only when the
+person who owns the domain says so.
 
 ## Views
 
@@ -8896,6 +9991,18 @@ A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
 `html!` resolves that into a `match` over the chain. A handler never reads the
 header and never changes for it.
 
+## Rate limit
+
+`brocanth_middleware::RateLimit` is registered in
+`src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).
+The numbers are an example. Do not invent limits: ask for the limit
+and the window of each route group.
+
+A request whose key cannot be found is not counted. Behind a proxy,
+the address comes from `ProxyHeaders` or from `ip_header`. Never set
+`ip_header` to a header the client can send, such as
+`X-Forwarded-For`, unless the edge overwrites it.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -8907,11 +10014,7 @@ automatically — registration happens at link time.
 ```
 brocanth --help      # lists this project's commands too
 brocanth serve
-brocanth css         # the CSS build; -W rebuilds on each change
 ```
-
-The stylesheet is embedded, so a new one is a new binary. `css` rewrites
-`src/assets.rs` to say so, which is what makes cargo notice.
 
 ## Decisions that belong to the person
 
@@ -8937,208 +10040,10 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## Reading a body
-
-A handler never parses `ctx.body` itself. It declares a struct with
-`#[derive(zod::Entry)]`, puts the rules on the fields, and calls
-`ctx.body_as()` or `ctx.read()`. The rules are values: a `const`
-shared by two structs is one rule, and `zod::accepts!` makes the
-compiler check a literal against it.
-
-Report every fault, never the first. `Faults` already holds them all
-and `by_name()` groups them per field; a handler that returns after
-the first one makes a person submit the form three times.
-
-Do not write `?` on a `zod::Faults`. The blanket `From` on `Error`
-turns any `std::error::Error` into a 500, and a bad body is a 422.
-`body_as` is the call that gets the status right.
-
-## Edge middleware
-
-`src/plugins/mod.rs` holds five commented registrations from
-`brocanth-middleware`. Each encodes a fact about the deployment --
-which proxy to trust, which host is canonical, which origins may call
--- so each is turned on by somebody who knows that fact. Do not
-enable them as a set, and do not invent an address or an origin to
-make one compile. To turn one on, copy it to `build()` in
-`src/app.rs` and widen `type Core` by its hook families; the comment
-above the five shows the type.
-
-## Google Analytics
-
-`brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
-Its hook puts a consent banner and Google's tag into every HTML page,
-before `</body>`. Nothing reaches Google before the visitor accepts.
-
-Do not add a second Google tag, and do not send a page view yourself:
-the hook scrubs the URL first. Never put an email address, a name or a
-user id in a URL, a page title or an event: Google's terms forbid it,
-and the scrubber only catches what it can recognise. A link with
-`data-consent-manage` reopens the banner.
-
-The choice lives in the visitor's browser. To keep a record of it on
-the server, set `consent_log` to a file: each choice is one JSON line
-with no address and no user agent.
-
-## The admin
-
-`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
-locked: the policy is `DenyAll` and `principal` returns an anonymous
-principal, so every screen answers 403. Do not open it with
-`AllowAllUnsafeForDevelopment` outside a test.
-
-A model reaches the admin through `AdminConfig::resource(..)`: a
-`brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
-the model's rows. A model with no resource answers 403. Never filter
-rows after a read; the row policy goes into the query.
-
-## Realtime over server-sent events
-
-`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
-to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
-`src/pages/realtime/events.rs` is the route.
-
-- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
-  Nothing is public until it is listed in `PUBLIC` or gated there by a
-  policy (`Subscription::from_policy`). Never filter frames after delivery.
-- Publish from a page after the write, with the row you already hold:
-
-  ```rust
-  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
-  let row = brocanth_realtime::Row::new().with("author_id", author);
-  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
-  ```
-
-- Read it in the browser. The event name is the topic. `lagged` means the
-  view may be stale: fetch it again.
-
-  ```js
-  const events = new EventSource("/realtime/events?topics=posts/*");
-  events.addEventListener("posts/*", (e) => console.log(e.data));
-  events.addEventListener("lagged", () => location.reload());
-  ```
-
-## The database
-
-`src/plugins/db/mod.rs` opens one Postgres pool at startup from `[db] url`.
-A page reads it with `ctx.db()`, a `&brocanth_db::Db`. Build a statement
-with `brocanth_db::sea_query`. Do not format values into SQL text: sea-query
-sends each value as a bound parameter.
-
-```rust
-use brocanth_db::sea_query::{Expr, ExprTrait, Order, Query};
-use brocanth_db::Exec;
-
-use crate::pages::{Ctx, Error, IntoResponse};
-
-pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let q = Query::select()
-        .columns(["id", "title"])
-        .from("posts")
-        .and_where(Expr::col("published").eq(true))
-        .order_by("id", Order::Desc)
-        .limit(10)
-        .to_owned();
-    let posts: Vec<(i64, String)> = ctx.db().all(&q).await?;
-    Ok(posts
-        .iter()
-        .map(|(id, title)| format!("{id} {title}\n"))
-        .collect::<String>())
-}
-```
-
-`ctx.db().json(&q).await?` returns each row as a `serde_json::Value`,
-encoded by Postgres. Writes that belong together go in one transaction.
-`Ok` commits, and `Err` rolls back:
-
-```rust
-ctx.db()
-    .transact(async |tx| {
-        tx.execute(&debit).await?;
-        tx.execute(&credit).await?;
-        Ok(())
-    })
-    .await?;
-```
-
-A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
-log, never to the client.
-
-## The client
-
-`src/commands/api.rs` is a command line for this application's own
-API. It is built from `crate::pages::described()` at run time, not
-generated, so there is nothing to regenerate and nothing to keep in
-step: add a page with a typed signature and the client grows a
-subcommand with the right flags.
-
-Do not add validation to it. The server checks the body and answers
-422 with every fault; a client that checked as well would be a second
-opinion, and the two would disagree the first time a rule changed.
-
-## CSRF
-
-`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
-is a double-submit cookie: the hook mints a token, sets it as its own
-cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
-unless the request sends the same value back -- in the `_csrf_token`
-field, or in the `X-CSRF-Token` header.
-
-So every form that posts carries the hidden field. In a page, read
-the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
-write `token.hidden_field()` inside the `<form>`. For HTML this
-project did not template, `token.stamp_forms(html)` adds the field to
-every posting form; the admin uses it.
-
-A 403 from this hook is a form that lost its token, or a caller that
-is not a browser. Add that path to `exempt`; do not remove the
-registration.
-
-## Analytics
-
-`brocanth_analytics::Analytics` is registered in `src/plugins/mod.rs`.
-It counts every GET answered with `text/html`, except paths under
-`[analytics] exclude`, bots and prefetches. Nothing to add to a page:
-no script, no cookie, no banner.
-
-Do not put personal data in a URL. The path and the allowed query
-parameters are stored; an email-shaped segment is replaced, but a name
-or an account number is not. Do not add a column to
-`brocanth_analytics_views` that identifies a person.
-
-With the admin, the numbers are at `/admin/analytics`, behind the
-admin's policy like every tab.
-
-## Security headers
-
-`brocanth_middleware::SecurityHeaders` is registered in
-`src/plugins/mod.rs`. Its Content-Security-Policy
-allows inline scripts by hash only. To inline a new script, add
-`Csp::default().inline_script(TEXT)` with the exact text between the
-tags. Do not add `'unsafe-inline'` to `script-src`. A value that
-depends on the request goes in a `data-` attribute or a `<meta>` tag,
-not in the script.
-
-HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
-is in front. Set `include_subdomains` or `preload` only when the
-person who owns the domain says so.
-
-## Rate limit
-
-`brocanth_middleware::RateLimit` is registered in
-`src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).
-The numbers are an example. Do not invent limits: ask for the limit
-and the window of each route group.
-
-A request whose key cannot be found is not counted. Behind a proxy,
-the address comes from `ProxyHeaders` or from `ip_header`. Never set
-`ip_header` to a header the client can send, such as
-`X-Forwarded-For`, unless the edge overwrites it.
-
-<!-- brocanth-digest: 87aada2a5737627b -->
+<!-- brocanth-digest: ea33a316d3ebcecf -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -9147,9 +10052,10 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
+version = "0.1.0"
 kind = ["middleware", "enhancer", "routes"]
 files = ["src/plugins/observability/"]
 config = ["observability"]
@@ -9157,6 +10063,7 @@ crates = ["brocanth-observe"]
 adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing"]
 
 [modules.observability-logs]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -9164,6 +10071,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-health]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -9171,6 +10079,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-metrics]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -9178,6 +10087,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-tracing]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -9185,6 +10095,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.analytics]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["analytics"]
@@ -9192,6 +10103,7 @@ crates = ["brocanth-analytics"]
 adapted_to = ["config"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -9199,6 +10111,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.sessions]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/sessions/"]
 config = ["sessions"]
@@ -9206,6 +10119,7 @@ crates = []
 adapted_to = ["config"]
 
 [modules.db]
+version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
 files = ["src/commands/dbshell.rs", "src/plugins/db/"]
 config = ["db"]
@@ -9213,6 +10127,7 @@ crates = ["brocanth-db"]
 adapted_to = ["config", "commands", "model"]
 
 [modules.model]
+version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
 files = ["migrations/", "src/bin/migrate.rs", "src/plugins/model/"]
 config = []
@@ -9220,6 +10135,7 @@ crates = ["brocanth-model", "brocanth-migrate"]
 adapted_to = ["config", "commands"]
 
 [modules.cache]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/cache/"]
 config = ["cache"]
@@ -9227,6 +10143,7 @@ crates = ["brocanth-cache"]
 adapted_to = ["config"]
 
 [modules.jobs]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/jobs/"]
 config = ["jobs"]
@@ -9234,6 +10151,7 @@ crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
 
 [modules.auth]
+version = "0.1.0"
 kind = ["middleware", "enhancer"]
 files = ["src/plugins/auth/"]
 config = ["auth"]
@@ -9241,6 +10159,7 @@ crates = ["brocanth-auth"]
 adapted_to = ["config", "jobs", "cache"]
 
 [modules.policy]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/policy/"]
 config = ["policy"]
@@ -9248,6 +10167,7 @@ crates = ["brocanth-policy"]
 adapted_to = ["config", "model", "realtime"]
 
 [modules.storage]
+version = "0.1.0"
 kind = ["enhancer", "middleware"]
 files = ["src/plugins/storage/"]
 config = ["storage"]
@@ -9255,6 +10175,7 @@ crates = ["brocanth-storage"]
 adapted_to = ["config"]
 
 [modules.input]
+version = "0.1.0"
 kind = ["enhancer", "renderer"]
 files = []
 config = []
@@ -9262,6 +10183,7 @@ crates = ["brocanth-input", "zod"]
 adapted_to = ["rsx"]
 
 [modules.client]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/api.rs"]
 config = []
@@ -9269,6 +10191,7 @@ crates = ["brocanth-client"]
 adapted_to = []
 
 [modules.middleware]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -9276,6 +10199,7 @@ crates = ["brocanth-middleware"]
 adapted_to = []
 
 [modules.middleware-csrf]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["csrf"]
@@ -9283,6 +10207,7 @@ crates = []
 adapted_to = ["config"]
 
 [modules.middleware-security-headers]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
@@ -9290,6 +10215,7 @@ crates = []
 adapted_to = ["admin", "gtag", "config"]
 
 [modules.middleware-rate-limit]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["rate_limit"]
@@ -9297,13 +10223,15 @@ crates = []
 adapted_to = ["config"]
 
 [modules.gtag]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
-adapted_to = ["config"]
+adapted_to = ["config", "i18n"]
 
 [modules.openapi]
+version = "0.1.0"
 kind = ["routes", "enhancer"]
 files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
@@ -9311,6 +10239,7 @@ crates = ["brocanth-openapi"]
 adapted_to = ["config", "input"]
 
 [modules.validation]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/validation/"]
 config = ["validation"]
@@ -9318,6 +10247,7 @@ crates = ["brocanth-schema"]
 adapted_to = ["config"]
 
 [modules.resource]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/plugins/resource/"]
 config = []
@@ -9325,6 +10255,7 @@ crates = ["brocanth-resource"]
 adapted_to = []
 
 [modules.admin]
+version = "0.1.0"
 kind = ["routes", "enhancer"]
 files = ["src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
@@ -9332,6 +10263,7 @@ crates = ["brocanth-admin"]
 adapted_to = ["config", "middleware-csrf", "admin-model", "commands", "analytics"]
 
 [modules.admin-model]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/plugins/admin/models.rs"]
 config = []
@@ -9339,6 +10271,7 @@ crates = ["brocanth-admin-model"]
 adapted_to = []
 
 [modules.realtime]
+version = "0.1.0"
 kind = ["enhancer", "middleware"]
 files = ["src/plugins/realtime/"]
 config = ["realtime"]
@@ -9346,13 +10279,23 @@ crates = ["brocanth-realtime"]
 adapted_to = ["config"]
 
 [modules.realtime-sse]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/realtime/events.rs", "src/plugins/realtime_sse/"]
 config = []
 crates = ["brocanth-events"]
 adapted_to = []
 
+[modules.realtime-websocket]
+version = "0.1.0"
+kind = ["routes"]
+files = ["src/pages/realtime/socket.rs", "src/plugins/realtime_websocket/"]
+config = []
+crates = ["brocanth-server", "brocanth-events"]
+adapted_to = []
+
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -9360,13 +10303,15 @@ crates = ["brocanth-command"]
 adapted_to = ["input"]
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
-files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
+files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.jt]
+version = "0.1.0"
 kind = ["renderer", "routes"]
 files = ["src/pages/status.jt", "src/pages/status.rs"]
 config = []
@@ -9374,20 +10319,23 @@ crates = ["jt"]
 adapted_to = []
 
 [modules.rsx-tailwind]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "src/commands/css.rs", "package.json"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.rsx-htmx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.robots]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
@@ -9395,13 +10343,23 @@ crates = ["brocanth-robots"]
 adapted_to = ["config", "admin", "sitemap"]
 
 [modules.sitemap]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "admin", "jt", "realtime-sse"]
 
+[modules.i18n]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
+config = ["i18n"]
+crates = ["brocanth-i18n"]
+adapted_to = ["config", "gtag", "rsx", "jt"]
+
 [modules.docker]
+version = "0.1.0"
 kind = ["external"]
 files = [".dockerignore", "Dockerfile"]
 config = []
@@ -9409,6 +10367,7 @@ crates = []
 adapted_to = []
 
 [modules.docker-kubernetes]
+version = "0.1.0"
 kind = ["external"]
 files = ["deploy/kubernetes.yaml"]
 config = []
@@ -9416,6 +10375,7 @@ crates = []
 adapted_to = []
 
 [modules.ci]
+version = "0.1.0"
 kind = ["external"]
 files = []
 config = []
@@ -9423,10 +10383,11 @@ crates = []
 adapted_to = []
 
 [modules.ci-github]
+version = "0.1.0"
 kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 641d8697b9b51f32
+# brocanth-digest: 7d73d1e5c3d238a1

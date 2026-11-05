@@ -37,6 +37,7 @@ default-run = "my-blog"
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
+#   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-static = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -75,7 +76,7 @@ run = "cargo test"
 description = "write the site to dist/"
 run = "cargo run -- export"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -112,7 +113,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e41b82fec04dd891
+// brocanth-digest: 2b0f22d766333dc2
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -594,7 +595,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -1320,7 +1321,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1789,7 +1790,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 51a792e916d1b8f2
+// brocanth-digest: 0f83396bdf625b6b
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -1870,7 +1871,7 @@ extra = []
 # Path prefixes kept out of the sitemap: "/drafts".
 exclude = []
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -1888,7 +1889,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: ed7381cec4c9c3b4
+// brocanth-digest: e621d24e31731f25
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2621,7 +2622,7 @@ mod tests {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2652,7 +2653,7 @@ request.
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2686,6 +2687,23 @@ Editing or deleting one is noticed.
 A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
+
+## Static site
+
+This project compiles to files. `cargo run -- export` writes every
+route that answers GET to `dist/`, and every asset beside it. `serve`
+is the preview, not the deployment.
+
+- A page must answer the same bytes whatever the request says. It must
+  not read a cookie or the query: the export sends none. The one
+  header it sends is `DP-Partial`, for the partials (`PARTIALS`).
+- A route with a parameter (`users/[id].rs`) is written only for the
+  paths listed in `PATHS` in `src/commands/export.rs`. Add each one.
+- Served under a path (a GitHub Pages project site)? Export with
+  `cargo run -- export --base /<repo>`. Write links from the root
+  (`/about`); the export prefixes them.
+- Do not add a module that runs in a server (a session, a database, a
+  queue, the observability probes). `brocanth add` refuses it.
 
 ## Tasks
 
@@ -2724,27 +2742,10 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## Static site
-
-This project compiles to files. `cargo run -- export` writes every
-route that answers GET to `dist/`, and every asset beside it. `serve`
-is the preview, not the deployment.
-
-- A page must answer the same bytes whatever the request says. It must
-  not read a cookie or the query: the export sends none. The one
-  header it sends is `DP-Partial`, for the partials (`PARTIALS`).
-- A route with a parameter (`users/[id].rs`) is written only for the
-  paths listed in `PATHS` in `src/commands/export.rs`. Add each one.
-- Served under a path (a GitHub Pages project site)? Export with
-  `cargo run -- export --base /<repo>`. Write links from the root
-  (`/about`); the export prefixes them.
-- Do not add a module that runs in a server (a session, a database, a
-  queue, the observability probes). `brocanth add` refuses it.
-
-<!-- brocanth-digest: c3522a4f56e037f1 -->
+<!-- brocanth-digest: 6bc4c8a57f703071 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2756,6 +2757,7 @@ title = "My Blog"
 enabled = ["static", "config", "commands", "robots", "sitemap"]
 
 [modules.static]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["src/commands/export.rs"]
 config = []
@@ -2763,6 +2765,7 @@ crates = ["brocanth-static"]
 adapted_to = []
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -2770,6 +2773,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -2777,6 +2781,7 @@ crates = ["brocanth-command"]
 adapted_to = []
 
 [modules.robots]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
@@ -2784,10 +2789,11 @@ crates = ["brocanth-robots"]
 adapted_to = ["config", "sitemap", "static"]
 
 [modules.sitemap]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "static"]
 
-# brocanth-digest: bf14e987723a24e5
+# brocanth-digest: 16fd0e3b4341578e

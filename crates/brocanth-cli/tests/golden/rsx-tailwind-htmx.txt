@@ -39,13 +39,14 @@ default-run = "my-blog"
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
+#   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 #   serde                 nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
+brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 ===== .gitignore =====
@@ -79,7 +80,7 @@ run = "cargo run -- css"
 description = "the same, again on each change"
 run = "cargo run -- css --watch"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -117,7 +118,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e19f2808bd04d0f1
+// brocanth-digest: 60f10486fb5b59ca
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -260,58 +261,6 @@ fn headers(request: &hooks::Request) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The file a request named, or `None` to let the router answer.
-///
-/// Checked before the route table, which is also the order of surprise: a
-/// page at the same path as a file would be shadowed, and a path under
-/// `/assets` or `/public` is not a route anybody writes by hand.
-fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
-    if !matches!(
-        request.verb,
-        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
-    ) {
-        return None;
-    }
-    let asset = crate::assets::lookup(&request.path)?;
-
-    // The ETag is the content hash, so it is strong and a match means the
-    // bytes are identical. 304 is the whole point of serving `public/`
-    // without a fingerprint in the name.
-    if request.header("if-none-match") == Some(asset.etag) {
-        return Some(
-            brocanth_server::Response::new(304, asset.content_type, &[][..])
-                .with_header("etag", asset.etag)
-                .with_header("cache-control", asset.cache_control()),
-        );
-    }
-
-    Some(
-        brocanth_server::Response::new(200, asset.content_type, asset.body)
-            .with_header("etag", asset.etag)
-            .with_header("cache-control", asset.cache_control()),
-    )
-}
-
-/// How many layout layers the client already has, from `DP-Partial`.
-///
-/// `html!` leaves out that many layouts, counting from the root, so a
-/// navigation inside a section sends the section's contents and not the
-/// document around them. dp-swap sends the number; the header is absent on
-/// a first load, for a crawler, and whenever JavaScript is off, and then
-/// this is zero and the whole document goes out.
-///
-/// `true` is dp-swap's word for "a fragment, I did not count", which is one
-/// layer. Anything that does not parse is zero: a client that cannot say
-/// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &hooks::Request) -> u32 {
-    let header = request.headers().get("dp-partial");
-    match header.and_then(|value| value.to_str().ok()) {
-        None => 0,
-        Some("true") => 1,
-        Some(value) => value.parse().unwrap_or(0),
-    }
-}
-
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
@@ -414,12 +363,7 @@ async fn run(
         let app = Arc::clone(&app);
         move |request| {
             let app = Arc::clone(&app);
-            async move {
-                match serve_asset(&request) {
-                    Some(file) => file,
-                    None => handle(&app, request).await,
-                }
-            }
+            async move { handle(&app, request).await }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -656,8 +600,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .holding(holding(request))
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -1027,11 +970,6 @@ pub struct Ctx {
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
     state: RequestState,
-    /// How many layout layers the client says it already holds.
-    ///
-    /// Zero unless a request asked for less, so a first load, a crawler
-    /// and a reader with JavaScript off all get the whole document.
-    partial: u32,
 }
 
 impl Ctx {
@@ -1048,7 +986,6 @@ impl Ctx {
             headers: Vec::new(),
             plugins: None,
             state: RequestState::new(),
-            partial: 0,
         }
     }
 
@@ -1127,21 +1064,6 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }
-
-    /// The same, for a request that said how much of the page it has.
-    #[must_use]
-    pub fn holding(mut self, layers: u32) -> Self {
-        self.partial = layers;
-        self
-    }
-
-    /// What `html!` asks, to leave out the layouts the client has.
-    ///
-    /// A method rather than a public field so the number has one
-    /// meaning: layers to skip, counted from the root.
-    pub fn partial_depth(&self) -> u32 {
-        self.partial
     }
 
     /// A route parameter, or `None`.
@@ -1417,6 +1339,29 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     Ok(Response::ok(content.render_to_string()?))
 }
 
+impl Ctx {
+    /// How many layout layers the client already holds, from `DP-Partial`.
+    /// `html!` asks it, and leaves out that many layouts, counted from the
+    /// root.
+    ///
+    /// A navigation inside a section sends the section's contents and not
+    /// the document around them. dp-swap sends the number; the header is
+    /// absent on a first load, for a crawler, and whenever JavaScript is
+    /// off, and then this is zero and the whole document goes out.
+    ///
+    /// `true` is dp-swap's word for "a fragment, I did not count", which is
+    /// one layer. Anything that does not parse is zero: a client that cannot
+    /// say what it holds gets everything, which is always correct and only
+    /// slower.
+    pub fn partial_depth(&self) -> u32 {
+        match self.header("dp-partial") {
+            None => 0,
+            Some("true") => 1,
+            Some(value) => value.parse().unwrap_or(0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,7 +1469,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1537,6 +1482,8 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! The registration chain sits here and not in `src/app.rs` because the
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
+
+pub mod static_files;
 
 use brocanth::plugin_context::Base;
 use brocanth::plugin_routes::BoxFuture;
@@ -1937,8 +1884,41 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 /// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
-/// What `serve` answers a request with: `next`, as it is. `brocanth add
-/// observe` logs and counts each request here, and answers the probes.
+/// A handler, as one server wrap hands it to the next.
+pub type Handler = std::sync::Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+/// Something around the whole server: it sees every request, a static
+/// file included, outside the request hooks.
+///
+/// A module writes a type that implements it and names the type in
+/// `Slot::ServerWrap`. Only `wrap` is required.
+pub trait ServerWrap {
+    /// `next`, with this wrap around it.
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler;
+
+    /// Listeners of its own, beside the main one. Called once, after the
+    /// plugins started.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let _ = app;
+        async { Ok(()) }
+    }
+
+    /// Called when a stop begins, before the listener closes. A wrap that
+    /// must keep answering for a while -- a readiness probe that fails
+    /// first -- waits here.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let _ = app;
+        async {}
+    }
+}
+
+/// What `serve` answers a request with: `next`, inside each server wrap.
+/// The first is the outermost: it sees a request first and the response
+/// last.
+///
+/// - `static_files::StaticFiles`
 pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
     next: F,
@@ -1947,23 +1927,25 @@ where
     F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
 {
-    let _ = app;
-    move |request| -> Answer { Box::pin(next(request)) }
+    let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
+    let next = <static_files::StaticFiles as ServerWrap>::wrap(app, next);
+    move |request| next(request)
 }
 
-/// No second listener: nothing here serves probes or metrics.
+/// Each wrap's own listeners, in order.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let _ = app;
+    <static_files::StaticFiles as ServerWrap>::side_listeners(app).await?;
     Ok(())
 }
 
-/// The first half of a stop: the listener closes at once.
+/// The first half of a stop: each wrap's `before_stop`, in order, then the
+/// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    let _ = app;
+    <static_files::StaticFiles as ServerWrap>::before_stop(app).await;
     stopper.stop();
 }
 
-// brocanth-digest: 0f0c5b1493e2d02f
+// brocanth-digest: 1090ef98f166a012
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -1993,7 +1975,7 @@ pub const WITH_CONFIG: bool = false;
 /// ```
 pub const RENAMES: &[(&str, &str)] = &[];
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -2010,7 +1992,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 8ae5e693599274c3
+// brocanth-digest: 8d99e12edb4b08e2
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2429,6 +2411,62 @@ pub fn Layout(layout: &str, children: Element) -> Element {
         <div dp-layout={layout}>{children}</div>
     </section>
 }
+===== src/plugins/static_files/mod.rs =====
+//! The static files, before the router: a server wrap.
+//!
+//! Not a page, and not routed. A page returns a `Response` whose body is a
+//! `String`, which a font is not, so a static file answers before the router
+//! is consulted and never touches the page contract. `src/plugins/mod.rs`
+//! composes this wrap with any other.
+
+use crate::plugins::{Answer, Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct StaticFiles;
+
+impl ServerWrap for StaticFiles {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let _ = app;
+        std::sync::Arc::new(move |request: brocanth_server::Request| -> Answer {
+            match serve_asset(&request) {
+                Some(file) => Box::pin(std::future::ready(file)),
+                None => next(request),
+            }
+        })
+    }
+}
+
+/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
 ===== package.json =====
 {
   "name": "my-blog",
@@ -2440,7 +2478,7 @@ pub fn Layout(layout: &str, children: Element) -> Element {
   }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2470,7 +2508,7 @@ request.
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `jt`, `static`, `robots`, `sitemap`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `jt`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2608,6 +2646,15 @@ A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
 `html!` resolves that into a `match` over the chain. A handler never reads the
 header and never changes for it.
 
+## CSS
+
+```
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -2619,11 +2666,7 @@ automatically — registration happens at link time.
 ```
 brocanth --help      # lists this project's commands too
 brocanth serve
-brocanth css         # the CSS build; -W rebuilds on each change
 ```
-
-The stylesheet is embedded, so a new one is a new binary. `css` rewrites
-`src/assets.rs` to say so, which is what makes cargo notice.
 
 ## Decisions that belong to the person
 
@@ -2649,10 +2692,10 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: e4a64d9d7ef0f9eb -->
+<!-- brocanth-digest: b27831702d452f08 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2664,31 +2707,35 @@ title = "My Blog"
 enabled = ["rsx", "rsx-tailwind", "rsx-htmx", "commands"]
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
-files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
+files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.rsx-tailwind]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "src/commands/css.rs", "package.json"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.rsx-htmx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: 7287ccde8b1e9b54
+# brocanth-digest: 1a0e8bb8e3a129a0

@@ -36,6 +36,7 @@ edition = "2021"
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
+#   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
 #   serde                 nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -70,7 +71,7 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -107,7 +108,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: b5f00348e17ca817
+// brocanth-digest: 32a281d6f318fea8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -589,7 +590,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -959,11 +960,6 @@ pub struct Ctx {
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
     state: RequestState,
-    /// How many layout layers the client says it already holds.
-    ///
-    /// Zero unless a request asked for less, so a first load, a crawler
-    /// and a reader with JavaScript off all get the whole document.
-    partial: u32,
 }
 
 impl Ctx {
@@ -980,7 +976,6 @@ impl Ctx {
             headers: Vec::new(),
             plugins: None,
             state: RequestState::new(),
-            partial: 0,
         }
     }
 
@@ -1059,14 +1054,6 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }
-
-    /// What `html!` asks, to leave out the layouts the client has.
-    ///
-    /// A method rather than a public field so the number has one
-    /// meaning: layers to skip, counted from the root.
-    pub fn partial_depth(&self) -> u32 {
-        self.partial
     }
 
     /// A route parameter, or `None`.
@@ -1342,6 +1329,16 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     Ok(Response::ok(content.render_to_string()?))
 }
 
+impl Ctx {
+    /// How many layout layers the client already holds. `html!` asks it.
+    ///
+    /// Always zero: nothing here sends a partial request, so every page
+    /// goes out whole. `brocanth add rsx-htmx` reads `DP-Partial` here.
+    pub fn partial_depth(&self) -> u32 {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,7 +1446,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -2170,7 +2167,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 543dbe32ac3f129b
+// brocanth-digest: e9d91e8121cf19d4
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2431,7 +2428,7 @@ mod tests {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2460,7 +2457,7 @@ request.
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2561,30 +2558,6 @@ An interpolated value is escaped on the way out. Templates are read at
 **compile** time, so an edit needs a rebuild, and a template that does not
 parse is a build failure on its own line rather than a 500.
 
-## Decisions that belong to the person
-
-The modules in this project are the person's choice. Do not add or
-remove one on your own. Before you run `brocanth add`, show the person
-the question: `brocanth add --questions` lists each module with its
-default, what it needs and what it recommends. Give your
-recommendation, and wait for the answer.
-
-## House style
-
-- A comment says **why**, next to the decision, and what was chosen
-  against. Not what the line does.
-- A test name is a sentence describing the guarantee it protects.
-- Prefer a type that cannot be built wrong over a check that can be
-  forgotten.
-- State a limit where someone would look for it rather than leaving it
-  to be discovered.
-
-## Framework reference
-
-`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
-cannot compile and can therefore be relied on, what can still go wrong
-and therefore needs a test, and the crate map.
-
 ## Google Analytics
 
 `brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
@@ -2633,10 +2606,34 @@ The consent banner's text is the `[gtag.banner]` table of each catalog.
 The `banner.*` settings of `gtag` are the fallback for a key no catalog
 has. Change the wording in the catalogs.
 
-<!-- brocanth-digest: 0035771d2ddc6664 -->
+## Decisions that belong to the person
+
+The modules in this project are the person's choice. Do not add or
+remove one on your own. Before you run `brocanth add`, show the person
+the question: `brocanth add --questions` lists each module with its
+default, what it needs and what it recommends. Give your
+recommendation, and wait for the answer.
+
+## House style
+
+- A comment says **why**, next to the decision, and what was chosen
+  against. Not what the line does.
+- A test name is a sentence describing the guarantee it protects.
+- Prefer a type that cannot be built wrong over a check that can be
+  forgotten.
+- State a limit where someone would look for it rather than leaving it
+  to be discovered.
+
+## Framework reference
+
+`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
+cannot compile and can therefore be relied on, what can still go wrong
+and therefore needs a test, and the crate map.
+
+<!-- brocanth-digest: 0846f36c6dbd9b11 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2648,6 +2645,7 @@ title = "My Blog"
 enabled = ["rsx", "gtag", "i18n"]
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
@@ -2655,6 +2653,7 @@ crates = ["rsx"]
 adapted_to = []
 
 [modules.gtag]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["gtag", "gtag.banner"]
@@ -2662,10 +2661,11 @@ crates = ["brocanth-gtag"]
 adapted_to = ["i18n"]
 
 [modules.i18n]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
 adapted_to = ["gtag", "rsx"]
 
-# brocanth-digest: 319a04dc3e274d22
+# brocanth-digest: 24a6165413ed278b
