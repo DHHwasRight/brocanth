@@ -312,10 +312,13 @@ impl Count {
             &self.config,
             &self.recorder,
             request,
-            request.uri().path(),
-            request.uri().query().unwrap_or(""),
-            header(request, "referer"),
-            host,
+            Page {
+                site: self.recorder.site(),
+                path: request.uri().path(),
+                query: request.uri().query().unwrap_or(""),
+                referer: header(request, "referer"),
+                host,
+            },
         )
     }
 }
@@ -329,22 +332,38 @@ pub(crate) fn header<'r>(request: &'r Request, name: &str) -> &'r str {
         .unwrap_or("")
 }
 
+/// The visited page, as the hook or the collector read it.
+pub(crate) struct Page<'a> {
+    /// The site the row belongs to: the recorder's own, or the host of a
+    /// static site that sent a beacon. It is also in the visitor hash.
+    pub site: &'a str,
+    /// The visited path, before `clean_path`.
+    pub path: &'a str,
+    /// The visited query, before `clean_query`.
+    pub query: &'a str,
+    /// Where the visitor came from.
+    pub referer: &'a str,
+    /// The visited host, so a referrer from the site itself is dropped.
+    pub host: Option<&'a str>,
+}
+
 /// A page view from the parts of a request that are kept, after the rules
 /// the hook and the collector share: no bot, no signal when the site
-/// respects it, no excluded path, and every field reduced.
-///
-/// `path` and `query` are the visited page's, `referer` is where the
-/// visitor came from, and `host` is the visited site, so a referrer from
-/// the site itself is dropped.
+/// respects it, no excluded path, and every field reduced. The address and
+/// the user agent come from `request`, which the browser sent.
 pub(crate) fn visit(
     config: &AnalyticsConfig,
     recorder: &Recorder,
     request: &Request,
-    path: &str,
-    query: &str,
-    referer: &str,
-    host: Option<&str>,
+    page: Page<'_>,
 ) -> Option<Pending> {
+    let Page {
+        site,
+        path,
+        query,
+        referer,
+        host,
+    } = page;
     let ua = header(request, "user-agent");
     if is_bot(ua) {
         return None;
@@ -360,8 +379,9 @@ pub(crate) fn visit(
     }
     let class = ua_class(ua);
     Some(Pending {
+        site: site.to_string(),
         day: recorder.today(),
-        prehash: recorder.prehash(&address(config, request), ua),
+        prehash: recorder.prehash(site, &address(config, request), ua),
         path,
         query: clean_query(query, &config.query_allow),
         referrer: referrer_origin(referer, host).unwrap_or_default(),

@@ -142,7 +142,10 @@ With `admin`, the admin module writes one line in its `mount`:
 config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
 ```
 
-The tab shows visitors and views over 7, 30 or 90 days, or between any two
+The tab shows one site at a time (decision 7: the server's own, or a
+static site that sends beacons), chosen with `?site=`. The range links and
+the date form carry the site, and the site form carries the range. It shows
+visitors and views over 7, 30 or 90 days, or between any two
 dates (`?from=2026-10-01&to=2026-10-31`, a GET form). A custom range is two
 years at most, so one request cannot ask for a decade; a range that is
 backwards, too long or unreadable falls back to 30 days. Below the totals
@@ -180,9 +183,13 @@ two halves:
 `collector_origins` lists at least one origin. It reads a page view a
 static page sends and counts it with the same rules as the hook:
 
+- the row's `site` is the host of the sending origin (`docs.example`, or
+  `docs.example:8443` with a port), not the server's `site`. See "Each
+  origin is a site" below;
 - the visitor hash comes from the beacon request's own address and user
-  agent, which are the visitor's, because the browser sends the beacon. A
-  page view on the server and a beacon from one browser are one visitor;
+  agent, which are the visitor's, because the browser sends the beacon. The
+  hash mixes in the static site's host, so one browser on the server and on
+  a static site is two unrelated visitors, as on any two sites;
 - the page is the `p` value of the payload, reduced by `clean_path` and
   `clean_query`; the referrer is the `r` value, kept as its origin, and
   dropped when it is the static site's own;
@@ -238,9 +245,20 @@ through the hooks, so every exported file carries it.
 
 Wiring the two: set `[beacon] collector = "https://app.example.com/_a/v"`
 on the static site, and `[analytics] collector_origins =
-["https://docs.example.com"]` on the server. Beacon rows carry the server's
-`site`, so the server's dashboard shows the static site's pages beside its
-own. Two static sites feeding one server are one site in the numbers.
+["https://docs.example.com"]` on the server.
+
+**Each origin is a site.** Decision: a beacon row stores the host of its
+origin as `site`; a page view the hook counts keeps the server's `site`.
+The dashboard has a site selector: the server's site first (the default),
+then every site that has rows, sorted. Reason: two static sites, or a
+static site and the app, are different audiences. One sum of their pages
+answers no question, and a `/` on each would merge into one line. The host
+is the origin with its scheme removed, because `collector_origins` already
+says which origins are allowed; it keeps a port, so two origins never
+share a site. The site is in the prehash, so the CNIL condition "no
+tracking across sites" holds between the static sites and the server too.
+A `?site=` value that is not in the list shows the server's site: the
+parameter picks a site, it never names a new one.
 
 ### 8. Off in development, on in production
 
@@ -317,8 +335,9 @@ audience-measurement tool from consent:
 4. Bot detection stays a word list (`classify::BOT_WORDS`). Detecting a
    client that never loads the page's assets needs a script on the server's
    own pages, which this module does not ship.
+5. Each collector origin is a site of its own on the dashboard, with a
+   site selector (decision 7, "Each origin is a site").
 
 ## Open questions
 
-1. Beacon rows carry the server's `site`. Should each collector origin be
-   a site of its own on the dashboard?
+None.

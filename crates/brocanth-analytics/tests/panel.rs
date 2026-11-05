@@ -11,8 +11,12 @@ use brocanth_analytics::{Day, MemoryStore, Recorder, Store, View};
 use brocanth_test::Html;
 
 fn view(day: i32, visitor: i64, path: &str, referrer: &str) -> View {
+    on("site", day, visitor, path, referrer)
+}
+
+fn on(site: &str, day: i32, visitor: i64, path: &str, referrer: &str) -> View {
     View {
-        site: "site".to_string(),
+        site: site.to_string(),
         day: Day(day),
         visitor,
         path: path.to_string(),
@@ -25,14 +29,17 @@ fn view(day: i32, visitor: i64, path: &str, referrer: &str) -> View {
     }
 }
 
-/// A recorder on day 20 000 over a store with three views, one of them a
-/// path that would be markup if it were not escaped.
+/// A recorder on day 20 000 over a store with three views of its own site,
+/// one of them a path that would be markup if it were not escaped, and one
+/// view of each of two static sites, one named like markup.
 fn recorder() -> Recorder {
     let store = Arc::new(MemoryStore::new());
     block_on(store.write(&[
         view(20_000, 1, "/", "https://news.example"),
         view(20_000, 1, "/pricing", ""),
         view(19_999, 2, "/<script>", ""),
+        on("docs.example", 20_000, 7, "/guide", ""),
+        on("<b>bold", 20_000, 8, "/x", ""),
     ]))
     .unwrap();
     let recorder = Recorder::new(
@@ -135,4 +142,82 @@ fn a_store_that_is_not_attached_says_so_instead_of_failing() {
     let (status, html) = get(&admin(recorder, true), "");
     assert_eq!(status, 200);
     Html::new(html).assert_text("not attached");
+}
+
+#[test]
+fn the_selector_lists_the_servers_site_first_then_every_site_with_rows() {
+    let (_, html) = get(&admin(recorder(), true), "");
+    let page = Html::new(html.clone());
+    assert_eq!(
+        page.field("site").expect("a site selector").name(),
+        "select"
+    );
+    let options: Vec<_> = page
+        .tags("option")
+        .iter()
+        .map(|o| {
+            (
+                o.attr("value").unwrap_or("").to_string(),
+                o.has_attr("selected"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        options,
+        vec![
+            ("site".to_string(), true),
+            ("<b>bold".to_string(), false),
+            ("docs.example".to_string(), false),
+        ],
+        "the server's site first and chosen, then the others sorted"
+    );
+    // The default is the server's own numbers.
+    page.assert_text("2 visitors");
+    page.assert_text("/pricing");
+    assert!(!html.contains("/guide"));
+}
+
+#[test]
+fn a_site_shows_only_its_own_views() {
+    let (_, html) = get(&admin(recorder(), true), "site=docs.example");
+    let page = Html::new(html.clone());
+    page.assert_text("1 visitors");
+    page.assert_text("/guide");
+    assert!(!html.contains("/pricing"));
+    assert!(html.contains("value=\"docs.example\" selected"));
+    // The range links and the date form carry the site.
+    assert!(html.contains("days=7&amp;site=docs.example"));
+    let hidden = html.matches("name=\"site\" value=\"docs.example\"").count();
+    assert_eq!(hidden, 1, "the date form keeps the site");
+}
+
+#[test]
+fn the_site_keeps_the_range_and_the_range_keeps_the_site() {
+    let (_, html) = get(
+        &admin(recorder(), true),
+        "site=docs.example&from=2024-10-03&to=2024-10-04",
+    );
+    let page = Html::new(html.clone());
+    page.assert_text("2024-10-03 to 2024-10-04");
+    page.assert_text("/guide");
+    assert!(html.contains("name=\"from\" value=\"2024-10-03\""));
+    let (_, html) = get(&admin(recorder(), true), "site=docs.example&days=7");
+    assert!(html.contains("name=\"days\" value=\"7\""));
+}
+
+#[test]
+fn an_unknown_site_is_the_servers_own() {
+    let (_, html) = get(&admin(recorder(), true), "site=nowhere.example");
+    let page = Html::new(html.clone());
+    page.assert_text("2 visitors");
+    assert!(!html.contains("nowhere.example"));
+}
+
+#[test]
+fn a_site_name_is_escaped() {
+    let (_, html) = get(&admin(recorder(), true), "site=%3Cb%3Ebold");
+    assert!(!html.contains("<b>bold"), "the site went out as markup");
+    assert!(html.contains("&lt;b&gt;bold"));
+    assert!(html.contains("site=%3Cb%3Ebold"), "the link encodes it");
+    Html::new(html).assert_text("/x");
 }

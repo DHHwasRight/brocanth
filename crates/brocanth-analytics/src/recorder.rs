@@ -26,6 +26,9 @@ pub const MAX_BUFFER: usize = 50_000;
 /// flusher, which can wait for the store.
 #[derive(Clone, Debug)]
 pub struct Pending {
+    /// The site the view belongs to: the recorder's own, or the host of a
+    /// static site that sent a beacon.
+    pub site: String,
     /// The UTC day of the request, fixed when it arrived.
     pub day: Day,
     /// `SHA-256(site ‖ 0 ‖ address ‖ 0 ‖ user agent)`.
@@ -115,11 +118,12 @@ impl Recorder {
         Day::of((self.inner.clock)())
     }
 
-    /// The prehash of one visitor: their address and user agent, mixed with
-    /// the site and never stored.
-    pub fn prehash(&self, address: &str, user_agent: &str) -> [u8; 32] {
+    /// The prehash of one visitor of `site`: their address and user agent,
+    /// mixed with the site and never stored. The site is in the hash, so one
+    /// person on two sites is two unrelated visitors.
+    pub fn prehash(&self, site: &str, address: &str, user_agent: &str) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(self.inner.site.as_bytes());
+        digest.update(site.as_bytes());
         digest.update([0]);
         digest.update(address.as_bytes());
         digest.update([0]);
@@ -206,17 +210,44 @@ impl Recorder {
         Ok(written)
     }
 
-    /// The report for this recorder's site, from the store.
+    /// The report for this recorder's own site, from the store.
     ///
     /// # Errors
     /// No store attached, or the store's error.
     pub async fn report(&self, from: Day, to: Day) -> Result<Report, StoreError> {
-        let store = self
-            .inner
+        let site = self.inner.site.clone();
+        self.report_for(&site, from, to).await
+    }
+
+    /// The report for any site with rows: this one, or a static site that
+    /// sends beacons.
+    ///
+    /// # Errors
+    /// No store attached, or the store's error.
+    pub async fn report_for(&self, site: &str, from: Day, to: Day) -> Result<Report, StoreError> {
+        self.attached()?.report(site, from, to).await
+    }
+
+    /// Every site with rows, this recorder's own first, whether or not it
+    /// has any yet.
+    ///
+    /// # Errors
+    /// No store attached, or the store's error.
+    pub async fn sites(&self) -> Result<Vec<String>, StoreError> {
+        let mut sites = vec![self.inner.site.clone()];
+        for site in self.attached()?.sites().await? {
+            if !sites.contains(&site) {
+                sites.push(site);
+            }
+        }
+        Ok(sites)
+    }
+
+    fn attached(&self) -> Result<&Arc<dyn Store>, StoreError> {
+        self.inner
             .store
             .get()
-            .ok_or_else(|| StoreError::new("the analytics store is not attached yet"))?;
-        store.report(&self.inner.site, from, to).await
+            .ok_or_else(|| StoreError::new("the analytics store is not attached yet"))
     }
 
     async fn write(&self, store: &dyn Store, batch: &[Pending]) -> Result<usize, StoreError> {
@@ -235,7 +266,7 @@ impl Recorder {
                 }
             };
             views.push(View {
-                site: self.inner.site.clone(),
+                site: pending.site.clone(),
                 day: pending.day,
                 visitor: visitor(&salt, &pending.prehash),
                 path: pending.path.clone(),

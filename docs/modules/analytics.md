@@ -48,7 +48,9 @@ Slots:
   reaches a request.
 - With `collector_origins`, a second hook answers `collector_path` for a
   static site's [`beacon`](beacon.md): it counts a beacon from a listed
-  origin with the same rules, and always answers 204 or a 1×1 GIF.
+  origin with the same rules, and always answers 204 or a 1×1 GIF. A beacon
+  row's site is its origin's host, so each static site is a site of its
+  own on the dashboard.
 - `before_start` takes the `brocanth_db::Db` the `db` plugin put in the
   services. With `migrate`, the first readiness check creates the tables.
 
@@ -59,7 +61,7 @@ Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `-
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
 | `enabled` | bool | `false` (the development file; the plugin's default is `true`) | `--analytics.enabled` | Count page views. Off installs no hook. |
-| `site` | text | the project name | `--analytics.site` | The site name on every row, and part of the visitor hash. |
+| `site` | text | the project name | `--analytics.site` | The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host. |
 | `exclude` | list | `["/admin"]` | none (list) | Paths never counted, each with everything under it. |
 | `query_allow` | list | the five `utm_*` | none (list) | Query parameters kept on the stored path. Every other one is dropped. |
 | `retention_days` | integer | `760` | `--analytics.retention_days` | Days a row is kept. 0 keeps rows forever. |

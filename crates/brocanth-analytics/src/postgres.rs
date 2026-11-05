@@ -153,6 +153,15 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn sites(&self) -> Result<Vec<String>, StoreError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT site FROM brocanth_analytics_views ORDER BY site")
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(failed)?;
+        Ok(rows.into_iter().map(|(site,)| site).collect())
+    }
+
     async fn report(&self, site: &str, from: Day, to: Day) -> Result<Report, StoreError> {
         let range = format!("site = $1 AND day BETWEEN {EPOCH} + $2 AND {EPOCH} + $3");
         let (views, visitors): (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(

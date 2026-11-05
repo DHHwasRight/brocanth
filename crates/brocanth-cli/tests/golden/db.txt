@@ -13,6 +13,7 @@ edition = "2021"
 #
 # Not here, because nothing asked for it:
 #   brocanth-observe      no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
+#   brocanth-analytics    no page-view counts; nothing is measured, so nothing needs consent
 #   brocanth-model        no ORM, no sea-orm anywhere in the lock file
 #   brocanth-cache        no cache; every read does the work a hit would have skipped
 #   brocanth-jobs         no queue; slow work happens inside the request that asked for it
@@ -2135,7 +2136,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2245,7 +2246,7 @@ ctx.db()
 A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
 log, never to the client.
 
-<!-- brocanth-digest: ec26cb3521e14500 -->
+<!-- brocanth-digest: ebefc66dac20cfae -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

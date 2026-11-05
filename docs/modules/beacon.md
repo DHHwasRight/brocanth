@@ -48,7 +48,8 @@ Slots:
 - With `respect_gpc`, a browser with Global Privacy Control or Do Not Track
   sends nothing.
 - The server counts the beacon only when its `[analytics]
-  collector_origins` lists this site's origin. See
+  collector_origins` lists this site's origin. Its views are a site of
+  their own on the server's dashboard, named by this site's host. See
   [`docs/analytics.md`](../analytics.md), decision 7.
 
 ## Settings

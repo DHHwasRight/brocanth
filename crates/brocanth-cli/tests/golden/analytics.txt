@@ -25,6 +25,7 @@ edition = "2021"
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   security-headers      no security headers; a browser sniffs types, frames the pages and runs any inline script
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   gtag                  no Google tag; nothing on a page talks to Google
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
@@ -38,7 +39,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
-brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", default-features = false }
+brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
@@ -1634,7 +1635,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "analytics.site",
-        help: "The site name on every row, and part of the visitor hash.",
+        help: "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
         flag: true,
         none_as: None,
         text: true,
@@ -1998,7 +1999,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 16994be46e4d17e6
+// brocanth-digest: e4828c93e2b8e92f
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2091,7 +2092,7 @@ application_name = "my-blog"
 # are not the audience. Production reads the plugin's default, true,
 # unless its own file says otherwise.
 enabled = false
-# The site name on every row, and part of the visitor hash.
+# The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.
 site = "my-blog"
 # Paths never counted, each with everything under it.
 exclude = ["/admin"]
@@ -2554,7 +2555,7 @@ request.
 - `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2691,7 +2692,7 @@ or an account number is not. Do not add a column to
 With the admin, the numbers are at `/admin/analytics`, behind the
 admin's policy like every tab.
 
-<!-- brocanth-digest: 64663faa40fed91c -->
+<!-- brocanth-digest: 8c59f2338224ca7b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

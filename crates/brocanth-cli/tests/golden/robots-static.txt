@@ -14,6 +14,7 @@ default-run = "my-blog"
 #
 # Not here, because nothing asked for it:
 #   brocanth-observe      no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
+#   brocanth-analytics    no page-view counts; nothing is measured, so nothing needs consent
 #   brocanth-db           no database pool; a page that needs SQL has nowhere to send it
 #   brocanth-model        no ORM, no sea-orm anywhere in the lock file
 #   brocanth-cache        no cache; every read does the work a hit would have skipped
@@ -2326,7 +2327,7 @@ request.
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2415,7 +2416,7 @@ is the preview, not the deployment.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
 
-<!-- brocanth-digest: fb423206d6280ad4 -->
+<!-- brocanth-digest: 3c0b45286af1ee68 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

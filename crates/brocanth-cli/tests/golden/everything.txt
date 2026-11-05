@@ -14,6 +14,7 @@ default-run = "my-blog"
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel"], default-features = false }
+brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
@@ -1999,6 +2000,17 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::robots::Robots>("robots")
             .map_err(|e| e.to_string())?;
+
+        // -- brocanth-analytics: page views ---------------------------------
+        //
+        // A request hook, after dispatch: a GET answered with HTML is one
+        // page view. It stores no address, no user agent and no cookie; the
+        // visitor is a hash whose salt is deleted when the day ends. The
+        // views go in two tables of the `[db]` database, written every
+        // `flush_interval` seconds, never during a request.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_analytics::Analytics>("analytics")
+            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
             .map_err(|e| e.to_string())?;
@@ -2073,7 +2085,8 @@ type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
 type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
-type WithModel = After<crate::plugins::model::Model, WithRobots>;
+type WithAnalytics = After<brocanth_analytics::Analytics, WithRobots>;
+type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
@@ -2081,8 +2094,9 @@ pub type Installed = WithMiddlewareRateLimit;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedGtag>;
+type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
 type HookedSecurityHeaders =
-    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedCsrf>;
+    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
 type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
 
@@ -2679,6 +2693,69 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "analytics.enabled",
+        help: "Count page views. Off installs no hook.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "analytics.site",
+        help: "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "analytics.retention_days",
+        help: "Days a row is kept. 0 keeps rows forever.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "analytics.flush_interval",
+        help: "Seconds between two writes of the buffer.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "analytics.respect_gpc",
+        help: "Skip a request that sends Sec-GPC: 1 or DNT: 1.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "analytics.ip_header",
+        help: "A header the edge sets to the client address. Unset, the socket's. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "analytics.country_header",
+        help: "A header the edge sets to a two-letter country code. Unset, no country. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "analytics.migrate",
+        help: "Create the two tables on the first readiness check.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "analytics.collector_path",
+        help: "The path that counts page views a static site sends with the `beacon` module.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "security_headers.behind_tls",
         help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
         flag: true,
@@ -2987,6 +3064,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
     let robots = crate::plugins::robots::Settings::default();
+    let analytics = brocanth_analytics::AnalyticsConfig::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
@@ -3103,6 +3181,30 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("realtime.overflow", format!("{:?}", realtime.overflow)),
         ("robots.index", format!("{:?}", robots.index)),
         ("robots.sitemap", format!("{:?}", robots.sitemap)),
+        ("analytics.enabled", format!("{:?}", analytics.enabled)),
+        ("analytics.site", format!("{:?}", analytics.site)),
+        (
+            "analytics.retention_days",
+            format!("{:?}", analytics.retention_days),
+        ),
+        (
+            "analytics.flush_interval",
+            format!("{:?}", analytics.flush_interval),
+        ),
+        (
+            "analytics.respect_gpc",
+            format!("{:?}", analytics.respect_gpc),
+        ),
+        ("analytics.ip_header", format!("{:?}", analytics.ip_header)),
+        (
+            "analytics.country_header",
+            format!("{:?}", analytics.country_header),
+        ),
+        ("analytics.migrate", format!("{:?}", analytics.migrate)),
+        (
+            "analytics.collector_path",
+            format!("{:?}", analytics.collector_path),
+        ),
         (
             "security_headers.behind_tls",
             format!("{:?}", security_headers.behind_tls),
@@ -3255,7 +3357,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: ef10d13bda35b871
+// brocanth-digest: 02d7eb90cbc2f194
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3547,6 +3649,41 @@ allow = []
 # [[robots.groups]]
 # agents = ["GPTBot", "CCBot", "Google-Extended", "ClaudeBot"]
 # disallow = ["/"]
+
+[analytics]
+# Count page views. Off installs no hook.
+# False here because this file is the development one: your own visits
+# are not the audience. Production reads the plugin's default, true,
+# unless its own file says otherwise.
+enabled = false
+# The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.
+site = "my-blog"
+# Paths never counted, each with everything under it.
+exclude = ["/admin"]
+# Query parameters kept on the stored path. Every other one is dropped.
+# A token or an email in a URL never reaches the database.
+query_allow = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
+# Days a row is kept. 0 keeps rows forever.
+# 760 days is 25 months, the longest retention the CNIL's audience-measurement exemption allows.
+retention_days = 760
+# Seconds between two writes of the buffer.
+flush_interval = 10
+# Skip a request that sends Sec-GPC: 1 or DNT: 1.
+# Nothing stored identifies a visitor, so the signal has nothing to opt out of.
+# On, to honour it anyway.
+respect_gpc = false
+# A header the edge sets to the client address. Unset, the socket's. Empty means none.
+# ip_header = "fly-client-ip"
+# A header the edge sets to a two-letter country code. Unset, no country. Empty means none.
+# country_header = "cf-ipcountry"
+# Create the two tables on the first readiness check.
+# Off, for a project that keeps brocanth_analytics::PgStore::SCHEMA in a migration.
+migrate = true
+# The path that counts page views a static site sends with the `beacon` module.
+collector_path = "/_a/v"
+# The static sites allowed to send them: "https://docs.example.com". Empty, no collector.
+# A beacon from any other origin is answered 204 and not counted.
+collector_origins = []
 
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
@@ -5009,6 +5146,8 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
+    // The page views the analytics plugin counts, as a tab.
+    config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
     // Built by the first request, over the ORM: see `OverOrm`.
     let admin = Arc::new(OverOrm::new(config));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
@@ -8041,6 +8180,7 @@ request.
 - `observability-health`  /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM
 - `observability-metrics`  Prometheus text on /metrics: requests by route and status, in-flight, job queues
 - `observability-tracing`  an OTLP span per request and per job, W3C traceparent in and out; needs a collector
+- `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
@@ -8075,7 +8215,7 @@ request.
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
 
-**Absent:** `logging`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `beacon`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -8411,6 +8551,21 @@ A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
 
+## Analytics
+
+`brocanth_analytics::Analytics` is registered in `src/plugins/mod.rs`.
+It counts every GET answered with `text/html`, except paths under
+`[analytics] exclude`, bots and prefetches. Nothing to add to a page:
+no script, no cookie, no banner.
+
+Do not put personal data in a URL. The path and the allowed query
+parameters are stored; an email-shaped segment is replaced, but a name
+or an account number is not. Do not add a column to
+`brocanth_analytics_views` that identifies a person.
+
+With the admin, the numbers are at `/admin/analytics`, behind the
+admin's policy like every tab.
+
 ## Security headers
 
 `brocanth_middleware::SecurityHeaders` is registered in
@@ -8437,7 +8592,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: ff6a4c8e16c018a5 -->
+<!-- brocanth-digest: 18eeee30c291c47e -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -8449,7 +8604,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -8485,6 +8640,13 @@ files = []
 config = []
 crates = ["brocanth-observe"]
 adapted_to = []
+
+[modules.analytics]
+kind = ["middleware"]
+files = []
+config = ["analytics"]
+crates = ["brocanth-analytics"]
+adapted_to = ["config"]
 
 [modules.config]
 kind = ["enhancer"]
@@ -8624,7 +8786,7 @@ kind = ["routes", "enhancer"]
 files = ["src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "middleware-csrf", "admin-model", "commands"]
+adapted_to = ["config", "middleware-csrf", "admin-model", "commands", "analytics"]
 
 [modules.admin-model]
 kind = ["routes"]
@@ -8717,4 +8879,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: f6d51ce285b715eb
+# brocanth-digest: 526acbed861a2c0f

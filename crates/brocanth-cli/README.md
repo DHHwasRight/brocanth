@@ -220,7 +220,7 @@ project without the `commands` module has no command line, and
 
 ## Modules
 
-The CLI offers 42 modules, grouped here by their main category
+The CLI offers 43 modules, grouped here by their main category
 ([docs/module-map.md](../../docs/module-map.md) has every category, the
 seams and the dependency graph). `brocanth create --help` prints each
 module with what it costs.

@@ -13,8 +13,9 @@
 pub struct AnalyticsConfig {
     /// Count page views. `false` installs no hook at all.
     pub enabled: bool,
-    /// The site name on every row, and part of the visitor hash. One
-    /// application is one site.
+    /// The site name on every row the server counts, and part of the
+    /// visitor hash. One application is one site; a static site that sends
+    /// beacons is a site named by its origin's host.
     pub site: String,
     /// Paths never counted, each with everything under it: `/admin`
     /// covers `/admin/users` and not `/administrators`.

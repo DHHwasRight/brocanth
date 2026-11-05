@@ -66,7 +66,7 @@ let app = AppBuilder::new()
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` (`false` in the generated development file) | Count page views. `false` installs no hook. |
-| `site` | the project name | The site on every row, and part of the hash. |
+| `site` | the project name | The site on every row the hook writes, and part of the hash. A beacon row takes its origin's host instead. |
 | `exclude` | `["/admin"]` | Paths never counted, with everything under them. File only. |
 | `query_allow` | the five `utm_*` | Query parameters kept on the path. File only. |
 | `retention_days` | `760` | Days a row is kept (25 months). `0` keeps rows forever. |

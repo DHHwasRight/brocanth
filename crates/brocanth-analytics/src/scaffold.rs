@@ -91,7 +91,7 @@ fn settings(project: &Project) -> Vec<Setting> {
         Setting::text(
             "site",
             project.name,
-            "The site name on every row, and part of the visitor hash.",
+            "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
         ),
         Setting::list("exclude", &["/admin"], "Paths never counted, each with everything under it."),
         Setting::list(

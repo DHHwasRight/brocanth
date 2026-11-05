@@ -13,6 +13,7 @@ edition = "2021"
 #
 # Not here, because nothing asked for it:
 #   brocanth-observe      no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
+#   brocanth-analytics    no page-view counts; nothing is measured, so nothing needs consent
 #   brocanth-db           no database pool; a page that needs SQL has nowhere to send it
 #   brocanth-model        no ORM, no sea-orm anywhere in the lock file
 #   brocanth-cache        no cache; every read does the work a hit would have skipped
@@ -2424,7 +2425,7 @@ request.
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2513,7 +2514,7 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
   events.addEventListener("lagged", () => location.reload());
   ```
 
-<!-- brocanth-digest: 612b64623e4d3a76 -->
+<!-- brocanth-digest: f0d66d9c3c3adf3a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

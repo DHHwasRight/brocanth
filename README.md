@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 41 crates under `crates/` and two examples under
+A Cargo workspace of 42 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you

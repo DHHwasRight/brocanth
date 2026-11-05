@@ -120,7 +120,7 @@ fn the_image_fallback_is_read_from_the_query_and_the_referer() {
 }
 
 #[test]
-fn the_beacon_and_a_page_from_one_browser_are_one_visitor() {
+fn a_page_view_keeps_the_servers_site_and_a_beacon_takes_its_origins_host() {
     let rig = collecting();
     rig.client
         .send(
@@ -135,7 +135,59 @@ fn the_beacon_and_a_page_from_one_browser_are_one_visitor() {
     flush(&rig.recorder).unwrap();
     let views = rig.store.views();
     assert_eq!(views.len(), 2);
-    assert_eq!(views[0].visitor, views[1].visitor);
+    let page = views.iter().find(|v| v.path == "/").expect("the page view");
+    let guide = views
+        .iter()
+        .find(|v| v.path == "/guide")
+        .expect("the beacon");
+    assert_eq!(page.site, "test-site");
+    assert_eq!(guide.site, "docs.example");
+    // The site is in the hash: one browser on two sites is two unrelated
+    // visitors.
+    assert_ne!(page.visitor, guide.visitor);
+}
+
+#[test]
+fn two_collector_origins_are_two_sites() {
+    let rig = rig(&[DOCS, "https://blog.example:8443"]);
+    rig.client
+        .send(beacon(DOCS, "p=%2Fguide"))
+        .assert_status(204);
+    rig.client
+        .send(beacon("https://blog.example:8443", "p=%2Fpost"))
+        .assert_status(204);
+    rig.client
+        .send(beacon("https://blog.example:8443", "p=%2Fpost"))
+        .assert_status(204);
+    assert_eq!(flush(&rig.recorder), Ok(3));
+    let views = rig.store.views();
+    let site_of = |path: &str| {
+        views
+            .iter()
+            .filter(|v| v.path == path)
+            .map(|v| v.site.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(site_of("/guide"), vec!["docs.example"]);
+    assert_eq!(site_of("/post"), vec!["blog.example:8443"; 2]);
+    // One browser on the same site and day is one visitor.
+    let posts: Vec<_> = views.iter().filter(|v| v.path == "/post").collect();
+    assert_eq!(posts[0].visitor, posts[1].visitor);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    assert_eq!(
+        rt.block_on(rig.recorder.sites()).unwrap(),
+        vec!["test-site", "blog.example:8443", "docs.example"],
+        "the server's site first, then every site with rows"
+    );
+    let today = rig.recorder.today();
+    let blog = rt
+        .block_on(rig.recorder.report_for("blog.example:8443", today, today))
+        .unwrap();
+    assert_eq!((blog.views, blog.visitors), (2, 1));
+    let own = rt.block_on(rig.recorder.report(today, today)).unwrap();
+    assert_eq!(own.views, 0, "beacon rows are not the server's numbers");
 }
 
 #[test]

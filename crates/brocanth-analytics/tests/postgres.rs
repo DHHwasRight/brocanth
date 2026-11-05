@@ -147,6 +147,33 @@ async fn views_are_written_and_reported_by_day_and_dimension() {
 }
 
 #[tokio::test]
+async fn sites_lists_every_site_with_rows_once_and_sorted() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    let mut docs = view(20_000, 3, "/guide", "");
+    docs.site = "docs.example".to_string();
+    let mut blog = view(20_000, 4, "/post", "");
+    blog.site = "blog.example".to_string();
+    sandbox
+        .store
+        .write(&[view(20_000, 1, "/", ""), docs.clone(), docs, blog])
+        .await
+        .unwrap();
+    assert_eq!(
+        sandbox.store.sites().await.unwrap(),
+        vec!["blog.example", "docs.example", "site"]
+    );
+    let report = sandbox
+        .store
+        .report("docs.example", Day(20_000), Day(20_000))
+        .await
+        .unwrap();
+    assert_eq!((report.views, report.visitors), (2, 1));
+    sandbox.drop().await;
+}
+
+#[tokio::test]
 async fn forget_deletes_old_salts_and_rows_past_the_retention() {
     let Some(sandbox) = Sandbox::new().await else {
         return;

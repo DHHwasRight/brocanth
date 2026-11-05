@@ -1,8 +1,10 @@
 //! The numbers, as a tab in `brocanth-admin`.
 //!
-//! One read-only screen: visitors and views over 7, 30 or 90 days, a bar
-//! per day, and the top pages, referrers, browsers, systems, devices and
-//! countries. Rendered on the server, with no script.
+//! One read-only screen per site: visitors and views over 7, 30 or 90
+//! days or any two dates, a bar per day, and the top pages, referrers,
+//! browsers, systems, devices and countries. The sites are this server's
+//! own and each static site that sends beacons. Rendered on the server,
+//! with no script.
 //!
 //! The bars are SVG `<rect>`s with `width` and `height` attributes, not
 //! `style="width: …"`: a presentation attribute is not an inline style, so
@@ -84,9 +86,20 @@ impl Panel for AnalyticsPanel {
         };
         let today = recorder.today();
         let (from, to, current) = range(&r, today);
+        // This server's site first, then every static site that sent a
+        // beacon. A `site` that is not one of them is this server's: the
+        // parameter picks from the list, it never names a new one.
+        let sites = recorder
+            .sites()
+            .await
+            .unwrap_or_else(|_| vec![recorder.site().to_string()]);
+        let site = r
+            .param("site")
+            .filter(|s| sites.contains(s))
+            .unwrap_or_else(|| recorder.site().to_string());
         let mut html = String::new();
-        html.push_str(&ranges(&r, current, from, to));
-        match recorder.report(from, to).await {
+        html.push_str(&ranges(&r, current, from, to, &sites, &site));
+        match recorder.report_for(&site, from, to).await {
             Ok(report) => html.push_str(&screen(&report, from, to)),
             Err(e) => html.push_str(&format!(
                 "<p class=\"{}\">The report failed: {}</p>",
@@ -124,9 +137,19 @@ fn range(r: &PanelRequest<'_>, today: Day) -> (Day, Day, Option<u32>) {
     (today.minus(days - 1), today, Some(days))
 }
 
-/// The three presets as links, then a form for any two dates. The form is
-/// a GET, so it changes nothing and needs no token.
-fn ranges(r: &PanelRequest<'_>, current: Option<u32>, from: Day, to: Day) -> String {
+/// The site picker, then the three presets as links, then a form for any
+/// two dates. Every form is a GET, so it changes nothing and needs no
+/// token. The site travels with the range, and the range with the site.
+fn ranges(
+    r: &PanelRequest<'_>,
+    current: Option<u32>,
+    from: Day,
+    to: Day,
+    sites: &[String],
+    site: &str,
+) -> String {
+    let action = escape(&r.url(""));
+    let site_query = format!("site={}", encode(site));
     let links: Vec<String> = RANGES
         .iter()
         .map(|&d| {
@@ -135,22 +158,45 @@ fn ranges(r: &PanelRequest<'_>, current: Option<u32>, from: Day, to: Day) -> Str
                 format!("<strong>{label}</strong>")
             } else {
                 format!(
-                    "<a class=\"{}\" href=\"{}?days={d}\">{label}</a>",
+                    "<a class=\"{}\" href=\"{action}?days={d}&amp;{}\">{label}</a>",
                     parts::action(),
-                    escape(&r.url(""))
+                    escape(&site_query),
                 )
             }
         })
         .collect();
+    let options: String = sites
+        .iter()
+        .map(|s| {
+            format!(
+                "<option value=\"{value}\"{selected}>{value}</option>",
+                value = escape(s),
+                selected = if s == site { " selected" } else { "" },
+            )
+        })
+        .collect();
+    // The site form keeps the range on screen: a preset as `days`, a
+    // custom range as `from` and `to`.
+    let kept = match current {
+        Some(d) => format!("<input type=\"hidden\" name=\"days\" value=\"{d}\">"),
+        None => format!(
+            "<input type=\"hidden\" name=\"from\" value=\"{from}\">\
+             <input type=\"hidden\" name=\"to\" value=\"{to}\">"
+        ),
+    };
     format!(
-        "<p class=\"{bar}\">{links}</p>\
+        "<form method=\"get\" action=\"{action}\" class=\"{bar}\">\
+         <label>Site <select name=\"site\" class=\"{control}\">{options}</select></label>{kept} \
+         <button type=\"submit\" class=\"{button}\">Show</button></form>\
+         <p class=\"{bar}\">{links}</p>\
          <form method=\"get\" action=\"{action}\" class=\"{bar}\">\
+         <input type=\"hidden\" name=\"site\" value=\"{site}\">\
          <label>From <input type=\"date\" name=\"from\" value=\"{from}\" class=\"{control}\" required></label> \
          <label>To <input type=\"date\" name=\"to\" value=\"{to}\" class=\"{control}\" required></label> \
          <button type=\"submit\" class=\"{button}\">Show</button></form>",
         bar = parts::bar(),
         links = links.join(" · "),
-        action = escape(&r.url("")),
+        site = escape(site),
         control = parts::control(),
         button = parts::button(),
     )
@@ -261,6 +307,20 @@ fn status(recorder: &Recorder) -> String {
         lines.push(format!("last write failed: {}", escape(&e)));
     }
     format!("<p class=\"{}\">{}</p>", parts::muted(), lines.join(" · "))
+}
+
+/// Percent-encodes a query value: every byte but an unreserved one.
+fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            byte => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn escape(text: &str) -> String {

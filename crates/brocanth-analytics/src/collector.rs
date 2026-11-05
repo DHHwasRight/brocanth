@@ -30,7 +30,7 @@ use brocanth::plugin_body::Body;
 use brocanth::plugin_hooks::{Flow, Request, RequestHook, RequestState, Response};
 
 use crate::config::AnalyticsConfig;
-use crate::plugin::{header, visit};
+use crate::plugin::{header, visit, Page};
 use crate::recorder::Recorder;
 
 /// The largest query or body the collector reads.
@@ -93,16 +93,19 @@ impl Collect {
             return;
         };
         let (path, query) = page.split_once('?').unwrap_or((&page, ""));
-        let host = origin.split_once("://").map(|(_, host)| host);
-        if let Some(pending) = visit(
-            &self.config,
-            &self.recorder,
-            request,
+        // The static site is a site of its own on the dashboard: its rows
+        // carry its host, and its visitors are hashed under it.
+        let Some(host) = origin.split_once("://").map(|(_, host)| host) else {
+            return;
+        };
+        let page = Page {
+            site: host,
             path,
             query,
-            &referer,
-            host,
-        ) {
+            referer: &referer,
+            host: Some(host),
+        };
+        if let Some(pending) = visit(&self.config, &self.recorder, request, page) {
             self.recorder.record(pending);
         }
     }

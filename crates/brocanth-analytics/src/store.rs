@@ -179,6 +179,9 @@ pub trait Store: Send + Sync {
 
     /// The report for `site` from `from` to `to`, both included.
     async fn report(&self, site: &str, from: Day, to: Day) -> Result<Report, StoreError>;
+
+    /// Every site that has a row, sorted.
+    async fn sites(&self) -> Result<Vec<String>, StoreError>;
 }
 
 /// A store in memory: gone at restart.
@@ -264,6 +267,13 @@ impl Store for MemoryStore {
             .filter(|v| v.site == site && v.day >= from && v.day <= to)
             .collect();
         Ok(summarise(&views))
+    }
+
+    async fn sites(&self) -> Result<Vec<String>, StoreError> {
+        let mut sites: Vec<String> = self.lock().views.iter().map(|v| v.site.clone()).collect();
+        sites.sort();
+        sites.dedup();
+        Ok(sites)
     }
 }
 
