@@ -241,6 +241,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
                 // Edited, and the developer has already made this module's
                 // change in it, around their own lines.
                 (Some(current), Some(was)) if applied(current, was, text) => {}
+                // Kept by an earlier `brocanth remove`: the migrations are
+                // the database's history and the `migrate` tool's list, and
+                // the flags file holds the developer's renames. Both are
+                // theirs, and this add writes around them.
+                (Some(_), None) if path.starts_with("migrations/") || path == "src/flags.rs" => {}
                 (Some(_), was) => {
                     let was = was.cloned().unwrap_or_default();
                     if path == "src/app.rs" {
@@ -273,6 +278,16 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         }
     }
 
+    // Renames `brocanth remove` parked, for flags that are back.
+    let flags = root.join("src/flags.rs");
+    if let Ok(current) = std::fs::read_to_string(&flags) {
+        let present = create::setting_paths(&answers(after_picks.clone()))?;
+        let restored = crate::commands::remove::unpark(&current, &present);
+        if restored != current {
+            writes.push((flags, restored, "renames restored"));
+        }
+    }
+
     let mut table = Table::new();
     for (full, text, what) in &writes {
         if let Some(parent) = full.parent() {
@@ -284,6 +299,15 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
             Cell::styled(shown.display().to_string(), ACCENT),
             Cell::styled((*what).to_string(), DIM).right(),
         ]);
+    }
+    // Screens ejected before a `brocanth remove admin`, installed again.
+    if adding.contains(&"admin") {
+        for path in crate::commands::admin::rewire(&root)? {
+            table.row(vec![
+                Cell::styled(path, ACCENT),
+                Cell::styled("ejected screens installed".to_string(), DIM).right(),
+            ]);
+        }
     }
     ui.table_note(&table);
     if !kept_deleted.is_empty() {
@@ -351,13 +375,13 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
 
 /// What `brocanth.toml` records.
 #[derive(Debug)]
-struct Record {
-    name: String,
-    title: String,
-    enabled: Vec<&'static str>,
+pub(crate) struct Record {
+    pub(crate) name: String,
+    pub(crate) title: String,
+    pub(crate) enabled: Vec<&'static str>,
 }
 
-fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
+pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
     let doc: DocumentMut = text.parse().map_err(|e| {
         vec![Diagnostic::error("brocanth.toml", format!("{e}")).at("brocanth.toml")]
     })?;
@@ -424,7 +448,7 @@ fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
 }
 
 /// The modules named on the command line, as the registry spells them.
-fn named(words: &[String]) -> Result<Vec<&'static str>, Vec<Diagnostic>> {
+pub(crate) fn named(words: &[String]) -> Result<Vec<&'static str>, Vec<Diagnostic>> {
     let mut out = Vec::new();
     let mut wrong = Vec::new();
     for word in words {
@@ -445,7 +469,7 @@ fn named(words: &[String]) -> Result<Vec<&'static str>, Vec<Diagnostic>> {
 }
 
 /// `--brocanth-path`, read back out of the project's own manifest.
-fn local_checkout(manifest: &DocumentMut) -> Option<String> {
+pub(crate) fn local_checkout(manifest: &DocumentMut) -> Option<String> {
     manifest
         .get("dependencies")?
         .get("brocanth")?
@@ -564,7 +588,7 @@ fn merge_manifest(path: &str, current: &str, generated: &str) -> Result<String, 
 ///
 /// A receipt line is one in the block under `# Not here`, indented by
 /// three spaces. Outside that block nothing is touched.
-fn receipt(current: &str, fresh: &str) -> String {
+pub(crate) fn receipt(current: &str, fresh: &str) -> String {
     let mut out = String::with_capacity(current.len());
     let mut in_block = false;
     for line in current.split_inclusive('\n') {
@@ -584,7 +608,7 @@ fn receipt(current: &str, fresh: &str) -> String {
 }
 
 /// Add to `old` every feature `new` asks for that it does not have.
-fn add_features(old: &mut Item, new: &Item) {
+pub(crate) fn add_features(old: &mut Item, new: &Item) {
     let Some(wanted) = new
         .as_table_like()
         .and_then(|t| t.get("features"))
@@ -703,7 +727,7 @@ fn merge_config(path: &str, current: &str, generated: &str) -> Result<String, Ve
 
 // -- the refusals -----------------------------------------------------------
 
-fn edited(path: &str, current: &str, was: &str) -> Diagnostic {
+pub(crate) fn edited(path: &str, current: &str, was: &str) -> Diagnostic {
     let body = owned::unstamp(current).map_or_else(|| current.to_string(), |(body, _)| body);
     let was = owned::unstamp(was).map_or_else(|| was.to_string(), |(body, _)| body);
     let help = if path == "src/commands/mod.rs" {
@@ -721,7 +745,7 @@ fn edited(path: &str, current: &str, was: &str) -> Diagnostic {
         .help(help)
 }
 
-fn unstamped(path: &str) -> Diagnostic {
+pub(crate) fn unstamped(path: &str) -> Diagnostic {
     Diagnostic::error("no digest", format!("{path} carries no digest"))
         .at(path)
         .note("`brocanth add` rewrites this file and cannot tell whether anybody changed it")
@@ -733,7 +757,7 @@ fn unstamped(path: &str) -> Diagnostic {
 ///
 /// Lines, not a patch: the developer applied the change by hand, around
 /// lines of their own, so its position is theirs to choose.
-fn applied(current: &str, was: &str, now: &str) -> bool {
+pub(crate) fn applied(current: &str, was: &str, now: &str) -> bool {
     let has = |text: &str, line: &str| text.lines().any(|l| l == line);
     now.lines()
         .filter(|line| !has(was, line))
@@ -755,15 +779,15 @@ fn theirs(path: &str, was: &str, now: &str) -> Diagnostic {
     .help("make this change by hand, keeping your own lines, and run the command again")
 }
 
-fn toml_error(path: &str, e: &toml_edit::TomlError) -> Vec<Diagnostic> {
+pub(crate) fn toml_error(path: &str, e: &toml_edit::TomlError) -> Vec<Diagnostic> {
     vec![Diagnostic::error("toml", format!("{e}")).at(path.to_string())]
 }
 
-fn read_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
+pub(crate) fn read_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
     vec![Diagnostic::error("read", format!("{e}")).at(path.display().to_string())]
 }
 
-fn write_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
+pub(crate) fn write_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
     vec![Diagnostic::error("write", format!("{e}")).at(path.display().to_string())]
 }
 

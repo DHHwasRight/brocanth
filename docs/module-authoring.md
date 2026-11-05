@@ -47,7 +47,7 @@ and only after every module named in its `after` list.
 
 ### The manifest
 
-`Manifest` (`lib.rs:81`) has 18 fields. Build it with `Manifest::new(key,
+`Manifest` (`lib.rs:81`) has 19 fields. Build it with `Manifest::new(key,
 gist)` and the builder methods. Do not set the fields directly: some
 builders set two fields at once on purpose.
 
@@ -71,6 +71,7 @@ builders set two fields at once on purpose.
 | `conflicts` | `conflicts(k, why)` | It cannot be chosen beside `k`. Declare it on the side that gives way. `create`, `add` and the chooser all read it through `brocanth_scaffold::clash`. |
 | `adapts_to` | `adapts_to(k, what_changes)` | It writes different code when `k` is chosen: the optional dependency. Every `project.has(k)` in `contribute` must be declared here, in `needs`, or be the parent. A test checks both directions. |
 | `recommends` | `recommends(k, why)` | A deployed project with this module usually wants `k`. Advice only: nothing refuses. `create` and `add` warn when `k` is absent, `brocanth check` warns (`check/recommended`), and `--questions` lists the edge. `why` names the cost in production. Not for a module already in `needs`. |
+| `version` | `version(env!("CARGO_PKG_VERSION"))` | The version of the code that writes the module. `brocanth.toml` records it, and `brocanth check` warns (`check/module-version`) when the installed CLI has another. `None` is the CLI's version, which is right for a crate in the brocanth workspace: they all take the workspace version. A module from another repository sets it. |
 
 `Dep` (`lib.rs:313`) names a crate and leaves the source to the CLI for
 brocanth's own crates:

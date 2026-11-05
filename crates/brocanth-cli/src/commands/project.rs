@@ -4,6 +4,7 @@
 //! its configuration, so the checks on it are the project's own `check`
 //! command, and this tool links no configuration loader.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::ui::Diagnostic;
@@ -14,6 +15,10 @@ pub struct Project {
     pub root: PathBuf,
     /// `[modules] enabled`, empty for a marker from before the list.
     pub modules: Vec<String>,
+    /// `[modules.<key>] version`: which version of each module wrote the
+    /// project. A module with no entry was written before the record held
+    /// versions.
+    pub versions: BTreeMap<String, String>,
 }
 
 impl Project {
@@ -53,11 +58,37 @@ impl Project {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Self { root, modules })
+        let versions = versions(&doc);
+        Ok(Self {
+            root,
+            modules,
+            versions,
+        })
+    }
+
+    /// The version `brocanth.toml` records for a module, if any.
+    pub fn version(&self, module: &str) -> Option<&str> {
+        self.versions.get(module).map(String::as_str)
     }
 
     /// Whether `brocanth.toml` lists this module.
     pub fn has(&self, module: &str) -> bool {
         self.modules.iter().any(|m| m == module)
     }
+}
+
+/// `[modules.<key>] version`, for every module that has one.
+pub fn versions(doc: &toml_edit::DocumentMut) -> BTreeMap<String, String> {
+    doc.get("modules")
+        .and_then(|m| m.as_table_like())
+        .map(|modules| {
+            modules
+                .iter()
+                .filter_map(|(key, item)| {
+                    let version = item.get("version")?.as_str()?;
+                    Some((key.to_owned(), version.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

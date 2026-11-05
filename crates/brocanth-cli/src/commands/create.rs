@@ -1138,12 +1138,18 @@ fn package_json(a: &Answers, built: &Built) -> String {
 /// before it can answer anything else, and reading it out of the source
 /// would be a parser guessing at a decision somebody already made.
 ///
-/// The per-module record is for a `remove` that does not exist yet, and it
-/// is written now because it cannot be added later: a project scaffolded
-/// today without it is a project a later `remove` has to guess about. Each
+/// The per-module record says what each module put in the project. Each
 /// entry is derived, never declared -- `files` is the difference between
 /// what the generator writes with this module and what it writes without
 /// it, so a module that stops writing a file stops recording it.
+/// `brocanth remove` does not read `files`: it generates the project
+/// without the module and compares, as `add` does with it, so the two
+/// cannot disagree about what a module wrote.
+///
+/// `version` is the version of the code that wrote the module
+/// ([`module_version`]). `brocanth check` compares it with the installed
+/// CLI's, because `add` and `remove` measure "unedited" against what the
+/// installed CLI writes.
 fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> String {
     let mut out = format!(
         "# What this project is made of. Every other generated file follows from it.\n\
@@ -1169,8 +1175,9 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
         // that one changes what this one wrote.
         let m = about(key);
         out.push_str(&format!(
-            "\n[modules.{key}]\nkind = [{kind}]\nfiles = [{files}]\nconfig = [{sections}]\n\
-             crates = [{crates}]\nadapted_to = [{adapted}]\n",
+            "\n[modules.{key}]\nversion = {version:?}\nkind = [{kind}]\nfiles = [{files}]\n\
+             config = [{sections}]\ncrates = [{crates}]\nadapted_to = [{adapted}]\n",
+            version = module_version(key),
             kind = quoted(
                 &m.categories
                     .iter()
@@ -1199,6 +1206,12 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
         ));
     }
     out
+}
+
+/// The version of the code that writes `key`: its manifest's, or this
+/// CLI's for a module of the brocanth workspace, which shares one version.
+pub fn module_version(key: &str) -> &'static str {
+    about(key).version.unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 /// A TOML array's contents, from a list of strings.
@@ -4274,6 +4287,19 @@ fn declared(built: &Built) -> Vec<(&str, &Setting)> {
         .filter(|(_, _, setting)| setting.kind != Kind::List)
         .map(|(_, section, setting)| (section, setting))
         .collect()
+}
+
+/// Every setting path the modules in `a` declare, as `src/flags.rs` names
+/// one: `<section>.<key>`.
+///
+/// `brocanth remove` parks a rename of a path that leaves with a module,
+/// and `brocanth add` restores it when the path comes back.
+pub fn setting_paths(a: &Answers) -> Result<Vec<String>, Vec<Diagnostic>> {
+    let built = contributions(a)?;
+    Ok(declared(&built)
+        .into_iter()
+        .map(|(section, setting)| format!("{section}.{}", setting.key))
+        .collect())
 }
 
 /// The sections that declared settings, in the order they were declared.

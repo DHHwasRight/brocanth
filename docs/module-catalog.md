@@ -132,12 +132,16 @@ shutdown_grace_secs` has a flag and a variable in every project
 
 ### 3. Module system
 
-1. **`brocanth remove <module>`.** `add` exists; nothing takes a module
-   out. A rename in `src/flags.rs` and an ejected admin screen must survive
-   a remove and a re-add.
-2. **Module versions.** Nothing records which version of a module wrote
-   which files, so an upgrade cannot show what changed. The admin eject
-   header names a version, and is the only place that does.
+1. ~~**`brocanth remove <module>`.**~~ Done. It is `add` in reverse
+   (`docs/modules.md`, "Removing from a project"). Renames in
+   `src/flags.rs` are parked, ejected admin screens and `migrations/` stay.
+   Remains: a remove does not touch the database, so a table of a removed
+   module stays until a migration drops it.
+2. ~~**Module versions.**~~ Done. `brocanth.toml` records each module's
+   version, and `brocanth check` warns on a difference
+   (`check/module-version`). Remains: the version does not say *what*
+   changed. An upgrade that shows a module's changes as a diff needs the
+   old generator, or the old output kept in the project.
 3. ~~**A `ServerWrap` slot.**~~ Done: `Slot::ServerWrap` and a generated
    `ServerWrap` trait; the first line is the outermost wrap. `observability`
    and `rsx`'s static files use it (gap 1).

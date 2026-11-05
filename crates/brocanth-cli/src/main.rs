@@ -97,6 +97,14 @@ enum Command {
     /// and the config, and refuses rather than overwrite a file of yours.
     /// `--questions` prints the choices, with what this project has.
     Add(commands::add::AddArgs),
+    /// Take a module out of a project, the inverse of `add`
+    ///
+    /// The same generator, with one entry fewer on the list. It deletes and
+    /// rewrites only what the generator wrote and nobody edited, and
+    /// refuses with the edit to make otherwise. It keeps renames in
+    /// src/flags.rs, ejected admin screens and migrations, so a later `add`
+    /// finds them again.
+    Remove(commands::remove::RemoveArgs),
     /// Find what is wrong with the modules, the configuration and the source
     ///
     /// The module checks run here: a module the chosen ones recommend and
@@ -207,6 +215,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("remove", m)) => commands::remove::run(
+            &ui,
+            dir,
+            commands::remove::RemoveArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         Some(("check", m)) => commands::check::run(
             &ui,

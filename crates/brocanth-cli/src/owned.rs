@@ -89,7 +89,9 @@ fn instead(path: &str) -> &'static str {
         "src/commands/mod.rs" => {
             "A command of your own: a file beside this one, and its `pub mod` line at the end."
         }
-        "brocanth.toml" => "Change the module list with `brocanth add`, not here.",
+        "brocanth.toml" => {
+            "Change the module list with `brocanth add` and `brocanth remove`, not here."
+        }
         "AGENTS.md" => "Notes of your own go in a file of your own, beside this one.",
         MIGRATOR => {
             "A migration is a file beside this one; `migrate make` and `migrate sync` list it here."
@@ -108,8 +110,8 @@ pub const MIGRATOR: &str = "migrations/mod.rs";
 /// Which command rewrites a stamped file, for its header.
 fn rewriter(path: &str) -> &'static str {
     match path {
-        MIGRATOR => "the `migrate` tool",
-        _ => "`brocanth add`",
+        MIGRATOR => "the `migrate` tool rewrites",
+        _ => "`brocanth add` and `brocanth remove` rewrite",
     }
 }
 
@@ -167,7 +169,7 @@ pub fn stamp(path: &str, text: &str) -> String {
         _ => (open, "", format!("{open}\n")),
     };
     let head = format!(
-        "{doc} Written by `brocanth`. Do not edit -- {by} rewrites this file.{shut}\n\
+        "{doc} Written by `brocanth`. Do not edit -- {by} this file.{shut}\n\
          {doc} {instead}{shut}\n\
          {blank}",
         by = rewriter(path),
