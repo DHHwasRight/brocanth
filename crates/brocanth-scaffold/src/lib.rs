@@ -547,6 +547,9 @@ pub struct Dep {
     /// A trailing comment on the dependency line. Short, and about why this
     /// crate is here rather than what it is.
     pub note: Option<&'static str>,
+    /// Whether it goes in `[build-dependencies]`: the build script uses it,
+    /// the binary does not. Set with [`Dep::for_build`].
+    pub build: bool,
 }
 
 /// Where a generated project's dependency is fetched from.
@@ -590,6 +593,7 @@ impl Dep {
             with: Vec::new(),
             defaults: true,
             note: None,
+            build: false,
         }
     }
 
@@ -619,6 +623,17 @@ impl Dep {
     /// A trailing comment on the dependency line.
     pub fn note(mut self, note: &'static str) -> Self {
         self.note = Some(note);
+        self
+    }
+
+    /// Put it in `[build-dependencies]`, for a `build.rs` the module writes.
+    ///
+    /// One crate may be both: `brocanth-i18n` is a dependency of the binary
+    /// with its runtime and a build dependency with its compiler. Cargo
+    /// resolves the two feature sets apart, so the binary links no TOML
+    /// parser and the build script links no CLDR data.
+    pub fn for_build(mut self) -> Self {
+        self.build = true;
         self
     }
 }
