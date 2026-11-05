@@ -179,11 +179,15 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
     // by `brocanth create` has two -- the application and the command runner --
     // and `cargo metadata` lists them in manifest order, which is not a
     // promise. Picking by name makes the choice ours rather than cargo's.
+    // Then the package's own binary: a project with `model` also has the
+    // `migrate` tool in src/bin/, and manifest order would hand every
+    // command to it.
     let bins: Vec<_> = package.targets.iter().filter(|t| t.is_bin()).collect();
     let bin = bins
         .iter()
         .find(|t| t.name == "manage")
-        .or_else(|| bins.first())
+        .or_else(|| bins.iter().find(|t| t.name == package.name.as_str()))
+        .or_else(|| (bins.len() == 1).then(|| &bins[0]))
         .ok_or_else(|| {
             vec![Diagnostic::error(
                 "no-binary",
