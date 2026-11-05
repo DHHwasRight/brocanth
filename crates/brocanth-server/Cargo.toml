@@ -22,6 +22,10 @@ description = "An HTTP entrypoint for a brocanth application, on Tokio."
 [features]
 default = []
 bridge = ["dep:http"]
+# The WebSocket protocol over `upgrade`: the handshake, the Origin check and
+# the frame codec. Off by default, so an application with no socket links
+# no codec. `realtime-websocket` turns it on in a generated project.
+websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 # Tokio rather than a thread pool, for M:N: a connection costs a task, not an
 # OS thread, so idle keep-alives are nearly free and the work-stealing
@@ -47,8 +51,28 @@ http-body-util = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 
+# The WebSocket frame codec, for the `websocket` feature only.
+#
+# RFC 6455 is small to state and easy to get wrong: masking, fragments,
+# control frames inside fragments, the close handshake, UTF-8 that is
+# checked across fragment boundaries, and limits on all of it. tungstenite
+# passes the Autobahn suite and is maintained; a hand-written codec would be
+# 600 lines that nothing here tests that well. `default-features = false`
+# keeps out the client connector and every TLS stack: this crate brings the
+# socket, and the codec only frames bytes. `handshake` adds the
+# `Sec-WebSocket-Accept` digest (sha1, data-encoding) and the client
+# handshake a test uses; `http` and `httparse` are in the tree already.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+# `SinkExt` and `StreamExt` over the codec's stream. tokio-tungstenite
+# depends on it already, with these features.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[test]]
+name = "websocket"
+required-features = ["websocket"]

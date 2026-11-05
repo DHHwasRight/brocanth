@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | Feature | Default | What it adds |
 |---|---|---|
 | `bridge` | off | the `bridge` module: `Bridge`, `bridge::serve`, and the conversions between this crate's `Request`/`Response` and the core's |
+| `websocket` | off | the `websocket` module: the handshake, the `Origin` check, and a frame codec (tokio-tungstenite, no TLS) over `upgrade` |
 
 With `bridge` off, `src/bridge.rs` is not compiled and none of its API
 exists. The feature removes code, not a crate: `brocanth` and `hyper` depend
@@ -153,15 +154,36 @@ block a Tokio worker. The cost is one OS thread per concurrent sync request. A
 route that can wait (`AnyHandler::Async`) runs inline and costs one task. The
 `bridge` module docs give the measurements and the panic handling.
 
+### Switch protocols (`upgrade`, `websocket`)
+
+A page answers `101 Switching Protocols` with `upgrade::switch(on_socket)`
+as its stream, or `Response::upgrade(protocol, on_socket)`. The server
+writes the headers and runs `on_socket` with the connection on a task of
+its own. The socket is on the server's `StreamGate` while it runs, so a
+stop reaches it and the drain waits for it. With `websocket`:
+
+```rust,ignore
+let handshake = Handshake::read(|name| request.header(name), &[])?; // protocol + Origin
+handshake.response(|mut socket| async move {
+    while let Incoming::Text(text) = socket.recv().await {
+        let _ = socket.send_text(text).await;
+    }
+})
+```
+
+`docs/realtime.md` has the design: the hooks, the shutdown, the codec and
+the Origin rule.
+
 ## Testing
 
 ```sh
 cargo test -p brocanth-server
-cargo test -p brocanth-server --features bridge
+cargo test -p brocanth-server --features bridge,websocket
 ```
 
 No environment variable is needed. The tests bind ephemeral ports on
-`127.0.0.1`. `tests/bridges.rs` runs only with the `bridge` feature.
+`127.0.0.1`. `tests/bridges.rs` runs only with the `bridge` feature, and
+`tests/websocket.rs` only with `websocket`.
 
 To test an application, do not start a server. Use `brocanth-test`:
 `TestClient::serving(app, router)` drives the same pipeline the bridge drives,
@@ -172,5 +194,6 @@ and `TestResponse` reads the status, the headers and the HTML.
 - The crate docs: the M:N model, and where the sync core still stops.
 - The `bridge` module docs: `spawn_blocking`, async routes, panics.
 - `docs/async-handlers.md`: routes and request hooks that wait.
+- `docs/realtime.md`: the upgrade and the WebSocket.
 - `docs/observability.md`: readiness and the probes a server answers.
 - `PLAN.md` §8 (features remove code) and ADR 2 (readiness before shutdown).
