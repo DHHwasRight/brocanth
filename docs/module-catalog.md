@@ -135,11 +135,14 @@ shutdown_grace_secs` has a flag and a variable in every project
 2. **Module versions.** Nothing records which version of a module wrote
    which files, so an upgrade cannot show what changed. The admin eject
    header names a version, and is the only place that does.
-3. **A `ServerWrap` slot.** Only `observability` can wrap the server
-   (`wrap`, `side_listeners`, `stop_accepting`). A tracer or an access log
-   cannot (`docs/module-authoring.md`, gap 1).
-4. **Smaller seams:** `Plugin::provide` cannot see the request (gap 10);
-   sixteen `rsx` branches remain in `create.rs` (gap 11).
+3. ~~**A `ServerWrap` slot.**~~ Done: `Slot::ServerWrap` and a generated
+   `ServerWrap` trait; the first line is the outermost wrap. `observability`
+   and `rsx`'s static files use it (gap 1).
+4. ~~**Smaller seams.**~~ Done: `Plugin::provide_for_request` sees the
+   request (gap 10), and the `rsx` branches in `create.rs` went from
+   sixteen to three, the starter pages, which stay by decision (gap 11).
+   Next: `brocanth-i18n` can provide the negotiated locale through
+   `provide_for_request`.
 5. **More module crates on the harness.** `brocanth-robots` keeps its
    shapes and goldens in its own crate through `brocanth_scaffold::testing`.
    The other module crates still rely on the CLI's goldens.

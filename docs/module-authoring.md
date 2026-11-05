@@ -677,6 +677,32 @@ s.at(Slot::AppContext).block(
 Spell paths from the crate root (`crate::plugins::..`): the macro expands
 in `src/app.rs`.
 
+**A value that depends on the request.** Override `provide_for_request`
+as well as `provide`:
+
+```rust
+fn provide(&self, cx: &mut ContextBuilder) {
+    cx.insert(Locale::default());      // a context with no request: `announce!`, a test
+}
+
+fn provide_for_request(&self, request: &Request, state: &RequestState, cx: &mut ContextBuilder) {
+    cx.insert(Locale::from_header(request.headers().get("accept-language")));
+}
+```
+
+`src/app.rs` calls `app.core.context_for(request, state)` after the request
+hooks ran, so `state` holds what they wrote. A page reads the value with
+`ctx.provided`, with the compile-time check. Keep `provide` too: it is the
+value a context with no request gets, and `Provides` promises a value in
+every context.
+
+`provide_for_request` cannot wait and cannot fail. A lookup that waits (a
+session in a store) belongs in an async request hook, which writes the
+result into `state`; `provide_for_request` moves it onto the typed context.
+A failure belongs to the hook, which can answer the request. A project made
+before this method existed calls `app.core.context()` in `src/app.rs`, and
+its pages get `provide`'s value.
+
 To say something at start, use `crate::plugins::say!`, not `eprintln!`.
 With `observability-logs` it is a `tracing` event (JSON in production);
 without it, a line on stderr. Bind each value first, then name it in the
@@ -687,13 +713,55 @@ let connections = db.pool().size();
 crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
 ```
 
-#### `plugins::wrap`: around the whole server
+#### `Slot::ServerWrap`: around the whole server
 
-`plugins::wrap` puts a function around `handle`, outside the hooks. The
-`observability` module uses it to answer `/up`, `/readyz` and `/metrics`
-and to time every request. **It is not a slot.** `create.rs` writes it
-when `observability` is chosen (`crates/brocanth-cli/src/commands/create.rs:3653`).
-A third-party module cannot use it today. See §5.
+A server wrap sits around `handle`, outside the request hooks. It sees
+every request, a static file included, and the response after the hooks.
+`observability` uses one to answer `/up`, `/readyz` and `/metrics` and to
+time every request. `rsx` uses one to serve static files before the router.
+
+Write a type that implements the generated `plugins::ServerWrap` trait,
+and name the type in the slot. The path resolves in `src/plugins/mod.rs`:
+
+```rust
+s.file("src/plugins/timing/mod.rs", TIMING_RS);
+s.at(Slot::PluginsMod).line("pub mod timing;");
+s.at(Slot::ServerWrap).line("timing::Timing");
+```
+
+The trait, as the generator writes it when one wrap exists:
+
+```rust
+pub type Handler = Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+pub trait ServerWrap {
+    fn wrap(app: &Arc<crate::app::App>, next: Handler) -> Handler;
+    fn side_listeners(app: &crate::app::App) -> impl Future<Output = Result<(), String>>; // default: none
+    fn before_stop(app: &crate::app::App) -> impl Future<Output = ()>;                   // default: nothing
+}
+```
+
+- `wrap` returns `next` with the wrap around it. Not calling `next`
+  answers the request: that is how a probe or a static file answers.
+- `side_listeners` opens listeners beside the main one, once, after the
+  plugins started. `observability-metrics` serves `/metrics` there.
+- `before_stop` runs when a stop begins, before the listener closes.
+  `observability` fails `/readyz` here and waits `drain_delay_secs`.
+
+**The composition rule.** The first line in the slot is the outermost
+wrap: it sees a request first and the response last. Lines land in the
+order the modules contribute. A wrap that must sit inside another declares
+`after(other)`: `rsx` declares `after("observability")`, so the observer
+logs and counts static files. `side_listeners` and `before_stop` run in
+the same order, one after the other, so two drain delays add up.
+
+Wrap or hook? A hook has `RequestState`, the route, and an order against
+other hooks; a page can pass it a value. A wrap has none of these. Use a
+wrap only for what must happen outside the hooks: an answer before any
+hook runs, a listener of its own, a step in the stop.
+
+Without a wrap, `src/plugins/mod.rs` has no trait, and `wrap` passes the
+handler through as it is.
 
 ### 3.2 Renderer: makes a response body
 
@@ -920,11 +988,21 @@ file.
 ### 3.6 Every category: `Slot::AgentsSections`
 
 One `##` section in `AGENTS.md`, for a rule a coding agent must follow in
-this project. Start the block with `"\n## "`. Write a rule with its
+this project. The sections land after "Adding a route", before the
+sections every project gets, in the order the modules contribute. Start
+the block with `"\n## "`. Write a rule with its
 reason, not a feature list. See `SECURITY_HEADERS_AGENTS` in
 `crates/brocanth-middleware/src/scaffold.rs`.
 
-### 3.7 Run-time seams that no slot reaches
+### 3.7 Every category: `Slot::MainMods`
+
+One `mod` line in `src/main.rs`, for a file a module puts at the crate
+root: `rsx` writes `mod assets;` for `src/assets.rs`. The generator sorts
+the lines among its own, as rustfmt does. `src/main.rs` is the developer's
+file, so `brocanth add` writes there only while it is unedited. Prefer a
+file under `src/plugins/<key>/`, which needs no line here.
+
+### 3.8 Run-time seams that no slot reaches
 
 - `RouteSource` with `App::mount_routes`: works in the core. Generated
   projects do not use it, by decision: they mount through
@@ -1122,11 +1200,12 @@ without a change to the CLI.
 
 Found while writing this guide. Input for the module-design discussion.
 
-1. **No slot for `plugins::wrap`.** `wrap`, `side_listeners` and
-   `stop_accepting` are written by `create.rs` when `observability` is
-   chosen (`create.rs:3653`). A second module that wants to wrap the server
-   (a tracer, an access log with timing) cannot. A `Slot::ServerWrap` needs
-   a composition rule: several wraps, in an order.
+1. ~~**No slot for `plugins::wrap`.**~~ Closed: `Slot::ServerWrap`, with
+   a generated `ServerWrap` trait (§3.1). The first line is the outermost
+   wrap; `after` places a wrap inside another. `observability` and `rsx`
+   (static files) use it. `logging` does not: its line needs the route and
+   `RequestState`, which only a hook has, and a hook times a request as
+   well as a wrap does.
 2. ~~**Conflicts are not in the manifest.**~~ Closed: `Manifest::conflicts`,
    read by `brocanth_scaffold::clash` for `create`, `add` and the chooser.
 3. ~~**Optional dependencies are invisible.**~~ Closed:
@@ -1158,11 +1237,18 @@ Found while writing this guide. Input for the module-design discussion.
 9. ~~**`NodeDependencies` is still unread.**~~ Closed: the generator writes
    `package.json` from the slot, and `rsx-tailwind` names its package
    through `snippet::node_dependency`.
-10. **`Plugin::provide` cannot see the request.** A context value cannot
-    depend on a cookie or a header. Today that value goes through a
-    request hook and `ctx.hooked`, which skips the compile-time check
-    `ctx.provided` gives.
-11. **Sixteen `rsx` branches remain in `create.rs`.** The `@DEPTH_*`
-    markers in `Ctx`, static files in `app.rs` and `main.rs`, and the
-    `AGENTS.md` sections at a fixed position. Each needs a slot that does
-    not exist (`docs/modules.md` §8).
+10. ~~**`Plugin::provide` cannot see the request.**~~ Closed:
+    `Plugin::provide_for_request(&self, &Request, &RequestState, &mut
+    ContextBuilder)`, called by `App::context_for` after the request hooks
+    (§3.1). A hook and `ctx.hooked` was the other answer; it was rejected
+    because it skips the compile-time check `ctx.provided` gives, and a
+    value every page reads (a locale, a tenant) deserves that check. The
+    method stays synchronous and infallible: a wait or a refusal belongs to
+    a hook. `brocanth-i18n` still provides a `Negotiator` that each page
+    calls; it can now provide the negotiated locale.
+11. **Three `rsx` branches remain in `create.rs`**, down from sixteen: the
+    starter pages `index.rs`, `about.rs` and `users/[id].rs`. The rest
+    moved to `Slot::PagesRenderers`, `Slot::ServerWrap`, the new
+    `Slot::MainMods`, `Slot::AgentsSections` (which now lands where the
+    views sections were) and the children's manifests. The pages stay
+    because each path has one writer; see `docs/modules.md` §8.

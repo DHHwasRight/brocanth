@@ -8,7 +8,7 @@ slots each module writes (checked against `b3a3461` + `a0df519`).
 
 | Category | What it does | How it hooks into brocanth |
 |---|---|---|
-| **Middleware** | Runs around a request, and may enrich the context | `plugin_hooking` → `Slot::PluginsHooks` (request/response hooks); a layer → `Slot::PluginsLayers` + `AppSetup` mount; a context item → `Slot::PluginsInstalled` + `AppContext` (`ctx.provided::<T>()`); `plugins::wrap` (observability) |
+| **Middleware** | Runs around a request, and may enrich the context | `plugin_hooking` → `Slot::PluginsHooks` (request/response hooks); a layer → `Slot::PluginsLayers` + `AppSetup` mount; a context item → `Slot::PluginsInstalled` + `AppContext` (`ctx.provided::<T>()`); a server wrap → `Slot::ServerWrap` (`observability`; `rsx` serves its static files with one) |
 | **Renderer** | Makes a response body: a file type in the page router, or a function | `Slot::PagesRenderers` (a `load_dir!` over `src/pages`); `Slot::PagesItems` (a function on `pages`) |
 | **External** | Does not touch the code: build, ship, check | Files only (`Dockerfile`, `ci.yml`); `MiseTasks`, `GitIgnore`, `NodeDependencies` |
 | **Enhancer** | Adds a capability to the codebase | A plugin with a lifecycle → `AppPlugins` + `PluginsMod`; a subcommand → `CommandsMod`; settings → `ConfigSections` |
@@ -71,7 +71,7 @@ the file, or a literal in code.
 | Module | Categories | Seams it writes | Part of | Needs | Optional |
 |---|---|---|---|---|---|
 | `logging` | **Middleware** | Layers, AppSetup, AppPlugins ★ | | | refused with `observability-logs` |
-| `observability` | **Middleware**, Enhancer, Routes | AppPlugins, `plugins::wrap` ★ | | | children below |
+| `observability` | **Middleware**, Enhancer, Routes | AppPlugins, ServerWrap ★ | | | children below |
 | `observability-logs` | **Middleware** | (parent's plugin) | observability | | |
 | `observability-health` | **Routes** | `/up`, `/readyz` via the observer, not RouterMounts | observability | | |
 | `observability-metrics` | **Routes** | `/metrics`, on a side listener | observability | | |
@@ -102,7 +102,7 @@ the file, or a literal in code.
 | `admin` | **Routes** | RouterMounts (`/admin`), PagesRoutes ★ | | | `middleware-csrf` (stamped forms), `admin-model` (rows over the ORM), `analytics` (a tab) |
 | `admin-model` | Routes | `src/plugins/admin/models.rs` | admin | `model` | |
 | `commands` | **Enhancer** | CommandsMod (`routes`) | | | `input` |
-| `rsx` | **Renderer** | PagesRenderers (`.rsx`), assets | | | children below |
+| `rsx` | **Renderer** | PagesRenderers (`.rsx`, `partial_depth`), AgentsSections; with a child: ServerWrap (static files), MainMods (`mod assets;`) | | | children below |
 | `rsx-tailwind` | **External**, Enhancer | CommandsMod (`css`), MiseTasks, package.json | rsx | `commands` | |
 | `rsx-htmx` | **Renderer** | `html!` depth, `public/dpswap.min.js` | rsx | | |
 | `jt` | **Renderer**, Routes | PagesRenderers (`.jt`), an example page | | | |

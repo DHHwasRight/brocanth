@@ -789,11 +789,24 @@ impl<E, H> App<E, H> {
             .is_some_and(|r| r.primary)
     }
 
-    /// A fresh per-request context, filled by the installed providers.
+    /// A fresh context with no request behind it, filled by
+    /// [`Plugin::provide`]. For start-up checks and tests; a dispatched
+    /// request uses [`App::context_for`].
     pub fn context(&self) -> Context<E> {
         let mut builder = ContextBuilder::new();
         for reg in self.instances.iter().filter(|r| r.provides_context) {
             reg.inner.provide(&mut builder);
+        }
+        builder.build::<E>()
+    }
+
+    /// The context of one request, filled by
+    /// [`Plugin::provide_for_request`]. Call it after the request hooks
+    /// ran, so a provider can read what they wrote in `state`.
+    pub fn context_for(&self, request: &Request, state: &RequestState) -> Context<E> {
+        let mut builder = ContextBuilder::new();
+        for reg in self.instances.iter().filter(|r| r.provides_context) {
+            reg.inner.provide_for_request(request, state, &mut builder);
         }
         builder.build::<E>()
     }
@@ -1609,5 +1622,87 @@ mod tests {
         assert!(rec_a.take().iter().all(|l| l.starts_with("logger:")));
         assert!(rec_b.take().iter().any(|l| l.starts_with("db_log:")));
         assert!(!rec_a.take().iter().any(|l| l.starts_with("db_log:")));
+    }
+
+    // -- a value that depends on the request ---------------------------------
+
+    #[derive(Debug, PartialEq)]
+    struct Locale(String);
+    impl ContextItem for Locale {}
+
+    /// What a request hook loaded: a user's own choice of language.
+    struct Chosen(&'static str);
+
+    /// `Accept-Language` first, unless a hook found a choice of the user's.
+    struct LocalePlugin;
+
+    impl Plugin for LocalePlugin {
+        type Config = ();
+        type Provides = ProvidesContext<Locale>;
+        const NAME: &'static str = "locale";
+
+        fn new(_: ()) -> Self {
+            Self
+        }
+
+        fn provide(&self, cx: &mut ContextBuilder) {
+            cx.insert(Locale("en".into()));
+        }
+
+        fn provide_for_request(
+            &self,
+            request: &Request,
+            state: &RequestState,
+            cx: &mut ContextBuilder,
+        ) {
+            let header = request
+                .headers()
+                .get("accept-language")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next());
+            let locale = match (state.get::<Chosen>(), header) {
+                (Some(chosen), _) => chosen.0,
+                (None, Some(asked)) => asked.trim(),
+                (None, None) => "en",
+            };
+            cx.insert(Locale(locale.to_string()));
+        }
+    }
+
+    fn asking(language: &str) -> Request {
+        http::Request::builder()
+            .header("accept-language", language)
+            .body(Vec::new())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_provider_reads_the_request_and_what_the_hooks_wrote() {
+        let app: App<With<Locale, Base>> = AppBuilder::new()
+            .plugin(LocalePlugin::new(()))
+            .build()
+            .unwrap();
+        let empty = RequestState::new();
+
+        let cx = app.context_for(&asking("fr-CH, en;q=0.5"), &empty);
+        assert_eq!(cx.get::<Locale, _>(), &Locale("fr-CH".into()));
+
+        let mut hooked = RequestState::new();
+        hooked.insert(Chosen("de"));
+        let cx = app.context_for(&asking("fr"), &hooked);
+        assert_eq!(cx.get::<Locale, _>(), &Locale("de".into()));
+
+        // No request: the default, so `Provides` holds for every context.
+        assert_eq!(app.context().get::<Locale, _>(), &Locale("en".into()));
+    }
+
+    #[test]
+    fn a_provider_that_ignores_the_request_writes_what_provide_writes() {
+        let app: App<With<RequestId, Base>> = AppBuilder::new()
+            .plugin(RequestIdPlugin::default())
+            .build()
+            .unwrap();
+        let cx = app.context_for(&asking("fr"), &RequestState::new());
+        assert!(cx.get::<RequestId, _>().0.ends_with("-1"));
     }
 }

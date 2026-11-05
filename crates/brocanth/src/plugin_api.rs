@@ -25,6 +25,7 @@ use thiserror::Error;
 
 use crate::plugin_context::{ContextBuilder, Provided};
 use crate::plugin_health::{Readiness, ReadinessCheck};
+use crate::plugin_hooks::{Request, RequestState};
 use crate::plugin_shutdown::ShutdownCx;
 
 /// Anything a hook can go wrong with.
@@ -477,7 +478,37 @@ pub trait Plugin: Sized + Send + Sync + 'static {
     /// Called once per context, and only for the instance whose registration
     /// widened the provider list — a context item is one value, so extra
     /// instances of the same plugin do not fight over it.
+    ///
+    /// This is also the value a context with no request gets:
+    /// [`App::context`](crate::plugin_app::App::context), which a generated
+    /// project reads once at start. A plugin that overrides
+    /// [`Plugin::provide_for_request`] still inserts a value here -- a
+    /// default -- so `Provides` stays true for every context.
     fn provide(&self, _cx: &mut ContextBuilder) {}
+
+    /// Fill the context of one request, after the request hooks ran.
+    ///
+    /// For a value that depends on the request: a locale from
+    /// `Accept-Language`, a tenant from the host, a session a request hook
+    /// loaded into `state`. A handler reads it with the same compile-time
+    /// check as any other provided value, which `ctx.hooked` does not give.
+    ///
+    /// `state` is what the request hooks wrote, so an asynchronous lookup
+    /// stays in an async hook and this method only moves its result onto
+    /// the typed context. It cannot fail and cannot wait, by design: a
+    /// failure belongs to a hook, which can answer the request.
+    ///
+    /// The default calls [`Plugin::provide`], so a plugin that does not
+    /// care about the request writes nothing new.
+    fn provide_for_request(
+        &self,
+        request: &Request,
+        state: &RequestState,
+        cx: &mut ContextBuilder,
+    ) {
+        let _ = (request, state);
+        self.provide(cx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +536,7 @@ pub(crate) trait AnyInstance: Send + Sync + 'static {
     fn installs_hooks(&self) -> bool;
     fn contributes_routes(&self) -> bool;
     fn provide(&self, cx: &mut ContextBuilder);
+    fn provide_for_request(&self, request: &Request, state: &RequestState, cx: &mut ContextBuilder);
     fn plugin_any(&self) -> &dyn Any;
     fn plugin_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -564,6 +596,15 @@ impl<P: Plugin> AnyInstance for Instance<P> {
 
     fn provide(&self, cx: &mut ContextBuilder) {
         self.plugin.provide(cx);
+    }
+
+    fn provide_for_request(
+        &self,
+        request: &Request,
+        state: &RequestState,
+        cx: &mut ContextBuilder,
+    ) {
+        self.plugin.provide_for_request(request, state, cx);
     }
 
     fn plugin_any(&self) -> &dyn Any {

@@ -545,10 +545,17 @@ and runs them, so the claim is checked from inside a real project.
 
 ### What is still a provider and not a layer
 
-`Plugin::provide(&self, &mut ContextBuilder)` does not see the request. A
-value that depends on the request — a session read from a cookie, a current
-user — cannot be built there yet. That is the next piece of this seam, and
-it is a change to the `Plugin` trait rather than to the generator.
+`Plugin::provide(&self, &mut ContextBuilder)` does not see the request.
+`Plugin::provide_for_request(&self, &Request, &RequestState, &mut
+ContextBuilder)` does. `App::context_for` calls it after the request hooks,
+so a value that depends on the request — a locale from a header, a session
+an async hook loaded into the state — reaches `ctx.provided` with the
+compile-time check. Its default calls `provide`, and `provide` still gives
+the value a context with no request gets.
+
+The alternative was a request hook and `ctx.hooked`. It works today, but it
+answers `Option` for a value every page reads, and a removed hook shows up
+as a `None` at run time, not as a build error.
 
 A value a *layer* writes is a different thing again, and it cannot have
 this guarantee: a layer is mounted at a pattern, so a type it publishes is
@@ -636,7 +643,7 @@ silence. That has already happened once, with a `.gitignore` line.
 | `ShutdownPhase::Begin` / `Drain` | works |
 | `Lifecycle::ready_when`, `Readiness` | works; `App::shutdown` fails it before `begin_shutdown`. See `docs/observability.md` |
 | `ProvidesContext<T>` | works, and reaches a handler through `Ctx::provided` (§6) |
-| `Plugin::provide` seeing the request | **missing** — a provider cannot read a cookie (§6) |
+| `Plugin::provide` seeing the request | `Plugin::provide_for_request`, called by `App::context_for` after the hooks |
 | `RouteSource` + `mount_routes` | works; not generated, by decision: a generated project mounts page-shaped routes through `Slot::RouterMounts` (§4.6) |
 | A renderer registry | **does not exist** (§5) |
 
@@ -791,13 +798,25 @@ direction: it never mistakes an edit for the generator's text.
    `rsx`. `Slot::MiseTasks` and `Slot::GitIgnore` got their first real
    customer on the way, and `Slot::CommandsMod` its second.
 
-   **Sixteen `rsx` branches are still in `create.rs`**, and they are the
-   ones the slot model does not reach: the three `@DEPTH_*` markers
-   substituted into `Ctx`, the `app.rs` and `main.rs` pieces for static
-   files, the `brocanth-assets` dependency, and the `AGENTS.md` sections,
-   which are interpolated at a position rather than appended. Each needs a
-   slot that does not exist. None of them blocks a second renderer: `jt`
-   adds no field to `Ctx`, serves no static file and mounts nothing.
+   **Three `rsx` branches remain in `create.rs`**, down from sixteen: the
+   starter pages `index.rs`, `about.rs` and `users/[id].rs`. The others
+   moved behind slots the `rsx` modules write:
+
+   | What | Now |
+   |---|---|
+   | `partial_depth` and the `@DEPTH_*` markers in `Ctx` | an `impl Ctx` in `Slot::PagesRenderers`; it reads `DP-Partial` from the headers `Ctx` already has |
+   | `holding()` and `.holding(..)` in `src/app.rs` | gone: `partial_depth` reads the header itself |
+   | `serve_asset` and the dispatch around it in `src/app.rs` | a server wrap, `Slot::ServerWrap` |
+   | `mod assets;` in the three shapes of `src/main.rs` | `Slot::MainMods` |
+   | the `brocanth-assets` dependency | the manifests of `rsx-tailwind` and `rsx-htmx` |
+   | the `AGENTS.md` views, static files, partial and CSS sections | `Slot::AgentsSections`, which now lands where the views sections were |
+
+   The starter pages stay. Each path has one writer, and the scaffold
+   refuses a second: that check is what turns two modules writing one
+   file into an error that names both. A renderer that replaced the
+   generator's page would need a "file a module may replace" rule, and that
+   rule would weaken the check for every path. The cost is small: three
+   pages, written once, that the developer owns.
 2. ~~**Add `jt` as the second renderer.**~~ **Done.** A manifest, a
    dependency, one block and two files. It cost three things the sketch did
    not predict, all of them written up in §5: `jt` named modules by its own
@@ -805,8 +824,8 @@ direction: it never mistakes an edit for the generator's text.
    `Slot::PagesRoutes` had to exist. It also found two live bugs (§6b).
 3. ~~**Give `Ctx` the plugin context and an extractor.**~~ **Done.**
    `Ctx::provided::<T, _>()`, bounded by `Has`, over a provider list the
-   generator writes from the same ordered list `register!` uses. What
-   remains of this seam is `Plugin::provide` seeing the request (§6).
+   generator writes from the same ordered list `register!` uses. A
+   provider sees the request through `Plugin::provide_for_request`.
 4. ~~**Add a mount slot and emit a mount.**~~ **Done.** `Slot::RouterMounts`
    (`244b603`), and now two customers: `resource` writes the page triple
    and an empty list of resources at `/api`; `admin` mounts the backoffice

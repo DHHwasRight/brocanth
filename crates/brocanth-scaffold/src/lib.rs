@@ -785,6 +785,31 @@ pub enum Slot {
     /// decision and stays in `src/app.rs`; *finding* the function for a
     /// mounted name is mechanism, and mechanism the generator owns.
     PluginsLayers,
+    /// One server wrap per line: the path of a type, from `crate::plugins`,
+    /// that implements the generated `plugins::ServerWrap` trait.
+    /// `observability::serving::Serving`.
+    ///
+    /// A server wrap sits around the whole handler, outside the request
+    /// hooks: it sees every request, a static file included, and the
+    /// response after the hooks. It can also open a listener of its own
+    /// (`side_listeners`) and delay the stop (`before_stop`).
+    ///
+    /// **Order.** The first line is the outermost wrap: it sees a request
+    /// first and the response last. Lines land in the order the modules
+    /// contribute, so a wrap that must sit inside another declares
+    /// `after(other)`. `side_listeners` and `before_stop` run in the same
+    /// order, one after the other.
+    ///
+    /// The generator wrote these three functions itself for one module,
+    /// `observability`, so no other module could wrap the server.
+    ServerWrap,
+    /// `src/main.rs`, one `mod` line per module a module puts at the crate
+    /// root: `mod assets;`. The generator sorts them among its own, as
+    /// rustfmt does.
+    ///
+    /// `src/main.rs` is the developer's file. `brocanth add` writes a new
+    /// line there only while the file is as the generator left it.
+    MainMods,
     /// `src/pages/mod.rs`, the renderers: one `pub mod` per template
     /// engine, each wrapping that engine's `load_dir!`, plus whatever the
     /// engine needs beside it.
@@ -860,13 +885,14 @@ pub enum Slot {
     /// and the binary that ships runs without node.
     NodeDependencies,
     /// `AGENTS.md`, one `##` section per module that has a rule a coding
-    /// agent must follow.
+    /// agent must follow. The sections land after "Adding a route", before
+    /// the generic sections, in the order the modules contribute.
     AgentsSections,
 }
 
 impl Slot {
     /// Every slot, in declaration order.
-    pub const ALL: [Slot; 18] = [
+    pub const ALL: [Slot; 20] = [
         Slot::AppUses,
         Slot::AppPlugins,
         Slot::AppSetup,
@@ -875,6 +901,8 @@ impl Slot {
         Slot::PluginsInstalled,
         Slot::PluginsHooks,
         Slot::PluginsLayers,
+        Slot::ServerWrap,
+        Slot::MainMods,
         Slot::PagesRenderers,
         Slot::RouterMounts,
         Slot::PagesRoutes,
@@ -906,11 +934,14 @@ impl Slot {
             Slot::AppSetup | Slot::AppContext | Slot::PluginsHooks | Slot::PluginsLayers => {
                 &[Middleware]
             }
+            // A middleware wraps every request; a renderer serves the static
+            // files its pages link to, before the router.
+            Slot::ServerWrap => &[Middleware, Renderer],
             Slot::PagesRenderers | Slot::PagesItems => &[Renderer],
             Slot::RouterMounts | Slot::PagesRoutes => &[Routes],
             Slot::CommandsMod => &[Enhancer],
             Slot::MiseTasks | Slot::NodeDependencies => &[External],
-            Slot::ConfigSections | Slot::GitIgnore | Slot::AgentsSections => &[],
+            Slot::ConfigSections | Slot::GitIgnore | Slot::AgentsSections | Slot::MainMods => &[],
         }
     }
 }
@@ -926,6 +957,8 @@ impl fmt::Display for Slot {
             Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
             Slot::PluginsHooks => "src/plugins/mod.rs (the hook record)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
+            Slot::ServerWrap => "src/plugins/mod.rs (the server wraps)",
+            Slot::MainMods => "src/main.rs (the crate-root modules)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
             Slot::RouterMounts => "src/pages/mod.rs (the mounted routes)",
             Slot::PagesRoutes => "src/pages/mod.rs (the route table test)",

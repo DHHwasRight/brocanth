@@ -237,7 +237,10 @@ flag. See `docs/modules/observability.md`.
 - **The generated `serve` has one signal path, and it is not
   `stop_on_signal`.** `serve` watches SIGTERM on a thread of its own (a
   synchronous handler can stall the serving runtime's signal driver), then
-  calls `plugins::stop_accepting`, which is `Observer::drain_then_stop`.
+  calls `plugins::stop_accepting`. That runs each server wrap's
+  `before_stop` (here `Observer::drain`), then closes the listener. The
+  wrap is `src/plugins/observability/serving.rs`, named in
+  `Slot::ServerWrap`.
   `drain_delay_secs` counts against `[server] shutdown_grace_secs`.
 - **No database readiness check.** `brocanth-model`'s plugin opens no pool,
   so there is nothing to ping. The same gap blocks pool stats.

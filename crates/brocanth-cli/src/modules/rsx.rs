@@ -24,6 +24,9 @@ impl Module for Rsx {
         .category(Category::Renderer)
         .adapts_to("rsx-tailwind", "the layout links the stylesheet")
         .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
+        // Static files are a server wrap; `observability` sees them first,
+        // so it logs and counts them as before.
+        .after("observability")
         .outside_runtime()
         .asked_in("pages", "Templates compiled into the binary")
         .krate(Dep::git("rsx", REPOSITORY, "main").note("templates, compiled"))
@@ -41,9 +44,15 @@ impl Module for Rsx {
         // template engine.
         s.at(Slot::PagesRenderers).block(format!(
             "/// The application's name, as the root layout writes it.\n\
-             pub const TITLE: &str = {:?};\n\n{PAGES_RSX_RS}\n",
-            p.title
+             pub const TITLE: &str = {:?};\n\n{PAGES_RSX_RS}\n{}\n",
+            p.title,
+            if p.has("rsx-htmx") {
+                PARTIAL_DEPTH_HEADER
+            } else {
+                PARTIAL_DEPTH_NONE
+            }
         ));
+        s.at(Slot::AgentsSections).block(AGENTS_VIEWS_MD);
 
         // Beside the page each one renders, and named after it. The Crystal
         // page_router does the same with `layout.cr`, and the reason carries
@@ -61,6 +70,17 @@ impl Module for Rsx {
         // written twice.
         if p.has("rsx-tailwind") || p.has("rsx-htmx") {
             s.file("src/assets.rs", ASSETS_RS);
+            s.at(Slot::MainMods).line("mod assets;");
+            // Before the router, around the whole server. A page returns a
+            // `String` body, which a font is not, so a static file never
+            // touches the page contract.
+            s.file("src/plugins/static_files/mod.rs", STATIC_FILES_RS);
+            s.at(Slot::PluginsMod).line("pub mod static_files;");
+            s.at(Slot::ServerWrap).line("static_files::StaticFiles");
+            s.at(Slot::AgentsSections).block(AGENTS_ASSETS_MD);
+        }
+        if p.has("rsx-htmx") {
+            s.at(Slot::AgentsSections).block(AGENTS_PARTIAL_MD);
         }
     }
 }
@@ -88,6 +108,7 @@ impl Module for Tailwind {
             "the CSS build is `brocanth css`, a subcommand, and a project \
              with no command line has nowhere to put it",
         )
+        .krate(assets_crate())
     }
 
     fn contribute(&self, p: &Project, s: &mut Scaffold) {
@@ -117,6 +138,9 @@ impl Module for Tailwind {
         // globally.
         s.at(Slot::MiseTasks).block(MISE_CSS_TASKS);
 
+        // Where an agent looks first: the build is a command, not a script.
+        s.at(Slot::AgentsSections).block(AGENTS_CSS_MD);
+
         let _ = p;
     }
 }
@@ -133,6 +157,7 @@ impl Module for Htmx {
         .category(Category::Renderer)
         .outside_runtime()
         .asked_in("pages", "A click swaps what changed, not the whole page")
+        .krate(assets_crate())
         .part_of("rsx")
         .because(
             "`<Link>` is an `.rsx` component, and the partial it asks for is a layout \
@@ -150,6 +175,232 @@ impl Module for Htmx {
         s.file("public/dpswap.min.js", DPSWAP_JS);
     }
 }
+
+/// The static files, embedded: a proc macro that puts the files themselves
+/// in the binary. Either child that has files to serve asks for it.
+fn assets_crate() -> Dep {
+    Dep::brocanth("brocanth-assets")
+}
+
+/// `partial_depth` with partial navigation: read from `DP-Partial`.
+const PARTIAL_DEPTH_HEADER: &str = r#"impl Ctx {
+    /// How many layout layers the client already holds, from `DP-Partial`.
+    /// `html!` asks it, and leaves out that many layouts, counted from the
+    /// root.
+    ///
+    /// A navigation inside a section sends the section's contents and not
+    /// the document around them. dp-swap sends the number; the header is
+    /// absent on a first load, for a crawler, and whenever JavaScript is
+    /// off, and then this is zero and the whole document goes out.
+    ///
+    /// `true` is dp-swap's word for "a fragment, I did not count", which is
+    /// one layer. Anything that does not parse is zero: a client that cannot
+    /// say what it holds gets everything, which is always correct and only
+    /// slower.
+    pub fn partial_depth(&self) -> u32 {
+        match self.header("dp-partial") {
+            None => 0,
+            Some("true") => 1,
+            Some(value) => value.parse().unwrap_or(0),
+        }
+    }
+}
+"#;
+
+/// `partial_depth` without partial navigation: always the whole document.
+const PARTIAL_DEPTH_NONE: &str = r#"impl Ctx {
+    /// How many layout layers the client already holds. `html!` asks it.
+    ///
+    /// Always zero: nothing here sends a partial request, so every page
+    /// goes out whole. `brocanth add rsx-htmx` reads `DP-Partial` here.
+    pub fn partial_depth(&self) -> u32 {
+        0
+    }
+}
+"#;
+
+/// `src/plugins/static_files/mod.rs`: the files in `assets/` and `public/`,
+/// answered before the router as a server wrap.
+const STATIC_FILES_RS: &str = r##"//! The static files, before the router: a server wrap.
+//!
+//! Not a page, and not routed. A page returns a `Response` whose body is a
+//! `String`, which a font is not, so a static file answers before the router
+//! is consulted and never touches the page contract. `src/plugins/mod.rs`
+//! composes this wrap with any other.
+
+use crate::plugins::{Answer, Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct StaticFiles;
+
+impl ServerWrap for StaticFiles {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let _ = app;
+        std::sync::Arc::new(move |request: brocanth_server::Request| -> Answer {
+            match serve_asset(&request) {
+                Some(file) => Box::pin(std::future::ready(file)),
+                None => next(request),
+            }
+        })
+    }
+}
+
+/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
+"##;
+
+/// The `## Views` section of `AGENTS.md`, written only when there are views.
+const AGENTS_VIEWS_MD: &str = r#"
+## Views
+
+The markup for a route is a `.rsx` file **next to the page that renders it**:
+`src/pages/index.rsx` beside `src/pages/index.rs`. There is no second tree and
+nothing to register -- `rsx::load_dir!("src/pages")` in `src/pages/mod.rs`
+compiles them all into the binary. One file is one module, under `views`, so
+`index.rsx` is `views::index` and `users/[id].rsx` is `views::users::_id_`.
+
+### Layouts
+
+`layout.rsx` wraps every page in its directory **and every directory below**,
+and a page never names it: which layout wraps a page is a property of where
+the page is. That is the Crystal page_router's rule for `layout.cr`.
+
+They stack root to leaf, and **the chain is not written down anywhere**.
+`html!` is a macro: it knows which file it was written in, walks up to
+`src/`, and wraps the page in every `layout.rsx` it passes. So
+`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
+layout, and deleting that file removes exactly that layer with no other edit.
+
+Every page uses the same import and the same call, whatever directory it is
+in. Do not add a chain of your own; if a page is wrapped wrongly, the
+directory tree is what to change.
+
+A layout takes `children: Element`, and may also take `layout: &str`, which
+`html!` fills with the URL prefix that layout covers. Those two are the only
+parameters it fills, because it cannot know what a third one would mean.
+A value every page shares comes from a `const` -- the root layout reads
+`pages::TITLE` that way. A value belonging to one request belongs on the page
+component, which the handler builds and which already has the context.
+
+For a fragment that is not a document -- an htmx swap, a partial -- call
+`render` instead of `html!`: the same thing with no shell.
+
+**Adding a `layout.rsx` where there was none does not rebuild anything**,
+because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
+creating one. Editing or deleting an existing layout is noticed.
+
+A component is a function returning `Element`. Its parameters are its contract
+with the handler, and a caller fills them as struct fields, so a field the
+component does not declare is a compile error rather than a blank in the page.
+A parameter of type `Element` receives children, which is all a layout is.
+
+Reach a template from a handler with `html!`, and with nothing else:
+
+```rust
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html!(ctx, views::index::Index { title: TITLE })
+}
+```
+
+It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
+template that bails propagates with `?`. For another status or a header,
+compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
+
+Adding a page with markup is two files in one directory -- `<name>.rs` and
+`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
+`src/pages/mod.rs`, because the directory is the registry.
+
+Not every response is a page. A redirect is `Response::empty(303)` with a
+header and no template anywhere near it.
+
+An interpolated value is escaped on the way out. Templates are read at
+**compile** time, so an edit needs a rebuild, and a template that does not
+parse is a build failure on its own line rather than a 500.
+"#;
+
+/// The static file rules, for a project that has files to serve.
+const AGENTS_ASSETS_MD: &str = r#"
+## Static files
+
+Two directories, and the difference matters. `assets/` is **fingerprinted**:
+`site.css` is published at `/css/site.<hash>.css` and cached for a year.
+`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
+`favicon.ico`, anything linked to from outside.
+
+Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
+logical path and returns the published one, and a name nothing publishes
+panics there rather than 404ing in a browser.
+
+A basename starting with `_` is an input and is never published, which is what
+`assets/css/_tailwind.css` is.
+
+Both directories are embedded in the binary. **Adding a file where there was
+none does not rebuild anything**; run `touch src/assets.rs` after creating one.
+"#;
+
+/// The partial navigation contract, for a project that asked for it.
+const AGENTS_PARTIAL_MD: &str = r#"
+## Partial navigation
+
+Link to a route with the `Link` component, never a bare `<a>`:
+
+```
+<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
+```
+
+`to` takes what a route helper returns, so a link to a route that does not
+exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
+so the page still works with no JavaScript.
+
+A layout marks what a swap may replace with `dp-layout={layout}`, on the
+element wrapping **exactly** the children. Anything inside that element is
+replaced with them, so a sidebar or a scroll position belongs outside it.
+
+A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
+`html!` resolves that into a `match` over the chain. A handler never reads the
+header and never changes for it.
+"#;
+
+/// The CSS build, for a project with Tailwind.
+const AGENTS_CSS_MD: &str = r#"
+## CSS
+
+```
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
+"#;
 
 // -- what the templates are -------------------------------------------------
 
