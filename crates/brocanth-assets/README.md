@@ -29,8 +29,9 @@ brocanth add rsx-tailwind
 ```
 
 The generator writes `src/assets.rs` with the macro call, an `assets/` and
-a `public/` directory, and a `serve_asset` function that `serve` checks
-before the route table. That function answers `GET` and `HEAD`, sends the
+a `public/` directory, and a `serve_asset` function in a server wrap,
+`src/plugins/static_files/mod.rs`, that runs before the route table. That function answers `GET` and
+`HEAD`, sends the
 `cache-control` and the strong `ETag`, and answers `304` to a matching
 `if-none-match`. The crate has no settings, no features and no `scaffold`
 module.

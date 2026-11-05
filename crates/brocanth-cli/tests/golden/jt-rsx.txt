@@ -585,7 +585,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -955,11 +955,6 @@ pub struct Ctx {
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
     state: RequestState,
-    /// How many layout layers the client says it already holds.
-    ///
-    /// Zero unless a request asked for less, so a first load, a crawler
-    /// and a reader with JavaScript off all get the whole document.
-    partial: u32,
 }
 
 impl Ctx {
@@ -976,7 +971,6 @@ impl Ctx {
             headers: Vec::new(),
             plugins: None,
             state: RequestState::new(),
-            partial: 0,
         }
     }
 
@@ -1055,14 +1049,6 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }
-
-    /// What `html!` asks, to leave out the layouts the client has.
-    ///
-    /// A method rather than a public field so the number has one
-    /// meaning: layers to skip, counted from the root.
-    pub fn partial_depth(&self) -> u32 {
-        self.partial
     }
 
     /// A route parameter, or `None`.
@@ -1374,6 +1360,16 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // body to take back, which is the property the rest of this file is
     // built on.
     Ok(Response::ok(content.render_to_string()?))
+}
+
+impl Ctx {
+    /// How many layout layers the client already holds. `html!` asks it.
+    ///
+    /// Always zero: nothing here sends a partial request, so every page
+    /// goes out whole. `brocanth add rsx-htmx` reads `DP-Partial` here.
+    pub fn partial_depth(&self) -> u32 {
+        0
+    }
 }
 
 #[cfg(test)]

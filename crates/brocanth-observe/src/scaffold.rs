@@ -15,10 +15,11 @@
 //! parent writes the one plugin file, and the file says only what the
 //! chosen children configure.
 //!
-//! What this module cannot write is the half in `src/app.rs`: `serve` has to
-//! pass its handler through `Observer::wrap_routed` and spawn
-//! `Observer::stop_on_signal`. No slot reaches inside `serve`, so that half
-//! belongs to the generator. `docs/observability.md` lists the lines.
+//! The half around `serve` is a server wrap:
+//! `src/plugins/observability/serving.rs` passes the handler through
+//! `Observer::wrap_routed`, serves `/metrics` on a side listener, and fails
+//! `/readyz` before the listener closes. The parent names it in
+//! `Slot::ServerWrap`, and the generator composes it with any other wrap.
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
@@ -66,7 +67,15 @@ impl Module for Observe {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/observability/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/observability/serving.rs",
+            serving_rs(project.has(METRICS)),
+        );
         s.at(Slot::PluginsMod).line("pub mod observability;");
+        // Around the whole server, outside the request hooks: the probes
+        // answer before any hook runs, and the log line times everything.
+        s.at(Slot::ServerWrap)
+            .line("observability::serving::Serving");
         configurable(s, project, "observability", "Observe", settings(project));
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
@@ -345,13 +354,15 @@ fn plugin_rs(project: &Project) -> String {
 //! of it is compiled. Each piece is its own module: `brocanth add
 //! observability-metrics` and the like.
 //!
-//! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
-//! its handler with it, and stops on SIGTERM through it.
+//! `serving.rs` beside this file reads the `Observer` this plugin
+//! publishes: `serve` wraps its handler with it, and stops through it.
 
 {uses_duration}use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_observe::{{{imports}}};
+
+pub mod serving;
 
 {settings_struct}
 {env_fn}{path_fn}{observer_sig}{build}    Observer::new(config)
@@ -402,6 +413,80 @@ impl Plugin for Observe {{
     )
 }
 
+/// `src/plugins/observability/serving.rs`: the server wrap.
+fn serving_rs(metrics: bool) -> String {
+    let side = if metrics { SIDE_LISTENERS_METRICS } else { "" };
+    SERVING_RS.replace("@SIDE_LISTENERS@", side)
+}
+
+const SERVING_RS: &str = r#"//! The `Observer` around the whole server: a server wrap.
+//!
+//! `src/plugins/mod.rs` composes it with any other wrap. It answers `/up`,
+//! `/readyz` and `/metrics` itself, and logs and counts every other request
+//! by its route template.
+
+use crate::plugins::{Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct Serving;
+
+impl ServerWrap for Serving {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let routes = std::sync::Arc::clone(app);
+        std::sync::Arc::new(observer(app).wrap_routed(
+            move |request| next(request),
+            move |request| {
+                routes
+                    .router
+                    .at(&request.path)
+                    .map(|found| found.template().to_string())
+            },
+        ))
+    }
+@SIDE_LISTENERS@
+    /// `/readyz` fails at once, so a load balancer stops sending requests;
+    /// the listener closes `[observability] drain_delay_secs` later.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let observer = observer(app);
+        async move { observer.drain().await }
+    }
+}
+
+/// The `Observer` the `observability` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observability` is registered in `register!`")
+}
+"#;
+
+/// `/metrics` on a second listener, when `[observability] metrics_bind`
+/// names one. Without `observability-metrics` the trait's default runs:
+/// no second listener.
+const SIDE_LISTENERS_METRICS: &str = r#"
+    /// `/metrics` on a second listener, when `[observability] metrics_bind`
+    /// names one.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let observer = observer(app);
+        async move {
+            let Some(bind) = observer.config().metrics_bind.clone() else {
+                return Ok(());
+            };
+            let server = brocanth_server::Server::bind(&bind)
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::spawn(async move {
+                let _ = observer.serve_admin(server).await;
+            });
+            Ok(())
+        }
+    }
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,7 +497,17 @@ mod tests {
         let mut s = Scaffold::new();
         Observe.contribute(&project, &mut s);
         let files: Vec<&str> = s.files().map(|(path, _)| path).collect();
-        assert_eq!(files, ["src/plugins/observability/mod.rs"]);
+        assert_eq!(
+            files,
+            [
+                "src/plugins/observability/mod.rs",
+                "src/plugins/observability/serving.rs"
+            ]
+        );
+        assert_eq!(
+            s.slot(Slot::ServerWrap).collect::<Vec<_>>(),
+            ["observability::serving::Serving\n"]
+        );
         assert!(s
             .slot(Slot::PluginsMod)
             .any(|l| l.contains("pub mod observability;")));

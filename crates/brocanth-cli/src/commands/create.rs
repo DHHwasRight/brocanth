@@ -985,9 +985,9 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         (
             "src/main.rs".to_string(),
             if a.has("commands") {
-                main_with_commands_rs(a, has_settings(&built))
+                main_with_commands_rs(a, &built, has_settings(&built))
             } else {
-                main_serve_only_rs(a, has_settings(&built))
+                main_serve_only_rs(a, &built, has_settings(&built))
             },
         ),
         // Always: it is the one answer to what this application is, and both
@@ -1049,7 +1049,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // appended after the sections every project gets. The slot was
         // declared and never read until a module needed to explain why it
         // had registered nothing.
-        agents_md(a) + &built.slot(Slot::AgentsSections).collect::<String>(),
+        agents_md(a, &built),
     ));
     Ok(files)
 }
@@ -1227,7 +1227,7 @@ fn sections_of(built: &Built, key: &str) -> Vec<String> {
 ///
 /// `AGENTS.md` is the filename the common agent tools look for; Claude Code
 /// also reads `CLAUDE.md`, and a developer who wants that can symlink it.
-fn agents_md(a: &Answers) -> String {
+fn agents_md(a: &Answers, built: &Built) -> String {
     let mut chosen = vec!["`core`  the router, the context, the plugin seams".to_string()];
     for pick in &a.picks {
         chosen.push(format!("`{}`  {}", pick, about(pick).gist));
@@ -1248,20 +1248,11 @@ fn agents_md(a: &Answers) -> String {
         )
     };
 
-    // A raw string, for the reason given above `COMMANDS_MOD_RS`: the `\n\`
-    // continuation used elsewhere here keeps the source's own indentation and
-    // writes it into the file, which in Markdown turns a paragraph into a
-    // code block.
-    let mut views = String::new();
-    if a.has("rsx") {
-        views.push_str(AGENTS_VIEWS_MD);
-    }
-    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        views.push_str(AGENTS_ASSETS_MD);
-    }
-    if a.has("rsx-htmx") {
-        views.push_str(AGENTS_PARTIAL_MD);
-    }
+    // What the modules have to say to a model reading the project, after
+    // "Adding a route" and before the sections every project gets: a rule
+    // about this project's views or settings is closer to the code than
+    // the house style is. Each module writes its own (`rsx` its views).
+    let sections: String = built.slot(Slot::AgentsSections).collect();
 
     let commands = if a.has("commands") {
         let mut out = String::from(
@@ -1272,17 +1263,7 @@ fn agents_md(a: &Answers) -> String {
              automatically — registration happens at link time.\n\n\
              ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n",
         );
-        if a.has("rsx-tailwind") {
-            // The CSS build is one of them, and the reason it is a command
-            // rather than a script belongs where an agent will look first.
-            out.push_str(
-                "brocanth css         # the CSS build; -W rebuilds on each change\n```\n\n\
-                 The stylesheet is embedded, so a new one is a new binary. `css` rewrites\n\
-                 `src/assets.rs` to say so, which is what makes cargo notice.\n",
-            );
-        } else {
-            out.push_str("```\n");
-        }
+        out.push_str("```\n");
         out
     } else {
         String::new()
@@ -1370,7 +1351,7 @@ fn agents_md(a: &Answers) -> String {
          A handler returns a value and never writes a response itself. That is\n\
          what makes a half-written body on an error impossible rather than\n\
          unlikely.\n\
-         {views}\
+         {sections}\
          {commands}\
          {decisions}\
          \n\
@@ -1396,123 +1377,11 @@ fn agents_md(a: &Answers) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         absent = absent,
-        views = views,
+        sections = sections,
         commands = commands,
         decisions = decisions,
     )
 }
-
-/// The `## Views` section of `AGENTS.md`, written only when there are views.
-const AGENTS_VIEWS_MD: &str = r#"
-## Views
-
-The markup for a route is a `.rsx` file **next to the page that renders it**:
-`src/pages/index.rsx` beside `src/pages/index.rs`. There is no second tree and
-nothing to register -- `rsx::load_dir!("src/pages")` in `src/pages/mod.rs`
-compiles them all into the binary. One file is one module, under `views`, so
-`index.rsx` is `views::index` and `users/[id].rsx` is `views::users::_id_`.
-
-### Layouts
-
-`layout.rsx` wraps every page in its directory **and every directory below**,
-and a page never names it: which layout wraps a page is a property of where
-the page is. That is the Crystal page_router's rule for `layout.cr`.
-
-They stack root to leaf, and **the chain is not written down anywhere**.
-`html!` is a macro: it knows which file it was written in, walks up to
-`src/`, and wraps the page in every `layout.rsx` it passes. So
-`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
-layout, and deleting that file removes exactly that layer with no other edit.
-
-Every page uses the same import and the same call, whatever directory it is
-in. Do not add a chain of your own; if a page is wrapped wrongly, the
-directory tree is what to change.
-
-A layout takes `children: Element`, and may also take `layout: &str`, which
-`html!` fills with the URL prefix that layout covers. Those two are the only
-parameters it fills, because it cannot know what a third one would mean.
-A value every page shares comes from a `const` -- the root layout reads
-`pages::TITLE` that way. A value belonging to one request belongs on the page
-component, which the handler builds and which already has the context.
-
-For a fragment that is not a document -- an htmx swap, a partial -- call
-`render` instead of `html!`: the same thing with no shell.
-
-**Adding a `layout.rsx` where there was none does not rebuild anything**,
-because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
-creating one. Editing or deleting an existing layout is noticed.
-
-A component is a function returning `Element`. Its parameters are its contract
-with the handler, and a caller fills them as struct fields, so a field the
-component does not declare is a compile error rather than a blank in the page.
-A parameter of type `Element` receives children, which is all a layout is.
-
-Reach a template from a handler with `html!`, and with nothing else:
-
-```rust
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html!(ctx, views::index::Index { title: TITLE })
-}
-```
-
-It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
-template that bails propagates with `?`. For another status or a header,
-compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
-
-Adding a page with markup is two files in one directory -- `<name>.rs` and
-`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
-`src/pages/mod.rs`, because the directory is the registry.
-
-Not every response is a page. A redirect is `Response::empty(303)` with a
-header and no template anywhere near it.
-
-An interpolated value is escaped on the way out. Templates are read at
-**compile** time, so an edit needs a rebuild, and a template that does not
-parse is a build failure on its own line rather than a 500.
-"#;
-
-/// The static file rules, for a project that has files to serve.
-const AGENTS_ASSETS_MD: &str = r#"
-## Static files
-
-Two directories, and the difference matters. `assets/` is **fingerprinted**:
-`site.css` is published at `/css/site.<hash>.css` and cached for a year.
-`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
-`favicon.ico`, anything linked to from outside.
-
-Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
-logical path and returns the published one, and a name nothing publishes
-panics there rather than 404ing in a browser.
-
-A basename starting with `_` is an input and is never published, which is what
-`assets/css/_tailwind.css` is.
-
-Both directories are embedded in the binary. **Adding a file where there was
-none does not rebuild anything**; run `touch src/assets.rs` after creating one.
-"#;
-
-/// The partial navigation contract, for a project that asked for it.
-const AGENTS_PARTIAL_MD: &str = r#"
-## Partial navigation
-
-Link to a route with the `Link` component, never a bare `<a>`:
-
-```
-<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
-```
-
-`to` takes what a route helper returns, so a link to a route that does not
-exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
-so the page still works with no JavaScript.
-
-A layout marks what a swap may replace with `dp-layout={layout}`, on the
-element wrapping **exactly** the children. Anything inside that element is
-replaced with them, so a sidebar or a scroll position belongs outside it.
-
-A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
-`html!` resolves that into a `match` over the chain. A handler never reads the
-header and never changes for it.
-"#;
 
 /// One command, as an example to copy.
 // A raw string, and deliberately: the `\n\` continuation used elsewhere in
@@ -1730,11 +1599,6 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // layouts when there are any. Compile-time only -- a proc macro puts no
     // bytes in the binary, which is why this one is not a choice.
     deps.push(source_of(a, &core("brocanth-pages")));
-    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        // The static files, embedded. Also a proc macro, but this one does
-        // put bytes in the binary -- the files themselves.
-        deps.push(source_of(a, &core("brocanth-assets")));
-    }
     {
         // Every project serves, so every project gets a socket and a reactor.
         // `bridge` for the two conversions `handle` makes around the hooks.
@@ -2039,14 +1903,8 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     );
 
     out.push_str(SENT_FN);
-    if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        out.push_str(STATIC_FN);
-    }
-    if a.has("rsx-htmx") {
-        out.push_str(HOLDING_FN);
-    }
 
-    out.push_str(&serve_fns(a));
+    out.push_str(&serve_fns());
     out.push_str(
         "/// One request: the request hooks, the table, then the response hooks.\n\
          ///\n\
@@ -2137,22 +1995,12 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     // both.
     out.replace(
         "@CTX@",
-        &if a.has("rsx-htmx") {
-            format!(
-                "Ctx::new(verb, path, matched.params())\n\
-                 \x20               .holding(holding(request))\n\
-                 \x20               .with_plugins(app.core.context())\n\
-                 \x20               .with_state(std::mem::take(state))\n\
-                 \x20               .sent(\n{deeper}\x20               )"
-            )
-        } else {
-            format!(
-                "Ctx::new(verb, path, matched.params())\n\
-                 \x20               .with_plugins(app.core.context())\n\
-                 \x20               .with_state(std::mem::take(state))\n\
-                 \x20               .sent(\n{deeper}\x20               )"
-            )
-        },
+        &format!(
+            "Ctx::new(verb, path, matched.params())\n\
+             \x20               .with_plugins(app.core.context_for(request, state))\n\
+             \x20               .with_state(std::mem::take(state))\n\
+             \x20               .sent(\n{deeper}\x20               )"
+        ),
     )
 }
 
@@ -2163,20 +2011,8 @@ fn app_rs(a: &Answers, built: &Built) -> String {
 /// period comes from does vary -- the files, the environment and the flags
 /// with the config plugin, the environment and the flags without -- so that
 /// question goes to `plugins::shutdown_grace`, which the generator owns.
-fn serve_fns(a: &Answers) -> String {
-    let dispatch = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-        // Static files never reach a page. They are bytes with a content
-        // type, and the page contract carries a `String` body on purpose.
-        "async move {\n\
-        \x20               match serve_asset(&request) {\n\
-        \x20                   Some(file) => file,\n\
-        \x20                   None => handle(&app, request).await,\n\
-        \x20               }\n\
-        \x20           }"
-    } else {
-        "async move { handle(&app, request).await }"
-    };
-    SERVE_FN.replace("@DISPATCH@", dispatch) + "\n"
+fn serve_fns() -> String {
+    SERVE_FN.to_string() + "\n"
 }
 
 /// `serve`, the drain, and the signals. ADR 2 in the generated project.
@@ -2282,7 +2118,7 @@ async fn run(
         let app = Arc::clone(&app);
         move |request| {
             let app = Arc::clone(&app);
-            @DISPATCH@
+            async move { handle(&app, request).await }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -2482,9 +2318,35 @@ impl Signals {
 /// `[commands.*]`, and mise answered `unknown field`.
 /// `src/main.rs` when the project has no command line: it serves, and that is
 /// all it does.
-fn main_serve_only_rs(a: &Answers, flags: bool) -> String {
+/// The `mod` lines of `src/main.rs`: the generator's own and each
+/// `Slot::MainMods` line, sorted by name as rustfmt sorts them. An entry
+/// is `(name, text)`, because a module with an attribute sorts by its
+/// name and not by the `#`.
+fn crate_mods(own: &[(&str, &str)], built: &Built) -> String {
+    let theirs: Vec<(String, String)> = built
+        .slot(Slot::MainMods)
+        .map(|line| {
+            let line = line.trim();
+            let name = line
+                .trim_start_matches("pub ")
+                .trim_start_matches("mod ")
+                .trim_end_matches(';');
+            (name.to_string(), line.to_string())
+        })
+        .collect();
+    let mut all: Vec<(String, String)> = own
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.to_string()))
+        .chain(theirs)
+        .collect();
+    all.sort();
+    all.dedup();
+    all.into_iter().map(|(_, text)| text + "\n").collect()
+}
+
+fn main_serve_only_rs(a: &Answers, built: &Built, flags: bool) -> String {
     if flags {
-        return main_serve_only_with_flags_rs(a);
+        return main_serve_only_with_flags_rs(a, built);
     }
     format!(
         r##"//! {title} -- a brocanth application.
@@ -2493,9 +2355,7 @@ fn main_serve_only_rs(a: &Answers, flags: bool) -> String {
 //! contains is in `src/app.rs`; `brocanth add commands` turns this into a
 //! command line with `serve` as one of its commands.
 
-mod app;{assets}
-mod pages;
-{plugins}
+{mods}
 use std::process::ExitCode;
 
 fn main() -> ExitCode {{
@@ -2511,18 +2371,20 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
-        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-            "\nmod assets;"
-        } else {
-            ""
-        },
-        plugins = "mod plugins;\n",
+        mods = crate_mods(
+            &[
+                ("app", "mod app;"),
+                ("pages", "mod pages;"),
+                ("plugins", "mod plugins;")
+            ],
+            built
+        ),
     )
 }
 
 /// `src/main.rs` with no command line: it reads the declared flags, refuses
 /// anything else, and serves.
-fn main_serve_only_with_flags_rs(a: &Answers) -> String {
+fn main_serve_only_with_flags_rs(a: &Answers, built: &Built) -> String {
     format!(
         r##"//! {title} -- a brocanth application.
 //!
@@ -2532,11 +2394,7 @@ fn main_serve_only_with_flags_rs(a: &Answers) -> String {
 //! `brocanth add commands` turns this into a command line with `serve` as one
 //! of its commands.
 
-mod app;{assets}
-mod flags;
-mod pages;
-mod plugins;
-
+{mods}
 use std::process::ExitCode;
 
 fn main() -> ExitCode {{
@@ -2559,16 +2417,37 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
-        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-            "\nmod assets;"
-        } else {
-            ""
-        },
+        mods = crate_mods(
+            &[
+                ("app", "mod app;"),
+                ("flags", "mod flags;"),
+                ("pages", "mod pages;"),
+                ("plugins", "mod plugins;")
+            ],
+            built
+        ),
     )
 }
 
 /// `src/main.rs` when the project has a command line: it is the command line.
-fn main_with_commands_rs(a: &Answers, flags: bool) -> String {
+fn main_with_commands_rs(a: &Answers, built: &Built, flags: bool) -> String {
+    let mut own = vec![
+        ("app", "mod app;"),
+        ("commands", "mod commands;"),
+        ("pages", "mod pages;"),
+        ("plugins", "mod plugins;"),
+    ];
+    if flags {
+        own.push(("flags", "mod flags;"));
+    }
+    // Outside `src/`, where `migrate make` writes, so the path is
+    // spelled. Only with a command line: `migrate` is what reads it.
+    if a.has("model") {
+        own.push((
+            "migrations",
+            "#[path = \"../migrations/mod.rs\"]\nmod migrations;",
+        ));
+    }
     format!(
         r##"//! {title} -- a brocanth application.
 //!
@@ -2580,10 +2459,7 @@ fn main_with_commands_rs(a: &Answers, flags: bool) -> String {
 //! The wiring lives in `src/app.rs`, so `serve` and anything else that needs
 //! the router read the same thing.
 
-mod app;{assets}
-mod commands;{flags_mod}{migrations}
-mod pages;
-{plugins}
+{mods}
 use std::process::ExitCode;
 
 fn main() -> ExitCode {{
@@ -2602,7 +2478,6 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
 {run}
 }}
 "##,
-        flags_mod = if flags { "\nmod flags;" } else { "" },
         // The flags the modules declared, as arguments every command takes.
         run = if flags {
             "    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)"
@@ -2610,19 +2485,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
             "    brocanth_command::main(brocanth_command::Context::boot()?)"
         },
         title = a.title,
-        assets = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
-            "\nmod assets;"
-        } else {
-            ""
-        },
-        plugins = "mod plugins;\n",
-        // Outside `src/`, where `migrate make` writes, so the path
-        // is spelled. Only with a command line: `migrate` is what reads it.
-        migrations = if a.has("model") {
-            "\n#[path = \"../migrations/mod.rs\"]\nmod migrations;"
-        } else {
-            ""
-        },
+        mods = crate_mods(&own, built),
     )
 }
 
@@ -3025,7 +2888,7 @@ pub struct Ctx {
     plugins: Option<Context<plugins::Installed>>,
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
-    state: RequestState,@DEPTH_FIELD@
+    state: RequestState,
 }
 
 impl Ctx {
@@ -3041,7 +2904,7 @@ impl Ctx {
                 .collect(),
             headers: Vec::new(),
             plugins: None,
-            state: RequestState::new(),@DEPTH_INIT@
+            state: RequestState::new(),
         }
     }
 
@@ -3120,7 +2983,7 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }@DEPTH_IMPL@
+    }
 
     /// A route parameter, or `None`.
     ///
@@ -3259,33 +3122,6 @@ pub fn page_async(
 
 "##;
 
-/// How many layout layers the client says it holds, from `DP-Partial`.
-///
-/// Written only with partial navigation; without it every request takes the
-/// first arm of `html!` and this would be a function that always returns
-/// zero.
-const HOLDING_FN: &str = r#"/// How many layout layers the client already has, from `DP-Partial`.
-///
-/// `html!` leaves out that many layouts, counting from the root, so a
-/// navigation inside a section sends the section's contents and not the
-/// document around them. dp-swap sends the number; the header is absent on
-/// a first load, for a crawler, and whenever JavaScript is off, and then
-/// this is zero and the whole document goes out.
-///
-/// `true` is dp-swap's word for "a fragment, I did not count", which is one
-/// layer. Anything that does not parse is zero: a client that cannot say
-/// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &hooks::Request) -> u32 {
-    let header = request.headers().get("dp-partial");
-    match header.and_then(|value| value.to_str().ok()) {
-        None => 0,
-        Some("true") => 1,
-        Some(value) => value.parse().unwrap_or(0),
-    }
-}
-
-"#;
-
 /// A page's answer, as the server sends it. Always written: both shapes of
 /// `serve` go through it, so one place turns a `Response` into bytes.
 const SENT_FN: &str = r#"/// Turns a page's answer into the response the hooks see.
@@ -3320,45 +3156,6 @@ fn headers(request: &hooks::Request) -> Vec<(String, String)> {
 }
 
 "#;
-
-/// The static-file half of `serve`, written only when there are assets.
-///
-/// Not a page, and not routed. A page returns a `Response` whose body is a
-/// `String`, which a font is not, so a static file answers before the router
-/// is consulted and never touches the page contract.
-const STATIC_FN: &str = r##"/// The file a request named, or `None` to let the router answer.
-///
-/// Checked before the route table, which is also the order of surprise: a
-/// page at the same path as a file would be shadowed, and a path under
-/// `/assets` or `/public` is not a route anybody writes by hand.
-fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
-    if !matches!(
-        request.verb,
-        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
-    ) {
-        return None;
-    }
-    let asset = crate::assets::lookup(&request.path)?;
-
-    // The ETag is the content hash, so it is strong and a match means the
-    // bytes are identical. 304 is the whole point of serving `public/`
-    // without a fingerprint in the name.
-    if request.header("if-none-match") == Some(asset.etag) {
-        return Some(
-            brocanth_server::Response::new(304, asset.content_type, &[][..])
-                .with_header("etag", asset.etag)
-                .with_header("cache-control", asset.cache_control()),
-        );
-    }
-
-    Some(
-        brocanth_server::Response::new(200, asset.content_type, asset.body)
-            .with_header("etag", asset.etag)
-            .with_header("cache-control", asset.cache_control()),
-    )
-}
-
-"##;
 
 const PAGES_MOD_RS_TESTS: &str = r##"#[cfg(test)]
 mod tests {
@@ -3571,42 +3368,6 @@ const PROVIDER_LIST_DOC: &str = "\
 /// `src/pages/mod.rs`, in three parts so the rsx bridge can land before the
 /// test module rather than after it, which clippy refuses.
 fn pages_mod_rs(a: &Answers, built: &Built) -> String {
-    // The partial-navigation members exist only where something reads them.
-    // `html!` is the only reader, and it is written only with templates, so
-    // without them these would be a field nobody sets and a method nobody
-    // calls -- two warnings in a brand-new project.
-    let (field, init, methods) = if a.has("rsx") {
-        (
-            "\n    /// How many layout layers the client says it already holds.\n\
-             \x20   ///\n\
-             \x20   /// Zero unless a request asked for less, so a first load, a crawler\n\
-             \x20   /// and a reader with JavaScript off all get the whole document.\n\
-             \x20   partial: u32,",
-            "\n            partial: 0,",
-            "\n\n\
-             \x20   /// What `html!` asks, to leave out the layouts the client has.\n\
-             \x20   ///\n\
-             \x20   /// A method rather than a public field so the number has one\n\
-             \x20   /// meaning: layers to skip, counted from the root.\n\
-             \x20   pub fn partial_depth(&self) -> u32 {\n\
-             \x20       self.partial\n\
-             \x20   }",
-        )
-    } else {
-        ("", "", "")
-    };
-    // `holding` is the setter and only partial navigation ever calls it.
-    let setter = if a.has("rsx-htmx") {
-        "\n\n\
-         \x20   /// The same, for a request that said how much of the page it has.\n\
-         \x20   #[must_use]\n\
-         \x20   pub fn holding(mut self, layers: u32) -> Self {\n\
-         \x20       self.partial = layers;\n\
-         \x20       self\n\
-         \x20   }"
-    } else {
-        ""
-    };
     let mut out = String::from(PAGES_MOD_RS_HEAD);
     // The renderers: one `pub mod` per template engine, each wrapping its
     // own `load_dir!`. Read from a slot rather than written here, because
@@ -3711,9 +3472,6 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     };
 
     out.replace("@ROUTES@", &routes)
-        .replace("@DEPTH_FIELD@", field)
-        .replace("@DEPTH_INIT@", init)
-        .replace("@DEPTH_IMPL@", &format!("{setter}{methods}"))
         .replace("@DESCRIBE@", &format!("{describe}{mounts}"))
 }
 
@@ -4198,33 +3956,86 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
 
     // -- serving ------------------------------------------------------
     //
-    // What `serve` does around the handler: observe it, and stop. Here for
-    // the same reason: `observe` changes it, and `src/app.rs` is not
-    // rewritten.
+    // What `serve` does around the handler: wrap it, open side listeners,
+    // and stop. Here for the same reason: the module list changes it, and
+    // `src/app.rs` is not rewritten. Each wrap is a module's
+    // `Slot::ServerWrap` line; this file only composes them.
     out.push('\n');
-    if a.has("observability") {
-        // `metrics_bind` is a field of the `metrics` feature, so the side
-        // listener exists only with `observability-metrics`.
-        let side = if a.has("observability-metrics") {
-            SIDE_LISTENERS_METRICS
-        } else {
-            SIDE_LISTENERS_NONE
-        };
-        out.push_str(&SERVING_OBSERVED.replace("@SIDE_LISTENERS@", side));
-    } else {
-        out.push_str(SERVING_PLAIN);
-    }
+    out.push_str(&serving(built));
     out
 }
 
-/// `wrap`, `side_listeners` and `stop_accepting` with the `observability` plugin.
-const SERVING_OBSERVED: &str = r#"/// What the server is handed for one request.
+/// `wrap`, `side_listeners` and `stop_accepting`, composed from the
+/// `Slot::ServerWrap` lines. Without one, the plain three, unchanged since
+/// before the slot existed.
+fn serving(built: &Built) -> String {
+    let wraps: Vec<&str> = built.slot(Slot::ServerWrap).map(str::trim).collect();
+    if wraps.is_empty() {
+        return SERVING_PLAIN.to_string();
+    }
+    // `next` is wrapped innermost first, so the first line is the
+    // outermost wrap: it sees a request first and the response last.
+    let wrapped: String = wraps
+        .iter()
+        .rev()
+        .map(|ty| format!("    let next = <{ty} as ServerWrap>::wrap(app, next);\n"))
+        .collect();
+    let listeners: String = wraps
+        .iter()
+        .map(|ty| format!("    <{ty} as ServerWrap>::side_listeners(app).await?;\n"))
+        .collect();
+    let stops: String = wraps
+        .iter()
+        .map(|ty| format!("    <{ty} as ServerWrap>::before_stop(app).await;\n"))
+        .collect();
+    let list: String = wraps.iter().map(|ty| format!("/// - `{ty}`\n")).collect();
+    SERVING_WRAPPED
+        .replace("@LIST@", &list)
+        .replace("@WRAPPED@", &wrapped)
+        .replace("@LISTENERS@", &listeners)
+        .replace("@STOPS@", &stops)
+}
+
+/// `wrap`, `side_listeners` and `stop_accepting` around the server wraps
+/// the modules declared.
+const SERVING_WRAPPED: &str = r#"/// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
-/// What `serve` answers a request with: `next`, observed. The `observe`
-/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
-/// counts every other request by its route template.
-pub fn wrap<F, Fut>(
+/// A handler, as one server wrap hands it to the next.
+pub type Handler = std::sync::Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+/// Something around the whole server: it sees every request, a static
+/// file included, outside the request hooks.
+///
+/// A module writes a type that implements it and names the type in
+/// `Slot::ServerWrap`. Only `wrap` is required.
+pub trait ServerWrap {
+    /// `next`, with this wrap around it.
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler;
+
+    /// Listeners of its own, beside the main one. Called once, after the
+    /// plugins started.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let _ = app;
+        async { Ok(()) }
+    }
+
+    /// Called when a stop begins, before the listener closes. A wrap that
+    /// must keep answering for a while -- a readiness probe that fails
+    /// first -- waits here.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let _ = app;
+        async {}
+    }
+}
+
+/// What `serve` answers a request with: `next`, inside each server wrap.
+/// The first is the outermost: it sees a request first and the response
+/// last.
+///
+@LIST@pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
     next: F,
 ) -> impl Fn(brocanth_server::Request) -> Answer + Send + Sync + 'static
@@ -4232,59 +4043,23 @@ where
     F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
 {
-    let routes = std::sync::Arc::clone(app);
-    observer(app).wrap_routed(next, move |request| {
-        routes
-            .router
-            .at(&request.path)
-            .map(|found| found.template().to_string())
-    })
+    let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
+@WRAPPED@    move |request| next(request)
 }
 
-/// The probes and `/metrics` on a second listener, when
-/// `[observability] metrics_bind` names one.
-@SIDE_LISTENERS@
+/// Each wrap's own listeners, in order.
+pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
+@LISTENERS@    Ok(())
+}
 
-/// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observability] drain_delay_secs`
-/// later.
+/// The first half of a stop: each wrap's `before_stop`, in order, then the
+/// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    observer(app).drain_then_stop(stopper).await;
-}
-
-/// The `Observer` the `observability` plugin published.
-fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
-    app.core
-        .services()
-        .get::<brocanth_observe::Observer>()
-        .cloned()
-        .expect("`observability` is registered in `register!`")
+@STOPS@    stopper.stop();
 }
 "#;
 
-/// `/metrics` on a second listener, when `[observability] metrics_bind` names one.
-const SIDE_LISTENERS_METRICS: &str = r#"pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let observer = observer(app);
-    let Some(bind) = observer.config().metrics_bind.clone() else {
-        return Ok(());
-    };
-    let server = brocanth_server::Server::bind(&bind)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(async move {
-        let _ = observer.serve_admin(server).await;
-    });
-    Ok(())
-}"#;
-
-/// No metrics, so no second listener. `brocanth add observability-metrics`
-/// writes the other one.
-const SIDE_LISTENERS_NONE: &str = r#"pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let _ = app;
-    Ok(())
-}"#;
-
-/// The same three, with nothing to observe.
+/// The same three, with nothing to wrap.
 const SERVING_PLAIN: &str = r#"/// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
@@ -6261,7 +6036,53 @@ mod tests {
         // And the bridge is not in the source either, so there is no function
         // to call and no `rsx::` path to copy from.
         assert!(!pages_mod_rs(&a, &built_for(&a)).contains("pub fn html("));
-        assert!(!main_with_commands_rs(&a, false).contains("mod views;"));
+        let built = contributions(&a).expect("the modules agree");
+        assert!(!main_with_commands_rs(&a, &built, false).contains("mod views;"));
+    }
+
+    #[test]
+    fn the_first_server_wrap_is_the_outermost_and_after_puts_one_inside() {
+        // `rsx` comes first in this list and declares
+        // `after("observability")`, so the observer is the outer wrap and
+        // still logs and counts a static file.
+        let a = answers(&["rsx", "rsx-htmx", "observability"]);
+        let built = contributions(&a).expect("the modules agree");
+        let text = plugins_mod_rs(&a, &built);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("no `{needle}` in:\n{text}"))
+        };
+        // `next` is wrapped innermost first, so the outer wrap comes last.
+        assert!(
+            at("<static_files::StaticFiles as ServerWrap>::wrap")
+                < at("<observability::serving::Serving as ServerWrap>::wrap")
+        );
+        // The stop runs outermost first: `/readyz` fails before anything else.
+        assert!(
+            at("<observability::serving::Serving as ServerWrap>::before_stop")
+                < at("<static_files::StaticFiles as ServerWrap>::before_stop")
+        );
+        // Without a wrap, no trait: the plain functions, as before the slot.
+        let plain = plugins_mod_rs(&answers(&[]), &contributions(&answers(&[])).unwrap());
+        assert!(!plain.contains("trait ServerWrap"), "{plain}");
+    }
+
+    #[test]
+    fn a_renderer_with_static_files_leaves_src_app_rs_alone() {
+        // `src/app.rs` is the developer's. A module that changed it made
+        // `brocanth add` refuse once the developer had edited it.
+        for picks in [
+            &["rsx"][..],
+            &["rsx", "rsx-tailwind", "rsx-htmx", "commands"][..],
+        ] {
+            let a = answers(picks);
+            let built = contributions(&a).expect("the modules agree");
+            assert_eq!(
+                app_rs(&a, &built),
+                app_rs(&answers(&[]), &built),
+                "{picks:?}"
+            );
+        }
     }
 
     #[test]
@@ -6533,7 +6354,7 @@ mod tests {
         // The receipt means "you did not ask for this". A module nobody
         // could have asked for does not belong in it, in either file.
         let core = cargo_toml(&answers(&[]), &built(&[]));
-        let brief = agents_md(&answers(&[]));
+        let brief = agents_md(&answers(&[]), &built(&[]));
         for key in all() {
             if about(key).blocked.is_none() {
                 continue;

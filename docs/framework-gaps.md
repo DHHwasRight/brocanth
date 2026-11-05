@@ -550,7 +550,7 @@ The jobs panel's row buttons are the first consumer.
 the admin's own delete still reloads; the jobs panel inlines it in its tab
 strip. The script has no JS test harness: the repository has none, and it
 is checked by `node --check` and the HTML-level tests. The generated
-project's `holding()` still parses `DP-Partial` itself instead of calling
+project's `Ctx::partial_depth` still parses `DP-Partial` itself instead of calling
 `dp::partial_depth`.
 
 ### G3. Nine capability crates are not reachable

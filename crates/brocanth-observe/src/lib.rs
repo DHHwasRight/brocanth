@@ -518,6 +518,15 @@ impl Observer {
     /// The second half of [`Observer::stop_on_signal`], for a stop that
     /// arrives some other way.
     pub async fn drain_then_stop(&self, stopper: Stopper) {
+        self.drain().await;
+        stopper.stop();
+    }
+
+    /// The wait before a stop, without the stop: readiness fails, then
+    /// [`ObserveConfig::drain_delay`] passes. For a caller that closes the
+    /// listener itself -- a generated project's `stop_accepting`, which
+    /// runs every server wrap's wait first.
+    pub async fn drain(&self) {
         self.readiness().drain();
         #[cfg(feature = "logs")]
         tracing::info!(
@@ -528,7 +537,6 @@ impl Observer {
         if !self.inner.config.drain_delay.is_zero() {
             tokio::time::sleep(self.inner.config.drain_delay).await;
         }
-        stopper.stop();
     }
 
     // -- the subscriber -----------------------------------------------------

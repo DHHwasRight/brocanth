@@ -586,7 +586,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -2489,6 +2489,32 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Realtime over server-sent events
+
+`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
+to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
+`src/pages/realtime/events.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+  Nothing is public until it is listed in `PUBLIC` or gated there by a
+  policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Publish from a page after the write, with the row you already hold:
+
+  ```rust
+  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
+  let row = brocanth_realtime::Row::new().with("author_id", author);
+  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
+  ```
+
+- Read it in the browser. The event name is the topic. `lagged` means the
+  view may be stale: fetch it again.
+
+  ```js
+  const events = new EventSource("/realtime/events?topics=posts/*");
+  events.addEventListener("posts/*", (e) => console.log(e.data));
+  events.addEventListener("lagged", () => location.reload());
+  ```
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -2517,33 +2543,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## Realtime over server-sent events
-
-`GET /realtime/events?topics=posts/*,posts/42` streams the broker's frames
-to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
-`src/pages/realtime/events.rs` is the route.
-
-- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
-  Nothing is public until it is listed in `PUBLIC` or gated there by a
-  policy (`Subscription::from_policy`). Never filter frames after delivery.
-- Publish from a page after the write, with the row you already hold:
-
-  ```rust
-  let realtime = ctx.provided::<Broadcast, _>().expect("a dispatched request");
-  let row = brocanth_realtime::Row::new().with("author_id", author);
-  realtime.broker.publish_with_row(&brocanth_events::RowChange::created("posts", id), &row);
-  ```
-
-- Read it in the browser. The event name is the topic. `lagged` means the
-  view may be stale: fetch it again.
-
-  ```js
-  const events = new EventSource("/realtime/events?topics=posts/*");
-  events.addEventListener("posts/*", (e) => console.log(e.data));
-  events.addEventListener("lagged", () => location.reload());
-  ```
-
-<!-- brocanth-digest: f0d66d9c3c3adf3a -->
+<!-- brocanth-digest: a39e2f4c22e7034a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

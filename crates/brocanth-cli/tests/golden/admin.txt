@@ -585,7 +585,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -2235,6 +2235,18 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## The admin
+
+`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+locked: the policy is `DenyAll` and `principal` returns an anonymous
+principal, so every screen answers 403. Do not open it with
+`AllowAllUnsafeForDevelopment` outside a test.
+
+A model reaches the admin through `AdminConfig::resource(..)`: a
+`brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
+the model's rows. A model with no resource answers 403. Never filter
+rows after a read; the row policy goes into the query.
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -2259,19 +2271,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## The admin
-
-`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
-locked: the policy is `DenyAll` and `principal` returns an anonymous
-principal, so every screen answers 403. Do not open it with
-`AllowAllUnsafeForDevelopment` outside a test.
-
-A model reaches the admin through `AdminConfig::resource(..)`: a
-`brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
-the model's rows. A model with no resource answers 403. Never filter
-rows after a read; the row policy goes into the query.
-
-<!-- brocanth-digest: 49307de9106a8307 -->
+<!-- brocanth-digest: 07ba815838fe81ad -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

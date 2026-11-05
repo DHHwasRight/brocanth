@@ -144,17 +144,19 @@ shutdown_grace_secs` has a flag and a variable in every project
 3. **A test harness for out-of-tree modules.** The goldens and the
    rustfmt check live in the CLI crate, so a third-party module must fork
    the CLI to test itself (`docs/module-authoring.md`, gap 8).
-4. **A `ServerWrap` slot.** Only `observability` can wrap the server
-   (`wrap`, `side_listeners`, `stop_accepting`). A tracer or an access log
-   cannot (gap 1).
+4. ~~**A `ServerWrap` slot.**~~ Done: `Slot::ServerWrap` and a generated
+   `ServerWrap` trait; the first line is the outermost wrap. `observability`
+   and `rsx`'s static files use it (gap 1).
 5. **The chooser groups modules by category.** The categories are in the
    manifests, `--help` and `brocanth.toml`, but the chooser still lists
    modules in `ALL` order.
 6. **Smaller seams:** `snippet::hooking` takes hand-formatted text
    (gap 6); `NodeDependencies` is not read, so a second node module would
-   collide with `rsx-tailwind` on `package.json` (gap 9);
-   `Plugin::provide` cannot see the request (gap 10); sixteen `rsx`
-   branches remain in `create.rs` (gap 11).
+   collide with `rsx-tailwind` on `package.json` (gap 9). Done:
+   `Plugin::provide_for_request` sees the request (gap 10), and the `rsx`
+   branches in `create.rs` went from sixteen to three, the starter pages,
+   which stay by decision (gap 11). Next: `brocanth-i18n` can provide the
+   negotiated locale through `provide_for_request`.
 
 ### 4. Admin
 

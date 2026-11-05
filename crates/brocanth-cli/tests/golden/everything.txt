@@ -39,9 +39,9 @@ brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
+brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
@@ -259,58 +259,6 @@ fn headers(request: &hooks::Request) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The file a request named, or `None` to let the router answer.
-///
-/// Checked before the route table, which is also the order of surprise: a
-/// page at the same path as a file would be shadowed, and a path under
-/// `/assets` or `/public` is not a route anybody writes by hand.
-fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
-    if !matches!(
-        request.verb,
-        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
-    ) {
-        return None;
-    }
-    let asset = crate::assets::lookup(&request.path)?;
-
-    // The ETag is the content hash, so it is strong and a match means the
-    // bytes are identical. 304 is the whole point of serving `public/`
-    // without a fingerprint in the name.
-    if request.header("if-none-match") == Some(asset.etag) {
-        return Some(
-            brocanth_server::Response::new(304, asset.content_type, &[][..])
-                .with_header("etag", asset.etag)
-                .with_header("cache-control", asset.cache_control()),
-        );
-    }
-
-    Some(
-        brocanth_server::Response::new(200, asset.content_type, asset.body)
-            .with_header("etag", asset.etag)
-            .with_header("cache-control", asset.cache_control()),
-    )
-}
-
-/// How many layout layers the client already has, from `DP-Partial`.
-///
-/// `html!` leaves out that many layouts, counting from the root, so a
-/// navigation inside a section sends the section's contents and not the
-/// document around them. dp-swap sends the number; the header is absent on
-/// a first load, for a crawler, and whenever JavaScript is off, and then
-/// this is zero and the whole document goes out.
-///
-/// `true` is dp-swap's word for "a fragment, I did not count", which is one
-/// layer. Anything that does not parse is zero: a client that cannot say
-/// what it holds gets everything, which is always correct and only slower.
-fn holding(request: &hooks::Request) -> u32 {
-    let header = request.headers().get("dp-partial");
-    match header.and_then(|value| value.to_str().ok()) {
-        None => 0,
-        Some("true") => 1,
-        Some(value) => value.parse().unwrap_or(0),
-    }
-}
-
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
@@ -413,12 +361,7 @@ async fn run(
         let app = Arc::clone(&app);
         move |request| {
             let app = Arc::clone(&app);
-            async move {
-                match serve_asset(&request) {
-                    Some(file) => file,
-                    None => handle(&app, request).await,
-                }
-            }
+            async move { handle(&app, request).await }
         }
     });
     let mut serving = tokio::spawn(server.run(handler));
@@ -655,8 +598,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .holding(holding(request))
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -1026,11 +968,6 @@ pub struct Ctx {
     /// What the request hooks wrote for this request: a `CsrfToken`, a
     /// client address. Empty for a context built by hand.
     state: RequestState,
-    /// How many layout layers the client says it already holds.
-    ///
-    /// Zero unless a request asked for less, so a first load, a crawler
-    /// and a reader with JavaScript off all get the whole document.
-    partial: u32,
 }
 
 impl Ctx {
@@ -1047,7 +984,6 @@ impl Ctx {
             headers: Vec::new(),
             plugins: None,
             state: RequestState::new(),
-            partial: 0,
         }
     }
 
@@ -1126,21 +1062,6 @@ impl Ctx {
         // `if let Some(..)`. A method returning `Option` must not abort
         // the process to say no.
         self.plugins.as_ref().and_then(|cx| cx.try_get::<T>())
-    }
-
-    /// The same, for a request that said how much of the page it has.
-    #[must_use]
-    pub fn holding(mut self, layers: u32) -> Self {
-        self.partial = layers;
-        self
-    }
-
-    /// What `html!` asks, to leave out the layouts the client has.
-    ///
-    /// A method rather than a public field so the number has one
-    /// meaning: layers to skip, counted from the root.
-    pub fn partial_depth(&self) -> u32 {
-        self.partial
     }
 
     /// A route parameter, or `None`.
@@ -1278,6 +1199,44 @@ pub fn page_async(
     Box::new(handler)
 }
 
+/// Every JSON template in this application.
+///
+/// The `.jt` files sit next to the pages they answer -- `status.jt` beside
+/// `status.rs` -- and `load_dir!` compiles the tree while this crate is
+/// being compiled. Nothing is parsed when a request arrives, and a template
+/// that does not parse is a compile error on its own line.
+///
+/// A module of their own, for the same reason the templates have one:
+/// `load_dir!` emits a `pub mod status` for `status.jt` and `pages!` emits
+/// one for `status.rs`, so unnested they collide. The path is relative to
+/// the package root and not to this file, because a proc macro cannot learn
+/// where it was written on stable Rust.
+///
+/// A file whose name is not an identifier gets the nearest one, by the same
+/// rule the templates and the route table use: `[id].jt` is
+/// `payload::users::_id_`.
+pub mod payload {
+    jt::load_dir!("src/pages");
+}
+
+/// Renders a JSON template as the answer.
+///
+/// The counterpart of `render` above, and deliberately a second function
+/// rather than a second `impl IntoResponse`: a template is an ordinary
+/// value, so a blanket impl would claim types that are not answers.
+///
+/// It returns the handler's own `Result` so a page reads the same whichever
+/// engine it uses. For another status or a header, compose:
+/// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
+///
+/// To override the type this sets, reach for `set_header` and not
+/// `with_header`: the second appends, so two `content-type` values would
+/// reach the wire and the client would pick between them.
+pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
+    // Into its own String first, so a page that fails half way through
+    // leaves nothing behind. Same property the HTML path has.
+    Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
+}
 /// The application's name, as the root layout writes it.
 pub const TITLE: &str = "My Blog";
 
@@ -1416,43 +1375,27 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     Ok(Response::ok(content.render_to_string()?))
 }
 
-/// Every JSON template in this application.
-///
-/// The `.jt` files sit next to the pages they answer -- `status.jt` beside
-/// `status.rs` -- and `load_dir!` compiles the tree while this crate is
-/// being compiled. Nothing is parsed when a request arrives, and a template
-/// that does not parse is a compile error on its own line.
-///
-/// A module of their own, for the same reason the templates have one:
-/// `load_dir!` emits a `pub mod status` for `status.jt` and `pages!` emits
-/// one for `status.rs`, so unnested they collide. The path is relative to
-/// the package root and not to this file, because a proc macro cannot learn
-/// where it was written on stable Rust.
-///
-/// A file whose name is not an identifier gets the nearest one, by the same
-/// rule the templates and the route table use: `[id].jt` is
-/// `payload::users::_id_`.
-pub mod payload {
-    jt::load_dir!("src/pages");
-}
-
-/// Renders a JSON template as the answer.
-///
-/// The counterpart of `render` above, and deliberately a second function
-/// rather than a second `impl IntoResponse`: a template is an ordinary
-/// value, so a blanket impl would claim types that are not answers.
-///
-/// It returns the handler's own `Result` so a page reads the same whichever
-/// engine it uses. For another status or a header, compose:
-/// `Ok(render_json(tpl)?.with_header("cache-control", "no-store"))`.
-///
-/// To override the type this sets, reach for `set_header` and not
-/// `with_header`: the second appends, so two `content-type` values would
-/// reach the wire and the client would pick between them.
-pub fn render_json(content: impl jt::ToJson) -> Result<Response, Error> {
-    // Into its own String first, so a page that fails half way through
-    // leaves nothing behind. Same property the HTML path has.
-    Ok(Response::ok(jt::to_string(&content)).with_header("content-type", "application/json"))
+impl Ctx {
+    /// How many layout layers the client already holds, from `DP-Partial`.
+    /// `html!` asks it, and leaves out that many layouts, counted from the
+    /// root.
+    ///
+    /// A navigation inside a section sends the section's contents and not
+    /// the document around them. dp-swap sends the number; the header is
+    /// absent on a first load, for a crawler, and whenever JavaScript is
+    /// off, and then this is zero and the whole document goes out.
+    ///
+    /// `true` is dp-swap's word for "a fragment, I did not count", which is
+    /// one layer. Anything that does not parse is zero: a client that cannot
+    /// say what it holds gets everything, which is always correct and only
+    /// slower.
+    pub fn partial_depth(&self) -> u32 {
+        match self.header("dp-partial") {
+            None => 0,
+            Some("true") => 1,
+            Some(value) => value.parse().unwrap_or(0),
+        }
+    }
 }
 
 /// Every route this project did not read off `src/pages`.
@@ -1850,6 +1793,7 @@ pub mod realtime_sse;
 pub mod resource;
 pub mod robots;
 pub mod sessions;
+pub mod static_files;
 pub mod storage;
 pub mod validation;
 
@@ -3335,9 +3279,42 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 /// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
-/// What `serve` answers a request with: `next`, observed. The `observe`
-/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
-/// counts every other request by its route template.
+/// A handler, as one server wrap hands it to the next.
+pub type Handler = std::sync::Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+/// Something around the whole server: it sees every request, a static
+/// file included, outside the request hooks.
+///
+/// A module writes a type that implements it and names the type in
+/// `Slot::ServerWrap`. Only `wrap` is required.
+pub trait ServerWrap {
+    /// `next`, with this wrap around it.
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler;
+
+    /// Listeners of its own, beside the main one. Called once, after the
+    /// plugins started.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let _ = app;
+        async { Ok(()) }
+    }
+
+    /// Called when a stop begins, before the listener closes. A wrap that
+    /// must keep answering for a while -- a readiness probe that fails
+    /// first -- waits here.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let _ = app;
+        async {}
+    }
+}
+
+/// What `serve` answers a request with: `next`, inside each server wrap.
+/// The first is the outermost: it sees a request first and the response
+/// last.
+///
+/// - `observability::serving::Serving`
+/// - `static_files::StaticFiles`
 pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
     next: F,
@@ -3346,48 +3323,28 @@ where
     F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
 {
-    let routes = std::sync::Arc::clone(app);
-    observer(app).wrap_routed(next, move |request| {
-        routes
-            .router
-            .at(&request.path)
-            .map(|found| found.template().to_string())
-    })
+    let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
+    let next = <static_files::StaticFiles as ServerWrap>::wrap(app, next);
+    let next = <observability::serving::Serving as ServerWrap>::wrap(app, next);
+    move |request| next(request)
 }
 
-/// The probes and `/metrics` on a second listener, when
-/// `[observability] metrics_bind` names one.
+/// Each wrap's own listeners, in order.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let observer = observer(app);
-    let Some(bind) = observer.config().metrics_bind.clone() else {
-        return Ok(());
-    };
-    let server = brocanth_server::Server::bind(&bind)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(async move {
-        let _ = observer.serve_admin(server).await;
-    });
+    <observability::serving::Serving as ServerWrap>::side_listeners(app).await?;
+    <static_files::StaticFiles as ServerWrap>::side_listeners(app).await?;
     Ok(())
 }
 
-/// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observability] drain_delay_secs`
-/// later.
+/// The first half of a stop: each wrap's `before_stop`, in order, then the
+/// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    observer(app).drain_then_stop(stopper).await;
+    <observability::serving::Serving as ServerWrap>::before_stop(app).await;
+    <static_files::StaticFiles as ServerWrap>::before_stop(app).await;
+    stopper.stop();
 }
 
-/// The `Observer` the `observability` plugin published.
-fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
-    app.core
-        .services()
-        .get::<brocanth_observe::Observer>()
-        .cloned()
-        .expect("`observability` is registered in `register!`")
-}
-
-// brocanth-digest: 4119a3f3ad59191c
+// brocanth-digest: 4706989c8414c630
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -6667,8 +6624,8 @@ impl Plugin for Model {
 //! of it is compiled. Each piece is its own module: `brocanth add
 //! observability-metrics` and the like.
 //!
-//! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
-//! its handler with it, and stops on SIGTERM through it.
+//! `serving.rs` beside this file reads the `Observer` this plugin
+//! publishes: `serve` wraps its handler with it, and stops through it.
 
 use std::time::Duration;
 
@@ -6676,6 +6633,8 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_observe::{LogFormat, ObserveConfig, ObservePlugin, Observer};
+
+pub mod serving;
 
 /// What this plugin is built from.
 ///
@@ -6793,6 +6752,68 @@ impl Plugin for Observe {
     fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
         self.inner()?.shutdown(sd)
     }
+}
+===== src/plugins/observability/serving.rs =====
+//! The `Observer` around the whole server: a server wrap.
+//!
+//! `src/plugins/mod.rs` composes it with any other wrap. It answers `/up`,
+//! `/readyz` and `/metrics` itself, and logs and counts every other request
+//! by its route template.
+
+use crate::plugins::{Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct Serving;
+
+impl ServerWrap for Serving {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let routes = std::sync::Arc::clone(app);
+        std::sync::Arc::new(observer(app).wrap_routed(
+            move |request| next(request),
+            move |request| {
+                routes
+                    .router
+                    .at(&request.path)
+                    .map(|found| found.template().to_string())
+            },
+        ))
+    }
+
+    /// `/metrics` on a second listener, when `[observability] metrics_bind`
+    /// names one.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let observer = observer(app);
+        async move {
+            let Some(bind) = observer.config().metrics_bind.clone() else {
+                return Ok(());
+            };
+            let server = brocanth_server::Server::bind(&bind)
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::spawn(async move {
+                let _ = observer.serve_admin(server).await;
+            });
+            Ok(())
+        }
+    }
+
+    /// `/readyz` fails at once, so a load balancer stops sending requests;
+    /// the listener closes `[observability] drain_delay_secs` later.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let observer = observer(app);
+        async move { observer.drain().await }
+    }
+}
+
+/// The `Observer` the `observability` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observability` is registered in `register!`")
 }
 ===== src/plugins/openapi/mod.rs =====
 //! The OpenAPI document, as this application derives it.
@@ -8033,6 +8054,62 @@ impl Plugin for Sessions {
 pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {
     next.run(ctx)
 }
+===== src/plugins/static_files/mod.rs =====
+//! The static files, before the router: a server wrap.
+//!
+//! Not a page, and not routed. A page returns a `Response` whose body is a
+//! `String`, which a font is not, so a static file answers before the router
+//! is consulted and never touches the page contract. `src/plugins/mod.rs`
+//! composes this wrap with any other.
+
+use crate::plugins::{Answer, Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct StaticFiles;
+
+impl ServerWrap for StaticFiles {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let _ = app;
+        std::sync::Arc::new(move |request: brocanth_server::Request| -> Answer {
+            match serve_asset(&request) {
+                Some(file) => Box::pin(std::future::ready(file)),
+                None => next(request),
+            }
+        })
+    }
+}
+
+/// The file a request named, or `None` to let the router answer.
+///
+/// Checked before the route table, which is also the order of surprise: a
+/// page at the same path as a file would be shadowed, and a path under
+/// `/assets` or `/public` is not a route anybody writes by hand.
+fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Response> {
+    if !matches!(
+        request.verb,
+        brocanth::routing::Verb::Get | brocanth::routing::Verb::Head
+    ) {
+        return None;
+    }
+    let asset = crate::assets::lookup(&request.path)?;
+
+    // The ETag is the content hash, so it is strong and a match means the
+    // bytes are identical. 304 is the whole point of serving `public/`
+    // without a fingerprint in the name.
+    if request.header("if-none-match") == Some(asset.etag) {
+        return Some(
+            brocanth_server::Response::new(304, asset.content_type, &[][..])
+                .with_header("etag", asset.etag)
+                .with_header("cache-control", asset.cache_control()),
+        );
+    }
+
+    Some(
+        brocanth_server::Response::new(200, asset.content_type, asset.body)
+            .with_header("etag", asset.etag)
+            .with_header("cache-control", asset.cache_control()),
+    )
+}
 ===== src/plugins/storage/mod.rs =====
 //! File storage, as this application registers it.
 //!
@@ -8489,150 +8566,6 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
-## Views
-
-The markup for a route is a `.rsx` file **next to the page that renders it**:
-`src/pages/index.rsx` beside `src/pages/index.rs`. There is no second tree and
-nothing to register -- `rsx::load_dir!("src/pages")` in `src/pages/mod.rs`
-compiles them all into the binary. One file is one module, under `views`, so
-`index.rsx` is `views::index` and `users/[id].rsx` is `views::users::_id_`.
-
-### Layouts
-
-`layout.rsx` wraps every page in its directory **and every directory below**,
-and a page never names it: which layout wraps a page is a property of where
-the page is. That is the Crystal page_router's rule for `layout.cr`.
-
-They stack root to leaf, and **the chain is not written down anywhere**.
-`html!` is a macro: it knows which file it was written in, walks up to
-`src/`, and wraps the page in every `layout.rsx` it passes. So
-`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
-layout, and deleting that file removes exactly that layer with no other edit.
-
-Every page uses the same import and the same call, whatever directory it is
-in. Do not add a chain of your own; if a page is wrapped wrongly, the
-directory tree is what to change.
-
-A layout takes `children: Element`, and may also take `layout: &str`, which
-`html!` fills with the URL prefix that layout covers. Those two are the only
-parameters it fills, because it cannot know what a third one would mean.
-A value every page shares comes from a `const` -- the root layout reads
-`pages::TITLE` that way. A value belonging to one request belongs on the page
-component, which the handler builds and which already has the context.
-
-For a fragment that is not a document -- an htmx swap, a partial -- call
-`render` instead of `html!`: the same thing with no shell.
-
-**Adding a `layout.rsx` where there was none does not rebuild anything**,
-because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
-creating one. Editing or deleting an existing layout is noticed.
-
-A component is a function returning `Element`. Its parameters are its contract
-with the handler, and a caller fills them as struct fields, so a field the
-component does not declare is a compile error rather than a blank in the page.
-A parameter of type `Element` receives children, which is all a layout is.
-
-Reach a template from a handler with `html!`, and with nothing else:
-
-```rust
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    html!(ctx, views::index::Index { title: TITLE })
-}
-```
-
-It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
-template that bails propagates with `?`. For another status or a header,
-compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
-
-Adding a page with markup is two files in one directory -- `<name>.rs` and
-`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
-`src/pages/mod.rs`, because the directory is the registry.
-
-Not every response is a page. A redirect is `Response::empty(303)` with a
-header and no template anywhere near it.
-
-An interpolated value is escaped on the way out. Templates are read at
-**compile** time, so an edit needs a rebuild, and a template that does not
-parse is a build failure on its own line rather than a 500.
-
-## Static files
-
-Two directories, and the difference matters. `assets/` is **fingerprinted**:
-`site.css` is published at `/css/site.<hash>.css` and cached for a year.
-`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
-`favicon.ico`, anything linked to from outside.
-
-Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
-logical path and returns the published one, and a name nothing publishes
-panics there rather than 404ing in a browser.
-
-A basename starting with `_` is an input and is never published, which is what
-`assets/css/_tailwind.css` is.
-
-Both directories are embedded in the binary. **Adding a file where there was
-none does not rebuild anything**; run `touch src/assets.rs` after creating one.
-
-## Partial navigation
-
-Link to a route with the `Link` component, never a bare `<a>`:
-
-```
-<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
-```
-
-`to` takes what a route helper returns, so a link to a route that does not
-exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
-so the page still works with no JavaScript.
-
-A layout marks what a swap may replace with `dp-layout={layout}`, on the
-element wrapping **exactly** the children. Anything inside that element is
-replaced with them, so a sidebar or a scroll position belongs outside it.
-
-A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
-`html!` resolves that into a `match` over the chain. A handler never reads the
-header and never changes for it.
-
-## Tasks
-
-A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
-`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
-below the line that starts `// Your commands`. `brocanth add` rewrites the
-lines above it and keeps yours. The command becomes a subcommand
-automatically — registration happens at link time.
-
-```
-brocanth --help      # lists this project's commands too
-brocanth serve
-brocanth css         # the CSS build; -W rebuilds on each change
-```
-
-The stylesheet is embedded, so a new one is a new binary. `css` rewrites
-`src/assets.rs` to say so, which is what makes cargo notice.
-
-## Decisions that belong to the person
-
-The modules in this project are the person's choice. Do not add or
-remove one on your own. Before you run `brocanth add`, show the person
-the question: `brocanth add --questions` lists each module with its
-default, what it needs and what it recommends. Give your
-recommendation, and wait for the answer.
-
-## House style
-
-- A comment says **why**, next to the decision, and what was chosen
-  against. Not what the line does.
-- A test name is a sentence describing the guarantee it protects.
-- Prefer a type that cannot be built wrong over a check that can be
-  forgotten.
-- State a limit where someone would look for it rather than leaving it
-  to be discovered.
-
-## Framework reference
-
-`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
-cannot compile and can therefore be relied on, what can still go wrong
-and therefore needs a test, and the crate map.
-
 ## Reading a body
 
 A handler never parses `ctx.body` itself. It declares a struct with
@@ -8790,6 +8723,15 @@ A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
 
+## CSS
+
+```
+brocanth css         # the CSS build; -W rebuilds on each change
+```
+
+The stylesheet is embedded, so a new one is a new binary. `css` rewrites
+`src/assets.rs` to say so, which is what makes cargo notice.
+
 ## Analytics
 
 `brocanth_analytics::Analytics` is registered in `src/plugins/mod.rs`.
@@ -8819,6 +8761,109 @@ HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
 is in front. Set `include_subdomains` or `preload` only when the
 person who owns the domain says so.
 
+## Views
+
+The markup for a route is a `.rsx` file **next to the page that renders it**:
+`src/pages/index.rsx` beside `src/pages/index.rs`. There is no second tree and
+nothing to register -- `rsx::load_dir!("src/pages")` in `src/pages/mod.rs`
+compiles them all into the binary. One file is one module, under `views`, so
+`index.rsx` is `views::index` and `users/[id].rsx` is `views::users::_id_`.
+
+### Layouts
+
+`layout.rsx` wraps every page in its directory **and every directory below**,
+and a page never names it: which layout wraps a page is a property of where
+the page is. That is the Crystal page_router's rule for `layout.cr`.
+
+They stack root to leaf, and **the chain is not written down anywhere**.
+`html!` is a macro: it knows which file it was written in, walks up to
+`src/`, and wraps the page in every `layout.rsx` it passes. So
+`src/pages/users/layout.rsx` wraps the pages under `users/` inside the root
+layout, and deleting that file removes exactly that layer with no other edit.
+
+Every page uses the same import and the same call, whatever directory it is
+in. Do not add a chain of your own; if a page is wrapped wrongly, the
+directory tree is what to change.
+
+A layout takes `children: Element`, and may also take `layout: &str`, which
+`html!` fills with the URL prefix that layout covers. Those two are the only
+parameters it fills, because it cannot know what a third one would mean.
+A value every page shares comes from a `const` -- the root layout reads
+`pages::TITLE` that way. A value belonging to one request belongs on the page
+component, which the handler builds and which already has the context.
+
+For a fragment that is not a document -- an htmx swap, a partial -- call
+`render` instead of `html!`: the same thing with no shell.
+
+**Adding a `layout.rsx` where there was none does not rebuild anything**,
+because nothing referenced the file yet. Run `touch src/pages/mod.rs` after
+creating one. Editing or deleting an existing layout is noticed.
+
+A component is a function returning `Element`. Its parameters are its contract
+with the handler, and a caller fills them as struct fields, so a field the
+component does not declare is a compile error rather than a blank in the page.
+A parameter of type `Element` receives children, which is all a layout is.
+
+Reach a template from a handler with `html!`, and with nothing else:
+
+```rust
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    html!(ctx, views::index::Index { title: TITLE })
+}
+```
+
+It returns the handler's own `Result`, so there is no `Ok(..)` to write and a
+template that bails propagates with `?`. For another status or a header,
+compose with the other return shapes: `Ok((html!(ctx, tpl)?, 404))`.
+
+Adding a page with markup is two files in one directory -- `<name>.rs` and
+`<name>.rsx` -- and nothing else anywhere. Neither needs a line in
+`src/pages/mod.rs`, because the directory is the registry.
+
+Not every response is a page. A redirect is `Response::empty(303)` with a
+header and no template anywhere near it.
+
+An interpolated value is escaped on the way out. Templates are read at
+**compile** time, so an edit needs a rebuild, and a template that does not
+parse is a build failure on its own line rather than a 500.
+
+## Static files
+
+Two directories, and the difference matters. `assets/` is **fingerprinted**:
+`site.css` is published at `/css/site.<hash>.css` and cached for a year.
+`public/` is served **verbatim**, for names that cannot move -- `robots.txt`,
+`favicon.ico`, anything linked to from outside.
+
+Never write either URL by hand. `crate::assets::url("css/site.css")` takes the
+logical path and returns the published one, and a name nothing publishes
+panics there rather than 404ing in a browser.
+
+A basename starting with `_` is an input and is never published, which is what
+`assets/css/_tailwind.css` is.
+
+Both directories are embedded in the binary. **Adding a file where there was
+none does not rebuild anything**; run `touch src/assets.rs` after creating one.
+
+## Partial navigation
+
+Link to a route with the `Link` component, never a bare `<a>`:
+
+```
+<Link to={&crate::pages::routes::users::id::path(7)}>User 7</Link>
+```
+
+`to` takes what a route helper returns, so a link to a route that does not
+exist is a compile error. It renders a real `<a href>` with `dp-boost` on it,
+so the page still works with no JavaScript.
+
+A layout marks what a swap may replace with `dp-layout={layout}`, on the
+element wrapping **exactly** the children. Anything inside that element is
+replaced with them, so a sidebar or a scroll position belongs outside it.
+
+A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
+`html!` resolves that into a `match` over the chain. A handler never reads the
+header and never changes for it.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -8831,7 +8876,44 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 18eeee30c291c47e -->
+## Tasks
+
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
+`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
+below the line that starts `// Your commands`. `brocanth add` rewrites the
+lines above it and keeps yours. The command becomes a subcommand
+automatically — registration happens at link time.
+
+```
+brocanth --help      # lists this project's commands too
+brocanth serve
+```
+
+## Decisions that belong to the person
+
+The modules in this project are the person's choice. Do not add or
+remove one on your own. Before you run `brocanth add`, show the person
+the question: `brocanth add --questions` lists each module with its
+default, what it needs and what it recommends. Give your
+recommendation, and wait for the answer.
+
+## House style
+
+- A comment says **why**, next to the decision, and what was chosen
+  against. Not what the line does.
+- A test name is a sentence describing the guarantee it protects.
+- Prefer a type that cannot be built wrong over a check that can be
+  forgotten.
+- State a limit where someone would look for it rather than leaving it
+  to be discovered.
+
+## Framework reference
+
+`docs/llm-authoring.md` in the brocanth checkout is the full brief: what
+cannot compile and can therefore be relied on, what can still go wrong
+and therefore needs a test, and the crate map.
+
+<!-- brocanth-digest: 9483c7cdbf4d5da7 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -9057,7 +9139,7 @@ adapted_to = ["input"]
 
 [modules.rsx]
 kind = ["renderer"]
-files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
+files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
@@ -9073,14 +9155,14 @@ adapted_to = []
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.rsx-htmx]
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
-crates = []
+crates = ["brocanth-assets"]
 adapted_to = []
 
 [modules.robots]
@@ -9118,4 +9200,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 544227c715e057e3
+# brocanth-digest: 0cac9a45af73e842

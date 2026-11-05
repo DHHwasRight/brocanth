@@ -586,7 +586,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
     match app.router.dispatch(verb, path) {
         Dispatch::Found { handler, matched } => {
             let mut ctx = Ctx::new(verb, path, matched.params())
-                .with_plugins(app.core.context())
+                .with_plugins(app.core.context_for(request, state))
                 .with_state(std::mem::take(state))
                 .sent(
                     request.uri().query().unwrap_or(""),
@@ -2017,9 +2017,41 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 /// What the server is handed for one request.
 pub type Answer = brocanth::plugin_routes::BoxFuture<'static, brocanth_server::Response>;
 
-/// What `serve` answers a request with: `next`, observed. The `observe`
-/// plugin answers `/up`, `/readyz` and `/metrics` itself, and logs and
-/// counts every other request by its route template.
+/// A handler, as one server wrap hands it to the next.
+pub type Handler = std::sync::Arc<dyn Fn(brocanth_server::Request) -> Answer + Send + Sync>;
+
+/// Something around the whole server: it sees every request, a static
+/// file included, outside the request hooks.
+///
+/// A module writes a type that implements it and names the type in
+/// `Slot::ServerWrap`. Only `wrap` is required.
+pub trait ServerWrap {
+    /// `next`, with this wrap around it.
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler;
+
+    /// Listeners of its own, beside the main one. Called once, after the
+    /// plugins started.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let _ = app;
+        async { Ok(()) }
+    }
+
+    /// Called when a stop begins, before the listener closes. A wrap that
+    /// must keep answering for a while -- a readiness probe that fails
+    /// first -- waits here.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let _ = app;
+        async {}
+    }
+}
+
+/// What `serve` answers a request with: `next`, inside each server wrap.
+/// The first is the outermost: it sees a request first and the response
+/// last.
+///
+/// - `observability::serving::Serving`
 pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
     next: F,
@@ -2028,48 +2060,25 @@ where
     F: Fn(brocanth_server::Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = brocanth_server::Response> + Send + 'static,
 {
-    let routes = std::sync::Arc::clone(app);
-    observer(app).wrap_routed(next, move |request| {
-        routes
-            .router
-            .at(&request.path)
-            .map(|found| found.template().to_string())
-    })
+    let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
+    let next = <observability::serving::Serving as ServerWrap>::wrap(app, next);
+    move |request| next(request)
 }
 
-/// The probes and `/metrics` on a second listener, when
-/// `[observability] metrics_bind` names one.
+/// Each wrap's own listeners, in order.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
-    let observer = observer(app);
-    let Some(bind) = observer.config().metrics_bind.clone() else {
-        return Ok(());
-    };
-    let server = brocanth_server::Server::bind(&bind)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(async move {
-        let _ = observer.serve_admin(server).await;
-    });
+    <observability::serving::Serving as ServerWrap>::side_listeners(app).await?;
     Ok(())
 }
 
-/// The first half of a stop. `/readyz` fails at once, so a load balancer
-/// stops sending requests; the listener closes `[observability] drain_delay_secs`
-/// later.
+/// The first half of a stop: each wrap's `before_stop`, in order, then the
+/// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
-    observer(app).drain_then_stop(stopper).await;
+    <observability::serving::Serving as ServerWrap>::before_stop(app).await;
+    stopper.stop();
 }
 
-/// The `Observer` the `observability` plugin published.
-fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
-    app.core
-        .services()
-        .get::<brocanth_observe::Observer>()
-        .cloned()
-        .expect("`observability` is registered in `register!`")
-}
-
-// brocanth-digest: f2fca8459ac9d893
+// brocanth-digest: 55e964f068fe76e1
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2506,8 +2515,8 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
 //! of it is compiled. Each piece is its own module: `brocanth add
 //! observability-metrics` and the like.
 //!
-//! `serve` in `src/app.rs` reads the `Observer` this plugin publishes, wraps
-//! its handler with it, and stops on SIGTERM through it.
+//! `serving.rs` beside this file reads the `Observer` this plugin
+//! publishes: `serve` wraps its handler with it, and stops through it.
 
 use std::time::Duration;
 
@@ -2515,6 +2524,8 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_observe::{LogFormat, ObserveConfig, ObservePlugin, Observer};
+
+pub mod serving;
 
 /// What this plugin is built from.
 ///
@@ -2624,6 +2635,68 @@ impl Plugin for Observe {
         self.inner()?.shutdown(sd)
     }
 }
+===== src/plugins/observability/serving.rs =====
+//! The `Observer` around the whole server: a server wrap.
+//!
+//! `src/plugins/mod.rs` composes it with any other wrap. It answers `/up`,
+//! `/readyz` and `/metrics` itself, and logs and counts every other request
+//! by its route template.
+
+use crate::plugins::{Handler, ServerWrap};
+
+/// Names this wrap in `src/plugins/mod.rs`.
+pub struct Serving;
+
+impl ServerWrap for Serving {
+    fn wrap(app: &std::sync::Arc<crate::app::App>, next: Handler) -> Handler {
+        let routes = std::sync::Arc::clone(app);
+        std::sync::Arc::new(observer(app).wrap_routed(
+            move |request| next(request),
+            move |request| {
+                routes
+                    .router
+                    .at(&request.path)
+                    .map(|found| found.template().to_string())
+            },
+        ))
+    }
+
+    /// `/metrics` on a second listener, when `[observability] metrics_bind`
+    /// names one.
+    fn side_listeners(
+        app: &crate::app::App,
+    ) -> impl std::future::Future<Output = Result<(), String>> {
+        let observer = observer(app);
+        async move {
+            let Some(bind) = observer.config().metrics_bind.clone() else {
+                return Ok(());
+            };
+            let server = brocanth_server::Server::bind(&bind)
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::spawn(async move {
+                let _ = observer.serve_admin(server).await;
+            });
+            Ok(())
+        }
+    }
+
+    /// `/readyz` fails at once, so a load balancer stops sending requests;
+    /// the listener closes `[observability] drain_delay_secs` later.
+    fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
+        let observer = observer(app);
+        async move { observer.drain().await }
+    }
+}
+
+/// The `Observer` the `observability` plugin published.
+fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
+    app.core
+        .services()
+        .get::<brocanth_observe::Observer>()
+        .cloned()
+        .expect("`observability` is registered in `register!`")
+}
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -2697,6 +2770,31 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Edge middleware
+
+`src/plugins/mod.rs` holds five commented registrations from
+`brocanth-middleware`. Each encodes a fact about the deployment --
+which proxy to trust, which host is canonical, which origins may call
+-- so each is turned on by somebody who knows that fact. Do not
+enable them as a set, and do not invent an address or an origin to
+make one compile. To turn one on, copy it to `build()` in
+`src/app.rs` and widen `type Core` by its hook families; the comment
+above the five shows the type.
+
+## Security headers
+
+`brocanth_middleware::SecurityHeaders` is registered in
+`src/plugins/mod.rs`. Its Content-Security-Policy
+allows inline scripts by hash only. To inline a new script, add
+`Csp::default().inline_script(TEXT)` with the exact text between the
+tags. Do not add `'unsafe-inline'` to `script-src`. A value that
+depends on the request goes in a `data-` attribute or a `<meta>` tag,
+not in the script.
+
+HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
+is in front. Set `include_subdomains` or `preload` only when the
+person who owns the domain says so.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -2734,32 +2832,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-## Edge middleware
-
-`src/plugins/mod.rs` holds five commented registrations from
-`brocanth-middleware`. Each encodes a fact about the deployment --
-which proxy to trust, which host is canonical, which origins may call
--- so each is turned on by somebody who knows that fact. Do not
-enable them as a set, and do not invent an address or an origin to
-make one compile. To turn one on, copy it to `build()` in
-`src/app.rs` and widen `type Core` by its hook families; the comment
-above the five shows the type.
-
-## Security headers
-
-`brocanth_middleware::SecurityHeaders` is registered in
-`src/plugins/mod.rs`. Its Content-Security-Policy
-allows inline scripts by hash only. To inline a new script, add
-`Csp::default().inline_script(TEXT)` with the exact text between the
-tags. Do not add `'unsafe-inline'` to `script-src`. A value that
-depends on the request goes in a `data-` attribute or a `<meta>` tag,
-not in the script.
-
-HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
-is in front. Set `include_subdomains` or `preload` only when the
-person who owns the domain says so.
-
-<!-- brocanth-digest: 26e769aaff4202fb -->
+<!-- brocanth-digest: e0b9d4fd6e975ea7 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
