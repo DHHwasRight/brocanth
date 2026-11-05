@@ -755,7 +755,6 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     /// anywhere inside it -- which is the shape the core has and the reason
     /// this function is called from [`tokio::task::spawn_blocking`].
     fn blocking(&self, mut request: CoreRequest) -> Response {
-        let context = self.app.context();
         let mut state = RequestState::new();
 
         let response = self.app.run(&mut request, &mut state, |request, state| {
@@ -773,6 +772,8 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             match self.router.dispatch(verb, request.uri().path()) {
                 Dispatch::Found { handler, matched } => {
                     let params = matched.params();
+                    // After the hooks: a provider may read what they wrote.
+                    let context = self.app.context_for(request, &*state);
                     let mut cx = RouteCx::new(request, &params, &context, state);
                     handler.call_blocking(&mut cx)
                 }
@@ -803,7 +804,6 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     /// that a panicking *hook* is a 500 as well -- on the other arm
     /// `spawn_blocking` catches those too, and the two arms answer alike.
     async fn inline(&self, mut request: CoreRequest) -> Response {
-        let context = self.app.context();
         let mut state = RequestState::new();
 
         let outcome = match self.app.begin(&mut request, &mut state) {
@@ -815,6 +815,8 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
                     Some(verb) => match self.router.dispatch(verb, read.uri().path()) {
                         Dispatch::Found { handler, matched } => {
                             let params = matched.params();
+                            // After the hooks: a provider may read what they wrote.
+                            let context = self.app.context_for(read, &state);
                             let mut cx = RouteCx::new(read, &params, &context, &mut state);
                             handler.call_inline(&mut cx).await
                         }

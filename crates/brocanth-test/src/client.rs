@@ -348,7 +348,6 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
     /// `brocanth-server`'s `Bridge::blocking`, without the socket.
     fn once(&self, request: &TestRequest) -> TestResponse {
         let mut core = request.build(&self.headers);
-        let context = self.app.context();
         let mut state = self.state();
         let plan = self.app.route_plan();
 
@@ -362,6 +361,8 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
             match self.router.dispatch(verb, read.uri().path()) {
                 Dispatch::Found { handler, matched } => {
                     let params = matched.params();
+                    // After the hooks: a provider may read what they wrote.
+                    let context = self.app.context_for(read, &*state);
                     let mut cx = RouteCx::new(read, &params, &context, state);
                     handler.run(plan, &mut cx)
                 }
@@ -382,7 +383,6 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
     /// [`App::finish`], so the core never holds a future.
     async fn once_async(&self, request: &TestRequest) -> TestResponse {
         let mut core = request.build(&self.headers);
-        let context = self.app.context();
         let mut state = self.state();
         let plan = self.app.route_plan();
 
@@ -395,6 +395,8 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
                     Some(verb) => match self.router.dispatch(verb, read.uri().path()) {
                         Dispatch::Found { handler, matched } => {
                             let params = matched.params();
+                            // After the hooks: a provider may read what they wrote.
+                            let context = self.app.context_for(read, &state);
                             let mut cx = RouteCx::new(read, &params, &context, &mut state);
                             handler.run_async(plan, &mut cx).await
                         }
