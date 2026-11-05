@@ -21,6 +21,7 @@ Features:
 
 | Feature | Default | What it adds |
 |---|---|---|
+| `runtime` | on | The screens, forms and policy: everything but `scaffold`. A generated project takes `default-features = false, features = ["runtime"]`. |
 | `plugin` | on | `AdminPlugin`, a `RouteSource` for a host that mounts one. With it off, `brocanth` is not in the tree, and `Admin::dispatch` still works behind any server. |
 | `scaffold` | off | The `admin` and `admin-model` modules for `brocanth create`. Only the CLI turns it on. |
 

@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! # Design notes
 //!
@@ -61,24 +61,41 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "runtime")]
 mod assets;
 
+#[cfg(feature = "runtime")]
 pub mod adapter;
+#[cfg(feature = "runtime")]
 pub mod admin;
+#[cfg(feature = "runtime")]
 pub mod config;
+#[cfg(feature = "runtime")]
 pub mod data;
+#[cfg(feature = "runtime")]
 pub mod discovery;
+#[cfg(feature = "runtime")]
 pub mod fixture;
+#[cfg(feature = "runtime")]
 pub mod form;
+#[cfg(feature = "runtime")]
 pub mod model;
+#[cfg(feature = "runtime")]
 pub mod paging;
+#[cfg(feature = "runtime")]
 pub mod panel;
 #[cfg(feature = "plugin")]
+#[cfg(feature = "runtime")]
 pub mod plugin;
+#[cfg(feature = "runtime")]
 pub mod policy;
+#[cfg(feature = "runtime")]
 pub mod query;
+#[cfg(feature = "runtime")]
 pub mod rows;
+#[cfg(feature = "runtime")]
 pub mod rt;
+#[cfg(feature = "runtime")]
 pub mod view;
 
 /// What `brocanth create` writes for `admin`, and why `admin-model` is listed
@@ -101,15 +118,18 @@ pub mod eject;
 /// Compiled into the binary by rsx at macro expansion: nothing is read from
 /// disk at runtime, and an application that replaces every view still pays for
 /// these, which is the one cost of shipping defaults at all.
+#[cfg(feature = "runtime")]
 mod templates {
     rsx::load_dir!("src/templates");
 }
 
+#[cfg(feature = "runtime")]
 pub use admin::{Admin, AdminError, Response, Route};
 
 /// The one inline script of the admin layout that is not dp-swap's own
 /// partial script. A Content-Security-Policy allows it by its hash:
 /// `Csp::default().inline_script(brocanth_admin::INLINE_SCRIPT)`.
+#[cfg(feature = "runtime")]
 pub const INLINE_SCRIPT: &str = assets::SCRIPT;
 
 /// The shipped stylesheet, which the layout inlines in a `<style>`.
@@ -117,12 +137,14 @@ pub const INLINE_SCRIPT: &str = assets::SCRIPT;
 /// Public for an ejected layout, which inlines it the same way. Its
 /// content changes with every release; the custom properties listed in
 /// `docs/admin-customization.md` are the stable part.
+#[cfg(feature = "runtime")]
 pub const STYLESHEET: &str = assets::STYLE;
 
 /// dp-swap's mutating verbs, the layout's second script.
 ///
 /// Re-exported from `brocanth_middleware::dp::SCRIPT` so an ejected layout
 /// needs no dependency of its own on the middleware crate.
+#[cfg(feature = "runtime")]
 pub const MUTATE_SCRIPT: &str = brocanth_middleware::dp::SCRIPT;
 
 /// The class strings the shipped screens are written in.
@@ -130,26 +152,41 @@ pub const MUTATE_SCRIPT: &str = brocanth_middleware::dp::SCRIPT;
 /// Public so an ejected screen compiles in the application with the same
 /// vocabulary. **Stable:** the function names. **Not stable:** the class
 /// strings they return, which follow the stylesheet.
+#[cfg(feature = "runtime")]
 pub mod parts {
     pub use crate::templates::parts::*;
 }
+#[cfg(feature = "runtime")]
 pub use config::{AdminConfig, ModelAdmin};
+#[cfg(feature = "runtime")]
 pub use data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search, SharedData};
+#[cfg(feature = "runtime")]
 pub use rows::{AdminResource, RowAction};
 
 /// Re-exported so an [`AdminResource`] and its policy name one crate.
+#[cfg(feature = "runtime")]
 pub use brocanth_policy as row_policy;
+#[cfg(feature = "runtime")]
 pub use discovery::{discover, Discovery, RegistryEntry};
+#[cfg(feature = "runtime")]
 pub use fixture::Fixture;
+#[cfg(feature = "runtime")]
 pub use form::{widget_for, Choice, Field, Form, Submission, Widget};
+#[cfg(feature = "runtime")]
 pub use model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Relation, Row, Value};
+#[cfg(feature = "runtime")]
 pub use paging::Page;
 #[cfg(feature = "plugin")]
+#[cfg(feature = "runtime")]
 pub use plugin::{AdminPlugin, AdminSetup};
+#[cfg(feature = "runtime")]
 pub use policy::{policy_fn, Action, DenyAll, Policy, Principal};
+#[cfg(feature = "runtime")]
 pub use query::{Direction, ListQuery, Sort};
+#[cfg(feature = "runtime")]
 pub use view::{View, Views};
 
 /// Re-exported so a template file and an override need one dependency, and so
 /// the rsx this crate was built against is the rsx an override compiles with.
+#[cfg(feature = "runtime")]
 pub use rsx;

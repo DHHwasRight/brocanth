@@ -9,5 +9,14 @@ run = "cargo build --workspace"
 run = "cargo test --workspace"
 [tasks.lint]
 run = "cargo clippy --all-targets -- -D warnings"
+# Every module crate as the CLI takes it: the scaffold side alone, with the
+# runtime off. Its own tests run too; doctests are the runtime's and stay in
+# `test`.
+[tasks.scaffold]
+run = """
+for c in admin auth cache client db input jobs middleware observe openapi policy realtime resource robots schema storage; do
+  cargo test -p brocanth-$c --no-default-features --features scaffold --lib || exit 1
+done
+"""
 [tasks.ci]
-depends = ["build", "lint", "test"]
+depends = ["build", "lint", "test", "scaffold"]

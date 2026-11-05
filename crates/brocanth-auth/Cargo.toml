@@ -9,7 +9,7 @@ description = "Authentication for brocanth: OAuth 2.0 and OIDC with mandatory PK
 [dependencies]
 # The arrow points plugin -> core, always. The core does not know this crate
 # exists and nothing here is reachable from it.
-brocanth.workspace = true
+brocanth = { workspace = true, optional = true }
 
 # --- crypto we do not write ------------------------------------------------
 #
@@ -17,7 +17,7 @@ brocanth.workspace = true
 # PHC string format's own reference crate, so a stored hash is a portable
 # `$argon2id$...` string rather than a bespoke encoding. We take argon2id and
 # offer no alternative.
-argon2 = "0.6"
+argon2 = { version = "0.6", optional = true }
 # `jsonwebtoken`: the maintained Rust JWT crate, and the only one that both
 # verifies RS256/ES256 id_tokens and *signs* ES256, which Apple's client-secret
 # JWT requires. `rust_crypto` keeps the backend pure Rust: no aws-lc-rs C build
@@ -25,37 +25,37 @@ argon2 = "0.6"
 jsonwebtoken = { version = "11", default-features = false, features = [
     "use_pem",
     "rust_crypto",
-] }
+], optional = true }
 # HMAC-SHA256 for the session cookie signature, for hashing the verifier half
 # of a single-use token, and for the keyed network digest a login alert stores.
 # RustCrypto again, same reason.
-hmac = "0.13"
-sha2 = "0.11"
+hmac = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
 # HMAC-SHA1, and only for TOTP. RFC 6238's interoperable parameters are SHA-1,
 # six digits and thirty seconds, and an authenticator app that ignores the
 # `algorithm` field of the `otpauth:` URI — most of them — will produce SHA-1
 # codes whatever we ask for. HMAC needs its hash to be a PRF, not
 # collision-resistant, so the attack on SHA-1 does not reach here. RustCrypto,
 # so it shares `digest` with `sha2` and adds no second trait stack.
-sha1 = "0.11"
+sha1 = { version = "0.11", optional = true }
 # Constant-time equality. `==` on a byte slice short-circuits and leaks the
 # length of the common prefix, which is enough to forge a MAC one byte at a
 # time.
-subtle = "2.6"
+subtle = { version = "2.6", optional = true }
 # The OS CSPRNG, directly. Session ids, state, nonce, PKCE verifiers and
 # single-use tokens are all "give me N unpredictable bytes" and nothing else.
-getrandom = "0.4"
+getrandom = { version = "0.4", optional = true }
 
 # --- plumbing ---------------------------------------------------------------
-base64 = "0.23"
-http = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+base64 = { version = "0.23", optional = true }
+http = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 thiserror = "2"
-url = "2"
+url = { version = "2", optional = true }
 # The storage trait and the HTTP client trait are both async and both
 # object-safe, which `async fn` in a trait still is not.
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 
 # `reqwest` is the default HTTP client because it is what the ecosystem
 # already has in the tree, and rustls keeps it off the system TLS stack. It is
@@ -159,8 +159,27 @@ brocanth-test.workspace = true
 # async runtime to hash a password. Turn the feature on to get
 # `ReqwestClient`; leave it off and implement `HttpClient` over whatever the
 # application already holds.
-default = []
-reqwest-client = ["dep:reqwest"]
+default = ["runtime"]
+# Accounts, sessions and tokens: everything but the scaffold module. The CLI
+# turns it off and takes `scaffold` alone, so `brocanth create` links no
+# password hash, no JWT stack and no URL parser to write a project that does.
+runtime = [
+    "dep:brocanth",
+    "dep:argon2",
+    "dep:jsonwebtoken",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:sha1",
+    "dep:subtle",
+    "dep:getrandom",
+    "dep:base64",
+    "dep:http",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:url",
+    "dep:async-trait",
+]
+reqwest-client = ["runtime", "dep:reqwest"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's
@@ -170,15 +189,15 @@ scaffold = ["dep:brocanth-scaffold"]
 # The backoffice tab. Off, like every other way out of this crate. `admin` off
 # means the code is absent and not merely unreachable: `src/admin.rs` and the
 # templates beside it are `#[cfg]`-ed out of the crate entirely.
-admin = ["dep:brocanth-admin", "dep:rsx"]
+admin = ["runtime", "dep:brocanth-admin", "dep:rsx"]
 
 # `PgStore`: the storage traits over Postgres. See the dependency line above.
-postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+postgres = ["runtime", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
 
 # The storage contract as tests: `brocanth_auth::conformance`, and one macro
 # per storage trait that writes a `#[tokio::test]` for each case. For an
 # adapter author's test binary; an application never turns it on.
-conformance = ["dep:tokio"]
+conformance = ["runtime", "dep:tokio"]
 
 [lints.rust]
 missing_docs = "warn"

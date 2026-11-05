@@ -16,20 +16,20 @@ description = "Background jobs for brocanth: a database-backed queue with retrie
 # to in this workspace, so an application running both the model layer and the
 # queue links one SQL driver and one connection pool implementation, not two.
 [dependencies]
-brocanth.workspace = true
+brocanth = { workspace = true, optional = true }
 
 # The job contract, for its read side only. `Inspect` is what the admin
 # screens are written against, so implementing it here is what lets one
 # panel serve this queue and `brocanth-queue` without knowing which it has.
 # It costs nothing in the tree: the contract names serde, serde_json,
 # thiserror and tokio, which is the set below already.
-brocanth-queue.workspace = true
+brocanth-queue = { workspace = true, optional = true }
 
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros"] }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 thiserror = "2"
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
@@ -145,9 +145,23 @@ brocanth-jobs = { path = ".", default-features = false, features = ["sqlite", "a
 # and gets no Postgres driver. Leaving `default-features` on and adding
 # `sqlite` compiles both drivers, which works and is almost never what you
 # meant.
-default = ["postgres"]
-postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring"]
-sqlite = ["sqlx/sqlite-bundled"]
+default = ["runtime", "postgres"]
+postgres = ["runtime", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+sqlite = ["runtime", "sqlx/sqlite-bundled"]
+
+# The queue itself: everything but the scaffold module. Each backend turns it
+# on. The CLI turns every default off and takes `scaffold` alone, so
+# `brocanth create` links no driver and no tokio to write a queue into a
+# project.
+runtime = [
+    "dep:brocanth",
+    "dep:brocanth-queue",
+    "dep:sqlx",
+    "dep:tokio",
+    "dep:chrono",
+    "dep:serde",
+    "dep:serde_json",
+]
 
 # The scaffold module, for `brocanth create`. Off by default, for the reason
 # in the dependency comment: writing a queue into a new project is the CLI's
@@ -155,7 +169,13 @@ sqlite = ["sqlx/sqlite-bundled"]
 scaffold = ["dep:brocanth-scaffold"]
 
 # The backoffice tab. Off, like every other way out of this crate.
-admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait", "dep:brocanth-middleware"]
+admin = [
+    "runtime",
+    "dep:brocanth-admin",
+    "dep:rsx",
+    "dep:async-trait",
+    "dep:brocanth-middleware",
+]
 
 [lints.rust]
 missing_docs = "warn"

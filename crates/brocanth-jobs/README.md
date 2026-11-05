@@ -29,6 +29,7 @@ Inside this workspace: `brocanth-jobs.workspace = true`.
 
 | Feature | Default | What it adds |
 |---|---|---|
+| `runtime` | on | The queue itself: everything but `scaffold`. Each backend turns it on. |
 | `postgres` | on | The Postgres store. The claim is `FOR UPDATE SKIP LOCKED`. |
 | `sqlite` | off | The SQLite store. Claims serialise under the file's write lock. |
 | `admin` | off | `admin::JobsPanel`, the queue's tab in `brocanth-admin`. |

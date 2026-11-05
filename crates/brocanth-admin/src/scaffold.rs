@@ -77,7 +77,8 @@ impl Module for Backoffice {
                 // The `RouteSource` is for a host that mounts one. A
                 // generated project mounts the page-shaped routes it writes
                 // itself, so the plugin half is not compiled.
-                .no_default_features(),
+                .no_default_features()
+                .feature("runtime"),
         )
         .absent(
             "brocanth-admin",

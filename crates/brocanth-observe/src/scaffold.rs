@@ -30,9 +30,12 @@ const HEALTH: &str = "observability-health";
 const METRICS: &str = "observability-metrics";
 const TRACING: &str = "observability-tracing";
 
-/// The crate with no default features: each child turns on its own.
+/// The crate with no default features but the observer itself: each child
+/// turns on its own.
 fn krate() -> Dep {
-    Dep::brocanth("brocanth-observe").no_default_features()
+    Dep::brocanth("brocanth-observe")
+        .no_default_features()
+        .feature("runtime")
 }
 
 /// The parent: an `Observer` around every request.

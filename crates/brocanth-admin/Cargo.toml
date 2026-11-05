@@ -18,13 +18,18 @@ readme = "README.md"
 # behind any server — `Admin::dispatch` takes a method, a path and form pairs —
 # and §8.2 says a feature that is off means the code is absent. With `plugin`
 # off, `brocanth` is not in the tree at all.
-default = ["plugin"]
-plugin = ["dep:brocanth", "dep:http"]
+default = ["runtime", "plugin"]
+plugin = ["runtime", "dep:brocanth", "dep:http"]
+# The screens, the forms and the policy: everything but the scaffold module.
+# A generated project asks for `default-features = false, features =
+# ["runtime"]`: the screens without the `RouteSource`. The CLI asks for
+# `scaffold` alone and links no template engine.
+runtime = ["dep:rsx", "dep:async-trait", "dep:brocanth-policy", "dep:brocanth-middleware"]
 # The module `brocanth create` lists under the key `admin`, and `admin-model`
 # beside it. Off by default: the one program that wants it is the CLI, which
 # asks for `default-features = false, features = ["scaffold"]`. It writes
-# text and reads nothing from this crate, so it needs neither `plugin` nor
-# the core.
+# text and reads nothing from this crate, so it needs neither `runtime`,
+# `plugin` nor the core.
 scaffold = ["dep:brocanth-scaffold"]
 
 [dependencies]
@@ -34,8 +39,8 @@ brocanth = { workspace = true, optional = true }
 # answer with an `http::Response` -- the core's `Response` is an alias for
 # one. Same major version as the core, so there is one copy in the binary.
 http = { version = "1", optional = true }
-rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
-async-trait = "0.1"
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+async-trait = { version = "0.1", optional = true }
 thiserror = "2"
 
 # Row-level authorisation, PLAN.md §9 and §12 item 9. The algebra and the
@@ -44,8 +49,8 @@ thiserror = "2"
 # entity. Its only dependency is `thiserror`, which is already here, so the
 # admin still links no SQL driver and no ORM: a policy compiles to SQL text
 # and a bind list, and the data source runs it.
-brocanth-policy = { workspace = true }
-brocanth-middleware = { workspace = true }
+brocanth-policy = { workspace = true, optional = true }
+brocanth-middleware = { workspace = true, optional = true }
 
 # Optional, and off. See the `scaffold` feature.
 brocanth-scaffold = { workspace = true, optional = true }

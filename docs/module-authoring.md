@@ -147,14 +147,17 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["runtime"]
+# What an application runs: every dependency but the scaffold's. On by
+# default. The CLI turns it off, so `brocanth create` never links it.
+runtime = ["dep:brocanth", "dep:http"]
 # The code that writes this crate into a project. Off, so an application
 # that depends on this crate never links the generator.
 scaffold = ["dep:brocanth-scaffold"]
 
 [dependencies]
-brocanth = { git = "https://github.com/DHHwasRight/brocanth", branch = "main" }
-http = "1"
+brocanth = { git = "https://github.com/DHHwasRight/brocanth", branch = "main", optional = true }
+http = { version = "1", optional = true }
 
 [dependencies.brocanth-scaffold]
 git = "https://github.com/DHHwasRight/brocanth"
@@ -162,9 +165,28 @@ branch = "main"
 optional = true
 ```
 
-The feature is off by default. This is the rule in `PLAN.md` §8: nothing
-ships unless it is asked for. Compare
+The `scaffold` feature is off by default. This is the rule in `PLAN.md`
+§8: nothing ships unless it is asked for. Compare
 `crates/brocanth-middleware/Cargo.toml:66`.
+
+The two features also split the crate the other way. `scaffold` depends
+on `brocanth-scaffold` and nothing else. Everything an application runs
+sits behind `runtime`:
+
+- In `src/lib.rs`, every item but `pub mod scaffold` carries
+  `#[cfg(feature = "runtime")]`. The README include becomes
+  `#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]`.
+- Every other feature that needs the runtime lists `"runtime"` first.
+- The scaffold module never names the crate's own types. It writes text.
+
+The reason is the CLI. It takes every module crate with
+`default-features = false, features = ["scaffold"]`. A runtime dependency
+outside `runtime` (a driver, a TLS stack, tokio) then lands in a tool that
+only writes files. The CLI still builds, slower and larger, and nobody
+notices. `crates/brocanth-cli/tests/lean.rs` notices: it fails when the
+CLI's dependency graph holds a runtime crate. A crate whose runtime needs
+only small pure crates (`brocanth-robots`, `brocanth-policy`) may skip the
+feature; that test decides. Compare `crates/brocanth-db/Cargo.toml`.
 
 ### Step 2: the plugin
 
@@ -356,7 +378,7 @@ through a transitive dependency (`crates/brocanth-scaffold/src/lib.rs:38`).
 
 ```toml
 # crates/brocanth-cli/Cargo.toml
-brocanth-correlation = { git = "https://github.com/you/brocanth-correlation", features = ["scaffold"] }
+brocanth-correlation = { git = "https://github.com/you/brocanth-correlation", default-features = false, features = ["scaffold"] }
 ```
 
 ```rust
@@ -991,7 +1013,8 @@ without a change to the CLI.
 
 ### Checklist
 
-1. A crate with a `scaffold` feature, off by default.
+1. A crate with a `scaffold` feature, off by default, and its runtime
+   behind a default `runtime` feature that the CLI turns off.
 2. `Manifest::new(key, gist)`: a key with no hyphen, unless it has a
    parent; a gist with no full stop.
 3. `category` for each kind of seam it writes; `after` for order,

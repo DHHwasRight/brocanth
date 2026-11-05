@@ -15,16 +15,16 @@ readme = "README.md"
 # static files included, and it needs nothing the server does not already
 # expose. An application that does not name `ObservePlugin` links none of it.
 [dependencies]
-brocanth.workspace = true
+brocanth = { workspace = true, optional = true }
 
 # The wrapper takes and returns the server's `Request` and `Response`, and the
 # signal helper stops a `Server` through its `Stopper`.
-brocanth-server.workspace = true
+brocanth-server = { workspace = true, optional = true }
 
 # Probe checks run concurrently under a timeout, and the signal helper waits
 # for SIGTERM. The server already links tokio with `rt` and `time`; `signal`
 # is the one feature this adds.
-tokio = { version = "1", features = ["rt", "time", "signal", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "signal", "macros"], optional = true }
 
 # `logs`: the request line and the application's own `tracing::info!` go
 # through one subscriber. `tracing` is in the workspace already (sqlx and
@@ -70,9 +70,13 @@ serde = { version = "1", features = ["derive"] }
 [features]
 # Logs and metrics are what every deployed application wants on day 2, and
 # both are small. Traces need a collector, so they wait to be asked for.
-default = ["logs", "metrics"]
-logs = ["dep:tracing", "dep:tracing-subscriber"]
-metrics = ["dep:prometheus-client"]
+default = ["runtime", "logs", "metrics"]
+# The observer itself: request ids, the SIGTERM sequence, the probes. Every
+# other feature turns it on. The CLI turns every default off and takes
+# `scaffold` alone, so `brocanth create` links no server and no tokio.
+runtime = ["dep:brocanth", "dep:brocanth-server", "dep:tokio"]
+logs = ["runtime", "dep:tracing", "dep:tracing-subscriber"]
+metrics = ["runtime", "dep:prometheus-client"]
 otel = [
     "logs",
     "dep:opentelemetry",
@@ -83,7 +87,7 @@ otel = [
 jobs = ["_jobs", "brocanth-jobs/postgres"]
 jobs-sqlite = ["_jobs", "brocanth-jobs/sqlite"]
 # What the code is gated on. Not for an application to name.
-_jobs = ["dep:brocanth-jobs"]
+_jobs = ["runtime", "dep:brocanth-jobs"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]

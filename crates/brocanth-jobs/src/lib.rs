@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! # Design notes
 //!
@@ -155,7 +155,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(not(any(feature = "postgres", feature = "sqlite")))]
+#[cfg(all(
+    feature = "runtime",
+    not(any(feature = "postgres", feature = "sqlite"))
+))]
 compile_error!(
     "brocanth-jobs needs a database to be a queue. Enable the `postgres` \
      feature (the default) or the `sqlite` feature. There is no in-memory \
@@ -164,15 +167,25 @@ compile_error!(
 );
 
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 pub mod admin;
+#[cfg(feature = "runtime")]
 pub mod backoff;
+#[cfg(feature = "runtime")]
 pub mod clock;
+#[cfg(feature = "runtime")]
 pub mod cron;
+#[cfg(feature = "runtime")]
 pub mod events;
+#[cfg(feature = "runtime")]
 pub mod job;
+#[cfg(feature = "runtime")]
 pub mod listen;
+#[cfg(feature = "runtime")]
 pub mod plugin;
+#[cfg(feature = "runtime")]
 pub mod queue;
+#[cfg(feature = "runtime")]
 pub mod registry;
 
 /// The panel's screens, compiled in by rsx at macro expansion: nothing is
@@ -182,34 +195,53 @@ pub mod registry;
 /// `use` line names this path. Private, like the admin's own template
 /// module, which is also what keeps `missing_docs` off generated items.
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 mod admin_templates {
     rsx::load_dir!("src/admin_templates");
 }
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+#[cfg(feature = "runtime")]
 pub mod worker;
 
+#[cfg(feature = "runtime")]
 mod error;
 /// This queue, as `brocanth_queue::Inspect`, so the admin screens can
 /// read it without knowing which queue they have.
+#[cfg(feature = "runtime")]
 mod inspect;
+#[cfg(feature = "runtime")]
 mod panic_hook;
+#[cfg(feature = "runtime")]
 mod store;
 
+#[cfg(feature = "runtime")]
 pub use backoff::{Backoff, Prng};
+#[cfg(feature = "runtime")]
 pub use clock::{Clock, ManualClock, SystemClock};
+#[cfg(feature = "runtime")]
 pub use cron::Cron;
+#[cfg(feature = "runtime")]
 pub use error::{Error, Result};
+#[cfg(feature = "runtime")]
 pub use events::{EventFn, JobEvent, JobEvents, Silent};
+#[cfg(feature = "runtime")]
 pub use job::{FailureKind, Job, JobContext, JobFailure, JobId};
+#[cfg(feature = "runtime")]
 pub use panic_hook::capture_backtraces;
+#[cfg(feature = "runtime")]
 pub use plugin::{JobsConfig, JobsPlugin};
+#[cfg(feature = "runtime")]
 pub use queue::{Enqueue, JobState, Misfire, Queue, Reclaimed, Recurring};
+#[cfg(feature = "runtime")]
 pub use registry::JobRegistry;
+#[cfg(feature = "runtime")]
 pub use store::{Backend, DeadJob, Enqueued, QueueDepth, RunningJob, Stats, WaitingJob};
+#[cfg(feature = "runtime")]
 pub use worker::{ShutdownReport, Worker, WorkerBuilder, WorkerConfig, WorkerHandle};
 
 /// Everything an application that enqueues and runs jobs needs, in one `use`.
+#[cfg(feature = "runtime")]
 pub mod prelude {
     pub use crate::{
         Backoff, Job, JobContext, JobEvent, JobEvents, JobId, JobRegistry, JobsConfig, JobsPlugin,

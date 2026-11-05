@@ -9,17 +9,17 @@ readme = "README.md"
 # The arrow points from the plugin to the core, never back. An application that
 # does not write `CachePlugin` in its `main` links none of this.
 [dependencies]
-brocanth.workspace = true
+brocanth = { workspace = true, optional = true }
 
 # The seam is an async trait held behind `Arc<dyn Cache>`, and `async fn` in a
 # trait is still not object-safe. Same choice, for the same reason, as
 # `brocanth-auth`'s `AuthStore` and `brocanth-storage`'s `Storage`.
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 thiserror = "2"
 
 # The route cache (`src/route.rs`) reads request headers and writes response
 # headers. The core already links `http` 1; this names the same copy.
-http = "1"
+http = { version = "1", optional = true }
 
 # Time is a value this crate holds rather than a function it calls; see
 # `src/clock.rs`. `chrono` with `default-features = false` is the same spelling
@@ -27,7 +27,7 @@ http = "1"
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
     "std",
-] }
+], optional = true }
 
 # `fetch` waits for whoever holds the lease, and waiting needs a timer. This is
 # the one runtime dependency that is not behind a backend feature, and it is
@@ -39,7 +39,7 @@ chrono = { version = "0.4", default-features = false, features = [
 # `before_start`, where the core's lifecycle hook is synchronous and `migrate`
 # is not — the same manoeuvre `brocanth-jobs` makes. This crate spawns nothing
 # and starts no runtime of its own.
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"], optional = true }
 
 # `sqlx` is version 0.9, which is the version `sea-orm` 2.0.4 already resolves
 # to in this workspace and the version `brocanth-jobs` pins. An application
@@ -106,7 +106,8 @@ brocanth-test.workspace = true
 [features]
 # `postgres` is the default and the only backend here. SQLite is the "smaller
 # setups, different crate" case, and this crate is shaped so that crate can
-# exist: build this one with `default-features = false` and you get the trait,
+# exist: build this one with `default-features = false, features = ["runtime"]`
+# and you get the trait,
 # the key types, the error type, the clock and `fetch` — and no `sqlx`, no
 # driver, no pool. A SQLite backend is then a crate that depends on this one and
 # implements `Cache`, exactly as an S3 backend is for `brocanth-storage`.
@@ -117,8 +118,13 @@ brocanth-test.workspace = true
 # find out at build time instead of at run time — is bought here by the type
 # system instead: with `postgres` off, `PgCache` does not exist, and a program
 # that names it fails to compile with a message pointing at the name.
-default = ["postgres"]
-postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+default = ["runtime", "postgres"]
+postgres = ["runtime", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+
+# The cache itself: everything but the scaffold module. On by default. The CLI
+# turns it off and takes `scaffold` alone, so `brocanth create` links no tokio,
+# no chrono and no driver to write a project that uses them.
+runtime = ["dep:brocanth", "dep:async-trait", "dep:http", "dep:chrono", "dep:tokio"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's
@@ -126,10 +132,10 @@ postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
 scaffold = ["dep:brocanth-scaffold"]
 
 # The backoffice tab. Off, like every other way out of this crate.
-admin = ["dep:brocanth-admin", "dep:rsx"]
+admin = ["runtime", "dep:brocanth-admin", "dep:rsx"]
 
 # Tag invalidation from model changes. Off, like the admin.
-events = ["dep:brocanth-events"]
+events = ["runtime", "dep:brocanth-events"]
 
 [lints.rust]
 missing_docs = "warn"

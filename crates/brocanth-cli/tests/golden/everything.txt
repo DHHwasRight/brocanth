@@ -13,7 +13,7 @@ default-run = "my-blog"
 # field on the context, no bytes in the binary.
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics", "otel"], default-features = false }
+brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
@@ -29,7 +29,7 @@ brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", fea
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
-brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", default-features = false }
+brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-admin-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }

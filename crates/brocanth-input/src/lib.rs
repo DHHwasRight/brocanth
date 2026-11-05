@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! ---
 //!
@@ -79,17 +79,26 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "runtime")]
 use std::fmt;
 
+#[cfg(feature = "runtime")]
 pub use described::Described;
+#[cfg(feature = "runtime")]
 pub use multipart::{FilePart, Limits, Multipart};
+#[cfg(feature = "runtime")]
 pub use rerender::{rerender, FieldErrors};
+#[cfg(feature = "runtime")]
 pub use zod;
 
+#[cfg(feature = "runtime")]
 use zod::{Faults, Input, Refusal, Value};
 
+#[cfg(feature = "runtime")]
 pub mod described;
+#[cfg(feature = "runtime")]
 pub mod multipart;
+#[cfg(feature = "runtime")]
 pub mod rerender;
 
 #[cfg(feature = "scaffold")]
@@ -100,6 +109,7 @@ pub mod scaffold;
 /// Three borrowed parts and no framework type, so a handler, a hook, a test
 /// and a command-line tool all build one the same way.
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "runtime")]
 pub struct Entrance<'r> {
     content_type: Option<&'r str>,
     query: &'r str,
@@ -109,6 +119,7 @@ pub struct Entrance<'r> {
 
 /// What the body is written in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(feature = "runtime")]
 pub enum Carrier<'r> {
     /// `application/x-www-form-urlencoded`.
     Form,
@@ -122,6 +133,7 @@ pub enum Carrier<'r> {
     Unsaid,
 }
 
+#[cfg(feature = "runtime")]
 impl<'r> Entrance<'r> {
     /// Build one from the parts of a request, under [`Limits::DEFAULT`].
     pub const fn new(
@@ -277,6 +289,7 @@ impl<'r> Entrance<'r> {
 /// body that arrived and said the wrong thing, which is 422. This is a body
 /// that did not arrive in a form anybody can read, which is 400 or 415.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg(feature = "runtime")]
 pub enum Unreadable {
     /// The bytes are not UTF-8.
     NotText,
@@ -291,6 +304,7 @@ pub enum Unreadable {
     Multipart(multipart::Fault),
 }
 
+#[cfg(feature = "runtime")]
 impl Unreadable {
     /// The status this deserves.
     ///
@@ -306,6 +320,7 @@ impl Unreadable {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl fmt::Display for Unreadable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -322,6 +337,7 @@ impl fmt::Display for Unreadable {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl std::error::Error for Unreadable {}
 
 /// Every fault, as an answer the server can write.
@@ -330,8 +346,10 @@ impl std::error::Error for Unreadable {}
 /// with its path, its code and the numbers it compared. It is
 /// [`zod::Problem`] with the body put in a [`brocanth_server::Response`].
 #[derive(Clone, Copy, Default, Debug)]
+#[cfg(feature = "runtime")]
 pub struct Answer;
 
+#[cfg(feature = "runtime")]
 impl Refusal for Answer {
     type Out = brocanth_server::Response;
 
@@ -342,11 +360,13 @@ impl Refusal for Answer {
 }
 
 /// A body nobody could read, as an answer the server can write.
+#[cfg(feature = "runtime")]
 pub fn unreadable(why: &Unreadable) -> brocanth_server::Response {
     brocanth_server::Response::text(why.status(), why.to_string())
 }
 
 #[cfg(test)]
+#[cfg(feature = "runtime")]
 mod tests {
     use super::*;
     use zod::{Entry, Int, Schema, Text};

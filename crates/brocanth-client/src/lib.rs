@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! ---
 //!
@@ -48,31 +48,42 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "runtime")]
 use std::collections::BTreeMap;
 
+#[cfg(feature = "runtime")]
 use brocanth::routing::Verb;
+#[cfg(feature = "runtime")]
 use brocanth_input::Described;
+#[cfg(feature = "runtime")]
 use clap::{Arg, ArgAction, Command};
+#[cfg(feature = "runtime")]
 use zod::node::{Field, Node};
 
+#[cfg(feature = "runtime")]
 pub mod help;
+#[cfg(feature = "runtime")]
 mod plan;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
 #[cfg(feature = "reqwest-client")]
+#[cfg(feature = "runtime")]
 mod reqwest_wire;
 
+#[cfg(feature = "runtime")]
 pub use plan::{plan, Call};
 
 #[cfg(feature = "reqwest-client")]
+#[cfg(feature = "runtime")]
 pub use reqwest_wire::Reqwest;
 
 /// How a request is actually sent.
 ///
 /// The contract, so an application holding its own HTTP client implements
 /// this and the shipped one appears nowhere in its lock file.
+#[cfg(feature = "runtime")]
 pub trait Wire {
     /// Send it, and give back what came back.
     ///
@@ -85,6 +96,7 @@ pub trait Wire {
 
 /// What came back.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg(feature = "runtime")]
 pub struct Answer {
     /// The HTTP status.
     pub status: u16,
@@ -94,6 +106,7 @@ pub struct Answer {
     pub content_type: Option<String>,
 }
 
+#[cfg(feature = "runtime")]
 impl Answer {
     /// Whether the server accepted the request.
     pub const fn ok(&self) -> bool {
@@ -104,6 +117,7 @@ impl Answer {
 /// The command tree for a surface.
 ///
 /// `name` is the program's own name, as `--help` should print it.
+#[cfg(feature = "runtime")]
 pub fn command(name: &'static str, routes: &[Described]) -> Command {
     let mut root = Command::new(name)
         .about("Talk to this application over HTTP")
@@ -143,6 +157,7 @@ pub fn command(name: &'static str, routes: &[Described]) -> Command {
 }
 
 /// One operation, as a subcommand.
+#[cfg(feature = "runtime")]
 fn operation(route: &Described) -> Command {
     let mut command =
         Command::new(route.command()).about(format!("{} {}", route.verb.as_str(), route.path));
@@ -178,6 +193,7 @@ fn operation(route: &Described) -> Command {
 /// A field no flag can express -- a nested object, a list of them -- gets
 /// none, and `--body` is how it is sent. Pretending a command line can
 /// carry a tree is how a client ends up with `--address.street`.
+#[cfg(feature = "runtime")]
 fn argument(field: &Field) -> Option<Arg> {
     let name = flag(field.name);
     let mut arg = Arg::new(name.clone())
@@ -224,6 +240,7 @@ fn argument(field: &Field) -> Option<Arg> {
 
 /// A field name as a long flag: hyphens, because that is what a command
 /// line uses and `--phone_number` is not one.
+#[cfg(feature = "runtime")]
 fn flag(name: &str) -> String {
     name.replace('_', "-")
 }
@@ -234,6 +251,7 @@ fn flag(name: &str) -> String {
 ///
 /// A message ready to print. Parsing failures are clap's own, already
 /// written for a person.
+#[cfg(feature = "runtime")]
 pub fn run<W: Wire>(
     name: &'static str,
     routes: &[Described],
@@ -249,6 +267,7 @@ pub fn run<W: Wire>(
 
 /// Every operation, as one line each: what `--help` would say, without
 /// going through clap.
+#[cfg(feature = "runtime")]
 pub fn listing(routes: &[Described]) -> Vec<(String, String)> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for route in routes {
@@ -261,11 +280,13 @@ pub fn listing(routes: &[Described]) -> Vec<(String, String)> {
 }
 
 /// The verb, for a sender that wants a method name.
+#[cfg(feature = "runtime")]
 pub const fn method(verb: Verb) -> &'static str {
     verb.as_str()
 }
 
 #[cfg(test)]
+#[cfg(feature = "runtime")]
 mod tests {
     use super::*;
     use zod::Entry;

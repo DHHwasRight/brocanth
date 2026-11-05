@@ -20,12 +20,13 @@ brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth", branch = "ma
 
 | Feature | Default | Adds |
 |---|---|---|
+| `runtime` | on | the cache itself: everything but `scaffold`. Every other feature turns it on |
 | `postgres` | on | `PgCache`, the one backend (`sqlx`) |
 | `admin` | off | `brocanth_cache::admin`, the cache tab in `brocanth-admin` |
 | `events` | off | `TagInvalidator`, a `ChangeSink` that invalidates tags on model writes |
 | `scaffold` | off | the `cache` module for `brocanth create`; only the CLI turns it on |
 
-With `default-features = false` you get the `Cache` trait, the key types, the
+With `default-features = false, features = ["runtime"]` you get the `Cache` trait, the key types, the
 clock and `fetch`, and no SQL driver. That build is for a crate that writes a
 second backend.
 

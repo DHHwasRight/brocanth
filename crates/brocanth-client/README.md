@@ -30,7 +30,7 @@ brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 Inside this workspace: `brocanth-client.workspace = true`.
 
 `Wire` is the contract for sending. An application with its own HTTP
-client sets `default-features = false`, implements `Wire`, and reqwest is
+client sets `default-features = false, features = ["runtime"]`, implements `Wire`, and reqwest is
 then not in its lock file.
 
 ### As a module

@@ -22,19 +22,19 @@ brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
 # that lives in the crate it writes, and `features = ["scaffold"]` is the
 # whole of the opt-in: the feature is off everywhere else, so no application
 # links a generator.
-brocanth-cache = { workspace = true, features = ["scaffold"] }
+brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, features = ["scaffold"] }
 
 # The database pool, for its scaffold module alone, on the same terms.
-brocanth-db = { workspace = true, features = ["scaffold"] }
+brocanth-db = { path = "../brocanth-db", version = "0.1.0", default-features = false, features = ["scaffold"] }
 
 # The broker, on the same terms. It offers `realtime` and no transport: the
 # core's `Response` is a finished `Vec<u8>` and every response hook is
 # specified to see one, so server-sent events are a change to the hook
 # contract rather than a module that can be written today.
-brocanth-auth = { workspace = true, features = ["scaffold"] }
-brocanth-jobs = { workspace = true, features = ["scaffold"] }
-brocanth-client = { workspace = true, features = ["scaffold"] }
-brocanth-input = { workspace = true, features = ["scaffold"] }
+brocanth-auth = { path = "../brocanth-auth", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-client = { path = "../brocanth-client", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-input = { path = "../brocanth-input", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-middleware = { workspace = true, features = ["scaffold"] }
 brocanth-openapi = { workspace = true, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }

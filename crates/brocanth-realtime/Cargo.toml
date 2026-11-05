@@ -76,7 +76,9 @@ brocanth-scaffold = { workspace = true, optional = true }
 # Setting it in the root table instead would turn the admin's plugin off
 # for every other crate. One crate wants something different from the
 # default, so one crate says so.
-brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", optional = true, default-features = false }
+brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", optional = true, default-features = false, features = [
+    "runtime",
+] }
 
 # The screen, compiled in by the macro. Only reachable through `admin`: a
 # broker does not render HTML. Same spelling the admin uses, so one copy is

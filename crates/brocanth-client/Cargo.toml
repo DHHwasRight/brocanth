@@ -7,14 +7,14 @@ readme = "README.md"
 description = "A command line that is a client for the application that generated it, built from the same table the document is."
 
 [dependencies]
-brocanth = { workspace = true }
-brocanth-input = { workspace = true }
-zod = { workspace = true }
+brocanth = { workspace = true, optional = true }
+brocanth-input = { workspace = true, optional = true }
+zod = { workspace = true, optional = true }
 
 # Already the command crate's dependency and re-exported by it, so a
 # project with both links one copy. `string` because a subcommand's name
 # comes out of a table rather than out of a literal.
-clap = { version = "4", features = ["derive", "string"] }
+clap = { version = "4", features = ["derive", "string"], optional = true }
 
 # The same choice `brocanth-auth` made, for the same reason: reqwest is
 # what the ecosystem already has in the tree, rustls keeps it off the
@@ -32,10 +32,14 @@ reqwest = { version = "0.13", default-features = false, features = [
 brocanth-scaffold = { workspace = true, optional = true }
 
 [features]
-default = ["reqwest-client"]
+default = ["runtime", "reqwest-client"]
+# The client and its command: everything but the scaffold module. The CLI
+# turns it off and takes `scaffold` alone, so `brocanth create` links no HTTP
+# client and no server to write a project that has both.
+runtime = ["dep:brocanth", "dep:brocanth-input", "dep:zod", "dep:clap"]
 # The shipped sender. Off, and this crate plans the request and hands it
 # back for a caller that has its own way to send one.
-reqwest-client = ["dep:reqwest"]
+reqwest-client = ["runtime", "dep:reqwest"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]

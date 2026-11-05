@@ -14,6 +14,7 @@ brocanth-db = { git = "https://github.com/DHHwasRight/brocanth", branch = "main"
 
 | Feature | Default | Adds |
 |---|---|---|
+| `runtime` | on | the pool and the statements: everything but `scaffold`. `serde` and `plugin` turn it on |
 | `serde` | off | `DbConfig: Deserialize`, for a `[db]` config section |
 | `plugin` | off | `Db: ContextItem`, so a plugin puts the pool on the request context |
 | `scaffold` | off | the `db` module of `brocanth create`; for the CLI only |

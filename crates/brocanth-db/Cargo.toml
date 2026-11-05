@@ -20,7 +20,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "postgres",
     "tls-rustls-ring",
     "json",
-] }
+], optional = true }
 
 # The query builder, without its entity layer. `1.0` is the line `sea-orm`
 # 2.0.4 uses, so this adds no second copy. Postgres is the only backend.
@@ -33,7 +33,7 @@ sea-query = { version = "1.0", default-features = false, features = [
     "with-json",
     "with-chrono",
     "with-uuid",
-] }
+], optional = true }
 
 # The bridge that turns sea-query `Values` into sqlx arguments. Version 0.9
 # targets sqlx 0.9. Its value features mirror the ones above.
@@ -42,9 +42,9 @@ sea-query-sqlx = { version = "0.9", default-features = false, features = [
     "with-json",
     "with-chrono",
     "with-uuid",
-] }
+], optional = true }
 
-serde_json = "1"
+serde_json = { version = "1", optional = true }
 thiserror = "2"
 
 # `DbConfig: Deserialize`, for a config plugin that reads a `[db]` section.
@@ -67,9 +67,13 @@ brocanth-scaffold = { workspace = true, optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
-default = []
-serde = ["dep:serde"]
-plugin = ["dep:brocanth"]
+default = ["runtime"]
+# The pool and the statements: everything but the scaffold module. The CLI
+# turns it off and takes `scaffold` alone, so `brocanth create` links no
+# driver, no TLS stack and no query builder to write a project that does.
+runtime = ["dep:sqlx", "dep:sea-query", "dep:sea-query-sqlx", "dep:serde_json"]
+serde = ["runtime", "dep:serde"]
+plugin = ["runtime", "dep:brocanth"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]

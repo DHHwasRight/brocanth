@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! A cache kept in Postgres, so a deployment that already runs Postgres gets a
 //! cache without running Redis.
@@ -168,21 +168,33 @@
 /// Behind an off-by-default feature, so a process that only reads the
 /// cache links neither the admin nor a renderer.
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 pub mod admin;
+#[cfg(feature = "runtime")]
 pub mod cache;
+#[cfg(feature = "runtime")]
 pub mod clock;
+#[cfg(feature = "runtime")]
 pub mod error;
+#[cfg(feature = "runtime")]
 pub mod fetch;
+#[cfg(feature = "runtime")]
 pub mod key;
+#[cfg(feature = "runtime")]
 pub mod plugin;
+#[cfg(feature = "runtime")]
 pub mod route;
+#[cfg(feature = "runtime")]
 pub mod sweep;
+#[cfg(feature = "runtime")]
 pub mod tag;
 
 #[cfg(feature = "events")]
+#[cfg(feature = "runtime")]
 pub mod invalidate;
 
 #[cfg(feature = "postgres")]
+#[cfg(feature = "runtime")]
 pub mod postgres;
 
 /// The `brocanth create` module that writes this crate into a new project.
@@ -199,26 +211,38 @@ pub mod scaffold;
 /// `use` line names this path. Private, like the admin's own template
 /// module, which is also what keeps `missing_docs` off generated items.
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 mod admin_templates {
     rsx::load_dir!("src/admin_templates");
 }
 
+#[cfg(feature = "runtime")]
 pub use cache::{expires_at, Cache, DEFAULT_MAX_VALUE_BYTES};
+#[cfg(feature = "runtime")]
 pub use clock::{from_millis, to_millis, Clock, ManualClock, SystemClock};
+#[cfg(feature = "runtime")]
 pub use error::{CacheError, Result};
+#[cfg(feature = "runtime")]
 pub use fetch::{CacheExt, FetchError, FetchPolicy};
+#[cfg(feature = "runtime")]
 pub use key::{Key, Namespace, MAX_KEY_BYTES, MAX_NAMESPACE_BYTES};
+#[cfg(feature = "runtime")]
 pub use plugin::{CacheConfig, CacheHandle, CachePlugin};
+#[cfg(feature = "runtime")]
 pub use sweep::sweep;
+#[cfg(feature = "runtime")]
 pub use tag::{Tag, MAX_TAG_BYTES};
 
 #[cfg(feature = "events")]
+#[cfg(feature = "runtime")]
 pub use invalidate::TagInvalidator;
 
 #[cfg(feature = "postgres")]
+#[cfg(feature = "runtime")]
 pub use postgres::{CacheStats, PgCache};
 
 /// Everything an application that caches needs, in one `use`.
+#[cfg(feature = "runtime")]
 pub mod prelude {
     pub use crate::{Cache, CacheConfig, CacheExt, CacheHandle, CachePlugin, Key, Namespace, Tag};
 

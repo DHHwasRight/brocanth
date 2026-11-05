@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! ---
 //!
@@ -110,6 +110,7 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "runtime")]
 pub mod accounts;
 
 /// The **Accounts** tab in `brocanth-admin`.
@@ -118,6 +119,7 @@ pub mod accounts;
 /// and no backoffice links neither the admin nor rsx, and a crate that keeps
 /// its dependency list to four does not grow a password hasher.
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 pub mod admin;
 
 /// The tab's screens, compiled in by rsx at macro expansion: nothing is read
@@ -126,12 +128,16 @@ pub mod admin;
 /// At the crate root and not inside [`admin`], because a template's own `use`
 /// line names this path. Private, like the admin's own template module.
 #[cfg(feature = "admin")]
+#[cfg(feature = "runtime")]
 mod admin_templates {
     rsx::load_dir!("src/admin_templates");
 }
 
+#[cfg(feature = "runtime")]
 pub mod alerts;
+#[cfg(feature = "runtime")]
 pub mod apple;
+#[cfg(feature = "runtime")]
 pub mod clock;
 
 /// The storage contract as an executable suite, for `MemoryStore`, `PgStore`
@@ -139,18 +145,30 @@ pub mod clock;
 ///
 /// Behind the `conformance` feature, which only a test binary turns on.
 #[cfg(feature = "conformance")]
+#[cfg(feature = "runtime")]
 pub mod conformance;
 
+#[cfg(feature = "runtime")]
 pub mod error;
+#[cfg(feature = "runtime")]
 pub mod http_client;
+#[cfg(feature = "runtime")]
 pub mod identity;
+#[cfg(feature = "runtime")]
 pub mod impersonation;
+#[cfg(feature = "runtime")]
 pub mod linking;
+#[cfg(feature = "runtime")]
 pub mod memory;
+#[cfg(feature = "runtime")]
 pub mod mfa;
+#[cfg(feature = "runtime")]
 pub mod oauth;
+#[cfg(feature = "runtime")]
 pub mod otp;
+#[cfg(feature = "runtime")]
 pub mod password;
+#[cfg(feature = "runtime")]
 pub mod plugin;
 
 /// [`PgStore`], every storage trait over Postgres.
@@ -158,10 +176,14 @@ pub mod plugin;
 /// Behind the `postgres` feature, which is off. With it off, neither this
 /// module nor `sqlx` is in the build.
 #[cfg(feature = "postgres")]
+#[cfg(feature = "runtime")]
 pub mod postgres;
 
+#[cfg(feature = "runtime")]
 pub mod providers;
+#[cfg(feature = "runtime")]
 pub mod random;
+#[cfg(feature = "runtime")]
 pub mod recovery;
 
 /// The `brocanth create` module that writes this crate into a new project.
@@ -171,39 +193,64 @@ pub mod recovery;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
+#[cfg(feature = "runtime")]
 pub mod session;
+#[cfg(feature = "runtime")]
 pub mod storage;
+#[cfg(feature = "runtime")]
 pub mod tokens;
+#[cfg(feature = "runtime")]
 pub mod totp;
 
+#[cfg(feature = "runtime")]
 pub use accounts::{Accounts, Authenticated, LoginRejection, RegistrationAccepted, ResetRequested};
+#[cfg(feature = "runtime")]
 pub use alerts::{LoginAlert, LoginAlerts};
+#[cfg(feature = "runtime")]
 pub use clock::{Clock, SystemClock, TestClock, UnixTime};
+#[cfg(feature = "runtime")]
 pub use error::AuthError;
+#[cfg(feature = "runtime")]
 pub use http_client::{HttpClient, HttpRequest, HttpResponse};
+#[cfg(feature = "runtime")]
 pub use identity::{Account, AccountId, EmailAddress, ProviderIdentity, ProviderLink};
+#[cfg(feature = "runtime")]
 pub use impersonation::{AccountHolder, Impersonation, Restricted};
+#[cfg(feature = "runtime")]
 pub use linking::{LinkRefusal, Linking, SignInOutcome};
+#[cfg(feature = "runtime")]
 pub use memory::MemoryStore;
+#[cfg(feature = "runtime")]
 pub use mfa::{
     Admission, Admitted, Elevation, Enrolled, FactorClass, FactorKind, FactorPolicy, FactorSet,
     Mfa, RecoveryAccepted, SecondFactorRequirement, TotpEnrolment, Verified,
 };
+#[cfg(feature = "runtime")]
 pub use oauth::{
     AuthorizationRequest, CallbackParams, ClientConfig, ClientSecret, FlowState, OauthClient,
     TokenResponse,
 };
+#[cfg(feature = "runtime")]
 pub use otp::{Otp, OtpChallengeId, OtpCode, OtpDelivery, OtpRequested};
+#[cfg(feature = "runtime")]
 pub use password::{PasswordCost, Passwords};
+#[cfg(feature = "runtime")]
 pub use plugin::{Auth, AuthConfig, AuthPlugin};
 #[cfg(feature = "postgres")]
+#[cfg(feature = "runtime")]
 pub use postgres::{PgStore, Swept};
+#[cfg(feature = "runtime")]
 pub use providers::{Provider, ProviderKind};
+#[cfg(feature = "runtime")]
 pub use recovery::{RecoveryCode, RecoveryCodes};
+#[cfg(feature = "runtime")]
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
+#[cfg(feature = "runtime")]
 pub use storage::{
     AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
     OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
 };
+#[cfg(feature = "runtime")]
 pub use tokens::{IssuedToken, TokenPurpose, Tokens};
+#[cfg(feature = "runtime")]
 pub use totp::{Totp, TotpSecret};

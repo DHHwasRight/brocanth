@@ -35,7 +35,7 @@ default-run = "my-blog"
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["logs", "metrics"], default-features = false }
+brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics"], default-features = false }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }

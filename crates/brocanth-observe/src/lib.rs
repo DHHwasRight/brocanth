@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! ---
 //!
@@ -57,49 +57,73 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "runtime")]
 mod config;
+#[cfg(feature = "runtime")]
 mod probes;
+#[cfg(feature = "runtime")]
 mod text;
 
 #[cfg(feature = "_jobs")]
+#[cfg(feature = "runtime")]
 mod jobs;
 #[cfg(feature = "logs")]
+#[cfg(feature = "runtime")]
 pub mod logs;
 #[cfg(feature = "metrics")]
+#[cfg(feature = "runtime")]
 pub mod metrics;
 #[cfg(feature = "otel")]
+#[cfg(feature = "runtime")]
 mod otel;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
+#[cfg(feature = "runtime")]
 use std::future::Future;
+#[cfg(feature = "runtime")]
 use std::sync::{Arc, OnceLock};
 #[cfg(feature = "logs")]
+#[cfg(feature = "runtime")]
 use std::time::Duration;
+#[cfg(feature = "runtime")]
 use std::time::Instant;
 
+#[cfg(feature = "runtime")]
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+#[cfg(feature = "runtime")]
 use brocanth::plugin_context::NoContext;
+#[cfg(feature = "runtime")]
 use brocanth::plugin_health::Readiness;
+#[cfg(feature = "runtime")]
 use brocanth::plugin_routes::BoxFuture;
+#[cfg(feature = "runtime")]
 use brocanth::plugin_shutdown::ShutdownCx;
+#[cfg(feature = "runtime")]
 use brocanth_server::{Request, Response, ServeError, Server, Stopper};
 
 #[cfg(feature = "otel")]
+#[cfg(feature = "runtime")]
 pub use config::TracingConfig;
+#[cfg(feature = "runtime")]
 pub use config::{LogFormat, ObserveConfig};
 #[cfg(feature = "_jobs")]
+#[cfg(feature = "runtime")]
 pub use jobs::JobTelemetry;
 #[cfg(feature = "metrics")]
+#[cfg(feature = "runtime")]
 pub use metrics::Metrics;
+#[cfg(feature = "runtime")]
 pub use probes::{CheckReport, ReadyReport};
 /// The `tracing` this crate's subscriber reads, for an application that logs
 /// through it without a dependency of its own: the generated `say!` macro
 /// writes `brocanth_observe::tracing::info!`.
 #[cfg(feature = "logs")]
+#[cfg(feature = "runtime")]
 pub use tracing;
 
 /// The route label for a request no route matched.
+#[cfg(feature = "runtime")]
 pub const UNMATCHED: &str = "unmatched";
 
 /// The request id, logs, probes, metrics and traces of one application.
@@ -108,10 +132,12 @@ pub const UNMATCHED: &str = "unmatched";
 /// application, so the job queue can take [`Observer::job_events`] when it
 /// is built, then register it with [`ObservePlugin`].
 #[derive(Clone)]
+#[cfg(feature = "runtime")]
 pub struct Observer {
     inner: Arc<Inner>,
 }
 
+#[cfg(feature = "runtime")]
 struct Inner {
     config: ObserveConfig,
     readiness: OnceLock<Readiness>,
@@ -127,6 +153,7 @@ struct Inner {
     otel: Option<otel::Otel>,
 }
 
+#[cfg(feature = "runtime")]
 impl std::fmt::Debug for Observer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Observer")
@@ -135,6 +162,7 @@ impl std::fmt::Debug for Observer {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl Observer {
     /// An observer for `config`.
     ///
@@ -575,6 +603,7 @@ impl Observer {
 
 /// The line a finished request writes: `info` below 500, `error` from it.
 #[cfg(feature = "logs")]
+#[cfg(feature = "runtime")]
 fn log_request(span: &tracing::Span, method: &str, path: &str, status: u16, took: Duration) {
     let duration_ms = text::millis(took);
     if status >= 500 {
@@ -586,6 +615,7 @@ fn log_request(span: &tracing::Span, method: &str, path: &str, status: u16, took
 }
 
 /// SIGTERM, or Ctrl-C. Whichever comes first.
+#[cfg(feature = "runtime")]
 async fn terminated() {
     #[cfg(unix)]
     {
@@ -614,10 +644,12 @@ async fn terminated() {
 /// the application needs the observer before the plugins exist: the job
 /// queue takes [`Observer::job_events`] when it is built, and the server
 /// takes [`Observer::wrap`].
+#[cfg(feature = "runtime")]
 pub struct ObservePlugin {
     observer: Observer,
 }
 
+#[cfg(feature = "runtime")]
 impl ObservePlugin {
     /// The observer this plugin registers.
     pub fn observer(&self) -> &Observer {
@@ -625,6 +657,7 @@ impl ObservePlugin {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl Plugin for ObservePlugin {
     type Config = Observer;
     type Provides = NoContext;

@@ -98,6 +98,20 @@ thirteen keep it beside the crate behind an off-by-default `scaffold`
 feature, which is the pattern. `rsx` and `jt` are in the CLI, because
 neither has a crate in this workspace to host one.
 
+The CLI links the scaffold side of each crate and nothing else. It takes
+each module crate with `default-features = false, features = ["scaffold"]`.
+A crate with a heavy runtime keeps it behind a default `runtime` feature:
+`brocanth-cache`, `brocanth-db`, `brocanth-auth`, `brocanth-jobs`,
+`brocanth-client`, `brocanth-input`, `brocanth-observe` and
+`brocanth-admin`. `brocanth-resource` and `brocanth-schema` split theirs
+more finely (`plugin`, `pages`, `derive`, `pattern`), and the CLI takes
+none of those. The rest (`middleware`, `openapi`, `robots`, `policy`,
+`storage`, `realtime`) have no default features and a runtime of small,
+pure crates. So `brocanth create` links no driver, no TLS stack, no async
+runtime and no template engine. `crates/brocanth-cli/tests/lean.rs` fails
+if one comes back. A generated project that turns a crate's defaults off
+asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
+
 | Crate | Kind (§4) | Build-time seams | Run-time seams |
 | --- | --- | --- | --- |
 | `brocanth-cache` | service | `ConfigSections`, `AppPlugins` | `Plugin`, `Services` |
