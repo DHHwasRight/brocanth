@@ -42,7 +42,7 @@ jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON 
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
+brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge", "websocket"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
 ===== .gitignore =====
@@ -1724,6 +1724,7 @@ mod tests {
                 "/openapi.json",
                 "/openapi.yaml",
                 "/realtime/events",
+                "/realtime/socket",
                 "/robots.txt",
                 "/status",
                 "/users/{id}"
@@ -1847,6 +1848,7 @@ pub mod openapi;
 pub mod policy;
 pub mod realtime;
 pub mod realtime_sse;
+pub mod realtime_websocket;
 pub mod resource;
 pub mod robots;
 pub mod sessions;
@@ -3387,7 +3389,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4119a3f3ad59191c
+// brocanth-digest: abfae36e3e884d1b
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -5155,6 +5157,252 @@ mod tests {
     #[tokio::test]
     async fn a_topic_no_rule_allows_is_refused() {
         assert_eq!(status("/realtime/events?topics=posts/*").await, 403);
+    }
+}
+===== src/pages/realtime/socket.rs =====
+//! `GET /realtime/socket?topics=posts/*,posts/42` -- the broker's frames
+//! over a WebSocket.
+//!
+//! ```js
+//! const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
+//! socket.onmessage = (e) => console.log(e.data); // "id:1\nevent:posts/*\ndata:..."
+//! socket.onopen = () => socket.send("subscribe posts/42");
+//! ```
+//!
+//! Three checks run before the connection switches, and each refusal is a
+//! status the browser can read:
+//!
+//! 1. The handshake: a WebSocket, version 13. Else 426.
+//! 2. The `Origin`. A browser sends the site's cookies with a WebSocket from
+//!    any page, and no CORS rule applies, so the Origin check is this
+//!    route's CSRF check: the page must be on this host, or in
+//!    `ALLOWED_ORIGINS`. Else 403.
+//! 3. Every topic in the URL passes `authorise`, and one refusal refuses
+//!    the socket. Else 403.
+//!
+//! A topic the browser asks for later (`subscribe <topic>`) passes the same
+//! `authorise`. The loop is `crate::plugins::realtime_websocket`.
+
+use brocanth_realtime::{Gate, Subscription, Topic};
+use brocanth_server::websocket::Handshake;
+
+use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::Broadcast;
+use crate::plugins::realtime_websocket::{self, Filed};
+
+/// Collections any visitor may follow: every row, every change.
+///
+/// Empty, so nothing is public until somebody says so here.
+const PUBLIC: &[&str] = &[];
+
+/// Sites other than this host whose pages may open a socket, spelled as a
+/// browser sends its `Origin`: `"https://app.example.com"`.
+const ALLOWED_ORIGINS: &[&str] = &[];
+
+/// Who is asking: what `authorise` needs, read from the request once.
+///
+/// The socket outlives the request, so `authorise` cannot read the request
+/// when the browser subscribes later. Put here what it decides on: the
+/// session's user id, a role.
+pub struct Viewer;
+
+fn viewer(_ctx: &Ctx) -> Viewer {
+    Viewer
+}
+
+/// Whether `viewer` may follow `topic`, and gated by what.
+///
+/// The one place a topic is authorised, and the place to edit. A public
+/// collection takes `Gate::everyone()`. Rows that a policy decides take the
+/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
+/// with the view rule, and the broker inverts the rule into an index key, so
+/// a write is a map lookup and not a check per subscriber.
+///
+/// ```ignore
+/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
+/// ```
+fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
+    if PUBLIC.contains(&topic.collection_name()) {
+        return Ok(Subscription::new(topic, Gate::everyone()));
+    }
+    Err(format!(
+        "no rule lets this socket follow {topic}\n\
+         help: add one to `authorise` in src/pages/realtime/socket.rs"
+    ))
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let handshake = Handshake::read(|name| ctx.header(name), ALLOWED_ORIGINS)
+        .map_err(|refused| Error::new(refused.status(), refused.to_string()))?;
+    let viewer = viewer(ctx);
+    let mut subscriptions = Vec::new();
+    for topic in topics(&ctx.query)? {
+        let name = topic.to_string();
+        let subscription = authorise(&viewer, topic).map_err(|why| Error::new(403, why))?;
+        subscriptions.push((name, subscription));
+    }
+    let broker = &ctx
+        .provided::<Broadcast, _>()
+        .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
+        .broker;
+
+    // A browser that reconnects sends the id of the last frame it read. The
+    // broker keeps no history to replay, so the honest answer to "did I miss
+    // anything" is yes whenever a frame was published since.
+    let missed = value(&ctx.query, "last")
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
+
+    // At the cap the broker refuses rather than evicting somebody.
+    let client = broker
+        .connect()
+        .map_err(|e| Error::new(503, e.to_string()).with_header("retry-after", "5"))?;
+    let mut filed = Filed::new();
+    for (name, subscription) in subscriptions {
+        let subscribed = client
+            .subscribe(subscription)
+            .map_err(|e| Error::new(400, e.to_string()))?;
+        filed.insert(name, subscribed.id);
+    }
+
+    let headers = handshake.headers().into_iter().collect();
+    let rule: realtime_websocket::Authorise = Box::new(move |topic| authorise(&viewer, topic));
+    let stream = handshake
+        .switch(move |socket| realtime_websocket::run(socket, client, rule, filed, missed));
+    Ok(Response {
+        status: 101,
+        headers,
+        stream: Some(stream),
+        ..Default::default()
+    })
+}
+
+/// Every `topics=` in the query, split at commas and parsed. None is
+/// allowed: the browser can subscribe after the socket opens.
+fn topics(query: &str) -> Result<Vec<Topic>, Error> {
+    let mut out = Vec::new();
+    for pair in query.split('&') {
+        let Some(("topics", value)) = pair.split_once('=') else {
+            continue;
+        };
+        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
+            let topic =
+                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
+            out.push(topic);
+        }
+    }
+    Ok(out)
+}
+
+/// The first value of `name` in the query, as sent.
+fn value<'q>(query: &'q str, name: &str) -> Option<&'q str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
+}
+
+/// A query value with its `%XX` and `+` undone.
+fn decoded(value: &str) -> Result<String, Error> {
+    let bad = || {
+        Error::new(
+            400,
+            format!("the query value {value:?} is not percent-encoded UTF-8"),
+        )
+    };
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
+                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
+                u8::from_str_radix(hex, 16).map_err(|_| bad())?
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use brocanth_server::websocket::{self, Incoming};
+    use brocanth_server::{Server, Stopper};
+
+    use super::*;
+
+    /// The whole application on a real port.
+    async fn serve() -> (SocketAddr, Stopper) {
+        let app = Arc::new(crate::app::build().expect("the application builds"));
+        let server = Server::bind("127.0.0.1:0")
+            .await
+            .expect("a port")
+            .with_streams(app.core.streams().clone());
+        let addr = server.local_addr().expect("an address");
+        let stopper = server.stopper();
+        tokio::spawn(server.run(move |request| {
+            let app = Arc::clone(&app);
+            async move { crate::app::handle(&app, request).await }
+        }));
+        (addr, stopper)
+    }
+
+    #[test]
+    fn topics_are_read_from_the_query_encoded_or_not() {
+        let read = topics("topics=posts/*,posts%2F42&x=1").expect("two");
+        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["posts/*", "posts/42"]);
+        assert!(topics("").expect("none is allowed").is_empty());
+        assert!(topics("topics=posts").is_err(), "a topic has a slash");
+        assert_eq!(value("a=1&last=7", "last"), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn a_socket_opens_and_a_topic_no_rule_allows_is_refused_over_it() {
+        let (addr, stopper) = serve().await;
+        let origin = format!("http://{addr}");
+        let mut socket = websocket::connect(addr, "/realtime/socket", Some(&origin))
+            .await
+            .expect("this host may open a socket");
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        let answer = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+            .await
+            .expect("an answer in time");
+        let Incoming::Text(answer) = answer else {
+            panic!("a text answer, not {answer:?}");
+        };
+        assert!(
+            answer.starts_with("event:refused\ndata:posts/*: "),
+            "{answer}"
+        );
+        socket.close(websocket::NORMAL, "done").await;
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_page_on_another_site_is_refused_before_the_switch() {
+        let (addr, stopper) = serve().await;
+        let refused = websocket::connect(addr, "/realtime/socket", Some("https://evil.example"))
+            .await
+            .expect_err("a cross-site socket");
+        assert_eq!(refused.status, Some(403));
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_topic_in_the_url_no_rule_allows_is_refused_before_the_switch() {
+        let (addr, stopper) = serve().await;
+        let refused = websocket::connect(addr, "/realtime/socket?topics=posts/*", None)
+            .await
+            .expect_err("no rule allows posts");
+        assert_eq!(refused.status, Some(403));
+        stopper.stop();
     }
 }
 ===== src/pages/robots.txt.rs =====
@@ -7330,7 +7578,9 @@ impl Plugin for Policies {
 //!    writes `GET /realtime/events?topics=posts/*` and the stream behind it
 //!    (`src/plugins/realtime_sse/mod.rs`): one `Client` per connection, a
 //!    heartbeat, `lagged` when frames were dropped, and an end on shutdown.
-//!    `brocanth add realtime-sse` adds it.
+//!    `brocanth add realtime-sse` adds it. `realtime-websocket` is the
+//!    duplex form: `GET /realtime/socket`, frames out and `subscribe`
+//!    commands in.
 //! 2. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
@@ -7687,6 +7937,304 @@ mod tests {
         assert_eq!(broker.clients(), 1);
         drop(frames);
         assert_eq!(broker.clients(), 0);
+    }
+}
+===== src/plugins/realtime_websocket/mod.rs =====
+//! `realtime-websocket`: the broker's frames over a WebSocket, and commands
+//! back.
+//!
+//! The transport is here, in the application, and not in
+//! `brocanth-realtime`, because that crate does not depend on `brocanth`:
+//! nothing in it touches a request, a response or a route.
+//! `src/pages/realtime/socket.rs` is the route; it checks the handshake and
+//! the Origin, authorises the first topics, and hands the socket to [`run`].
+//!
+//! # What the server sends
+//!
+//! One text message per record, in the same format as server-sent events,
+//! so one parser reads both transports:
+//!
+//! ```text
+//! id:12 event:posts/* data:..   each frame the broker addressed to this client
+//! event:lagged data:3           the queue was full and 3 frames were dropped
+//! event:lagged data:            first, when a reconnect may have missed frames
+//! event:subscribed data:posts/42      the answer to `subscribe posts/42`
+//! event:unsubscribed data:posts/42    the answer to `unsubscribe posts/42`
+//! event:refused data:posts/42: why    a command that was not obeyed
+//! ```
+//!
+//! A frame is the broker's bytes as it encoded them, shared by every
+//! subscriber; nothing is encoded twice.
+//!
+//! # What the browser sends
+//!
+//! `subscribe <topic>` and `unsubscribe <topic>`, as text. Each topic passes
+//! the same `authorise` as the topics in the URL. A binary message, or one
+//! larger than `websocket::MAX_MESSAGE` (64 KiB), ends the connection.
+//!
+//! # Back-pressure
+//!
+//! The broker never waits for this socket. Each send waits until the frame
+//! is written, so a browser that reads slowly holds this loop, the loop
+//! stops taking from the mailbox, and `[realtime] overflow` decides what is
+//! lost: `drop-oldest` and `drop-newest` drop frames and the browser reads
+//! `lagged`; `disconnect` closes the mailbox, and this loop closes the
+//! socket with code 1013.
+//!
+//! # Ending
+//!
+//! * The browser closes the socket, or stops answering pings for one
+//!   `HEARTBEAT`. The loop ends, which drops the `Client`, which unsubscribes
+//!   it and closes its mailbox.
+//! * The server stops. The loop sends the frames already queued, then a
+//!   close frame with code 1001, and ends, so a deploy does not wait for a
+//!   subscriber. The browser reconnects with `?last=<id>`.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use brocanth_realtime::{Client, Event, Subscription, SubscriptionId, Topic};
+use brocanth_server::websocket::{self, Incoming, WebSocket};
+use tokio::time::{Instant, MissedTickBehavior};
+
+/// How often the socket pings the browser. A browser that has not answered
+/// by the next ping is gone, so this is also the longest a dead subscriber
+/// holds its mailbox.
+pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Who may follow what: the page's `authorise`, with what it read from the
+/// request already captured.
+pub type Authorise = Box<dyn Fn(Topic) -> Result<Subscription, String> + Send>;
+
+/// The topics this socket follows, by name, so `unsubscribe` can find them.
+pub type Filed = HashMap<String, SubscriptionId>;
+
+/// Serves one socket until the browser leaves or the server stops.
+///
+/// `client` holds the subscriptions the page filed, and `filed` names them.
+/// `missed` is true when the browser reconnected and frames were published
+/// since the last one it read; the broker keeps no history, so the socket
+/// says `lagged` instead.
+pub async fn run(
+    mut socket: WebSocket,
+    client: Client,
+    authorise: Authorise,
+    mut filed: Filed,
+    missed: bool,
+) {
+    if missed && socket.send_text(lagged(None)).await.is_err() {
+        return;
+    }
+    let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            event = client.mailbox().recv() => match event {
+                Some(event) => {
+                    if socket.send_text(encoded(event)).await.is_err() {
+                        return;
+                    }
+                }
+                // This loop holds the client, so only the overflow policy
+                // closes its mailbox: `disconnect` fired.
+                None => {
+                    return socket
+                        .close(websocket::TRY_AGAIN_LATER, "too far behind; reconnect")
+                        .await;
+                }
+            },
+            incoming = socket.recv() => match incoming {
+                Incoming::Text(command) => {
+                    let answer = obey(&client, &authorise, &mut filed, &command);
+                    if socket.send_text(answer).await.is_err() {
+                        return;
+                    }
+                }
+                Incoming::Binary(_) => {
+                    return socket.close(websocket::POLICY, "send text commands").await;
+                }
+                Incoming::Stopping => {
+                    for event in client.mailbox().drain() {
+                        if socket.send_text(encoded(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                    return socket
+                        .close(websocket::GOING_AWAY, "the server is stopping")
+                        .await;
+                }
+                Incoming::Closed(_) => return,
+            },
+            _ = ticker.tick() => {
+                if socket.keepalive().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One command from the browser, obeyed, and the record that answers it.
+fn obey(client: &Client, authorise: &Authorise, filed: &mut Filed, command: &str) -> String {
+    let (verb, name) = command
+        .trim()
+        .split_once(' ')
+        .unwrap_or((command.trim(), ""));
+    let name = name.trim();
+    let topic = match Topic::parse(name) {
+        Ok(topic) => topic,
+        Err(e) => return record("refused", &format!("{name}: {e}")),
+    };
+    match verb {
+        "subscribe" if filed.contains_key(name) => record("subscribed", name),
+        "subscribe" => {
+            let subscription = match authorise(topic) {
+                Ok(subscription) => subscription,
+                Err(why) => return record("refused", &format!("{name}: {why}")),
+            };
+            match client.subscribe(subscription) {
+                Ok(subscribed) => {
+                    filed.insert(name.to_string(), subscribed.id);
+                    record("subscribed", name)
+                }
+                Err(e) => record("refused", &format!("{name}: {e}")),
+            }
+        }
+        "unsubscribe" => {
+            if let Some(id) = filed.remove(name) {
+                client.unsubscribe(id);
+            }
+            record("unsubscribed", name)
+        }
+        other => record(
+            "refused",
+            &format!(
+                "{other:?} is not a command; send `subscribe <topic>` or `unsubscribe <topic>`"
+            ),
+        ),
+    }
+}
+
+/// A record with no id: an event name and one data line.
+fn record(event: &str, data: &str) -> String {
+    let data = data.replace(['\r', '\n'], " ");
+    format!("event:{event}\ndata:{data}\n\n")
+}
+
+/// `event:lagged`, with how many frames were dropped when that is known.
+fn lagged(skipped: Option<u64>) -> String {
+    match skipped {
+        Some(n) => format!("event:lagged\ndata:{n}\n\n"),
+        None => "event:lagged\ndata:\n\n".to_string(),
+    }
+}
+
+/// What a mailbox event looks like on the wire.
+fn encoded(event: Event) -> String {
+    match event {
+        // Encoded once by the broker and shared by every subscriber.
+        Event::Frame(frame) => String::from_utf8_lossy(frame.bytes()).into_owned(),
+        Event::Lagged { skipped } => lagged(Some(skipped)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use brocanth_events::RowChange;
+    use brocanth_realtime::{Broker, Gate};
+    use brocanth_server::websocket::Handshake;
+    use brocanth_server::{Request, Server, Stopper};
+
+    use super::*;
+
+    /// A server whose one route is this loop, with every topic public.
+    async fn open(broker: &Arc<Broker>) -> (WebSocket, Stopper) {
+        let server = Server::bind("127.0.0.1:0").await.expect("a port");
+        let addr = server.local_addr().expect("an address");
+        let stopper = server.stopper();
+        let broker = Arc::clone(broker);
+        tokio::spawn(server.run(move |request: Request| {
+            let broker = Arc::clone(&broker);
+            async move {
+                let handshake =
+                    Handshake::read(|name| request.header(name), &[]).expect("a handshake");
+                let client = broker.connect().expect("room");
+                let everyone: Authorise =
+                    Box::new(|topic| Ok(Subscription::new(topic, Gate::everyone())));
+                handshake.response(move |socket| run(socket, client, everyone, Filed::new(), false))
+            }
+        }));
+        let socket = websocket::connect(addr, "/", None).await.expect("open");
+        (socket, stopper)
+    }
+
+    async fn next(socket: &mut WebSocket) -> Incoming {
+        tokio::time::timeout(Duration::from_secs(5), socket.recv())
+            .await
+            .expect("a message in time")
+    }
+
+    #[tokio::test]
+    async fn a_subscribed_socket_reads_a_published_change_and_a_close_frees_it() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Text("event:subscribed\ndata:posts/*\n\n".into())
+        );
+
+        broker.publish_change(&RowChange::created("posts", 42i64));
+        let Incoming::Text(frame) = next(&mut socket).await else {
+            panic!("a frame");
+        };
+        assert!(frame.starts_with("id:1\nevent:posts/*\n"), "{frame}");
+        assert!(frame.contains("data:id=42\n"), "{frame}");
+
+        socket.close(websocket::NORMAL, "done").await;
+        for _ in 0..500 {
+            if broker.clients() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(broker.clients(), 0, "the loop ended and dropped the client");
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_bad_command_is_refused_and_the_socket_stays_open() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("follow posts/*").await.expect("sent");
+        let Incoming::Text(answer) = next(&mut socket).await else {
+            panic!("an answer");
+        };
+        assert!(answer.starts_with("event:refused\n"), "{answer}");
+        socket
+            .send_text("unsubscribe posts/*")
+            .await
+            .expect("still open");
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Text("event:unsubscribed\ndata:posts/*\n\n".into())
+        );
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_stopping_server_sends_going_away() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open(&broker).await;
+        socket.send_text("subscribe posts/*").await.expect("sent");
+        let _ = next(&mut socket).await;
+        stopper.stop();
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Closed(Some(websocket::GOING_AWAY))
+        );
     }
 }
 ===== src/plugins/resource/mod.rs =====
@@ -8477,6 +9025,7 @@ request.
 - `admin-model`  the admin's rows over SeaORM, one line per entity
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
+- `realtime-websocket`  a duplex socket per subscriber, frames both ways
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
@@ -8748,6 +9297,29 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
   events.addEventListener("lagged", () => location.reload());
   ```
 
+## Realtime over a WebSocket
+
+`GET /realtime/socket?topics=posts/*` upgrades to a WebSocket that carries
+the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
+`src/pages/realtime/socket.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+  It runs for the topics in the URL and for each `subscribe <topic>` the
+  browser sends later, so read what it needs (the user id) into `Viewer`
+  when the socket opens. Never filter frames after delivery.
+- A page on another site is refused by its `Origin`. List a second site of
+  your own in `ALLOWED_ORIGINS`; never turn the check off.
+- Each message is one record in the server-sent-events format: `id:`,
+  `event:` (the topic) and `data:` lines. `lagged` means the view may be
+  stale: fetch it again. A close with code 1001 means the server is
+  stopping: reconnect with `?last=<id>`.
+
+  ```js
+  const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
+  socket.onmessage = (e) => console.log(e.data);
+  socket.onopen = () => socket.send("subscribe posts/42");
+  ```
+
 ## The database
 
 `src/plugins/db/mod.rs` opens one Postgres pool at startup from `[db] url`.
@@ -8865,7 +9437,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 18eeee30c291c47e -->
+<!-- brocanth-digest: bbc5bede33dbc6e2 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -8877,7 +9449,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -9082,6 +9654,13 @@ config = []
 crates = ["brocanth-events"]
 adapted_to = []
 
+[modules.realtime-websocket]
+kind = ["routes"]
+files = ["src/pages/realtime/socket.rs", "src/plugins/realtime_websocket/"]
+config = []
+crates = ["brocanth-server", "brocanth-events"]
+adapted_to = []
+
 [modules.commands]
 kind = ["enhancer"]
 files = ["src/commands/"]
@@ -9152,4 +9731,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: d21d641765683cbb
+# brocanth-digest: 878dc892bd086209

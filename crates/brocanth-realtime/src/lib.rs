@@ -133,9 +133,14 @@
 //! disconnect. [`Broker::last_frame_id`] answers a reconnect's
 //! `Last-Event-ID`. See `scaffold::Sse` for why it lives there.
 //!
-//! A websocket is still a second piece of work, and not this one: it needs an
-//! HTTP upgrade below `Response` and a frame codec, neither of which is a
-//! body.
+//! **A WebSocket is generated the same way.** `brocanth create --with
+//! realtime-websocket` writes a loop over one socket
+//! (`src/plugins/realtime_websocket/mod.rs`, kept in this crate as
+//! `templates/realtime_websocket.rs` so `tests/websocket.rs` runs it) and
+//! `GET /realtime/socket` (`src/pages/realtime/socket.rs`). The upgrade out
+//! of the request/response shape and the frame codec are `brocanth-server`'s:
+//! `upgrade`, and the `websocket` feature. `docs/realtime.md` has the
+//! design.
 //!
 //! Note also §4: SSE was on the "cut from v1, explicitly" list, and §4 itself
 //! records that three cut things shipped anyway *"and the list is wrong

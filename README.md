@@ -184,7 +184,7 @@ puts the crate in a new project.
 | [`brocanth-queue-memory`](crates/brocanth-queue-memory/README.md) | The in-process backend, the reference for the suite | |
 | [`brocanth-queue-conformance`](crates/brocanth-queue-conformance/README.md) | The contract as a test suite for any backend | |
 | [`brocanth-mail`](crates/brocanth-mail/README.md) | Mail: one trait, an in-memory backend, SMTP behind a feature | |
-| [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` carries it to a browser | `realtime` |
+| [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` and `realtime-websocket` carry it to a browser | `realtime` |
 | [`brocanth-static`](crates/brocanth-static/README.md) | Writes the application to files: every GET page, partials per layout depth, the assets | `static` |
 | [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin` | `admin` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
@@ -339,8 +339,8 @@ opt-in, and the wizard's **Operations** question can untick them.
 - [ ] **A non-Postgres queue backend** (SQS) and an **object-store
   `Storage`** (S3).
 - [x] **A realtime transport.** `realtime-sse` writes server-sent events
-  over the broker into the project. `realtime-websocket` is listed and
-  blocked.
+  over the broker into the project. `realtime-websocket` writes a duplex
+  WebSocket over it (`docs/realtime.md`).
 - [ ] **`brocanth remove`**, to take a module out again.
 
 ## Tests and the gate

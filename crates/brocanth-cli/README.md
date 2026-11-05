@@ -285,8 +285,8 @@ module with what it costs.
 | Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt` |
 | External | files only: build, ship, check | `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` |
 
-`admin-model`, `realtime-sse` and `realtime-websocket` are listed and not
-available yet; the reason is on their row. A module from another crate
+A module that is listed and not available yet gives the reason on its
+row; none is blocked today. A module from another crate
 joins the list with two lines in this crate: a dependency with
 `features = ["scaffold"]`, and an entry in `ALL` in
 `src/modules/mod.rs`. See [docs/module-authoring.md](../../docs/module-authoring.md).
