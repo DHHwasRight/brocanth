@@ -3942,7 +3942,8 @@ jobs:
 # Three stages. `planner` reduces the manifests to a recipe. `builder` builds
 # the dependencies from the recipe, in a layer that stays cached until
 # Cargo.toml or Cargo.lock changes, and then builds the application. The
-# runtime holds the binary, the config directory and nothing else.
+# runtime holds the binary, the config directory, the migrations directory
+# (`migrate up` reads SQL migrations from it) and nothing else.
 #
 # Dependencies on a path outside this directory (`brocanth create
 # --brocanth-path`) are not in the build context, and the build fails. Build
@@ -3963,7 +3964,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --bin my-blog \
- && mkdir -p config
+ && mkdir -p config migrations
 
 FROM debian:bookworm-slim AS runtime
 # ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
@@ -3974,6 +3975,7 @@ RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
 WORKDIR /app
 COPY --from=builder /app/target/release/my-blog /app/my-blog
 COPY --from=builder /app/config /app/config
+COPY --from=builder /app/migrations /app/migrations
 USER 10001
 
 # Every interface, inside the container. `$MY_BLOG_ENV` picks
@@ -4713,8 +4715,28 @@ fn tool(args: &[&str]) -> anyhow::Result<()> {
 }
 
 /// Refuses when a file in `migrations/` is not in the list this binary was
-/// built with: it would be skipped without a word.
+/// built with: it would be skipped without a word. A `.sql` file is the
+/// same case: the SQL migrations of a project with `db` and no `model`.
 fn unlisted() -> anyhow::Result<()> {
+    let mut sql: Vec<String> = std::fs::read_dir("migrations")
+        .map(|dir| {
+            dir.flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".sql"))
+                .collect()
+        })
+        .unwrap_or_default();
+    sql.sort();
+    if !sql.is_empty() {
+        anyhow::bail!(
+            "migrations/ holds SQL migrations ({}), and this command applies only the \
+             migrations of `model`\n\
+             help: the SQL files made tables that are already there. Record them with \
+             `migrate make <name> --snapshot-only`, then move the .sql files out of \
+             migrations/, for example to migrations/sql/",
+            sql.join(", ")
+        );
+    }
     let built: BTreeSet<String> = Migrator::migrations()
         .iter()
         .map(|m| m.name().to_string())
@@ -9188,11 +9210,11 @@ kind = ["enhancer", "middleware", "renderer"]
 files = ["src/commands/dbshell.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
-adapted_to = ["config", "commands"]
+adapted_to = ["config", "commands", "model"]
 
 [modules.model]
 kind = ["enhancer", "middleware", "renderer"]
-files = ["migrations/", "src/bin/migrate.rs", "src/commands/migrate.rs", "src/plugins/model/"]
+files = ["migrations/", "src/bin/migrate.rs", "src/plugins/model/"]
 config = []
 crates = ["brocanth-model", "brocanth-migrate"]
 adapted_to = ["config", "commands"]
@@ -9407,4 +9429,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 8f74205a93b24567
+# brocanth-digest: 641d8697b9b51f32

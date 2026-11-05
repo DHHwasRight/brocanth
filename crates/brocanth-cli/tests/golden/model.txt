@@ -2453,7 +2453,7 @@ kind = ["enhancer", "middleware", "renderer"]
 files = ["src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
-adapted_to = ["config"]
+adapted_to = ["config", "model"]
 
 [modules.model]
 kind = ["enhancer", "middleware", "renderer"]
@@ -2462,4 +2462,4 @@ config = []
 crates = ["brocanth-model", "brocanth-migrate"]
 adapted_to = ["config"]
 
-# brocanth-digest: 1a04064230f6d555
+# brocanth-digest: 769b04d96396598e

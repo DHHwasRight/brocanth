@@ -5312,6 +5312,12 @@ mod tests {
             // The pool, with a config file: a `[db]` section, a plugin that
             // opens it in `before_start`, and `ctx.db()` on the context.
             ("db", vec!["config", "db"]),
+            // The pool with a command line and no ORM: a `migrate` command
+            // over the SQL files in migrations/, reading `[db]` from the file.
+            ("db-migrate", vec!["config", "db", "commands"]),
+            // The same with no config file: the URL comes from the flags and
+            // the environment.
+            ("db-migrate-flags", vec!["db", "commands"]),
             // Page views over that pool, with the admin, so the generated
             // `mount` carries the analytics tab and the hook record names a
             // plugin from a library crate.
@@ -5710,14 +5716,28 @@ mod tests {
             } else {
                 &["test", "--", "pages::ticks"][..]
             };
+            // A project with `db` and no config file reads `[db]` from the
+            // environment: the same closed port and short timeout.
+            let closed_db: &[(&str, &str)] = if has_db && !picks.contains(&"config") {
+                &[
+                    ("MY_BLOG_DB__URL", "postgres://brocanth@127.0.0.1:1/none"),
+                    ("MY_BLOG_DB__ACQUIRE_TIMEOUT", "1"),
+                ]
+            } else {
+                &[]
+            };
             for step in [lint, &["test"][..], &["async-page"][..], lint, streams] {
                 if step == ["async-page"] {
                     std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
                     std::fs::write(root.join("src/pages/ticks.rs"), STREAM_PAGE).unwrap();
                     if has_db {
                         std::fs::write(root.join("src/pages/pinged.rs"), DB_PAGE).unwrap();
+                        // Without a config file, the same values come from
+                        // the environment; see `closed_db` above.
                         let config = root.join("config/development.toml");
-                        let text = std::fs::read_to_string(&config).unwrap();
+                        let Ok(text) = std::fs::read_to_string(&config) else {
+                            continue;
+                        };
                         let text = text
                             .replace(
                                 "\"postgres://localhost/development\"",
@@ -5738,6 +5758,7 @@ mod tests {
                 )
                 .args(step)
                 .env("CARGO_TARGET_DIR", &target)
+                .envs(closed_db.iter().copied())
                 .current_dir(&root)
                 .output()
                 .expect("run cargo");

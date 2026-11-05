@@ -74,7 +74,7 @@ nothing holds this page.
 | [`client`](modules/client.md) | A subcommand that calls this application's own API, built from its routes |  |  | needs `input`: the client is built from what each page takes and gives, and that table is what `input` writes; `commands`: the client is a subcommand, and a project with no command line has nowhere to put one |  |
 | [`commands`](modules/commands.md) | This project's own command line, `serve` plus whatever you add |  | yes |  | static-site safe |
 | [`config`](modules/config.md) | Config/<env>.toml, merged; without it nothing links a TOML parser |  | yes |  | static-site safe |
-| [`db`](modules/db.md) | One Postgres pool and sea-query statements, read as `ctx.db()`; without it no SQL driver | Middleware, Renderer |  |  |  |
+| [`db`](modules/db.md) | One Postgres pool and sea-query statements, read as `ctx.db()`; without it no SQL driver | Middleware, Renderer |  |  | with `commands` and no `model`: SQL migrations in migrations/ |
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
@@ -126,10 +126,7 @@ shutdown_grace_secs` has a flag and a variable in every project
 1. **`i18n`.** `brocanth-i18n` exists, but no module adds it to a project
    (`docs/i18n.md` §7). It also unblocks translated banners in `gtag`,
    which needs a catalogue a hook can read.
-2. **Migrations for `db` without `model`.** sea-query has no models to
-   diff, so there is no `make`. Plain SQL files are one option; not decided
-   (`docs/migrations.md` §5).
-3. **`realtime-websocket`.** Blocked: an upgrade out of the
+2. **`realtime-websocket`.** Blocked: an upgrade out of the
    request/response shape and a frame codec (`docs/modules/realtime-websocket.md`).
 
 ### 3. Module system
@@ -181,7 +178,9 @@ What remains, from `docs/admin-customization.md`, "Open":
 For context, not to do: per-module settings with flags and config, the
 manifest rules, `admin eject` (CLI and project command), `robots`,
 `analytics` with `beacon`, `gtag`, `sitemap` (the base URL is
-`[sitemap] base_url`; see `docs/robots.md`), `migrate` and `dbshell` as project
+`[sitemap] base_url`; see `docs/robots.md`), SQL migrations for `db`
+without `model` (`docs/migrations.md` §7; open: no checksum of an applied
+file), `migrate` and `dbshell` as project
 commands, and a CLI with no module runtime.
 
 Also done: a test harness for out-of-tree modules

@@ -48,6 +48,33 @@ the client. Another plugin, registered after `db`, reads the same pool with
 `lc.require_service::<brocanth_db::Db>()`. The settings are in
 [docs/modules/db.md](../../docs/modules/db.md).
 
+### SQL migrations
+
+`brocanth_db::migrate` applies plain SQL files,
+`migrations/<YYYYMMDD_HHMMSS>_<name>.sql`, in name order. The statements
+before a `-- down` line apply a file; the statements after it undo it. Each
+file runs in one transaction and is recorded in `brocanth_migrations`.
+
+```rust,no_run
+use std::path::Path;
+
+use brocanth_db::migrate::{self, Migrator};
+use brocanth_db::{Db, DbConfig};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let db = Db::connect(&DbConfig::new("postgres://localhost/app")).await?;
+migrate::new_file(Path::new("migrations"), "add_posts")?;
+let files = migrate::read_dir(Path::new("migrations"))?;
+let applied = Migrator::new(&db, files).up().await?;
+println!("applied {applied:?}");
+# Ok(())
+# }
+```
+
+A generated project with `db` and `commands` and no `model` gets this as a
+`migrate` command: `new`, `up`, `down [N]` and `status`. See
+`docs/migrations.md`, section 7.
+
 ## Example
 
 ```rust,no_run

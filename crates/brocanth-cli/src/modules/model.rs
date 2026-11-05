@@ -444,8 +444,28 @@ fn tool(args: &[&str]) -> anyhow::Result<()> {
 }
 
 /// Refuses when a file in `migrations/` is not in the list this binary was
-/// built with: it would be skipped without a word.
+/// built with: it would be skipped without a word. A `.sql` file is the
+/// same case: the SQL migrations of a project with `db` and no `model`.
 fn unlisted() -> anyhow::Result<()> {
+    let mut sql: Vec<String> = std::fs::read_dir("migrations")
+        .map(|dir| {
+            dir.flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".sql"))
+                .collect()
+        })
+        .unwrap_or_default();
+    sql.sort();
+    if !sql.is_empty() {
+        anyhow::bail!(
+            "migrations/ holds SQL migrations ({}), and this command applies only the \
+             migrations of `model`\n\
+             help: the SQL files made tables that are already there. Record them with \
+             `migrate make <name> --snapshot-only`, then move the .sql files out of \
+             migrations/, for example to migrations/sql/",
+            sql.join(", ")
+        );
+    }
     let built: BTreeSet<String> = Migrator::migrations()
         .iter()
         .map(|m| m.name().to_string())

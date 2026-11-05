@@ -7,8 +7,8 @@
 //!
 //! The Dockerfile's text depends on the project name alone, so `brocanth
 //! add` never has to change a file the developer tunes: a serve-only binary
-//! ignores the `serve` argument, the config directory is made empty when
-//! there is none, and the health check accepts any HTTP answer, so a
+//! ignores the `serve` argument, the config and migrations directories are
+//! made empty when there are none, and the health check accepts any HTTP answer, so a
 //! project without `observability-health` passes it with a 404 from `/up`.
 
 use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold};
@@ -84,7 +84,8 @@ const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1
 # Three stages. `planner` reduces the manifests to a recipe. `builder` builds
 # the dependencies from the recipe, in a layer that stays cached until
 # Cargo.toml or Cargo.lock changes, and then builds the application. The
-# runtime holds the binary, the config directory and nothing else.
+# runtime holds the binary, the config directory, the migrations directory
+# (`migrate up` reads SQL migrations from it) and nothing else.
 #
 # Dependencies on a path outside this directory (`brocanth create
 # --brocanth-path`) are not in the build context, and the build fails. Build
@@ -105,7 +106,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --bin @NAME@ \
- && mkdir -p config
+ && mkdir -p config migrations
 
 FROM debian:bookworm-slim AS runtime
 # ca-certificates for TLS to a database or an API; curl for HEALTHCHECK.
@@ -116,6 +117,7 @@ RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin app
 WORKDIR /app
 COPY --from=builder /app/target/release/@NAME@ /app/@NAME@
 COPY --from=builder /app/config /app/config
+COPY --from=builder /app/migrations /app/migrations
 USER 10001
 
 # Every interface, inside the container. `$@UPPER@_ENV` picks

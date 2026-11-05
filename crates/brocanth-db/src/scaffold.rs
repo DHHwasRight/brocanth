@@ -43,7 +43,14 @@ impl Module for Database {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to("commands", "a `dbshell` command opens psql on `[db] url`")
+        .adapts_to(
+            "commands",
+            "a `dbshell` command opens psql on `[db] url`, and a `migrate` command applies the SQL files in migrations/",
+        )
+        .adapts_to(
+            "model",
+            "no SQL `migrate` command: `model` writes its own, over SeaORM",
+        )
         .asked_in("data", "A Postgres pool, and SQL built with sea-query")
         .recommends(
             "observability-health",
@@ -70,6 +77,13 @@ impl Module for Database {
         if project.has("commands") {
             s.file("src/commands/dbshell.rs", dbshell_rs(project));
             s.at(Slot::CommandsMod).line("pub mod dbshell;");
+        }
+        // Plain SQL migrations, for a project with no ORM. With `model`,
+        // the `migrate` command is the model's: one per project.
+        if project.has("commands") && !project.has("model") {
+            s.file("src/commands/migrate.rs", migrate_rs(project));
+            s.at(Slot::CommandsMod).line("pub mod migrate;");
+            s.at(Slot::AgentsSections).block(AGENTS_MIGRATE.to_string());
         }
         if !project.has("config") {
             // The literal form calls `Plugin::new`, a trait method, so the
@@ -184,6 +198,166 @@ impl Ctx {
         )
     }
 }
+"#;
+
+/// `src/commands/migrate.rs`: `brocanth_db::migrate` on the database the
+/// server reads.
+fn migrate_rs(project: &Project) -> String {
+    let url = if project.has("config") {
+        MIGRATE_URL_FROM_CONFIG
+    } else {
+        MIGRATE_URL_FROM_ENV
+    };
+    MIGRATE_RS.replace("@URL@", url)
+}
+
+const MIGRATE_RS: &str = r#"//! `migrate` -- apply the SQL files in `migrations/` to `[db] url`.
+//!
+//! A migration is one file, `migrations/<UTC time>_<name>.sql`. The
+//! statements before a `-- down` line apply it; the statements after that
+//! line undo it. `migrate new <name>` writes an empty one. Each file runs in
+//! one transaction, and `brocanth_migrations` records it.
+//!
+//! The files are read when this command runs, not built into the binary.
+//! The container image copies `migrations/` next to the binary, so
+//! `<binary> migrate up` works in a release job. See `brocanth_db::migrate`.
+
+use std::path::Path;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_db::migrate::{self, Migrator};
+use brocanth_db::{Db, DbConfig};
+
+/// Apply, roll back or list the SQL migrations in migrations/
+#[cmd]
+#[derive(clap::Args)]
+pub struct Migrate {
+    #[command(subcommand)]
+    action: Action,
+}
+
+#[derive(clap::Subcommand)]
+enum Action {
+    /// Apply each pending migration, oldest first
+    Up,
+    /// Roll back the newest N applied migrations
+    Down {
+        /// How many migrations to roll back
+        #[arg(value_name = "N", default_value_t = 1)]
+        n: usize,
+    },
+    /// List each migration as applied or pending
+    Status,
+    /// Write an empty migration, migrations/<UTC time>_<NAME>.sql
+    New {
+        /// The name of the migration, in snake case: add_posts
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+}
+
+impl Command for Migrate {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        // `migrations/` and the config files resolve from the project
+        // root, wherever the command started.
+        std::env::set_current_dir(ctx.root())?;
+        let dir = Path::new("migrations");
+        if let Action::New { name } = &self.action {
+            let path = migrate::new_file(dir, name)?;
+            println!("wrote {}", path.display());
+            return Ok(());
+        }
+        let files = migrate::read_dir(dir)?;
+        let config = database()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let db = Db::connect(&config).await?;
+            let migrator = Migrator::new(&db, files);
+            let result = apply(&migrator, self.action).await;
+            db.close().await;
+            result
+        })
+    }
+}
+
+async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
+    match action {
+        Action::Up => {
+            let applied = migrator.up().await?;
+            if applied.is_empty() {
+                println!("Nothing to apply: each migration is applied.");
+            }
+            for name in applied {
+                println!("applied      {name}");
+            }
+        }
+        Action::Down { n } => {
+            let undone = migrator.down(n).await?;
+            if undone.is_empty() {
+                println!("Nothing to roll back: no migration is applied.");
+            }
+            for name in undone {
+                println!("rolled back  {name}");
+            }
+        }
+        Action::Status => {
+            let states = migrator.status().await?;
+            if states.is_empty() {
+                println!("No migration in migrations/. Write one with `migrate new <name>`.");
+            }
+            for (name, state) in states {
+                println!("{:<12} {name}", state.as_str());
+            }
+        }
+        Action::New { .. } => {}
+    }
+    Ok(())
+}
+@URL@"#;
+
+const MIGRATE_URL_FROM_CONFIG: &str = r#"
+/// The pool's configuration: `[db]`, through the loader the server uses, so
+/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
+/// sees.
+fn database() -> anyhow::Result<DbConfig> {
+    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
+    Ok(config
+        .section::<crate::plugins::db::Settings>("db")?
+        .config())
+}
+"#;
+
+const MIGRATE_URL_FROM_ENV: &str = r#"
+/// The pool's configuration, as the server reads `[db]` without a file:
+/// the defaults in `src/plugins/db/mod.rs`, then `$<APP>_DB__URL` and the
+/// other variables, then the flags.
+fn database() -> anyhow::Result<DbConfig> {
+    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&given).map_err(anyhow::Error::msg)?;
+    Ok(settings.config())
+}
+"#;
+
+const AGENTS_MIGRATE: &str = r#"
+## Migrations
+
+A schema change is a SQL file in `migrations/`. Write one with
+`brocanth migrate new add_posts` (or `cargo run -- migrate new add_posts`),
+then fill it:
+
+```sql
+CREATE TABLE posts (id bigserial PRIMARY KEY, title text NOT NULL);
+
+-- down
+DROP TABLE posts;
+```
+
+`migrate up` applies each pending file in name order, each in one
+transaction. `migrate down [N]` runs the `-- down` part of the newest N.
+`migrate status` lists each file. Do not edit a file that is applied: write
+a new one.
 "#;
 
 /// `src/commands/dbshell.rs`: `brocanth_db::shell` on the URL the server reads.

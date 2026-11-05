@@ -9,6 +9,7 @@
 //! - [`Exec`]: `all`, `one`, `optional`, `execute`, `json`, `raw_json`, for a
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
+//! - [`migrate`]: plain SQL migrations, for a project with no ORM.
 //!
 //! [`sea_query`] and [`sqlx`] are re-exported, so an application names one
 //! dependency and gets the versions this crate was built against.
@@ -21,6 +22,8 @@ mod db;
 pub mod error;
 #[cfg(feature = "runtime")]
 pub mod exec;
+#[cfg(feature = "runtime")]
+pub mod migrate;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 #[cfg(feature = "runtime")]

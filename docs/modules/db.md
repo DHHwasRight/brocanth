@@ -13,7 +13,7 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`commands`](commands.md) |
+| Adapts to | [`config`](config.md), [`commands`](commands.md), [`model`](model.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-db` (feature `plugin`) |
@@ -34,6 +34,15 @@ Slots:
 - src/pages/mod.rs: `impl Ctx { pub fn db(&self) -> &brocanth_db::Db }`
 - config/<env>.toml: `[db]`
 - AGENTS.md: `## The database`
+
+With `commands`:
+
+- `src/commands/dbshell.rs`: `dbshell` opens psql on `[db] url`.
+- `src/commands/migrate.rs`, without `model`: `migrate new`, `up`,
+  `down [N]` and `status` over the SQL files in `migrations/`
+  (`brocanth_db::migrate`). AGENTS.md gets `## Migrations`. With `model`,
+  the model's `migrate` command is written instead. See
+  [migrations](../migrations.md), section 7.
 
 ## What the plugin does
 
@@ -74,4 +83,5 @@ A duration is a whole number of seconds. For `idle_timeout` and
 ## Read more
 
 - [brocanth-db](../../crates/brocanth-db/README.md)
+- [Migrations](../migrations.md)
 - Source: [`crates/brocanth-db/src/scaffold.rs`](../../crates/brocanth-db/src/scaffold.rs)
