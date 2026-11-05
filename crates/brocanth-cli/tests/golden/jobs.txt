@@ -66,7 +66,7 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -103,7 +103,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: b5f00348e17ca817
+// brocanth-digest: 32a281d6f318fea8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1308,7 +1308,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1785,7 +1785,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 0f480b9e8c990629
+// brocanth-digest: cc286f67f97a6a36
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2161,7 +2161,7 @@ impl Plugin for Jobs {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2253,10 +2253,10 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: fb31cae8e96260c8 -->
+<!-- brocanth-digest: 7cbe4d3beda5a2c9 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2268,6 +2268,7 @@ title = "My Blog"
 enabled = ["config", "jobs"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
@@ -2275,10 +2276,11 @@ crates = ["brocanth-config"]
 adapted_to = []
 
 [modules.jobs]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
 
-# brocanth-digest: a840cda448d436f9
+# brocanth-digest: ac402250019f37f0

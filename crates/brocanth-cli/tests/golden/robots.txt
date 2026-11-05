@@ -66,7 +66,7 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -103,7 +103,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: b5f00348e17ca817
+// brocanth-digest: 32a281d6f318fea8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1334,7 +1334,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1841,7 +1841,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 81744b4952bcad0e
+// brocanth-digest: 191e7cea80fc4e7d
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2367,7 +2367,7 @@ mod tests {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2471,10 +2471,10 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
 
-<!-- brocanth-digest: b9353384cf7fac3d -->
+<!-- brocanth-digest: 2115d386af477eea -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2486,6 +2486,7 @@ title = "My Blog"
 enabled = ["config", "admin", "robots"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
@@ -2493,6 +2494,7 @@ crates = ["brocanth-config"]
 adapted_to = []
 
 [modules.admin]
+version = "0.1.0"
 kind = ["routes", "enhancer"]
 files = ["src/plugins/admin/"]
 config = ["admin"]
@@ -2500,10 +2502,11 @@ crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
 [modules.robots]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "admin"]
 
-# brocanth-digest: ff50a3ca0b4525dc
+# brocanth-digest: c1dd6c61697ed10f

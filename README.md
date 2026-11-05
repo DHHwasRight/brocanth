@@ -341,7 +341,7 @@ opt-in, and the wizard's **Operations** question can untick them.
 - [x] **A realtime transport.** `realtime-sse` writes server-sent events
   over the broker into the project. `realtime-websocket` is listed and
   blocked.
-- [ ] **`brocanth remove`**, to take a module out again.
+- [x] **`brocanth remove`**, to take a module out again.
 
 ## Tests and the gate
 

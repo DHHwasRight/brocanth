@@ -77,7 +77,7 @@ run = "cargo run -- css"
 description = "the same, again on each change"
 run = "cargo run -- css --watch"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -117,7 +117,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: 470bfa3bd0d4d786
+// brocanth-digest: a4c0d834f4f0578f
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1822,7 +1822,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -3387,7 +3387,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4119a3f3ad59191c
+// brocanth-digest: cd8cad01d4a53e4b
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3773,7 +3773,7 @@ methods = ["POST"]
 limit = 5
 window_secs = 60
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -3795,7 +3795,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: ed561dbe0c5ec6f9
+// brocanth-digest: 51e3d64c0736bf5e
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -8423,7 +8423,7 @@ impl Plugin for Validation {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -8865,10 +8865,10 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 18eeee30c291c47e -->
+<!-- brocanth-digest: 01a40d9953fc15c9 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -8880,6 +8880,7 @@ title = "My Blog"
 enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
+version = "0.1.0"
 kind = ["middleware", "enhancer", "routes"]
 files = ["src/plugins/observability/"]
 config = ["observability"]
@@ -8887,6 +8888,7 @@ crates = ["brocanth-observe"]
 adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing"]
 
 [modules.observability-logs]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -8894,6 +8896,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-health]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -8901,6 +8904,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-metrics]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -8908,6 +8912,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-tracing]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -8915,6 +8920,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.analytics]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["analytics"]
@@ -8922,6 +8928,7 @@ crates = ["brocanth-analytics"]
 adapted_to = ["config"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -8929,6 +8936,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.sessions]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/sessions/"]
 config = ["sessions"]
@@ -8936,6 +8944,7 @@ crates = []
 adapted_to = ["config"]
 
 [modules.db]
+version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
 files = ["src/commands/dbshell.rs", "src/plugins/db/"]
 config = ["db"]
@@ -8943,6 +8952,7 @@ crates = ["brocanth-db"]
 adapted_to = ["config", "commands"]
 
 [modules.model]
+version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
 files = ["migrations/", "src/bin/migrate.rs", "src/commands/migrate.rs", "src/plugins/model/"]
 config = []
@@ -8950,6 +8960,7 @@ crates = ["brocanth-model", "brocanth-migrate"]
 adapted_to = ["config", "commands"]
 
 [modules.cache]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/cache/"]
 config = ["cache"]
@@ -8957,6 +8968,7 @@ crates = ["brocanth-cache"]
 adapted_to = ["config"]
 
 [modules.jobs]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/jobs/"]
 config = ["jobs"]
@@ -8964,6 +8976,7 @@ crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
 
 [modules.auth]
+version = "0.1.0"
 kind = ["middleware", "enhancer"]
 files = ["src/plugins/auth/"]
 config = ["auth"]
@@ -8971,6 +8984,7 @@ crates = ["brocanth-auth"]
 adapted_to = ["config", "jobs", "cache"]
 
 [modules.policy]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/policy/"]
 config = ["policy"]
@@ -8978,6 +8992,7 @@ crates = ["brocanth-policy"]
 adapted_to = ["config", "model", "realtime"]
 
 [modules.storage]
+version = "0.1.0"
 kind = ["enhancer", "middleware"]
 files = ["src/plugins/storage/"]
 config = ["storage"]
@@ -8985,6 +9000,7 @@ crates = ["brocanth-storage"]
 adapted_to = ["config"]
 
 [modules.input]
+version = "0.1.0"
 kind = ["enhancer", "renderer"]
 files = []
 config = []
@@ -8992,6 +9008,7 @@ crates = ["brocanth-input", "zod"]
 adapted_to = ["rsx"]
 
 [modules.client]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/api.rs"]
 config = []
@@ -8999,6 +9016,7 @@ crates = ["brocanth-client"]
 adapted_to = []
 
 [modules.middleware]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -9006,6 +9024,7 @@ crates = ["brocanth-middleware"]
 adapted_to = []
 
 [modules.middleware-csrf]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["csrf"]
@@ -9013,6 +9032,7 @@ crates = []
 adapted_to = ["config"]
 
 [modules.middleware-security-headers]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
@@ -9020,6 +9040,7 @@ crates = []
 adapted_to = ["admin", "gtag", "config"]
 
 [modules.middleware-rate-limit]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["rate_limit"]
@@ -9027,6 +9048,7 @@ crates = []
 adapted_to = ["config"]
 
 [modules.gtag]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["gtag", "gtag.banner"]
@@ -9034,6 +9056,7 @@ crates = ["brocanth-gtag"]
 adapted_to = ["config"]
 
 [modules.openapi]
+version = "0.1.0"
 kind = ["routes", "enhancer"]
 files = ["src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
@@ -9041,6 +9064,7 @@ crates = ["brocanth-openapi"]
 adapted_to = ["config", "input"]
 
 [modules.validation]
+version = "0.1.0"
 kind = ["middleware"]
 files = ["src/plugins/validation/"]
 config = ["validation"]
@@ -9048,6 +9072,7 @@ crates = ["brocanth-schema"]
 adapted_to = ["config"]
 
 [modules.resource]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/plugins/resource/"]
 config = []
@@ -9055,6 +9080,7 @@ crates = ["brocanth-resource"]
 adapted_to = []
 
 [modules.admin]
+version = "0.1.0"
 kind = ["routes", "enhancer"]
 files = ["src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
@@ -9062,6 +9088,7 @@ crates = ["brocanth-admin"]
 adapted_to = ["config", "middleware-csrf", "admin-model", "commands", "analytics"]
 
 [modules.admin-model]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/plugins/admin/models.rs"]
 config = []
@@ -9069,6 +9096,7 @@ crates = ["brocanth-admin-model"]
 adapted_to = []
 
 [modules.realtime]
+version = "0.1.0"
 kind = ["enhancer", "middleware"]
 files = ["src/plugins/realtime/"]
 config = ["realtime"]
@@ -9076,6 +9104,7 @@ crates = ["brocanth-realtime"]
 adapted_to = ["config"]
 
 [modules.realtime-sse]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/realtime/events.rs", "src/plugins/realtime_sse/"]
 config = []
@@ -9083,6 +9112,7 @@ crates = ["brocanth-events"]
 adapted_to = []
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -9090,6 +9120,7 @@ crates = ["brocanth-command"]
 adapted_to = ["input"]
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
@@ -9097,6 +9128,7 @@ crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.jt]
+version = "0.1.0"
 kind = ["renderer", "routes"]
 files = ["src/pages/status.jt", "src/pages/status.rs"]
 config = []
@@ -9104,6 +9136,7 @@ crates = ["jt"]
 adapted_to = []
 
 [modules.rsx-tailwind]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
 config = []
@@ -9111,6 +9144,7 @@ crates = []
 adapted_to = []
 
 [modules.rsx-htmx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
@@ -9118,6 +9152,7 @@ crates = []
 adapted_to = []
 
 [modules.robots]
+version = "0.1.0"
 kind = ["routes"]
 files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
@@ -9125,6 +9160,7 @@ crates = ["brocanth-robots"]
 adapted_to = ["config", "admin"]
 
 [modules.docker]
+version = "0.1.0"
 kind = ["external"]
 files = [".dockerignore", "Dockerfile"]
 config = []
@@ -9132,6 +9168,7 @@ crates = []
 adapted_to = []
 
 [modules.docker-kubernetes]
+version = "0.1.0"
 kind = ["external"]
 files = ["deploy/kubernetes.yaml"]
 config = []
@@ -9139,6 +9176,7 @@ crates = []
 adapted_to = []
 
 [modules.ci]
+version = "0.1.0"
 kind = ["external"]
 files = []
 config = []
@@ -9146,10 +9184,11 @@ crates = []
 adapted_to = []
 
 [modules.ci-github]
+version = "0.1.0"
 kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 544227c715e057e3
+# brocanth-digest: 4a9422cd67b0f798

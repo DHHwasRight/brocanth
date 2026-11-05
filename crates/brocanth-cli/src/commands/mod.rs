@@ -11,6 +11,7 @@ pub mod check;
 pub mod create;
 pub mod delegate;
 pub mod project;
+pub mod remove;
 
 /// What every command returns.
 pub type Outcome = Result<std::process::ExitCode, Vec<crate::ui::Diagnostic>>;

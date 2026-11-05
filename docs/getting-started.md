@@ -183,6 +183,7 @@ title = "Blog"
 enabled = ["observability", "config", "jobs", "commands"]
 
 [modules.jobs]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/plugins/jobs/"]
 config = ["jobs"]
@@ -190,9 +191,10 @@ crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
 ```
 
-`kind` is the manifest's categories. `adapted_to` lists the modules in
-this project whose presence changed what `jobs` wrote. That record is for
-the `remove` that will need to know which modules to rewrite.
+`version` is the version of the code that wrote the module; `brocanth
+check` warns when the installed CLI writes another one. `kind` is the
+manifest's categories. `adapted_to` lists the modules in this project
+whose presence changed what `jobs` wrote.
 
 Four kinds of file come out of a run, and which is which is fixed:
 
@@ -231,9 +233,12 @@ to place, and the project compiles and runs without it:
                   Ok(())
 ```
 
-There is no `brocanth remove` yet. The per-module record above is written so
-that there can be one: it says what each module put in the project, so a
-later `remove` deletes what was written rather than what a rule guesses.
+`brocanth remove jobs` is the inverse. It generates the project without
+the module, deletes what only the module needed, and takes its
+dependencies and config sections out. It refuses an edited file with the
+edit, and a module that a remaining module needs. It keeps renames in
+`src/flags.rs`, ejected admin screens and `migrations/`, so a later
+`brocanth add` finds them again.
 
 ## Run it
 

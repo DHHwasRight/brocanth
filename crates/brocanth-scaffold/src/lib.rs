@@ -228,6 +228,16 @@ pub struct Manifest {
     ///
     /// [`needs`]: Manifest::needs
     pub recommends: Vec<(&'static str, &'static str)>,
+    /// The version of the code that writes this module, when it is not the
+    /// CLI's own. Set with [`Manifest::version`].
+    ///
+    /// `brocanth.toml` records it per module, and `brocanth check` says when
+    /// the installed CLI writes a module at another version than the one
+    /// that wrote the project. `None` is the CLI's version: every crate in
+    /// the brocanth workspace takes the workspace version, so a module that
+    /// lives there writes at the CLI's version by construction. A module
+    /// from another repository sets it, with its own crate's version.
+    pub version: Option<&'static str>,
 }
 
 impl Manifest {
@@ -252,7 +262,18 @@ impl Manifest {
             conflicts: Vec::new(),
             adapts_to: Vec::new(),
             recommends: Vec::new(),
+            version: None,
         }
+    }
+
+    /// The version of the code that writes this module. Pass
+    /// `env!("CARGO_PKG_VERSION")`, so the number is the crate's own.
+    ///
+    /// Only a module outside the brocanth workspace needs it: inside, every
+    /// crate takes the workspace version, which is the CLI's.
+    pub fn version(mut self, version: &'static str) -> Self {
+        self.version = Some(version);
+        self
     }
 
     /// One of the kinds of seam this module hooks into. Call it once per

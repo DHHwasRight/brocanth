@@ -56,6 +56,11 @@ impl Module for Backoffice {
             "admin",
             "a Django-shaped backoffice at /admin, locked until you say who may in",
         )
+        // This crate's version, said here and not left to the CLI's, because
+        // `brocanth admin eject` writes the same number into the header of
+        // every screen it copies. `brocanth.toml` and the header then name
+        // one version by construction, not by the workspace's agreement.
+        .version(env!("CARGO_PKG_VERSION"))
         .category(Category::Routes)
         .category(Category::Enhancer)
         .adapts_to(

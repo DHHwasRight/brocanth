@@ -85,7 +85,7 @@ run = "cargo run -- css"
 description = "the same, again on each change"
 run = "cargo run -- css --watch"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -123,7 +123,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e19f2808bd04d0f1
+// brocanth-digest: 60f10486fb5b59ca
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1530,7 +1530,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -2086,7 +2086,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: c08f6d7216432078
+// brocanth-digest: 79c9a67867f65657
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2172,7 +2172,7 @@ manage = "Cookie settings"
 # A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
 # policy_url = ""
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -2191,7 +2191,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 7d2d328058b16e5b
+// brocanth-digest: 0e36b073756e4154
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2781,7 +2781,7 @@ pub fn Layout(layout: &str, children: Element) -> Element {
     </section>
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -3028,10 +3028,10 @@ is the preview, not the deployment.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
 
-<!-- brocanth-digest: 1b213afbe5f235f1 -->
+<!-- brocanth-digest: b0858892d3b58cd8 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -3043,6 +3043,7 @@ title = "My Blog"
 enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github", "gtag"]
 
 [modules.static]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["src/commands/export.rs"]
 config = []
@@ -3050,6 +3051,7 @@ crates = ["brocanth-static"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -3057,6 +3059,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -3064,6 +3067,7 @@ crates = ["brocanth-command"]
 adapted_to = []
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
@@ -3071,6 +3075,7 @@ crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.rsx-tailwind]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
 config = []
@@ -3078,6 +3083,7 @@ crates = []
 adapted_to = []
 
 [modules.rsx-htmx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
@@ -3085,6 +3091,7 @@ crates = []
 adapted_to = []
 
 [modules.ci]
+version = "0.1.0"
 kind = ["external"]
 files = []
 config = []
@@ -3092,6 +3099,7 @@ crates = []
 adapted_to = []
 
 [modules.ci-github]
+version = "0.1.0"
 kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
@@ -3099,10 +3107,11 @@ crates = []
 adapted_to = ["static"]
 
 [modules.gtag]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
 adapted_to = ["config"]
 
-# brocanth-digest: 844ef1d6a8efc60a
+# brocanth-digest: 7c56be4e32141299

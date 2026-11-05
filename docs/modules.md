@@ -781,6 +781,95 @@ printed and the add goes on.
 the command. After an upgrade that changed a template, an untouched file
 reads as edited, and `add` refuses with the diff. That is the safe
 direction: it never mistakes an edit for the generator's text.
+`brocanth check` says so first, with `check/module-version` (below).
+
+### Removing from a project — what `remove` may delete
+
+`brocanth remove` is `add` in the other direction, and the same machine.
+It generates the project with the module and without it, and writes the
+difference. It does not read the `files` list in `brocanth.toml`: the
+generator is the one source of what a module wrote, so `add` and
+`remove` cannot disagree about it.
+
+1. **Every module runs again.** A module that adapted to the one leaving
+   writes its code without it: `ci-github` rewrites the workflow when
+   `jobs` leaves.
+2. **An unedited file goes.** A file of the developer's that only the
+   module needed is deleted while it holds, byte for byte, what the
+   generator wrote. Then the directories it leaves empty go.
+3. **An edit is never deleted.** An edited file that would go or change
+   stops the command, with the edit as a diff and a `help:` line. Nothing
+   is written. `src/app.rs` is no exception here: a mount of a middleware
+   that has left references a crate that is gone, so the project does not
+   compile until the line goes.
+4. **The shared files lose only the module's part.** In `Cargo.toml`, a
+   dependency the generator wrote before and does not write now goes, a
+   feature it no longer asks for goes, and so do its `[[bin]]` and
+   `default-run`. The receipt above `[dependencies]` gets the module's
+   line again. In `config/<env>.toml`, a section (or a key in a parent's
+   section) goes while its values are the generator's. A changed value is
+   refused, because it is the developer's: copy it, delete the section,
+   and run again. A comment is not a value.
+5. **What stays must stand.** A module that a remaining module `needs`,
+   or the parent of a remaining child, is refused. The `help:` line names
+   all of them in one command: `brocanth remove model db`.
+
+Three kinds of state must survive a remove and a re-add. Each has its own
+rule, and the reason for it:
+
+- **Renames in `src/flags.rs` are parked.** The project refuses to start
+  with a rename of a flag that no module sets, so the rename cannot stay
+  live. Deleting it would lose a decision. So `remove` turns the line
+  into a comment,
+  `` // Parked by `brocanth remove`; `brocanth add` restores it: ("jobs.workers", "workers"), ``,
+  and `add` restores it when
+  the flag is back. A rename that shares its line with another is refused
+  with the edit to make: one rename per line. When no module has
+  settings any more, an edited `src/flags.rs` stays; nothing compiles it.
+- **Ejected admin screens stay.** The copies under
+  `src/plugins/admin/screens/` and `ejected.rs` are the developer's work,
+  and an eject is often hours of it. `remove admin` deletes the plugin
+  when it holds what the generator wrote plus the two edits `eject` makes,
+  and leaves the copies. Without the plugin's `mod` line nothing compiles
+  them. `add admin` writes the plugin and makes the eject's edits again
+  from the copies on disk. The other choice, refusing `remove admin` while
+  a screen is ejected, makes the developer delete their work to remove a
+  module they may want back.
+- **`migrations/` stays.** It is the history of a database that still has
+  the tables. `remove model` does not delete it, and `add model` writes
+  around the list the `migrate` tool has rewritten since.
+
+### Module versions — which code wrote the project
+
+`brocanth.toml` records `version` under `[modules.<key>]`, and `add` and
+`remove` write it again on every run. The number is the crate version of
+the code that writes the module:
+
+- A module of the brocanth workspace does not declare one. Every crate
+  in the workspace takes the workspace version, so its version is the
+  CLI's (`CARGO_PKG_VERSION` of `brocanth-cli`). A declaration on each of
+  forty manifests would be forty copies of one number.
+- A module from another repository declares
+  `Manifest::version(env!("CARGO_PKG_VERSION"))`. The macro runs in the
+  module's crate, so the number is that crate's.
+- `admin` declares it, though it is in the workspace. `brocanth admin
+  eject` writes `Ejected from brocanth-admin <version>` into each copy,
+  from the same `CARGO_PKG_VERSION`. So the record and the eject header
+  name one number by construction, and an upgrade that changes the
+  shipped screens shows in both.
+
+`brocanth check` warns (`check/module-version`) when the installed CLI
+writes a module at another version than the recorded one, or when no
+version is recorded. A warning, because the project builds and runs. The
+cost lands on the next `add` or `remove`, which compares the files with
+what the installed CLI writes: a file the old version wrote reads as
+edited. The `help:` line gives both ways out: install the recorded
+version, or run `add` or `remove`, apply the changes it prints, and let
+it record the new version.
+
+The version does not say what changed. Between two commits with one
+workspace version, a template can change and the number does not. The
+digest and the byte-for-byte comparison still catch that file by file.
 
 ---
 

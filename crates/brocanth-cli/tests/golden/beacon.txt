@@ -76,7 +76,7 @@ run = "cargo test"
 description = "write the site to dist/"
 run = "cargo run -- export"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -113,7 +113,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e41b82fec04dd891
+// brocanth-digest: 2b0f22d766333dc2
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1318,7 +1318,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1781,7 +1781,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: bf7282a1e521ba6a
+// brocanth-digest: 9b7b97e1a4263bdd
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -1837,7 +1837,7 @@ shutdown_grace_secs = 25
 # Send nothing from a browser with Global Privacy Control or Do Not Track on.
 respect_gpc = false
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -1855,7 +1855,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: ed7381cec4c9c3b4
+// brocanth-digest: e621d24e31731f25
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2126,7 +2126,7 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
     (vec!["VERB", "PATTERN", "HANDLER"], rows)
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2253,10 +2253,10 @@ is the preview, not the deployment.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
 
-<!-- brocanth-digest: 0c984bcd80aeadca -->
+<!-- brocanth-digest: c84af42f33a78055 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2268,6 +2268,7 @@ title = "My Blog"
 enabled = ["static", "config", "commands", "beacon"]
 
 [modules.static]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["src/commands/export.rs"]
 config = []
@@ -2275,6 +2276,7 @@ crates = ["brocanth-static"]
 adapted_to = []
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -2282,6 +2284,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -2289,10 +2292,11 @@ crates = ["brocanth-command"]
 adapted_to = []
 
 [modules.beacon]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["beacon"]
 crates = ["brocanth-analytics"]
 adapted_to = ["config"]
 
-# brocanth-digest: 356b3ace764d67f5
+# brocanth-digest: c1fed8615de935fc

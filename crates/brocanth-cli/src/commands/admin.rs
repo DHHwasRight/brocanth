@@ -105,8 +105,8 @@ pub struct EjectArgs {
 }
 
 /// Where the plugin and the copies live, relative to the package root.
-const PLUGIN: &str = "src/plugins/admin/mod.rs";
-const SCREENS: &str = "src/plugins/admin/screens";
+pub(crate) const PLUGIN: &str = "src/plugins/admin/mod.rs";
+pub(crate) const SCREENS: &str = "src/plugins/admin/screens";
 const WIRING: &str = "src/plugins/admin/ejected.rs";
 
 /// The line in the generated `mount` the install goes in front of: the
@@ -522,6 +522,46 @@ fn unified(old: &str, new: &str, old_name: &str, new_name: &str) -> Option<Strin
         k += 1;
     }
     Some(out)
+}
+
+/// The plugin as `eject` leaves it: `text` with the two wiring edits made.
+///
+/// `brocanth remove admin` reads a plugin equal to this as unedited: the
+/// eject made the edits, not the developer.
+pub(crate) fn wired(text: &str) -> String {
+    wire(text).0
+}
+
+/// Install again the screens a project ejected before, into an admin
+/// plugin `brocanth add` has just written. Returns the paths it changed.
+///
+/// `brocanth remove admin` keeps the copies, because they are the
+/// developer's work, and deletes the plugin that installed them. So the
+/// next `add admin` finds copies and a plugin that does not know them, and
+/// makes the edits an eject makes, from the copies on disk.
+pub(crate) fn rewire(root: &Path) -> Result<Vec<String>, Vec<Diagnostic>> {
+    let all = on_disk(&root.join(SCREENS));
+    if all.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut changed = Vec::new();
+    let wiring = eject::wiring(SCREENS, &all);
+    if std::fs::read_to_string(root.join(WIRING)).ok().as_deref() != Some(wiring.as_str()) {
+        write(&root.join(WIRING), &wiring)?;
+        changed.push(WIRING.to_string());
+    }
+    if add_rsx(&root.join("Cargo.toml"))? {
+        changed.push("Cargo.toml".to_string());
+    }
+    let plugin = root.join(PLUGIN);
+    if let Ok(text) = std::fs::read_to_string(&plugin) {
+        let (wired, _) = wire(&text);
+        if wired != text {
+            write(&plugin, &wired)?;
+            changed.push(PLUGIN.to_string());
+        }
+    }
+    Ok(changed)
 }
 
 /// The screens that take `--model`.

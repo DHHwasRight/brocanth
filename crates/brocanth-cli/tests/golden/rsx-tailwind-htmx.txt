@@ -78,7 +78,7 @@ run = "cargo run -- css"
 description = "the same, again on each change"
 run = "cargo run -- css --watch"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -116,7 +116,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e19f2808bd04d0f1
+// brocanth-digest: 60f10486fb5b59ca
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1523,7 +1523,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1962,7 +1962,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 0f0c5b1493e2d02f
+// brocanth-digest: 8fca5c92cd076058
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -1992,7 +1992,7 @@ pub const WITH_CONFIG: bool = false;
 /// ```
 pub const RENAMES: &[(&str, &str)] = &[];
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -2009,7 +2009,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 8ae5e693599274c3
+// brocanth-digest: 8d99e12edb4b08e2
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2439,7 +2439,7 @@ pub fn Layout(layout: &str, children: Element) -> Element {
     </section>
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2648,10 +2648,10 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ac7535a3bd973bf4 -->
+<!-- brocanth-digest: fff7f7ac3fc1f9bf -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2663,6 +2663,7 @@ title = "My Blog"
 enabled = ["rsx", "rsx-tailwind", "rsx-htmx", "commands"]
 
 [modules.rsx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx"]
 config = []
@@ -2670,6 +2671,7 @@ crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
 
 [modules.rsx-tailwind]
+version = "0.1.0"
 kind = ["external", "enhancer"]
 files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/commands/css.rs"]
 config = []
@@ -2677,6 +2679,7 @@ crates = []
 adapted_to = []
 
 [modules.rsx-htmx]
+version = "0.1.0"
 kind = ["renderer"]
 files = ["public/dpswap.min.js", "src/pages/link.rsx"]
 config = []
@@ -2684,10 +2687,11 @@ crates = []
 adapted_to = []
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: 6bd1efd0d915d794
+# brocanth-digest: 6f348e9b7ecdaf2d

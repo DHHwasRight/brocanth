@@ -67,7 +67,7 @@ run = "cargo run -- serve"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -104,7 +104,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
     brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: e41b82fec04dd891
+// brocanth-digest: 2b0f22d766333dc2
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1309,7 +1309,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -2069,7 +2069,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: f2fca8459ac9d893
+// brocanth-digest: a0c6599c1c9b82d2
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2167,7 +2167,7 @@ metrics_path = "/metrics"
 # When set, /metrics is served on this address, not the main listener.
 # metrics_bind = "127.0.0.1:9100"
 ===== src/commands/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
 //!
 //! Every command in this project.
@@ -2184,7 +2184,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: c378ffc0cd707f1e
+// brocanth-digest: ffbf1e5455ad74d7
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2625,7 +2625,7 @@ impl Plugin for Observe {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2759,10 +2759,10 @@ HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
 is in front. Set `include_subdomains` or `preload` only when the
 person who owns the domain says so.
 
-<!-- brocanth-digest: 26e769aaff4202fb -->
+<!-- brocanth-digest: 683b3fdf986cad42 -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2774,6 +2774,7 @@ title = "My Blog"
 enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "config", "commands", "docker", "ci", "ci-github", "middleware", "middleware-security-headers"]
 
 [modules.observability]
+version = "0.1.0"
 kind = ["middleware", "enhancer", "routes"]
 files = ["src/plugins/observability/"]
 config = ["observability"]
@@ -2781,6 +2782,7 @@ crates = ["brocanth-observe"]
 adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics"]
 
 [modules.observability-logs]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -2788,6 +2790,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-health]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -2795,6 +2798,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.observability-metrics]
+version = "0.1.0"
 kind = ["routes"]
 files = []
 config = []
@@ -2802,6 +2806,7 @@ crates = ["brocanth-observe"]
 adapted_to = []
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml", "src/commands/check.rs"]
 config = []
@@ -2809,6 +2814,7 @@ crates = ["brocanth-config"]
 adapted_to = ["commands"]
 
 [modules.commands]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["src/commands/"]
 config = []
@@ -2816,6 +2822,7 @@ crates = ["brocanth-command"]
 adapted_to = []
 
 [modules.docker]
+version = "0.1.0"
 kind = ["external"]
 files = [".dockerignore", "Dockerfile"]
 config = []
@@ -2823,6 +2830,7 @@ crates = []
 adapted_to = []
 
 [modules.ci]
+version = "0.1.0"
 kind = ["external"]
 files = []
 config = []
@@ -2830,6 +2838,7 @@ crates = []
 adapted_to = []
 
 [modules.ci-github]
+version = "0.1.0"
 kind = ["external"]
 files = [".github/workflows/ci.yml"]
 config = []
@@ -2837,6 +2846,7 @@ crates = []
 adapted_to = ["docker"]
 
 [modules.middleware]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = []
@@ -2844,10 +2854,11 @@ crates = ["brocanth-middleware"]
 adapted_to = []
 
 [modules.middleware-security-headers]
+version = "0.1.0"
 kind = ["middleware"]
 files = []
 config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
 adapted_to = ["config"]
 
-# brocanth-digest: 028a887e916b7365
+# brocanth-digest: cf42c4c0cbbb4e4a

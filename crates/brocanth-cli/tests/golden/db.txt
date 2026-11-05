@@ -66,7 +66,7 @@ run = "cargo run"
 [tasks.test]
 run = "cargo test"
 ===== src/main.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! My Blog -- a brocanth application.
@@ -103,7 +103,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: b5f00348e17ca817
+// brocanth-digest: 32a281d6f318fea8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1338,7 +1338,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     Ok(Response::empty(303).with_header("location", routes::users::id::path(id)))
 }
 ===== src/plugins/mod.rs =====
-//! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Something else belongs here? Put it in `src/app.rs`, which is yours.
 //!
 //! The plugins this application contains, and the four things `src/app.rs`
@@ -1860,7 +1860,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: d5568e702c98866b
+// brocanth-digest: 1956b6116f33b77e
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -2137,7 +2137,7 @@ impl Plugin for Database {
     }
 }
 ===== AGENTS.md =====
-<!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
+<!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
 # Working in My Blog
 
@@ -2275,10 +2275,10 @@ ctx.db()
 A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
 log, never to the client.
 
-<!-- brocanth-digest: ebefc66dac20cfae -->
+<!-- brocanth-digest: b07d0f683aa7a6fb -->
 ===== brocanth.toml =====
-# Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
-# Change the module list with `brocanth add`, not here.
+# Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+# Change the module list with `brocanth add` and `brocanth remove`, not here.
 #
 # What this project is made of. Every other generated file follows from it.
 
@@ -2290,6 +2290,7 @@ title = "My Blog"
 enabled = ["config", "db"]
 
 [modules.config]
+version = "0.1.0"
 kind = ["enhancer"]
 files = ["config/development.toml"]
 config = []
@@ -2297,10 +2298,11 @@ crates = ["brocanth-config"]
 adapted_to = []
 
 [modules.db]
+version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
 files = ["src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
 adapted_to = ["config"]
 
-# brocanth-digest: 5fb11b85095c7fc9
+# brocanth-digest: adbbbaf43a11be06

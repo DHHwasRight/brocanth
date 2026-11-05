@@ -126,6 +126,54 @@ writes its adaptation too. `ci-github` adapts to `jobs`: in a project made
 with the default modules, `brocanth add jobs` also rewrites
 `.github/workflows/ci.yml`, if you have not edited it.
 
+### `brocanth remove`
+
+Takes modules out of a project: `brocanth remove jobs,cache`. It is the
+inverse of `add`, and it runs the same generator with fewer entries in
+the module list.
+
+It rewrites the files it owns, and deletes the ones that only the removed
+module needed. It takes the module's dependencies and features out of
+`Cargo.toml`, and its sections out of `config/<env>.toml`. It deletes or
+rewrites a file of yours only while it still holds exactly what the
+generator wrote. Otherwise it refuses, prints your edit, and writes
+nothing. A config section with a value you changed is refused too: copy
+what you need, delete the section, and run it again.
+
+It refuses to remove a module that a remaining module needs, or that is
+the parent of a remaining module. The `help:` line names the modules to
+remove with it: `brocanth remove model db`.
+
+It keeps three things, so that a later `brocanth add` finds them again:
+
+- **A rename in `src/flags.rs`** of a flag that leaves with the module.
+  A rename of a flag that nothing sets stops the binary, so `remove`
+  turns the line into a comment that starts with `// Parked by`. `add`
+  restores the line.
+- **Ejected admin screens.** The copies under
+  `src/plugins/admin/screens/` stay, because they are your work. Nothing
+  compiles them while the admin is out. `brocanth add admin` installs
+  them again.
+- **Migrations.** `migrations/` is the history of a database that still
+  has the tables. `remove model` does not delete it, and `add model`
+  writes around it.
+
+### Module versions
+
+`brocanth.toml` records the version of each module that wrote the
+project: `[modules.<key>] version`. A module from the brocanth workspace
+has the CLI's version, because every crate in the workspace has the
+workspace version. A module from another repository declares its own
+crate's version with `Manifest::version`. The admin declares it too,
+because `brocanth admin eject` writes the same number into the header of
+each screen it copies.
+
+`add` and `remove` write the version again. `brocanth check` warns
+(`check/module-version`) when the installed CLI writes a module at another
+version than the recorded one. `add` and `remove` compare each file with
+what the installed CLI writes, so after an upgrade a file that you did not
+edit can read as edited.
+
 ### Migrations: a command of the project, not of `brocanth`
 
 `brocanth` has no `migrate` command. The `model` module (SeaORM) writes
@@ -156,7 +204,8 @@ See [docs/migrations.md](../../docs/migrations.md).
 ### `brocanth check`
 
 Two halves. The CLI runs the module checks: a module that the chosen ones
-recommend and the project lacks. Then it runs the project's own `check`
+recommend and the project lacks, and a module that `brocanth.toml`
+records at another version than the installed CLI writes. Then it runs the project's own `check`
 command with the same arguments, which reads the configuration of one
 environment and `src/` as text. That half exists when the project has
 `config` and `commands`; it lives in the project because only the project
