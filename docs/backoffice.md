@@ -9,13 +9,24 @@ behind an `admin` feature that is off, because `brocanth-admin` keeps its
 dependencies few and intends to keep them so. `brocanth-jobs` is the worked
 example.
 
+An application adds a page of its own the same way, without a crate:
+`AdminConfig::page(key, label, closure)` is a `Panel` from a closure.
+That is Django's `AdminSite.get_urls()`: the page gets the layout, a tab
+(or none, with `Page::hidden`), the policy as `ViewPanel` and
+`ActOnPanel`, and every path under its key. See "Extra pages" in
+`docs/admin-customization.md`.
+
 The four model screens go through the entity's row policy. §2a says how.
 
 To change how the admin looks — titles, a theme, one screen for one
 model, the whole layout — see `docs/admin-customization.md`. To start
 from the shipped screen instead of an empty file,
 `brocanth admin eject <screen> [--model <key>]` copies it into the
-project and installs it (level 8 there).
+project and installs it (level 8 there). After an upgrade,
+`brocanth admin diff` compares each copy with the shipped screen of the
+installed version. The brand and the user links are blocks of their own
+(`Views::with_brand`, `Views::with_userlinks`), so a logo or a "Log out"
+link needs no copy of the layout.
 
 Measured by reading each crate's public surface at `54ff827`. Where this
 says a tab cannot be built, somebody read the trait.

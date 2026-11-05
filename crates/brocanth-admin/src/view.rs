@@ -73,7 +73,7 @@ pub fn render<C: ?Sized + 'static>(view: &dyn View<C>, context: &C) -> RsxResult
     w.into_string()
 }
 
-/// The six screens, each replaceable.
+/// The screens and the two blocks of the layout, each replaceable.
 ///
 /// [`Views::default`] is the shipped set. Replace one and the rest stay as
 /// they are. A model can replace its own four screens on top of these, with
@@ -114,6 +114,14 @@ pub struct Views {
     pub confirm_delete: Box<dyn View<DeleteCtx>>,
     /// Anything that went wrong: 403, 404.
     pub error: Box<dyn View<ErrorCtx>>,
+    /// The top of the sidebar: the header, linked to the index. Django's
+    /// `branding` block. The layout receives it rendered, in
+    /// [`LayoutCtx::brand`].
+    pub brand: Box<dyn View<Chrome>>,
+    /// The links about the person and the site: who is signed in, and
+    /// "View site". Django's `userlinks` block. The layout receives it
+    /// rendered, in [`LayoutCtx::userlinks`].
+    pub userlinks: Box<dyn View<Chrome>>,
 }
 
 impl std::fmt::Debug for Views {
@@ -146,6 +154,12 @@ impl Default for Views {
             }),
             error: Box::new(|ctx: &ErrorCtx, w: &mut Writer<'_>| {
                 templates::error::ErrorPage { ctx }.render(w)
+            }),
+            brand: Box::new(|ctx: &Chrome, w: &mut Writer<'_>| {
+                templates::brand::Brand { ctx }.render(w)
+            }),
+            userlinks: Box::new(|ctx: &Chrome, w: &mut Writer<'_>| {
+                templates::userlinks::Userlinks { ctx }.render(w)
             }),
         }
     }
@@ -193,6 +207,35 @@ impl Views {
         self.error = Box::new(view);
         self
     }
+
+    /// Replaces the brand block at the top of the sidebar, and keeps the
+    /// layout. Django's `{% block branding %}`.
+    ///
+    /// ```
+    /// use brocanth_admin::view::Chrome;
+    /// use brocanth_admin::{AdminConfig, Views};
+    ///
+    /// let config = AdminConfig::new().map_views(|views| {
+    ///     views.with_brand(|ctx: &Chrome, w: &mut brocanth_admin::rsx::Writer<'_>| {
+    ///         w.raw("<img src=\"/logo.svg\" alt=\"\"> ")?;
+    ///         w.text(&ctx.header)
+    ///     })
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn with_brand(mut self, view: impl View<Chrome>) -> Self {
+        self.brand = Box::new(view);
+        self
+    }
+
+    /// Replaces the user links block under the sidebar, and keeps the
+    /// layout. Django's `{% block userlinks %}`: the place for "Log out"
+    /// and "Change password", which the admin cannot draw because it has
+    /// no authentication scheme of its own.
+    pub fn with_userlinks(mut self, view: impl View<Chrome>) -> Self {
+        self.userlinks = Box::new(view);
+        self
+    }
 }
 
 /// One entry in the sidebar.
@@ -228,6 +271,15 @@ pub struct Chrome {
     /// Stylesheets linked after the shipped one, in order: the admin's own,
     /// then the shown model's. Each is an `href` the application serves.
     pub stylesheets: Vec<String>,
+    /// Scripts loaded with `defer` after the admin's own, in order: the
+    /// admin's, then the shown model's. Each is a `src` the application
+    /// serves. Django's `Media.js`.
+    pub scripts: Vec<String>,
+    /// Who is signed in, as [`AdminConfig::user_label`] names them. `None`
+    /// when no label was configured or nobody is signed in.
+    ///
+    /// [`AdminConfig::user_label`]: crate::AdminConfig::user_label
+    pub user: Option<String>,
 }
 
 /// The layout's context: the chrome, and the screen already rendered.
@@ -240,6 +292,11 @@ pub struct LayoutCtx {
     /// The screen's markup. Written out unescaped, because the view that
     /// produced it already escaped what needed escaping.
     pub body: String,
+    /// The brand block, rendered by [`Views::brand`]. Unescaped, as `body`.
+    pub brand: String,
+    /// The user links block, rendered by [`Views::userlinks`]. Unescaped,
+    /// as `body`.
+    pub userlinks: String,
 }
 
 /// One model on the index screen.

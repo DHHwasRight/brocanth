@@ -1,9 +1,10 @@
 // Ejected from brocanth-admin 0.1.0 by `brocanth admin eject layout`.
 //
 // Yours now: an upgrade of brocanth-admin does not change this file.
-// Compare it with the shipped `layout.rsx` after one. Utility classes
-// that the shipped stylesheet does not contain have no effect: add
-// a stylesheet of your own for those (`AdminConfig::stylesheet`).
+// After one, `brocanth admin diff` compares it with the shipped
+// `layout.rsx`. Utility classes that the shipped stylesheet does not
+// contain have no effect: add a stylesheet of your own for those
+// (`AdminConfig::stylesheet`).
 
 use brocanth_admin::{INLINE_SCRIPT as SCRIPT, STYLESHEET as STYLE};
 use brocanth_admin::view::LayoutCtx;
@@ -31,14 +32,17 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
             for href in &ctx.chrome.stylesheets {
                 <link rel="stylesheet" href={href} />
             }
+            // Files, not inline code: a same-origin file passes the
+            // default `script-src 'self'` with no hash and no nonce.
+            for src in &ctx.chrome.scripts {
+                <script src={src} defer></script>
+            }
         </head>
         <body class="h-full m-0 font-sans text-[15px] leading-normal text-ink bg-stage antialiased">
             <div class="flex min-h-full">
                 <aside class="w-60 shrink-0 bg-white border-r border-line flex flex-col gap-6 py-6">
-                    <a class="px-6 text-[15px] font-semibold text-ink no-underline"
-                       href={&ctx.chrome.base_path} dp-boost>
-                        {&ctx.chrome.header}
-                    </a>
+                    // The brand block: `Views::brand`, rendered.
+                    {! &ctx.brand }
                     <nav class="flex flex-col gap-0.5 px-3" aria-label="Sections">
                         for item in &ctx.chrome.nav {
                             // `aria-current` and not only a class: it is
@@ -55,11 +59,8 @@ pub fn Layout(ctx: &LayoutCtx) -> Element {
                             }
                         }
                     </nav>
-                    // No `dp-boost`: the front page is not an admin screen,
-                    // and a swap into `dp-layout="admin"` would be wrong.
-                    if let Some(href) = &ctx.chrome.site_url {
-                        <a class={nav_class(false)} href={href}>View site</a>
-                    }
+                    // The user links block: `Views::userlinks`, rendered.
+                    {! &ctx.userlinks }
                 </aside>
                 // `dp-layout` marks what a swap may replace. The rail is
                 // outside it, so moving between screens does not rebuild

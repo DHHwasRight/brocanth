@@ -158,14 +158,20 @@ shutdown_grace_secs` has a flag and a variable in every project
 
 ### 4. Admin
 
-From `docs/admin-customization.md`, "Open":
+Done: the `brand` and `userlinks` blocks (`Views::with_brand`,
+`with_userlinks`, `AdminConfig::user_label`); extra pages
+(`AdminConfig::page`, `Page::hidden`, `Panel::in_nav`); per-model
+JavaScript as files (`ModelAdmin::script`, `AdminConfig::script`; no
+inline code, so no hash and no nonce); `brocanth admin diff`.
 
-1. Override blocks smaller than a screen (Django's `branding`,
-   `userlinks`).
-2. Extra admin pages (Django's `get_urls`); a `Panel` is the closest
-   today.
-3. Per-model JavaScript, after a CSP decision.
-4. A diff between an ejected screen and the shipped one after an upgrade.
+What remains, from `docs/admin-customization.md`, "Open":
+
+1. A model's script does not load on a dp-swap into its screen: dp-swap
+   keeps the `<head>`. The fix is in dp-swap: merge the response's
+   `<head>`.
+2. Pages under one model (Django's `ModelAdmin.get_urls`).
+3. A three-way `admin diff`: it needs the template of the version a copy
+   came from.
 
 ### 5. Open questions to decide
 

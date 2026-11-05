@@ -105,12 +105,14 @@ enum Command {
     /// arguments; it exists with `config` and `commands`. --deploy adds
     /// the production checks. The exit code is 1 when an error remains.
     Check(commands::check::CheckArgs),
-    /// Work on the project's admin: `eject` copies a shipped screen into it
+    /// Work on the project's admin: `eject` copies a screen, `diff` compares it
     ///
     /// `brocanth admin eject list` writes the shipped list screen to
     /// src/plugins/admin/screens/list.rsx and installs it over the default.
     /// The copy renders the same page until you edit it, and it is yours:
-    /// an upgrade does not change it. See docs/admin-customization.md.
+    /// an upgrade does not change it. After an upgrade, `brocanth admin
+    /// diff` compares each copy with the shipped screen of the installed
+    /// version. See docs/admin-customization.md.
     Admin(commands::admin::AdminArgs),
     /// A command defined in this project, run by the project's own binary
     ///

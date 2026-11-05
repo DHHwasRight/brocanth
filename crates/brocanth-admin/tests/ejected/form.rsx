@@ -1,9 +1,10 @@
 // Ejected from brocanth-admin 0.1.0 by `brocanth admin eject form`.
 //
 // Yours now: an upgrade of brocanth-admin does not change this file.
-// Compare it with the shipped `form.rsx` after one. Utility classes
-// that the shipped stylesheet does not contain have no effect: add
-// a stylesheet of your own for those (`AdminConfig::stylesheet`).
+// After one, `brocanth admin diff` compares it with the shipped
+// `form.rsx`. Utility classes that the shipped stylesheet does not
+// contain have no effect: add a stylesheet of your own for those
+// (`AdminConfig::stylesheet`).
 
 use brocanth_admin::form::{Field, Widget};
 use brocanth_admin::parts;

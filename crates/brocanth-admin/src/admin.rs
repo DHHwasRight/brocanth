@@ -115,6 +115,8 @@ pub struct Admin {
     index_title: String,
     site_url: Option<String>,
     stylesheets: Vec<String>,
+    scripts: Vec<String>,
+    user_label: Option<crate::config::UserLabelFn>,
     base_path: String,
     policy: Box<dyn crate::policy::Policy>,
     views: Views,
@@ -206,6 +208,8 @@ impl Admin {
             title: config.title,
             site_url: config.site_url,
             stylesheets: config.stylesheets,
+            scripts: config.scripts,
+            user_label: config.user_label,
             base_path: config.base_path,
             policy: config.policy,
             views: config.views,
@@ -968,11 +972,24 @@ impl Admin {
             )
             .cloned()
             .collect();
+        // The same order for scripts: the admin's, then the model's.
+        let scripts = self
+            .scripts
+            .iter()
+            .chain(
+                self.entry(current)
+                    .map(|e| e.admin.scripts())
+                    .unwrap_or_default(),
+            )
+            .cloned()
+            .collect();
         Chrome {
             title: self.title.clone(),
             header: self.header.clone(),
             site_url: self.site_url.clone(),
             stylesheets,
+            scripts,
+            user: self.user_label.as_ref().and_then(|label| label(&principal)),
             base_path: self.index_url(),
             nav: self
                 .entries
@@ -990,6 +1007,8 @@ impl Admin {
                 .chain(
                     self.panels
                         .iter()
+                        // A hidden page is reached by a link, not a tab.
+                        .filter(|p| p.in_nav())
                         .filter(|p| {
                             self.allows(principal, Request::new(Action::ViewPanel, p.key()))
                         })
@@ -1012,8 +1031,21 @@ impl Admin {
         heading: String,
         body: String,
     ) -> Result<Response, AdminError> {
+        self.wrap(status, self.chrome(principal, current), heading, body)
+    }
+
+    /// Renders the two blocks, then the layout around `body`.
+    fn wrap(
+        &self,
+        status: u16,
+        chrome: Chrome,
+        heading: String,
+        body: String,
+    ) -> Result<Response, AdminError> {
         let context = LayoutCtx {
-            chrome: self.chrome(principal, current),
+            brand: view::render(self.views.brand.as_ref(), &chrome)?,
+            userlinks: view::render(self.views.userlinks.as_ref(), &chrome)?,
+            chrome,
             heading,
             body,
         };
@@ -1058,15 +1090,7 @@ impl Admin {
             message,
         };
         let body = view::render(self.views.error.as_ref(), &context)?;
-        let layout = LayoutCtx {
-            chrome,
-            heading: heading.to_string(),
-            body,
-        };
-        Ok(Response::Page {
-            status,
-            html: view::render(self.views.layout.as_ref(), &layout)?,
-        })
+        self.wrap(status, chrome, heading.to_string(), body)
     }
 
     async fn render_form(

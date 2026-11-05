@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
 use brocanth_admin::rt::block_on;
-use brocanth_admin::view::{DeleteCtx, DetailCtx, ErrorCtx, FormCtx, IndexCtx, LayoutCtx, ListCtx};
+use brocanth_admin::view::{
+    Chrome, DeleteCtx, DetailCtx, ErrorCtx, FormCtx, IndexCtx, LayoutCtx, ListCtx,
+};
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Principal, Submission, Views};
 use rsx::{Template as _, Writer};
 
@@ -37,6 +39,10 @@ fn ejected_views() -> Views {
         .with_error(|ctx: &ErrorCtx, w: &mut Writer<'_>| {
             ejected::error::ErrorPage { ctx }.render(w)
         })
+        .with_brand(|ctx: &Chrome, w: &mut Writer<'_>| ejected::brand::Brand { ctx }.render(w))
+        .with_userlinks(|ctx: &Chrome, w: &mut Writer<'_>| {
+            ejected::userlinks::Userlinks { ctx }.render(w)
+        })
 }
 
 fn blog(config: AdminConfig) -> Admin {
@@ -47,6 +53,8 @@ fn blog(config: AdminConfig) -> Admin {
             .at("/admin")
             .site_url("/")
             .stylesheet("/theme.css")
+            .script("/theme.js")
+            .user_label(|_| Some("Ada".to_string()))
             .discovering(Discovery::new().under("blog::models"))
             .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),

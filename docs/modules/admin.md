@@ -24,8 +24,8 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 Files:
 
 - `src/plugins/admin/mod.rs`
-- `src/commands/admin.rs`, with `commands`: `admin eject`, which runs
-  `brocanth admin eject` in the project root
+- `src/commands/admin.rs`, with `commands`: `admin eject` and `admin diff`, which run
+  `brocanth admin` in the project root
 
 Slots:
 

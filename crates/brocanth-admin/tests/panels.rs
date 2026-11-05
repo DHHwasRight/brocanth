@@ -279,3 +279,86 @@ fn a_panel_that_would_shadow_a_model_is_refused_by_name() {
             .panel(Queue { key: "post" }),
     );
 }
+
+// ------------------------------------------------- an application's own page
+
+fn admin_with_page(policy: impl brocanth_admin::Policy) -> Admin {
+    use brocanth_admin::panel::Page;
+
+    Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            // Django's `get_urls()`: a closure, a tab, the chrome.
+            .page("reports", "Reports", |r| {
+                Ok(match r.path {
+                    "" => Some(PanelPage::body(
+                        "Reports",
+                        format!(
+                            "<p>Monthly report</p><a href=\"{}\">Export</a>",
+                            r.url("export")
+                        ),
+                    )),
+                    "export" => Some(PanelPage::body("Export", "<p>export ready</p>")),
+                    _ => None,
+                })
+            })
+            // A page with no tab: a link reaches it.
+            .panel(
+                Page::new("wizard", "Wizard", |_| {
+                    Ok(Some(PanelPage::body("Wizard", "<p>step one</p>")))
+                })
+                .hidden(),
+            )
+            .unscoped_rows_unsafe_for_development()
+            .with_policy(policy),
+    )
+}
+
+fn html(response: Response) -> brocanth_test::Html {
+    brocanth_test::Html::new(response.html().expect("a page"))
+}
+
+#[test]
+fn an_application_page_has_the_chrome_a_tab_and_its_own_paths() {
+    let admin = admin_with_page(policy_fn(|_: &Principal<'_>, _| true));
+
+    let page = html(get(&admin, "/admin/reports", ""));
+    assert!(page.text().contains("Monthly report"));
+    let tab = page
+        .link_to("/admin/reports")
+        .expect("a tab in the sidebar");
+    assert_eq!(tab.attr("aria-current"), Some("page"));
+    assert!(page.has_link_to("/admin/post"), "the models are in the nav");
+    assert!(page.has_link_to("/admin/reports/export"));
+
+    let export = html(get(&admin, "/admin/reports/export", ""));
+    assert!(export.text().contains("export ready"));
+    // A path the page does not serve is the admin's own 404.
+    assert_eq!(get(&admin, "/admin/reports/nope", "").status(), 404);
+}
+
+#[test]
+fn a_hidden_page_has_no_tab_and_answers_all_the_same() {
+    let admin = admin_with_page(policy_fn(|_: &Principal<'_>, _| true));
+    let index = html(get(&admin, "/admin", ""));
+    assert!(index.has_link_to("/admin/reports"));
+    assert!(!index.has_link_to("/admin/wizard"), "no tab");
+
+    let wizard = get(&admin, "/admin/wizard", "");
+    assert_eq!(wizard.status(), 200);
+    assert!(html(wizard).text().contains("step one"));
+}
+
+#[test]
+fn an_application_page_is_behind_the_policy_like_a_panel() {
+    // Only `ViewPanel` on `reports` is refused: the page answers 403 and
+    // its tab is gone, while the models stay.
+    let admin = admin_with_page(policy_fn(|_: &Principal<'_>, r: Request<'_>| {
+        !(r.action == Action::ViewPanel && r.model == "reports")
+    }));
+    assert_eq!(get(&admin, "/admin/reports", "").status(), 403);
+    let index = html(get(&admin, "/admin", ""));
+    assert!(!index.has_link_to("/admin/reports"));
+    assert!(index.has_link_to("/admin/post"));
+}

@@ -69,7 +69,7 @@ impl Module for Backoffice {
         )
         .adapts_to(
             "commands",
-            "the binary gets `admin eject`, which runs `brocanth admin eject` in the project",
+            "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
         .adapts_to(
             "analytics",
@@ -187,10 +187,12 @@ impl Module for Backoffice {
 /// would name the directory the binary was compiled in, which is wrong for
 /// a binary copied elsewhere and for a second checkout that shares a
 /// target directory.
-const ADMIN_COMMAND_RS: &str = r##"//! `admin eject` -- a shipped admin screen, copied into this project.
+const ADMIN_COMMAND_RS: &str = r##"//! `admin eject` and `admin diff` -- shipped admin screens, copied into
+//! this project and compared with the shipped ones.
 //!
 //! The work is the `brocanth` CLI's. This command runs
-//! `brocanth admin eject <screen> [--model <key>]` in the project root and
+//! `brocanth admin eject <screen> [--model <key>]` or
+//! `brocanth admin diff [<screen>] [--model <key>]` in the project root and
 //! exits with its status, so `cargo run -- admin eject list` and
 //! `brocanth admin eject list` do the same thing. The application does not
 //! link the code that writes source.
@@ -203,7 +205,8 @@ use std::process;
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
-/// Work on the admin: `eject` copies a shipped screen into this project.
+/// Work on the admin: `eject` copies a shipped screen into this project,
+/// `diff` compares the copies with the shipped screens.
 #[cmd]
 #[derive(clap::Args)]
 pub struct Admin {
@@ -221,6 +224,15 @@ pub enum Action {
         /// Install the copy for this model only. list, detail, form and
         /// delete take one.
         #[arg(long, value_name = "KEY")]
+        model: Option<String>,
+    },
+    /// Compare ejected screens with the shipped ones of the installed
+    /// brocanth-admin. Run it after an upgrade.
+    Diff {
+        /// The screen to compare. Without one, every ejected copy.
+        screen: Option<String>,
+        /// Compare the copy for this model only.
+        #[arg(long, value_name = "KEY", requires = "screen")]
         model: Option<String>,
     },
 }
@@ -242,6 +254,14 @@ impl Action {
         match self {
             Action::Eject { screen, model } => {
                 let mut args = vec!["admin".to_string(), "eject".to_string(), screen.clone()];
+                if let Some(model) = model {
+                    args.extend(["--model".to_string(), model.clone()]);
+                }
+                args
+            }
+            Action::Diff { screen, model } => {
+                let mut args = vec!["admin".to_string(), "diff".to_string()];
+                args.extend(screen.clone());
                 if let Some(model) = model {
                     args.extend(["--model".to_string(), model.clone()]);
                 }
@@ -286,6 +306,20 @@ mod tests {
             model: None,
         };
         assert_eq!(action.args(), ["admin", "eject", "layout"]);
+    }
+
+    #[test]
+    fn diff_passes_the_screen_and_the_model_through() {
+        let action = Action::Diff {
+            screen: Some("list".to_string()),
+            model: Some("post".to_string()),
+        };
+        assert_eq!(action.args(), ["admin", "diff", "list", "--model", "post"]);
+        let action = Action::Diff {
+            screen: None,
+            model: None,
+        };
+        assert_eq!(action.args(), ["admin", "diff"]);
     }
 
     #[test]

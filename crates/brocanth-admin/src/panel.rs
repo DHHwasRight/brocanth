@@ -34,6 +34,15 @@
 //! "may empty the dead set" are different answers in every organisation that
 //! has ever asked the question.
 //!
+//! # An extra page of the application's own
+//!
+//! Django's `AdminSite.get_urls()` adds a view with the admin's chrome. A
+//! panel is that view, so there is no second concept: an application adds
+//! one with [`AdminConfig::page`](crate::AdminConfig::page), a closure
+//! wrapped in [`Page`], or implements [`Panel`] when the page awaits
+//! something. [`Page::hidden`] and [`Panel::in_nav`] keep it out of the
+//! sidebar.
+//!
 //! [`Action::ViewPanel`]: crate::policy::Action::ViewPanel
 //! [`Action::ActOnPanel`]: crate::policy::Action::ActOnPanel
 
@@ -54,6 +63,14 @@ pub trait Panel: Send + Sync {
 
     /// The tab's label.
     fn label(&self) -> String;
+
+    /// Whether the sidebar shows a tab for it. `true` by default.
+    ///
+    /// `false` is a page reached by a link only: a report a list screen
+    /// links to, a wizard step. The policy guards it all the same.
+    fn in_nav(&self) -> bool {
+        true
+    }
 
     /// Renders one request.
     ///
@@ -143,5 +160,73 @@ impl PanelPage {
         PanelPage::Redirect {
             location: location.into(),
         }
+    }
+}
+
+/// Renders one request of a [`Page`].
+pub type PageFn =
+    Box<dyn Fn(&PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> + Send + Sync>;
+
+/// A panel from a closure: the application's own page with the admin's
+/// chrome. [`AdminConfig::page`](crate::AdminConfig::page) builds one.
+///
+/// The closure is synchronous. It renders from what it captured and from
+/// the request. A page that reads a database implements [`Panel`], whose
+/// `render` is async.
+pub struct Page {
+    key: String,
+    label: String,
+    in_nav: bool,
+    render: PageFn,
+}
+
+impl std::fmt::Debug for Page {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Page")
+            .field("key", &self.key)
+            .field("label", &self.label)
+            .field("in_nav", &self.in_nav)
+            .finish()
+    }
+}
+
+impl Page {
+    /// A page at `{base}/{key}` and every path under it, with a tab named
+    /// `label`.
+    pub fn new<F>(key: impl Into<String>, label: impl Into<String>, render: F) -> Self
+    where
+        F: Fn(&PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> + Send + Sync + 'static,
+    {
+        Page {
+            key: key.into(),
+            label: label.into(),
+            in_nav: true,
+            render: Box::new(render),
+        }
+    }
+
+    /// Keeps the page out of the sidebar. A link reaches it.
+    pub fn hidden(mut self) -> Self {
+        self.in_nav = false;
+        self
+    }
+}
+
+#[async_trait]
+impl Panel for Page {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn in_nav(&self) -> bool {
+        self.in_nav
+    }
+
+    async fn render(&self, request: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {
+        (self.render)(&request)
     }
 }

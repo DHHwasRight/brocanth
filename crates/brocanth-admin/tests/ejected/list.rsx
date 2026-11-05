@@ -1,9 +1,10 @@
 // Ejected from brocanth-admin 0.1.0 by `brocanth admin eject list`.
 //
 // Yours now: an upgrade of brocanth-admin does not change this file.
-// Compare it with the shipped `list.rsx` after one. Utility classes
-// that the shipped stylesheet does not contain have no effect: add
-// a stylesheet of your own for those (`AdminConfig::stylesheet`).
+// After one, `brocanth admin diff` compares it with the shipped
+// `list.rsx`. Utility classes that the shipped stylesheet does not
+// contain have no effect: add a stylesheet of your own for those
+// (`AdminConfig::stylesheet`).
 
 use brocanth_admin::paging::Page;
 use brocanth_admin::parts;

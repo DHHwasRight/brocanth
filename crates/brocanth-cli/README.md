@@ -185,8 +185,8 @@ them to the project's binary, like any project command:
 
 ### `brocanth admin`
 
-Works on the project's admin. It has one subcommand, `eject`. It needs the
-`admin` module.
+Works on the project's admin. It has two subcommands, `eject` and `diff`.
+It needs the `admin` module.
 
 `brocanth admin eject <SCREEN>` copies a shipped admin screen into the
 project and installs it over the default. The copy renders the same HTML
@@ -201,7 +201,7 @@ brocanth admin eject layout                # the shell around every screen
 
 | Argument | Meaning |
 |---|---|
-| `SCREEN` | One of `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`. |
+| `SCREEN` | One of `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`, or a block of the layout: `brand`, `userlinks`. |
 | `--model <KEY>` | Install the copy for this model only. Only `list`, `detail`, `form` and `delete` take it. |
 
 It writes `src/plugins/admin/screens/<screen>.rsx`, or
@@ -217,16 +217,46 @@ It refuses:
 - a project without the `admin` module (`admin/no-admin`);
 - a screen that is already ejected (`admin/exists`). Edit that file, or
   delete it to start again from the shipped screen;
-- `--model` on `layout`, `index` or `error` (`admin/not-per-model`);
+- `--model` on `layout`, `index`, `error`, `brand` or `userlinks`
+  (`admin/not-per-model`);
 - a model key that is not a Rust module name, such as `blog-post`
   (`admin/model-key`), because `rsx` turns each directory into a module.
 
 When `mount` no longer has the line `let admin = Arc::new(Admin::new(`,
 it writes the copy and warns (`admin/not-installed`): add the install line
 yourself. With the `commands` module, the generated project
-has `admin eject` too (`src/commands/admin.rs`). It runs this command in
-the project root with the same arguments and exits with its status. See level 8 of
+has `admin eject` and `admin diff` too (`src/commands/admin.rs`). It runs
+this command in the project root with the same arguments and exits with
+its status. See level 8 of
 [docs/admin-customization.md](../../docs/admin-customization.md).
+
+`brocanth admin diff [SCREEN] [--model <KEY>] [--shipped <DIR>]` compares
+ejected copies with the shipped screens, after an upgrade. It prints a
+unified diff from the shipped screen to each copy, or every copy without
+`SCREEN`.
+
+```text
+brocanth admin diff                       # every ejected copy
+brocanth admin diff list --model invoice  # one copy
+```
+
+| Argument | Meaning |
+|---|---|
+| `SCREEN` | The copy to compare. Without it, every copy on disk. |
+| `--model <KEY>` | The copy for this model. Needs `SCREEN`. |
+| `--shipped <DIR>` | A `brocanth-admin` directory to compare with, not the installed one. |
+
+The shipped screen is the template of the `brocanth-admin` the project
+installed, found with `cargo metadata --offline`. When cargo cannot say,
+the command warns (`admin/no-installed`) and compares with the screens
+this CLI carries. It prints the version each copy came from, from its
+header line, and the version it compares with. When the two differ, the
+diff holds your edits and the release's changes together. It exits 0
+whether the copies differ or not.
+
+It refuses a screen that is not ejected (`admin/not-ejected`, with the
+eject command in its help line) and a `--shipped` directory with no
+`src/templates/` (`admin/shipped`).
 
 ### A project's own commands
 

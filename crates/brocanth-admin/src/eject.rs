@@ -43,7 +43,8 @@ pub struct Screen {
     shipped: &'static str,
 }
 
-/// Every screen, in the order a page is built: the shell first.
+/// Every screen, in the order a page is built: the shell first, the two
+/// blocks of the shell last.
 pub const SCREENS: &[Screen] = &[
     Screen {
         name: "layout",
@@ -101,6 +102,22 @@ pub const SCREENS: &[Screen] = &[
         one_model: None,
         shipped: include_str!("templates/error.rsx"),
     },
+    Screen {
+        name: "brand",
+        component: "Brand",
+        context: "Chrome",
+        every_model: "with_brand",
+        one_model: None,
+        shipped: include_str!("templates/brand.rsx"),
+    },
+    Screen {
+        name: "userlinks",
+        component: "Userlinks",
+        context: "Chrome",
+        every_model: "with_userlinks",
+        one_model: None,
+        shipped: include_str!("templates/userlinks.rsx"),
+    },
 ];
 
 /// The screen with this name.
@@ -128,23 +145,65 @@ const REWRITES: &[(&str, &str)] = &[
     ("use crate::", "use brocanth_admin::"),
 ];
 
+/// The version of this crate, which a copy's header line names.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The first line of every copy, up to the version.
+const HEADER: &str = "// Ejected from brocanth-admin ";
+
+/// The version a copy names in its header line, when it has one.
+///
+/// `brocanth admin diff` reads it to say which release a copy came from.
+pub fn ejected_version(copy: &str) -> Option<&str> {
+    let rest = copy.lines().next()?.strip_prefix(HEADER)?;
+    rest.split_whitespace().next()
+}
+
+/// A copy without the header [`Screen::source`] puts on top: the template
+/// as the developer owns it. A file with no header comes back whole.
+pub fn without_header(copy: &str) -> &str {
+    if !copy.starts_with(HEADER) {
+        return copy;
+    }
+    // The header is a run of `//` lines, then one empty line.
+    match copy.find("\n\n") {
+        Some(at) => &copy[at + 2..],
+        None => copy,
+    }
+}
+
+/// A shipped template's text, rewritten to compile outside the crate.
+///
+/// Public so `brocanth admin diff` can rewrite the template of the version
+/// a project has installed, which may not be the version the CLI embeds.
+pub fn rewrite(shipped: &str) -> String {
+    let mut text = shipped.to_string();
+    for (from, to) in REWRITES {
+        text = text.replace(from, to);
+    }
+    text
+}
+
 impl Screen {
+    /// The template as this crate ships it, without the rewrite.
+    pub fn shipped(&self) -> &'static str {
+        self.shipped
+    }
+
     /// The template, rewritten to compile in an application, under a
     /// header that says where it came from.
     pub fn source(&self) -> String {
-        let mut text = self.shipped.to_string();
-        for (from, to) in REWRITES {
-            text = text.replace(from, to);
-        }
+        let text = rewrite(self.shipped);
         format!(
             "// Ejected from brocanth-admin {version} by `brocanth admin eject {name}`.\n\
              //\n\
              // Yours now: an upgrade of brocanth-admin does not change this file.\n\
-             // Compare it with the shipped `{name}.rsx` after one. Utility classes\n\
-             // that the shipped stylesheet does not contain have no effect: add\n\
-             // a stylesheet of your own for those (`AdminConfig::stylesheet`).\n\
+             // After one, `brocanth admin diff` compares it with the shipped\n\
+             // `{name}.rsx`. Utility classes that the shipped stylesheet does not\n\
+             // contain have no effect: add a stylesheet of your own for those\n\
+             // (`AdminConfig::stylesheet`).\n\
              \n{text}",
-            version = env!("CARGO_PKG_VERSION"),
+            version = VERSION,
             name = self.name,
         )
     }
@@ -253,7 +312,12 @@ pub fn wiring(dir: &str, ejected: &[Ejected]) -> String {
     contexts.dedup();
     let contexts = match contexts.as_slice() {
         [one] => (*one).to_string(),
-        many => format!("{{{}}}", many.join(", ")),
+        // rustfmt's shape: one line up to 100 columns, else the list on a
+        // line of its own.
+        many if many.join(", ").len() + "use brocanth_admin::view::{};".len() <= 100 => {
+            format!("{{{}}}", many.join(", "))
+        }
+        many => format!("{{\n    {},\n}}", many.join(", ")),
     };
 
     let mut body = String::new();
@@ -358,6 +422,20 @@ mod tests {
                 assert!(screen(&stem).is_some(), "{stem}.rsx cannot be ejected");
             }
         }
+    }
+
+    #[test]
+    fn the_header_names_the_version_and_comes_off() {
+        for s in SCREENS {
+            let copy = s.source();
+            assert_eq!(ejected_version(&copy), Some(env!("CARGO_PKG_VERSION")));
+            assert_eq!(without_header(&copy), rewrite(s.shipped()));
+        }
+        assert_eq!(ejected_version("use x;\n"), None);
+        assert_eq!(
+            without_header("use x;\n\nfn a() {}\n"),
+            "use x;\n\nfn a() {}\n"
+        );
     }
 
     #[test]

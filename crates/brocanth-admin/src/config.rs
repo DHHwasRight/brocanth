@@ -28,6 +28,9 @@ pub const DEFAULT_CHOICE_LIMIT: usize = 200;
 /// Names a record. Supplied by the application; the default is below.
 pub type LabelFn = Box<dyn Fn(&Row) -> String + Send + Sync>;
 
+/// Names who is signed in. See [`AdminConfig::user_label`].
+pub type UserLabelFn = Box<dyn Fn(&crate::policy::Principal<'_>) -> Option<String> + Send + Sync>;
+
 /// One model's configuration.
 pub struct ModelAdmin {
     key: String,
@@ -49,6 +52,7 @@ pub struct ModelAdmin {
     can_update: bool,
     can_delete: bool,
     stylesheets: Vec<String>,
+    scripts: Vec<String>,
     views: ModelViews,
 }
 
@@ -97,6 +101,7 @@ impl ModelAdmin {
             can_update: true,
             can_delete: true,
             stylesheets: Vec::new(),
+            scripts: Vec::new(),
             views: ModelViews::default(),
         }
     }
@@ -263,6 +268,29 @@ impl ModelAdmin {
     /// The stylesheets this model's screens link, in order.
     pub fn stylesheets(&self) -> &[String] {
         &self.stylesheets
+    }
+
+    /// Loads a script on this model's screens only, after the admin's own.
+    /// Django's `ModelAdmin.Media.js`.
+    ///
+    /// The layout writes `<script src="…" defer>` in the `<head>`. `src` is
+    /// a file the application serves: the admin mounts no asset route and
+    /// takes no inline code. A same-origin file passes the default
+    /// `script-src 'self'`, so the Content-Security-Policy needs no hash
+    /// and no nonce. A file on another origin needs that origin in
+    /// `script-src`: `Csp::allow("script-src", ["https://cdn.example.com"])`.
+    ///
+    /// dp-swap replaces the `<main>` region and keeps the `<head>`. So the
+    /// script runs when a page of this model loads in full, and not when a
+    /// swap shows one. See `docs/admin-customization.md`, level 3.
+    pub fn script(mut self, src: impl Into<String>) -> Self {
+        self.scripts.push(src.into());
+        self
+    }
+
+    /// The scripts this model's screens load, in order.
+    pub fn scripts(&self) -> &[String] {
+        &self.scripts
     }
 
     /// Replaces the list screen for this model only. Django's
@@ -488,6 +516,10 @@ pub struct AdminConfig {
     pub site_url: Option<String>,
     /// Stylesheets every screen links after the shipped one.
     pub stylesheets: Vec<String>,
+    /// Scripts every screen loads with `defer`.
+    pub scripts: Vec<String>,
+    /// Names who is signed in, for [`Chrome::user`](crate::view::Chrome).
+    pub user_label: Option<UserLabelFn>,
     /// The path the admin is mounted at, without a trailing slash.
     pub base_path: String,
     /// How the model list is narrowed.
@@ -543,6 +575,8 @@ impl AdminConfig {
             index_title: None,
             site_url: None,
             stylesheets: Vec::new(),
+            scripts: Vec::new(),
+            user_label: None,
             base_path: "/admin".to_string(),
             discovery: Discovery::new(),
             policy: Box::new(DenyAll),
@@ -648,6 +682,73 @@ impl AdminConfig {
     pub fn stylesheet(mut self, href: impl Into<String>) -> Self {
         self.stylesheets.push(href.into());
         self
+    }
+
+    /// Loads a script on every screen, with `defer`, after the admin's own.
+    ///
+    /// The same rules as [`ModelAdmin::script`]: a file the application
+    /// serves, no inline code. A script loaded here stays in the page
+    /// across dp-swap navigation. To act on each screen a swap shows, listen
+    /// for the `dp:afterSwap` event on `document`.
+    pub fn script(mut self, src: impl Into<String>) -> Self {
+        self.scripts.push(src.into());
+        self
+    }
+
+    /// Names who is signed in. The user links block shows the name.
+    ///
+    /// The principal is the application's own identity value, so only the
+    /// application can name it. Return `None` for nobody.
+    ///
+    /// ```
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// struct User { email: String }
+    ///
+    /// let config = AdminConfig::new()
+    ///     .user_label(|who| who.downcast::<User>().map(|u| u.email.clone()));
+    /// # let _ = config;
+    /// ```
+    pub fn user_label<F>(mut self, label: F) -> Self
+    where
+        F: Fn(&crate::policy::Principal<'_>) -> Option<String> + Send + Sync + 'static,
+    {
+        self.user_label = Some(Box::new(label));
+        self
+    }
+
+    /// Adds a page with the admin's chrome: a tab in the sidebar, behind
+    /// the policy as [`Action::ViewPanel`](crate::policy::Action::ViewPanel),
+    /// at `{base}/{key}` and every path under it. Django's
+    /// `AdminSite.get_urls()`.
+    ///
+    /// A shorthand for [`panel`](Self::panel) with a
+    /// [`Page`](crate::panel::Page): the closure renders one request. A
+    /// page that awaits something implements [`Panel`](crate::panel::Panel)
+    /// instead.
+    ///
+    /// ```
+    /// use brocanth_admin::panel::PanelPage;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().page("reports", "Reports", |request| {
+    ///     Ok(match request.path {
+    ///         "" => Some(PanelPage::body("Reports", "<p>Nothing to report.</p>")),
+    ///         _ => None,
+    ///     })
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn page<F>(self, key: impl Into<String>, label: impl Into<String>, render: F) -> Self
+    where
+        F: Fn(
+                &crate::panel::PanelRequest<'_>,
+            ) -> Result<Option<crate::panel::PanelPage>, crate::admin::AdminError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.panel(crate::panel::Page::new(key, label, render))
     }
 
     /// Sets the mount path. A trailing slash is dropped.

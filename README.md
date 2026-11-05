@@ -137,6 +137,7 @@ brocanth migrate up               # and applies, in the project's binary
 brocanth check --deploy           # secrets, cookies, CSRF, the database
 brocanth dbshell                  # with `db`: the project's command, psql or sqlite3
 brocanth admin eject list         # copy a shipped admin screen into the project, as yours
+brocanth admin diff               # after an upgrade: each copy against the shipped screen
 brocanth --help                   # also lists the project's own commands
 ```
 
@@ -189,7 +190,7 @@ puts the crate in a new project.
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
 | [`brocanth-analytics`](crates/brocanth-analytics/README.md) | Page views counted on the server: a daily visitor hash, no cookie, no third party; a beacon for static sites | `analytics`, `beacon` |
-| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `check`, `admin eject`; it hands every other command to the project | |
+| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `check`, `admin eject`, `admin diff`; it hands every other command to the project | |
 | [`brocanth-scaffold`](crates/brocanth-scaffold/README.md) | The contract a scaffold module implements | |
 | [`brocanth-test`](crates/brocanth-test/README.md) | An HTTP test client and an HTML reader for a built `App` | |
 
@@ -267,10 +268,12 @@ to keep in step with new versions:
 |---|---|---|
 | Settings | titles, the "View site" link | `[admin]` keys `title`, `header`, `index_title`, `site_url`, or `--admin.<key>` |
 | Theme | colours, fonts, radii | `[admin] stylesheet`: one CSS file linked after the shipped one |
-| Model assets | CSS for one model's screens | `ModelAdmin::stylesheet` |
+| Assets | CSS and JavaScript files, every screen or one model's | `AdminConfig::script`, `ModelAdmin::{stylesheet, script}` |
+| Replace a block | the brand or the user links | `Views::{with_brand, with_userlinks}` |
 | Wrap or replace a screen | one model, or every model | `ModelAdmin::{list_view, ...}`, `Views::with_<screen>` |
 | Replace the layout | the whole shell | `Views::with_layout` |
-| Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject list [--model invoice]` |
+| Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject list [--model invoice]`, `brocanth admin diff` |
+| Add a page | a page of your own with the admin's chrome | `AdminConfig::page` |
 
 [`docs/admin-customization.md`](docs/admin-customization.md) has all eight
 levels, with Django's way beside each.

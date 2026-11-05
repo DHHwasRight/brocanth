@@ -142,12 +142,14 @@ equivalent for each level, is
 |---|---|---|
 | 1. Settings | titles, "View site" link | `AdminConfig::{titled, headed, index_titled, site_url}` |
 | 2. Theme | colours, fonts, radii | `AdminConfig::stylesheet` |
-| 3. Model assets | CSS for one model's screens | `ModelAdmin::stylesheet` |
+| 3. Assets | CSS and JavaScript files, for every screen or one model | `AdminConfig::{stylesheet, script}`, `ModelAdmin::{stylesheet, script}` |
+| 3a. Replace a block | the brand or the user links, keep the layout | `Views::{with_brand, with_userlinks}`, `AdminConfig::user_label` |
 | 4. Wrap a screen | add markup, keep the default | call `Views::default().<screen>` from your view |
 | 5. Replace a screen, one model | one model's list, detail, form or delete | `ModelAdmin::{list_view, detail_view, form_view, confirm_delete_view}` |
 | 6. Replace a screen, every model | one screen for all models | `Views::with_<screen>` |
 | 7. Replace the layout | the whole shell | `Views::with_layout` |
-| 8. Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject <screen>` |
+| 8. Eject a screen | a copy of a shipped screen, as your own file | `brocanth admin eject <screen>`, then `brocanth admin diff` |
+| Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `panel::Panel` |
 
 ### Settings: titles, header, index title, site URL
 
@@ -286,6 +288,104 @@ tokens in a layer, so your `:root` rule wins. The admin mounts no asset
 route: the application serves the file. A same-origin file passes the
 default `Content-Security-Policy`.
 
+### Scripts
+
+`AdminConfig::script` loads a file on every screen. `ModelAdmin::script`
+loads one on a model's screens only: Django's `Media.js`. Each is
+`<script src="…" defer>` in the `<head>`, the admin's first.
+
+A script is a file and never inline code. A same-origin file passes the
+default `script-src 'self'`, so the Content-Security-Policy needs no hash
+and no nonce. The admin renders with no request in reach, so a nonce is
+not possible; a hash per model script is one more value to keep in step.
+
+```rust
+use std::sync::Arc;
+
+use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
+use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, ListQuery, Principal};
+
+let admin = Admin::new(
+    Arc::new(Fixture::blog()),
+    AdminConfig::new()
+        .model("post", |m| m.script("/admin/posts.js"))
+        .at("/admin")
+        .discovering(Discovery::new().under("blog::models"))
+        .unscoped_rows_unsafe_for_development()
+        .with_policy(AllowAllUnsafeForDevelopment),
+);
+let list = |model| {
+    brocanth_admin::rt::block_on(admin.list(Principal::anonymous(), model, ListQuery::new()))
+        .unwrap()
+        .html()
+        .unwrap()
+        .to_string()
+};
+assert!(list("post").contains(r#"<script src="/admin/posts.js" defer></script>"#));
+assert!(!list("user").contains("/admin/posts.js"));
+```
+
+dp-swap replaces `<main>` and keeps the `<head>`. A model's script runs
+when a page of that model loads in full, not after a swap into it. Code
+that must run after each swap goes in `AdminConfig::script` and listens
+for `dp:afterSwap`.
+
+### Replace a block: the brand and the user links
+
+Django overrides `{% block branding %}` and `{% block userlinks %}`
+without copying `base.html`. Here they are two typed views,
+`Views::brand` and `Views::userlinks`, each a `View<Chrome>`. The layout
+receives them rendered, in `LayoutCtx::brand` and `LayoutCtx::userlinks`.
+
+`AdminConfig::user_label` names who is signed in. The admin has no user
+type of its own, so the application turns its principal into a name. The
+shipped user links show it, with the "View site" link.
+
+```rust
+use std::sync::Arc;
+
+use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
+use brocanth_admin::view::Chrome;
+use brocanth_admin::{Admin, AdminConfig, Fixture, Principal};
+use brocanth_test::Html;
+
+struct User {
+    email: String,
+}
+
+let admin = Admin::new(
+    Arc::new(Fixture::blog()),
+    AdminConfig::new()
+        .titled("Acme")
+        .user_label(|who| who.downcast::<User>().map(|u| u.email.clone()))
+        .map_views(|views| {
+            views
+                .with_brand(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+                    w.raw(r#"<a href="/admin"><img src="/logo.svg" alt=""> "#)?;
+                    w.text(&ctx.header)?;
+                    w.raw("</a>")
+                })
+                .with_userlinks(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+                    w.text(ctx.user.as_deref().unwrap_or("Nobody"))?;
+                    w.raw(r#" <a href="/logout">Log out</a>"#)
+                })
+        })
+        .at("/admin")
+        .with_policy(AllowAllUnsafeForDevelopment),
+);
+
+let ada = User { email: "ada@example.com".into() };
+let page = brocanth_admin::rt::block_on(admin.index(Principal::new(&ada))).unwrap();
+let page = Html::new(page.html().unwrap());
+assert_eq!(page.tags("img").len(), 1);
+assert!(page.has_link_to("/logout"));
+assert!(page.text().contains("ada@example.com"));
+```
+
+Two named blocks and not a map from a name to a view: a misspelt name in
+a map shows the default and says nothing. A field on `Views` is checked
+by the compiler.
+
 ### Replace a screen for one model
 
 A screen is a `View` over a typed context. An rsx component that takes the
@@ -393,13 +493,15 @@ assert!(html.contains("Edits here reach customers."));
 assert!(html.contains("<table"), "and the shipped table is still there");
 ```
 
-The smallest unit is a screen. The shipped templates have no named blocks.
+The unit is a screen. Inside the layout, the brand and the user links
+are smaller units: see "Replace a block" above.
 
 ### Replace the layout
 
 `Views::with_layout` takes a `View<LayoutCtx>`. `LayoutCtx` carries the
-`Chrome` (title, header, site URL, navigation, stylesheets), the heading,
-and the screen's HTML in `body`.
+`Chrome` (title, header, site URL, navigation, stylesheets, scripts, the
+signed-in user), the heading, the screen's HTML in `body`, and the two
+blocks rendered in `brand` and `userlinks`.
 
 ```rust
 use std::sync::Arc;
@@ -426,8 +528,8 @@ let page = brocanth_admin::rt::block_on(admin.index(Principal::anonymous())).unw
 assert!(page.html().unwrap().contains("our-shell"));
 ```
 
-Your layout must write `ctx.chrome.stylesheets` itself, or the theme and the
-model sheets stop working. Keep `dp-layout="admin"` around the body if you
+Your layout must write `ctx.chrome.stylesheets` and `ctx.chrome.scripts`
+itself, or the theme and the model assets stop working. Keep `dp-layout="admin"` around the body if you
 want dp-swap navigation.
 
 ### Eject a screen
@@ -442,7 +544,8 @@ brocanth admin eject layout                # the shell around every screen
 ```
 
 The screens are `layout`, `index`, `list`, `detail`, `form`, `delete` and
-`error`. Only `list`, `detail`, `form` and `delete` take `--model`.
+`error`, and the two blocks `brand` and `userlinks`. Only `list`,
+`detail`, `form` and `delete` take `--model`.
 
 With the `commands` module, the project binary has the same command,
 `cargo run -- admin eject list`. It hands the arguments to the installed
@@ -458,8 +561,20 @@ the same HTML as the shipped screen until you edit it. The
 command refuses.
 
 An ejected screen does not get the admin's fixes when you upgrade. A
-wrapped screen (level 4) does. A header line in the copy names the version
-it came from, so you can compare it with the new default.
+wrapped screen (level 4) does. After an upgrade, `brocanth admin diff`
+prints a unified diff from the shipped screen of the installed version to
+each copy:
+
+```sh
+brocanth admin diff                       # every ejected copy
+brocanth admin diff list --model invoice  # one copy
+```
+
+`cargo metadata --offline` finds the installed `brocanth-admin`. When it
+cannot, the command compares with the screens the CLI carries and warns.
+The header line of the copy names the version it came from. When that is
+not the installed version, the diff holds your edits and the release's
+changes together, and the command says so.
 
 A copy names the crate through this public API:
 
@@ -496,11 +611,63 @@ assert!(!brocanth_admin::STYLESHEET.is_empty());
 A class that you add to a copy and that `STYLESHEET` does not contain has
 no effect. Put its rule in a stylesheet of your own (level 2).
 
+### Add a page
+
+Django's `AdminSite.get_urls()` adds a view with the admin's chrome. Here
+that is a `Panel`, the same seam other crates use for their tabs.
+`AdminConfig::page` builds one from a closure: the page gets the layout,
+a tab after the models, the policy (`Action::ViewPanel` to read,
+`Action::ActOnPanel` to post) and every path under its key.
+
+```rust
+use std::sync::Arc;
+
+use brocanth_admin::panel::{Page, PanelPage};
+use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
+use brocanth_admin::{Admin, AdminConfig, Fixture, Principal, Submission};
+use brocanth_test::Html;
+
+let admin = Admin::new(
+    Arc::new(Fixture::blog()),
+    AdminConfig::new()
+        .page("reports", "Reports", |request| {
+            Ok(match request.path {
+                "" => Some(PanelPage::body("Reports", "<p>All quiet.</p>")),
+                _ => None, // the admin's own 404
+            })
+        })
+        // No tab: a link from your own screen reaches it.
+        .panel(Page::new("wizard", "Wizard", |_| {
+            Ok(Some(PanelPage::body("Wizard", "<p>Step one</p>")))
+        }).hidden())
+        .at("/admin")
+        .with_policy(AllowAllUnsafeForDevelopment),
+);
+
+let get = |path| {
+    brocanth_admin::rt::block_on(admin.dispatch(
+        Principal::anonymous(), "GET", path, "", &Submission::new(),
+    ))
+    .unwrap()
+};
+let page = Html::new(get("/admin/reports").html().unwrap());
+assert!(page.text().contains("All quiet."));
+assert_eq!(page.link_to("/admin/reports").unwrap().attr("aria-current"), Some("page"));
+assert!(!page.has_link_to("/admin/wizard"));
+assert_eq!(get("/admin/wizard").status(), 200);
+assert_eq!(get("/admin/reports/nope").status(), 404);
+```
+
+The closure is synchronous. A page that awaits a database read
+implements `panel::Panel`, whose `render` is async.
+
 ### What is stable
 
 - The context types in `brocanth_admin::view` and their field names.
-- `View`, `Views` and its `with_*` methods, `AdminConfig::map_views`, and
-  the `ModelAdmin` view methods.
+- `View`, `Views` and its `with_*` methods (`with_brand` and
+  `with_userlinks` too), `AdminConfig::map_views`, and the `ModelAdmin`
+  view methods.
+- `panel::Panel`, `panel::Page` and `AdminConfig::page`.
 - For ejected screens: the function names in `brocanth_admin::parts`, and
   the constants `STYLESHEET`, `INLINE_SCRIPT` and `MUTATE_SCRIPT`. Their
   values are not stable.
@@ -521,7 +688,8 @@ The tests need no database. They run against `Fixture`, the in-memory
 source. `tests/customization.rs` covers levels 1 to 5 above, and
 `tests/screens.rs` covers levels 6 and 7. `tests/eject.rs` compiles the
 copies in `tests/ejected/` as an outside crate does and compares each
-screen's HTML with the shipped screen's, byte for byte (level 8). `tests/ui` holds the compile-fail
+screen's HTML with the shipped screen's, byte for byte (level 8).
+`tests/panels.rs` covers panels and extra pages. `tests/ui` holds the compile-fail
 cases: an `AdminResource` with no policy does not compile.
 
 In an application, test a screen through the router with

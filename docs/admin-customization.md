@@ -11,17 +11,20 @@ in step with new versions of the admin.
 |---|---|---|---|
 | 1. Settings | titles, "View site" link | `AdminConfig::{titled, headed, index_titled, site_url}`, or `[admin]` and `--admin.*` in a generated project | `AdminSite.site_title`, `site_header`, `index_title`, `site_url` |
 | 2. Theme | colours, fonts, radii | `AdminConfig::stylesheet` | `extrastyle` block, CSS variables |
-| 3. Model assets | CSS for one model's screens | `ModelAdmin::stylesheet` | `ModelAdmin.Media` |
+| 3. Assets | CSS and JavaScript, for every screen or one model's | `AdminConfig::{stylesheet, script}`, `ModelAdmin::{stylesheet, script}` | `ModelAdmin.Media`, `extrahead` |
+| 3a. Replace a block | the brand or the user links, keep the layout | `Views::{with_brand, with_userlinks}`, `AdminConfig::user_label` | `{% block branding %}`, `{% block userlinks %}` |
 | 4. Wrap a screen | add markup, keep the default | capture `Views::default().<screen>` and call it | `{{ block.super }}` |
 | 5. Replace a screen, one model | one model's list, detail, form or delete | `ModelAdmin::{list_view, detail_view, form_view, confirm_delete_view}` | `admin/<app>/<model>/change_list.html`, `ModelAdmin.change_list_template` |
 | 6. Replace a screen, every model | a screen for all models | `Views::with_<screen>` | `admin/change_list.html` in `DIRS` |
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
-| 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]` | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
+| 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]`, then `brocanth admin diff` after an upgrade | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
+| Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `Panel` | `AdminSite.get_urls()` |
 
 The tests for levels 1 to 5 are in
 `crates/brocanth-admin/tests/customization.rs`. Levels 6 and 7 are in
 `tests/screens.rs`. Level 8 is in `tests/eject.rs` and in
-`crates/brocanth-cli/src/commands/admin.rs`.
+`crates/brocanth-cli/src/commands/admin.rs`. Extra pages are in
+`tests/panels.rs`.
 
 ## How Django does it
 
@@ -168,16 +171,99 @@ application serves: the page router's public files, a CDN, anything. A
 same-origin file passes the default `Content-Security-Policy`, whose
 `style-src` is `'self' 'unsafe-inline'`.
 
-## Level 3: CSS for one model
+## Level 3: CSS and JavaScript
 
 ```rust
-.model("invoice", |m| m.stylesheet("/admin/invoices.css"))
+AdminConfig::new()
+    .script("/admin/everywhere.js")                  // every screen
+    .model("invoice", |m| {
+        m.stylesheet("/admin/invoices.css")          // Media.css
+            .script("/admin/invoices.js")            // Media.js
+    })
 ```
 
-The file is linked on that model's list, detail, form and delete screens,
-after the admin's own sheets. There is no `js` counterpart yet: the layout
-already runs dp-swap, and a script per model needs a CSP decision first
-(`INLINE_SCRIPT` is the only inline script the admin allows by hash).
+A model's files are on that model's list, detail, form and delete
+screens, after the admin's own. The layout writes each stylesheet as a
+`<link>` and each script as `<script src="…" defer>` in the `<head>`.
+
+### The Content-Security-Policy decision
+
+**A script is a file the application serves. The admin takes no inline
+code for a model.** Three choices were open:
+
+| Choice | Why not, or why |
+|---|---|
+| A nonce | A fresh value per response, on the header and on each `<script>`. The admin renders a page with no request in reach (`Admin::dispatch` takes a method, a path and form pairs), so it cannot read the nonce. A page with a nonce also differs per visitor, which a shared cache must not store. `brocanth-middleware`'s security headers chose hashes for the same reason. |
+| A hash of inline code | Works with `Csp::inline_script(text)`, as `INLINE_SCRIPT` does. But each model script would be one more hash for the application to keep in step with the code, and a file does the same job. |
+| **A file** | A same-origin file passes the default `script-src 'self'`. No hash, no nonce, no change to the policy. The browser caches it. |
+
+A file on another origin needs that origin in `script-src`:
+
+```rust
+SecurityHeadersConfig::default()
+    .csp(Csp::default().allow("script-src", ["https://cdn.example.com"]))
+```
+
+The test `a_model_script_is_a_deferred_file_and_never_inline_code` holds
+the admin to this: a model script adds no inline `<script>`.
+
+### Scripts and dp-swap
+
+dp-swap replaces the `<main dp-layout="admin">` region and keeps the
+`<head>`. So:
+
+- A script from `AdminConfig::script` loads on the first page and stays.
+  To act on each screen a swap shows, listen on `document` for
+  `dp:afterSwap`.
+- A script from `ModelAdmin::script` runs when a page of that model loads
+  in full: a reload, a form post, a link typed in. A swap from another
+  screen does not load it. When the code must run after a swap too, load
+  it with `AdminConfig::script`, and on each `dp:afterSwap` look for the
+  markup it works on.
+
+Stylesheets follow the same rule.
+
+## Level 3a: replace a block
+
+Django overrides `{% block branding %}` or `{% block userlinks %}`
+without copying `base.html`. Here the two are typed views of their own:
+
+| Block | `Views` field | Default | Django |
+|---|---|---|---|
+| Brand | `brand: View<Chrome>` | the header, linked to the index | `branding` |
+| User links | `userlinks: View<Chrome>` | "Signed in as …" and "View site" | `userlinks` |
+
+```rust
+AdminConfig::new()
+    // Who is signed in: the principal is yours, so you name it.
+    .user_label(|who| who.downcast::<User>().map(|u| u.email.clone()))
+    .map_views(|views| {
+        views
+            .with_brand(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+                views::admin::Brand { ctx }.render(w)  // a logo and ctx.header
+            })
+            .with_userlinks(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+                views::admin::UserLinks { ctx }.render(w)  // "Log out"
+            })
+    })
+```
+
+The admin renders each block, then gives the HTML to the layout in
+`LayoutCtx::brand` and `LayoutCtx::userlinks`. A layout of your own
+(level 7) writes them where it wants, or ignores them.
+
+**Why two named blocks and not a general block mechanism.** A general one
+is a map from a block name to a view. A misspelt name would then fail
+silently and show the default, which is the Django failure this design
+removes (see "Why brocanth does not search by name"). A field on `Views`
+is checked by the compiler. The two blocks are the two Django
+applications override most. The next block follows the same pattern: a
+field on `Views`, a template in `src/templates/`, a field on `LayoutCtx`.
+
+**Why the admin draws no "Log out".** It has no authentication scheme
+(PLAN.md §8). The application that has one replaces `userlinks`.
+
+Both blocks can be ejected: `brocanth admin eject brand`.
 
 ## Level 4: wrap a shipped screen
 
@@ -194,8 +280,8 @@ let shipped = Views::default().list;
 })
 ```
 
-The unit is a screen, not a block. The shipped screens have no named
-blocks to fill one at a time. See "Open" below.
+The unit is a screen. Inside the layout, two blocks are smaller units:
+level 3a.
 
 ## Level 5 and 6: replace a screen
 
@@ -269,9 +355,10 @@ source. Without the CLI on `PATH`, it stops with a `help:` line that says
 how to install it. The command is `src/commands/admin.rs`, and it is
 yours.
 
-Screens: `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`.
-`list`, `detail`, `form` and `delete` take `--model`; the other three show
-no one model.
+Screens: `layout`, `index`, `list`, `detail`, `form`, `delete`, `error`,
+and the two blocks of the layout, `brand` and `userlinks`. `list`,
+`detail`, `form` and `delete` take `--model`; the others show no one
+model.
 
 The command writes the shipped template into the project and installs it.
 The copy renders the same HTML as the shipped screen until you edit it.
@@ -304,7 +391,8 @@ screen, delete its file and run any eject again, or remove its lines from
 
 **What it refuses.** It never overwrites a copy that exists: edit that
 file, or delete it to start again from the shipped screen. It refuses
-`--model` on `layout`, `index` and `error`, and a model key that is not a
+`--model` on `layout`, `index`, `error`, `brand` and `userlinks`, and a
+model key that is not a
 Rust module name (`blog-post`), because `rsx` turns each directory into a
 module.
 
@@ -322,15 +410,87 @@ contain does nothing. Put the rules for it in a stylesheet of your own
 
 Ejecting and wrapping are different trades. A wrapped screen (level 4)
 gets the admin's fixes for free. An ejected screen does not: after an
-upgrade you compare your copy with the new default yourself. The header
-line in the copy says which version to compare with.
+upgrade, compare your copy with the new default.
+
+### After an upgrade: `brocanth admin diff`
+
+```
+brocanth admin diff                       # every ejected copy
+brocanth admin diff list --model invoice  # one copy
+brocanth admin diff --shipped ../brocanth/crates/brocanth-admin
+```
+
+It prints a unified diff from the shipped screen to your copy, with the
+same path rewrite an eject applies, so a fresh copy shows no difference.
+With `commands`, the project binary has it too: `cargo run -- admin diff`.
+
+**Which shipped screen.** The one of the `brocanth-admin` the project
+installed. `cargo metadata --offline` names its directory, and the
+command reads `src/templates/<screen>.rsx` there. It does not fetch: a
+project that was never built has nothing on disk, and the command then
+compares with the screens the CLI carries, and warns. `--shipped <dir>`
+names a directory.
+
+**What the diff means.** The copy's header line names the version it
+came from. The command prints that version and the shipped one:
+
+- The same version: the diff is your edits.
+- Another version: the diff holds your edits and the release's changes
+  together. Read the `-` lines that you did not remove: those are the
+  release's.
+
+A three-way diff would separate the two. It needs the template of the
+version the copy came from, and nothing keeps that on disk after the
+upgrade. A copy with no header line still compares; the command says it
+cannot name the version.
+
+The command exits 0 whether the copies differ or not. It reports; it does
+not judge an edit.
+
+## Extra pages: `AdminConfig::page`
+
+Django's `AdminSite.get_urls()` adds a view with the admin's chrome. Here
+that is a `Panel`, the tab other crates contribute (`docs/backoffice.md`).
+There is no second concept, because a panel already has all four parts
+an extra page needs:
+
+| Part | How |
+|---|---|
+| The chrome | the layout wraps `PanelPage::Body` |
+| Authorization | `Action::ViewPanel` to read, `Action::ActOnPanel` to post, asked before the page runs |
+| A navigation entry | a tab after the models; `Page::hidden` or `Panel::in_nav` removes it |
+| Its own paths | everything under `{base}/{key}`; `None` is the admin's 404 |
+
+`AdminConfig::page` is the short form. The closure renders one request:
+
+```rust
+AdminConfig::new().page("reports", "Reports", |request| {
+    Ok(match request.path {
+        "" => Some(PanelPage::body("Reports", render_reports()?)),
+        "export" => Some(PanelPage::body("Export", render_export()?)),
+        _ => None,
+    })
+})
+```
+
+A page with no tab, reached by a link from your own override:
+
+```rust
+.panel(Page::new("wizard", "Wizard", render_wizard).hidden())
+```
+
+The closure is synchronous. A page that awaits something, such as a
+database read, implements `Panel`, whose `render` is async. A page key
+that is also a model key stops `Admin::new`, naming both.
 
 ## What is stable API
 
 - The context types in `brocanth_admin::view` and their field names. A
   new field is a minor change; a renamed or removed field is breaking.
-- `View`, `Views` and its `with_*` methods, `AdminConfig::map_views`, and
-  the `ModelAdmin` view methods.
+- `View`, `Views` and its `with_*` methods (`with_brand` and
+  `with_userlinks` too), `AdminConfig::map_views`, and the `ModelAdmin`
+  view methods.
+- `Panel`, `Page`, `AdminConfig::page`.
 - The CSS custom properties listed under level 2.
 - For ejected screens: the function names in `brocanth_admin::parts`
   (`heading`, `card`, `button`, `control`, ...), and the constants
@@ -347,18 +507,18 @@ targets `.bg-white` breaks on the next stylesheet build.
 
 ## Open
 
-- **Blocks smaller than a screen.** Django overrides `branding` or
-  `userlinks` without copying `base.html`. Here the smallest unit is a
-  screen or the layout. A `Views::brand` and `Views::userlinks` pair would
-  cover the two most-used Django blocks; it waits for a second application
-  that needs it.
 - **Per-app overrides.** No app grouping exists.
-- **Extra pages on the admin.** Django's `get_urls()`. A `Panel` is the
-  closest thing: a tab with the admin's chrome. See `docs/backoffice.md`.
-- **Per-model JavaScript.** See level 3.
-- **Ejecting a panel.** `brocanth admin eject` copies the seven shipped
-  screens. A `Panel` renders its own body in the crate that owns it, so
-  there is no shipped panel template to copy.
-- **A diff after an upgrade.** The command does not compare a copy with
-  the new shipped screen. The header line names the version; the shipped
-  templates are in `crates/brocanth-admin/src/templates/`.
+- **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
+  and the two blocks. A `Panel` renders its own body in the crate that
+  owns it, so there is no shipped panel template to copy.
+- **Pages under one model.** Django's `get_urls()` on a `ModelAdmin` adds
+  `/admin/invoice/<id>/send`. Here an extra page is under its own key,
+  not under a model. A per-record action is a page that takes the record
+  key in its path: `/admin/invoice-actions/7/send`.
+- **More blocks.** `brand` and `userlinks` exist. `nav-global` and
+  `footer` follow the same pattern when an application needs them.
+- **A model script after a swap.** dp-swap keeps the `<head>`, so a
+  model's script does not load on a swap into that model's screen (level
+  3). A fix belongs in dp-swap: merge the `<head>` of the response.
+- **A three-way diff.** `brocanth admin diff` is two-way. A three-way diff
+  needs the template of the version a copy came from.

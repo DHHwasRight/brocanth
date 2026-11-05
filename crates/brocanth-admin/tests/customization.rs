@@ -181,3 +181,172 @@ fn an_override_can_wrap_the_shipped_screen() {
     );
     assert!(page.text().contains("On the Analytical Engine"));
 }
+
+// ------------------------------------------------------------------ scripts
+
+/// The opening `<script ...>` tags, read from the source: the HTML reader
+/// skips raw-text elements.
+fn script_tags(page: &Html) -> Vec<String> {
+    page.source()
+        .split("<script")
+        .skip(1)
+        .map(|rest| rest[..rest.find('>').unwrap_or(rest.len())].to_string())
+        .collect()
+}
+
+fn scripts(page: &Html) -> Vec<String> {
+    script_tags(page)
+        .iter()
+        .filter_map(|tag| {
+            let at = tag.find("src=\"")? + 5;
+            let len = tag[at..].find('"')?;
+            Some(tag[at..at + len].to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn the_admin_script_is_on_every_screen_and_a_model_one_only_on_its_own() {
+    let admin = blog(
+        AdminConfig::new()
+            .script("/assets/admin.js")
+            .model("post", |m| m.script("/assets/posts.js")),
+    );
+
+    assert_eq!(scripts(&index(&admin)), ["/assets/admin.js"]);
+    // The admin's first, then the model's, as the stylesheets.
+    assert_eq!(
+        scripts(&list(&admin, "post")),
+        ["/assets/admin.js", "/assets/posts.js"]
+    );
+    assert_eq!(scripts(&list(&admin, "user")), ["/assets/admin.js"]);
+    let detail = Html::new(
+        block_on(admin.detail(Principal::anonymous(), "post", "1"))
+            .unwrap()
+            .html()
+            .unwrap(),
+    );
+    assert!(scripts(&detail).contains(&"/assets/posts.js".to_string()));
+}
+
+#[test]
+fn a_model_script_is_a_deferred_file_and_never_inline_code() {
+    // The CSP decision: a file passes `script-src 'self'` with no hash. So
+    // a model script adds no inline script, and the two inline scripts the
+    // layout has are the ones a policy already allows by hash.
+    let plain = list(&blog(AdminConfig::new()), "post");
+    let with = list(
+        &blog(AdminConfig::new().model("post", |m| m.script("/assets/posts.js"))),
+        "post",
+    );
+    let inline = |page: &Html| {
+        script_tags(page)
+            .iter()
+            .filter(|tag| !tag.contains("src="))
+            .count()
+    };
+    assert_eq!(inline(&with), inline(&plain));
+    assert_eq!(inline(&plain), 2, "dp-swap's two");
+    let tags = script_tags(&with);
+    let tag = tags
+        .iter()
+        .find(|tag| tag.contains("src=\"/assets/posts.js\""))
+        .expect("the model script");
+    assert!(tag.contains("defer"), "it waits for the document");
+}
+
+// ------------------------------------------------------------------- blocks
+
+#[test]
+fn a_brand_block_replaces_the_header_and_keeps_the_layout() {
+    use brocanth_admin::view::Chrome;
+
+    let admin = blog(AdminConfig::new().map_views(|views| {
+        views.with_brand(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+            w.raw("<a href=\"/admin\"><img src=\"/logo.svg\" alt=\"Acme\"> ")?;
+            w.text(&ctx.header)?;
+            w.raw("</a>")
+        })
+    }));
+    let page = list(&admin, "post");
+    let home = page.link_to("/admin").expect("the brand links home");
+    assert!(home.text().contains("Blog admin"));
+    assert_eq!(page.tags("img").len(), 1, "the logo is in");
+    // The rest of the layout is the shipped one: the nav and the screen.
+    assert_eq!(page.tags("nav").len(), 1);
+    assert_eq!(page.tags("table").len(), 1);
+}
+
+struct User {
+    email: &'static str,
+}
+
+fn named(who: &Principal<'_>) -> Option<String> {
+    who.downcast::<User>().map(|u| u.email.to_string())
+}
+
+fn index_as(admin: &Admin, user: &User) -> Html {
+    Html::new(
+        block_on(admin.index(Principal::new(user)))
+            .unwrap()
+            .html()
+            .expect("a page"),
+    )
+}
+
+#[test]
+fn the_user_links_name_who_is_signed_in() {
+    let ada = User {
+        email: "ada@example.com",
+    };
+    let admin = blog(AdminConfig::new().user_label(named));
+    assert!(index_as(&admin, &ada)
+        .text()
+        .contains("Signed in as ada@example.com"));
+    // Nobody signed in: no name.
+    assert!(!index(&admin).text().contains("Signed in"));
+}
+
+#[test]
+fn a_user_links_block_draws_what_the_application_has_and_keeps_the_layout() {
+    use brocanth_admin::view::Chrome;
+
+    let ada = User {
+        email: "ada@example.com",
+    };
+    // Django's `userlinks` block: the application draws "Log out".
+    let admin = blog(AdminConfig::new().user_label(named).map_views(|views| {
+        views.with_userlinks(|ctx: &Chrome, w: &mut rsx::Writer<'_>| {
+            if let Some(user) = &ctx.user {
+                w.text(user)?;
+            }
+            w.raw(" <a href=\"/logout\">Log out</a>")
+        })
+    }));
+    let page = index_as(&admin, &ada);
+    assert_eq!(page.link_to("/logout").unwrap().text().trim(), "Log out");
+    assert!(page.text().contains("ada@example.com"));
+    assert!(
+        !page.text().contains("Signed in as"),
+        "the shipped block is gone"
+    );
+    assert_eq!(page.tags("nav").len(), 1, "the layout is the shipped one");
+}
+
+#[test]
+fn a_replaced_layout_receives_the_blocks_rendered() {
+    use brocanth_admin::view::{Chrome, LayoutCtx};
+
+    let admin = blog(AdminConfig::new().map_views(|views| {
+        views
+            .with_brand(|_: &Chrome, w: &mut rsx::Writer<'_>| w.raw("<b>Brand</b>"))
+            .with_layout(|ctx: &LayoutCtx, w: &mut rsx::Writer<'_>| {
+                w.raw("<header>")?;
+                w.raw(&ctx.brand)?;
+                w.raw("</header><main>")?;
+                w.raw(&ctx.body)?;
+                w.raw("</main>")
+            })
+    }));
+    assert_eq!(texts(&index(&admin), "header"), ["Brand"]);
+}
