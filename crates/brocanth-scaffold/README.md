@@ -264,8 +264,16 @@ brocanth create try --with correlation --brocanth-path ~/src/brocanth/crates/bro
 cd try && cargo build && cargo test && cargo clippy --all-targets -- -D warnings
 ```
 
-A module outside this repository has no test harness of its own yet
-(docs/module-authoring.md §5, gap 8).
+A module crate tests itself with the `testing` feature:
+`brocanth_scaffold::testing` checks a generated project (rustfmt, a golden
+file, a build), and `brocanth_cli::testing::generate` generates it with
+the module as a `&dyn Module`. No fork of the CLI is needed.
+`crates/brocanth-robots/tests/scaffold.rs` is the example, and
+`docs/module-authoring.md` §4 has the walkthrough.
+
+```text
+cargo test -p brocanth-scaffold --features testing
+```
 
 ## Links
 

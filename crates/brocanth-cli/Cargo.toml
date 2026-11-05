@@ -6,6 +6,13 @@ rust-version.workspace = true
 readme = "README.md"
 description = "The brocanth command line."
 
+# The generator as a library, for the tests of a module crate:
+# `brocanth_cli::testing::generate`. Its unit tests run in the binary.
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
 [[bin]]
 name = "brocanth"
 path = "src/main.rs"

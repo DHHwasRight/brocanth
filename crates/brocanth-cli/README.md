@@ -89,7 +89,9 @@ fits the command: `--with rsx,rsx-tailwind` for `create`,
 #### The chooser
 
 The chooser has two tabs over one answer. **Expert** shows every module,
-nested under its parent. **Wizard** asks one question per screen:
+grouped by its main category (Middleware, Renderer, External, Enhancer,
+Routes) and nested under its parent. A child stays under its parent, even
+when its own category differs. The arrows follow the rows as drawn. **Wizard** asks one question per screen:
 Shape, Foundations, Data, Pages, Behaviour, Doors, Operations, and Extras
 for a module that names no question. A module picks its question with
 `Manifest::asked_in`.
@@ -318,6 +320,11 @@ No database and no environment variable is needed.
 - **Formatting.** `every_generated_rust_file_is_already_formatted` runs
   rustfmt over every generated `.rs` file. A file must come out the same.
 - **Modules.** `src/modules/mod.rs` checks each manifest in `ALL`.
+- **A module crate's own goldens.** The crate is also a library,
+  `brocanth_cli::testing`, so a module crate generates projects in its
+  own tests. `brocanth-robots` keeps its two shapes in
+  `crates/brocanth-robots/tests/golden/`. Bless them the same way:
+  `BROCANTH_BLESS=1 cargo test -p brocanth-robots --test scaffold`.
 - **Binary tests.** `tests/migrate.rs` and `tests/plain_text.rs` run the
   built `brocanth`
   over projects on disk. The configuration checks are tested in

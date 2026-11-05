@@ -2056,16 +2056,6 @@ impl Command for Settings {
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
-===== package.json =====
-{
-  "name": "my-blog",
-  "version": "0.0.0",
-  "private": true,
-  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
-  "devDependencies": {
-    "@tailwindcss/cli": "^4.1.14"
-  }
-}
 ===== src/assets.rs =====
 //! Every static file this binary serves.
 //!
@@ -2386,6 +2376,16 @@ pub fn Layout(children: Element) -> Element {
         <div>{children}</div>
     </section>
 }
+===== package.json =====
+{
+  "name": "my-blog",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The node packages the brocanth modules of this project build with.",
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14"
+  }
+}
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -2598,7 +2598,7 @@ adapted_to = ["rsx-tailwind"]
 
 [modules.rsx-tailwind]
 kind = ["external", "enhancer"]
-files = ["assets/css/_tailwind.css", "assets/css/site.css", "package.json", "src/assets.rs", "src/commands/css.rs"]
+files = ["assets/css/_tailwind.css", "assets/css/site.css", "src/assets.rs", "src/commands/css.rs", "package.json"]
 config = []
 crates = []
 adapted_to = []
@@ -2610,4 +2610,4 @@ config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: 97edcdb2a2f6066e
+# brocanth-digest: 86dbbeeeb27f57fe

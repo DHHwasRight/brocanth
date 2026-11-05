@@ -11,3 +11,9 @@ description = "The contract a scaffold module implements, so `brocanth create` c
 # cost nothing: no serde, no syn, no transitive tree arriving in a web
 # framework because somebody wanted a menu entry.
 [dependencies]
+
+[features]
+# `brocanth_scaffold::testing`: the checks a module crate runs on a
+# generated project. Off, and for dev-dependencies: it runs `rustfmt` and
+# `cargo`, which a scaffold has no reason to.
+testing = []

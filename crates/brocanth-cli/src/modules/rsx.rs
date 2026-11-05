@@ -5,7 +5,7 @@
 //! skips the layouts they define. Each is a separate entry on the menu, and
 //! each can be left out.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{snippet, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// rsx lives in its own repository, so `--brocanth-path` does not reach it.
 /// That asymmetry is on purpose: brocanth is the thing being developed here
@@ -94,7 +94,10 @@ impl Module for Tailwind {
         s.file("assets/css/_tailwind.css", TAILWIND_CSS);
         // So the first `cargo build` works before anyone has run node.
         s.file("assets/css/site.css", SITE_CSS_PLACEHOLDER);
-        s.file("package.json", package_json(p));
+        // The generator writes `package.json` from this line, so a second
+        // module that needs node adds its own and does not clash on the
+        // file.
+        snippet::node_dependency(s, "@tailwindcss/cli", "^4.1.14");
 
         // The CSS build. A command and not `scripts/build-css.sh`, because
         // this project has a command line and a second way to run things is
@@ -663,22 +666,6 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 "##;
-
-fn package_json(p: &Project) -> String {
-    format!(
-        r#"{{
-  "name": {name:?},
-  "version": "0.0.0",
-  "private": true,
-  "description": "One dev dependency: the Tailwind CLI. `brocanth css` runs it.",
-  "devDependencies": {{
-    "@tailwindcss/cli": "^4.1.14"
-  }}
-}}
-"#,
-        name = p.name
-    )
-}
 
 /// The two `[tasks.*]` tables the CSS build adds to `mise.toml`.
 const MISE_CSS_TASKS: &str = r#"[tasks.css]

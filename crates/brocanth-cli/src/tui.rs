@@ -82,6 +82,10 @@ pub struct Choice {
     pub short: String,
     /// The wizard question this choice belongs to.
     pub section: String,
+    /// The module's main category, the first its manifest declares:
+    /// `middleware`, `routes`. Empty for a module that declares none. The
+    /// expert view groups the rows by it.
+    pub category: String,
     pub on: bool,
     /// Whether this choice is ticked the moment its parent is.
     pub starts_on: bool,
@@ -178,6 +182,62 @@ impl Draft {
 
     fn at(&self, key: &str) -> Option<usize> {
         self.choices.iter().position(|c| c.label == key)
+    }
+
+    /// Every choice, in the order the expert view draws it: grouped by main
+    /// category, in the order `Category::ALL` gives, and a module with no
+    /// category last. A child follows its parent, whatever its own
+    /// category, because it is part of that row. Inside a group, the
+    /// registry's order stays.
+    ///
+    /// The cursor walks this order too, so up and down follow the screen.
+    fn order(&self) -> Vec<usize> {
+        let mut groups: Vec<&str> = brocanth_scaffold::Category::ALL
+            .iter()
+            .map(|c| c.name())
+            .collect();
+        for choice in &self.choices {
+            if !groups.contains(&choice.category.as_str()) {
+                groups.push(choice.category.as_str());
+            }
+        }
+        // No category last, whatever position it was found at.
+        groups.retain(|g| !g.is_empty());
+        groups.push("");
+        let mut out = Vec::with_capacity(self.choices.len());
+        for group in groups {
+            for (i, choice) in self.choices.iter().enumerate() {
+                if choice.under.is_some() || choice.category != group {
+                    continue;
+                }
+                out.push(i);
+                out.extend(
+                    self.choices
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.under == Some(i))
+                        .map(|(j, _)| j),
+                );
+            }
+        }
+        // A child whose parent is not a choice: none today, but a row the
+        // order lost would be a module nobody can tick.
+        for i in 0..self.choices.len() {
+            if !out.contains(&i) {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// Whether the top-level choices fall in more than one category, so
+    /// the expert view draws a heading over each.
+    fn grouped(&self) -> bool {
+        let mut top = self.choices.iter().filter(|c| c.under.is_none());
+        match top.next() {
+            Some(first) => top.any(|c| c.category != first.category),
+            None => false,
+        }
     }
 }
 
@@ -457,7 +517,9 @@ impl Model {
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Name, Row::Title];
         rows.extend(
-            (0..self.draft.choices.len())
+            self.draft
+                .order()
+                .into_iter()
                 .filter(|i| self.draft.shown(*i))
                 .map(Row::Choice),
         );
@@ -980,11 +1042,26 @@ fn expert_view(lines: &mut Vec<Line<'static>>, model: &Model, problem: Option<&s
         + 2;
 
     // The group a row belongs to, so a heading is written once, above the
-    // first row of each group, and not again.
+    // first row of each group, and not again. Two levels: the category of
+    // a top-level row, and the parent of a child.
     let mut group: Option<usize> = None;
-    for (i, choice) in model.draft.choices.iter().enumerate() {
+    let mut category: Option<&str> = None;
+    for i in model.draft.order() {
+        let choice = &model.draft.choices[i];
         if !model.draft.shown(i) {
             continue;
+        }
+        if choice.under.is_none() && category != Some(choice.category.as_str()) {
+            // Only once the list holds more than one group: a heading over
+            // every row says nothing.
+            if model.draft.grouped() {
+                // A blank line between two groups, so each has a top edge.
+                if category.is_some() {
+                    lines.push(Line::raw(""));
+                }
+                lines.push(heading(&choice.category));
+            }
+            category = Some(choice.category.as_str());
         }
         if choice.under != group {
             if let Some(parent) = choice.under {
@@ -1036,6 +1113,17 @@ fn field(label: &str, value: &str, active: bool) -> Line<'static> {
         spans.push(Span::styled(" ", Style::new().bg(ACCENT)));
     }
     Line::from(spans)
+}
+
+/// The heading over the modules of one category: `Middleware`, `Other`
+/// for a module with none.
+fn heading(category: &str) -> Line<'static> {
+    let name = if category.is_empty() {
+        "Other".to_string()
+    } else {
+        title_case(category)
+    };
+    Line::from(Span::styled(format!("  {name}"), bold()))
 }
 
 /// The heading over the rows that are part of the row above them.
@@ -1156,6 +1244,7 @@ mod tests {
             blurb: String::new(),
             short: label.to_string(),
             section: section.to_string(),
+            category: String::new(),
             on,
             starts_on: false,
             under: None,
@@ -1209,6 +1298,10 @@ mod tests {
                     blurb: m.gist.to_string(),
                     short: m.phrasing().to_string(),
                     section: m.section.to_string(),
+                    category: m
+                        .categories
+                        .first()
+                        .map_or(String::new(), |c| c.name().to_string()),
                     on: m.parent.is_none() || m.on_with_parent,
                     starts_on: m.on_with_parent,
                     under: m
@@ -1569,6 +1662,83 @@ mod tests {
     // -- the expert view ----------------------------------------------------
 
     #[test]
+    fn the_expert_view_groups_the_modules_by_main_category() {
+        // Each category has one heading, in the order `Category::ALL`
+        // gives, and every module sits under the heading of its main
+        // category, or under its parent's row.
+        let m = registry(Tab::Expert);
+        let screen = render(&m, None, 112, 120);
+        let lines: Vec<&str> = screen.lines().collect();
+        let mut at = Vec::new();
+        for category in brocanth_scaffold::Category::ALL {
+            let title = crate::ui::title_case(category.name());
+            let found: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.trim() == title)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(found.len(), 1, "one `{title}` heading:\n{screen}");
+            at.push(found[0]);
+        }
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "the headings are out of order:\n{screen}"
+        );
+        // A top-level module is below the heading of its main category, and
+        // above the next heading.
+        for i in m.draft.order() {
+            let choice = &m.draft.choices[i];
+            if choice.under.is_some() || !m.draft.shown(i) {
+                continue;
+            }
+            let row = lines
+                .iter()
+                .position(|line| {
+                    let row = format!("] {} ", choice.label);
+                    line.contains(&row) || line.ends_with(&row[..row.len() - 1])
+                })
+                .unwrap_or_else(|| panic!("`{}` is not on the screen", choice.label));
+            let under = at.iter().rposition(|h| *h < row).expect("a heading above");
+            assert_eq!(
+                brocanth_scaffold::Category::ALL[under].name(),
+                choice.category,
+                "`{}` is under the wrong heading:\n{screen}",
+                choice.label
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_walks_the_rows_in_the_order_they_are_drawn() {
+        // Grouping moves rows on the screen, so the arrows must follow the
+        // screen and not the registry.
+        let mut m = registry(Tab::Expert);
+        m.row = 0;
+        let mut walked = Vec::new();
+        for _ in 0..m.rows().len() {
+            if let Row::Choice(i) = m.here() {
+                walked.push(i);
+            }
+            m.step(1);
+        }
+        let drawn: Vec<usize> = m
+            .draft
+            .order()
+            .into_iter()
+            .filter(|i| m.draft.shown(*i) && !m.draft.blocked(*i))
+            .collect();
+        assert_eq!(walked, drawn);
+    }
+
+    #[test]
+    fn a_list_of_one_category_has_no_heading() {
+        // A heading over every row says nothing.
+        let screen = render(&model(), None, 72, 20);
+        assert!(!screen.contains("Other"), "{screen}");
+    }
+
+    #[test]
     fn the_expert_view_counts_what_is_taken() {
         let m = registry(Tab::Expert);
         let taken = m.draft.count();
@@ -1796,7 +1966,7 @@ mod tests {
         // Taller than the table, with room to spare. This test is about
         // wrapping, and a height that exactly fits today's menu is a test
         // that fails the next time a module joins it.
-        let screen = render(&m, None, 72, 70);
+        let screen = render(&m, None, 72, 90);
         // Whichever choice the untick took with it, the note names it and
         // the sentence finishes. `commands` carries more than one now, and
         // the panel shows the last.

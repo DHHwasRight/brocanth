@@ -64,6 +64,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -697,7 +700,6 @@ impl<'a> Project<'a> {
 /// module writes its own file under `src/plugins/<key>/` instead, and an
 /// answer before the router is a route in the one table
 /// ([`Slot::RouterMounts`]). Add one back with its first reader.
-/// [`Slot::NodeDependencies`] is the last variant with no reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Slot {
     /// The `use` lines the registration chain needs. Use
@@ -830,7 +832,17 @@ pub enum Slot {
     GitIgnore,
     /// `mise.toml`, one `[tasks.x]` table per task.
     MiseTasks,
-    /// `package.json`, dependencies for a project that needs node.
+    /// `package.json`, one node package per line: `name version`, as
+    /// [`snippet::node_dependency`] writes it.
+    ///
+    /// The generator writes `package.json` when this slot has a line, with
+    /// every package under `devDependencies`, sorted by name. A module does
+    /// not write `package.json` itself: two modules that did would clash on
+    /// the file. Two modules may name one package with one version; two
+    /// versions of one package is an error that names both modules.
+    ///
+    /// `devDependencies` and not `dependencies`: node builds an asset here,
+    /// and the binary that ships runs without node.
     NodeDependencies,
     /// `AGENTS.md`, one `##` section per module that has a rule a coding
     /// agent must follow.
@@ -1727,43 +1739,22 @@ pub mod snippet {
         } else {
             let ident = section.replace('-', "_");
             let value = match &adjust {
-                None => format!("                crate::plugins::{ident}_settings(&given)?,\n"),
+                None => format!("crate::plugins::{ident}_settings(&given)?"),
                 Some(adjust) => {
-                    let one = format!(
-                        "                crate::plugins::{ident}_settings(&given)?{adjust},\n"
-                    );
-                    if one.trim_end().len() <= 100 {
+                    let one = format!("crate::plugins::{ident}_settings(&given)?{adjust}");
+                    // 16 columns of indent and a comma: what the argument
+                    // line costs inside the registration.
+                    if one.len() < 100 - 16 {
                         one
                     } else {
                         format!(
-                            "                crate::plugins::{ident}_settings(&given)?\n{}",
-                            broken_chain(adjust, 20, ",")
+                            "crate::plugins::{ident}_settings(&given)?\n{}",
+                            broken_chain(adjust, 4, "")
                         )
                     }
                 }
             };
-            // rustfmt keeps the call and the constructor on one line after
-            // `let builder =` when they fit in 100 columns, which a short
-            // type name does.
-            let head = format!(
-                "            builder.plugin_hooking(<{ty} as brocanth::plugin_api::Plugin>::new("
-            );
-            if head.len() <= 100 {
-                format!(
-                    "        let builder =\n\
-                     {head}\n\
-                     {value}\
-                     \x20           ));\n"
-                )
-            } else {
-                format!(
-                    "        let builder = builder.plugin_hooking(\n\
-                     \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
-                     {value}\
-                     \x20           ),\n\
-                     \x20       );\n"
-                )
-            }
+            hooking_line(ty, &value)
         };
         s.at(Slot::AppPlugins)
             .block(format!("{prelude}{statement}"));
@@ -1822,7 +1813,9 @@ pub mod snippet {
     /// provider line, and the hook record line.
     ///
     /// `block` is the whole statement, comments included, and it must call
-    /// `plugin_hooking` on `builder`. `ty` is the plugin type as a path the
+    /// `plugin_hooking` on `builder`. Build the statement with
+    /// [`hooking_line`] and put a comment before it, if any: do not write
+    /// the statement by hand. `ty` is the plugin type as a path the
     /// generated `src/plugins/mod.rs` can name: `brocanth_middleware::Csrf`.
     /// `key` names the provider alias, so it is the module's key.
     ///
@@ -1833,6 +1826,98 @@ pub mod snippet {
         s.at(Slot::AppPlugins).block(block);
         s.at(Slot::PluginsInstalled).line(format!("{key} {ty}"));
         s.at(Slot::PluginsHooks).line(ty);
+    }
+
+    /// The statement that registers a hooking plugin `ty`, built from the
+    /// expression `config`, in the shape rustfmt gives it.
+    ///
+    /// ```
+    /// let line = brocanth_scaffold::snippet::hooking_line(
+    ///     "brocanth_correlation::Correlation",
+    ///     "brocanth_correlation::CorrelationConfig::default()",
+    /// );
+    /// assert_eq!(
+    ///     line,
+    ///     "        let builder = builder.plugin_hooking(\n\
+    ///      \x20           <brocanth_correlation::Correlation as brocanth::plugin_api::Plugin>::new(\n\
+    ///      \x20               brocanth_correlation::CorrelationConfig::default(),\n\
+    ///      \x20           ),\n\
+    ///      \x20       );\n",
+    /// );
+    /// ```
+    ///
+    /// Pass the result to [`hooking`]. The statement calls
+    /// `<ty as Plugin>::new(config)`, because a hooking plugin is built
+    /// before `plugin_hooking` takes it, and `Plugin::new` is a trait
+    /// method.
+    ///
+    /// `config` is one expression. Write it at column 0. A line after the
+    /// first keeps its own indent, relative to the first: a chain that
+    /// rustfmt breaks is `"Config::default()\n    .a(1)\n    .b(2)"`.
+    /// This function indents it and adds the trailing comma.
+    ///
+    /// No `Project` argument: the statement is the same with and without
+    /// `config`. A plugin whose configuration comes from the file uses
+    /// [`configurable_hooking`], which calls this function for its
+    /// literal branch.
+    pub fn hooking_line(ty: &str, config: &str) -> String {
+        // The argument, at `indent` columns, with its trailing comma.
+        let value = |indent: usize| -> String {
+            let pad = " ".repeat(indent);
+            let mut lines: Vec<String> = config
+                .lines()
+                .map(|line| format!("{pad}{line}\n"))
+                .collect();
+            if let Some(last) = lines.last_mut() {
+                last.insert(last.len() - 1, ',');
+            }
+            lines.concat()
+        };
+        // rustfmt keeps the call and the constructor on the `let` line when
+        // they fit in 100 columns. Else on one line after `let builder =`,
+        // when they fit there, which a short type name does. Else it breaks
+        // both calls.
+        let call = format!("builder.plugin_hooking(<{ty} as brocanth::plugin_api::Plugin>::new(");
+        let head = format!("            {call}");
+        if 8 + "let builder = ".len() + call.len() <= 100 {
+            format!(
+                "        let builder = {call}\n\
+                 {}\
+                 \x20       ));\n",
+                value(12)
+            )
+        } else if head.len() <= 100 {
+            format!(
+                "        let builder =\n\
+                 {head}\n\
+                 {}\
+                 \x20           ));\n",
+                value(16)
+            )
+        } else {
+            format!(
+                "        let builder = builder.plugin_hooking(\n\
+                 \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
+                 {}\
+                 \x20           ),\n\
+                 \x20       );\n",
+                value(16)
+            )
+        }
+    }
+
+    /// Asks for a node package in the generated `package.json`:
+    /// `node_dependency(s, "@tailwindcss/cli", "^4.1.14")`.
+    ///
+    /// The generator writes the file from [`Slot::NodeDependencies`], so
+    /// several modules can each name what they need.
+    pub fn node_dependency(s: &mut Scaffold, name: &str, version: &str) {
+        debug_assert!(
+            !name.contains(char::is_whitespace) && !version.contains(char::is_whitespace),
+            "a node package name or version with a space: `{name}` `{version}`"
+        );
+        s.at(Slot::NodeDependencies)
+            .once(format!("{name} {version}"));
     }
 
     /// The registration statement alone, without the provider list.

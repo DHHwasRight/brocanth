@@ -168,14 +168,52 @@ pub const ALL: &[&dyn Module] = &[
     &ci::GitHub,
 ];
 
-/// The module with this key, if this CLI has one.
-pub fn find(key: &str) -> Option<&'static dyn Module> {
-    ALL.iter().copied().find(|m| m.manifest().key == key)
+thread_local! {
+    /// Modules a test adds to [`ALL`], for `brocanth_cli::testing`. Empty in
+    /// the binary: nothing joins the menu at run time.
+    ///
+    /// Per thread, because the test harness runs tests on several threads
+    /// and each test generates with its own module.
+    static EXTRA: std::cell::RefCell<Vec<&'static dyn Module>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Every key, in listing order.
+/// Runs `f` with `extra` beside [`ALL`]. A module in `extra` replaces the
+/// module in `ALL` with its key, so a module crate tests the module it
+/// compiles and not the copy this CLI was built with.
+// The binary never calls it; the library target does.
+#[allow(dead_code)]
+pub fn with_extra<T>(extra: &[&'static dyn Module], f: impl FnOnce() -> T) -> T {
+    let before = EXTRA.with(|e| std::mem::replace(&mut *e.borrow_mut(), extra.to_vec()));
+    let out = f();
+    EXTRA.with(|e| *e.borrow_mut() = before);
+    out
+}
+
+/// The modules a test added, in its order.
+fn extra() -> Vec<&'static dyn Module> {
+    EXTRA.with(|e| e.borrow().clone())
+}
+
+/// The module with this key, if this CLI has one.
+pub fn find(key: &str) -> Option<&'static dyn Module> {
+    extra()
+        .into_iter()
+        .chain(ALL.iter().copied())
+        .find(|m| m.manifest().key == key)
+}
+
+/// Every key, in listing order. A key a test added and `ALL` lacks comes
+/// last.
 pub fn keys() -> Vec<&'static str> {
-    ALL.iter().map(|m| m.manifest().key).collect()
+    let mut keys: Vec<&'static str> = ALL.iter().map(|m| m.manifest().key).collect();
+    for m in extra() {
+        let key = m.manifest().key;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 #[cfg(test)]

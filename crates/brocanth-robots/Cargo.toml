@@ -18,6 +18,14 @@ readme = "README.md"
 # `features = ["scaffold"]`.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side, and this crate's tests take the CLI.
+[dev-dependencies]
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 default = []
 scaffold = ["dep:brocanth-scaffold"]

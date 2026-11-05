@@ -605,6 +605,11 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                 // gist for a module that did not write one.
                 short: about(pick).phrasing().to_string(),
                 section: about(pick).section.to_string(),
+                // The main category, which groups the expert view.
+                category: about(pick)
+                    .categories
+                    .first()
+                    .map_or(String::new(), |c| c.name().to_string()),
                 starts_on: about(pick).on_with_parent,
                 // A child starts ticked once its parent is, which is the
                 // asymmetry with the flags: somebody in a terminal building
@@ -862,6 +867,7 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
             .help("call `brocanth_scaffold::snippet::plugin`, which writes both"),
         );
     }
+    wrong.extend(node_clashes(&built));
     for key in project.unknown_keys() {
         wrong.push(
             Diagnostic::error("module", format!("a module asked about `{key}`"))
@@ -1041,6 +1047,19 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         files.push((path.to_string(), contents.to_string()));
     }
 
+    // The node packages the modules asked for, in one file, so a second
+    // module that needs node adds a line and does not clash on the file.
+    if !built.slot_is_empty(Slot::NodeDependencies) {
+        if let Some((taken, _)) = files.iter().find(|(p, _)| p == "package.json") {
+            return Err(vec![Diagnostic::error(
+                "module",
+                format!("a module writes {taken}, which the scaffold writes from `Slot::NodeDependencies`"),
+            )
+            .help("call `brocanth_scaffold::snippet::node_dependency` instead of writing the file")]);
+        }
+        files.push(("package.json".to_string(), package_json(a, &built)));
+    }
+
     // The brief goes last because it is the one file about all the others,
     // and the listing `create` prints reads in this order.
     files.push((
@@ -1052,6 +1071,63 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         agents_md(a) + &built.slot(Slot::AgentsSections).collect::<String>(),
     ));
     Ok(files)
+}
+
+/// The node packages in [`Slot::NodeDependencies`], one `name version`
+/// line each, sorted by name and without repeats.
+fn node_packages(built: &Built) -> Vec<(&str, &str, &str)> {
+    let mut packages: Vec<(&str, &str, &str)> = built
+        .slot_owners(Slot::NodeDependencies)
+        .zip(built.slot(Slot::NodeDependencies))
+        .map(|(owner, line)| {
+            let (name, version) = line.trim().split_once(' ').unwrap_or((line.trim(), "*"));
+            (name, version.trim(), owner)
+        })
+        .collect();
+    packages.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    packages.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    packages
+}
+
+/// One error for each node package that two modules ask for at two
+/// versions. npm takes one version of a package, so the generator cannot
+/// pick one for them.
+fn node_clashes(built: &Built) -> Vec<Diagnostic> {
+    let packages = node_packages(built);
+    packages
+        .windows(2)
+        .filter(|pair| pair[0].0 == pair[1].0)
+        .map(|pair| {
+            Diagnostic::error(
+                "module",
+                format!(
+                    "`{}` asks for the node package `{}` at `{}`, and `{}` asks for it at `{}`",
+                    pair[0].2, pair[0].0, pair[0].1, pair[1].2, pair[1].1
+                ),
+            )
+            .note("`package.json` holds one version of a package")
+            .help("make the two modules name one version range")
+        })
+        .collect()
+}
+
+/// `package.json`, from the packages the modules asked for.
+///
+/// Every package is a dev dependency: node builds an asset, and the binary
+/// that ships does not run node.
+fn package_json(a: &Answers, built: &Built) -> String {
+    let packages = node_packages(built);
+    let lines: Vec<String> = packages
+        .iter()
+        .map(|(name, version, _)| format!("    {name:?}: {version:?}"))
+        .collect();
+    format!(
+        "{{\n  \"name\": {name:?},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \
+         \"description\": \"The node packages the brocanth modules of this project build with.\",\n  \
+         \"devDependencies\": {{\n{}\n  }}\n}}\n",
+        lines.join(",\n"),
+        name = a.name,
+    )
 }
 
 /// `brocanth.toml`: the marker, the module list, and what each module put
@@ -5210,15 +5286,9 @@ mod tests {
                     "gtag",
                 ],
             ),
-            // A robots.txt with a config file and an admin to keep crawlers
-            // out of: the development file answers `Disallow: /`.
-            ("robots", vec!["config", "admin", "robots"]),
-            // And on a static site, where the file opens the site because
-            // the export is what gets published.
-            (
-                "robots-static",
-                vec!["static", "config", "commands", "robots"],
-            ),
+            // `robots` has no shape here: its own crate generates its two
+            // shapes through `brocanth_cli::testing` and keeps the goldens
+            // in `crates/brocanth-robots/tests/golden/`.
             // The consent banner and the tag, with the policy that allows
             // them and no config file: the literal branch of a hooking
             // plugin, and the one adjustment a second module makes to the
@@ -5805,6 +5875,72 @@ mod tests {
     /// Everything a shape writes. The modules have to agree for a project
     /// to exist at all, so a test that cannot get this far has already
     /// found the bug.
+    /// A module that asks for one node package, for the `package.json`
+    /// tests.
+    struct Node(&'static str, &'static str, &'static str);
+
+    impl brocanth_scaffold::Module for Node {
+        fn manifest(&self) -> brocanth_scaffold::Manifest {
+            brocanth_scaffold::Manifest::new(self.0, "a node package")
+                .category(brocanth_scaffold::Category::External)
+                .outside_runtime()
+        }
+
+        fn contribute(&self, _: &brocanth_scaffold::Project, s: &mut Built) {
+            brocanth_scaffold::snippet::node_dependency(s, self.1, self.2);
+        }
+    }
+
+    const LINT: Node = Node("node-lint", "eslint", "^9.0.0");
+    const LINT_AGAIN: Node = Node("node-lint-again", "eslint", "^9.0.0");
+    const LINT_OLD: Node = Node("node-lint-old", "eslint", "^8.0.0");
+
+    #[test]
+    fn two_modules_that_need_node_share_one_package_json() {
+        let files = crate::modules::with_extra(&[&LINT, &LINT_AGAIN], || {
+            written(&[
+                "rsx",
+                "rsx-tailwind",
+                "commands",
+                "node-lint",
+                "node-lint-again",
+            ])
+        });
+        let package = &files
+            .iter()
+            .find(|(path, _)| path == "package.json")
+            .expect("package.json")
+            .1;
+        assert!(
+            package.contains(
+                "  \"devDependencies\": {\n    \"@tailwindcss/cli\": \"^4.1.14\",\n    \
+                 \"eslint\": \"^9.0.0\"\n  }"
+            ),
+            "sorted, and one line for a package two modules name:\n{package}"
+        );
+    }
+
+    #[test]
+    fn two_versions_of_one_node_package_are_refused_by_name() {
+        let wrong = crate::modules::with_extra(&[&LINT, &LINT_OLD], || {
+            scaffold(&answers(&["node-lint", "node-lint-old"]))
+        })
+        .expect_err("two versions of eslint");
+        let text = wrong.iter().map(|d| d.message.clone()).collect::<String>();
+        assert!(
+            text.contains("node-lint") && text.contains("node-lint-old") && text.contains("eslint"),
+            "{text}"
+        );
+        assert!(wrong
+            .iter()
+            .any(|d| d.notes.iter().any(|(kind, _)| *kind == "help")));
+    }
+
+    #[test]
+    fn no_node_module_no_package_json() {
+        assert!(!paths(&["rsx"]).contains(&"package.json".to_string()));
+    }
+
     fn written(picks: &[&'static str]) -> Vec<(String, String)> {
         scaffold(&answers(picks)).expect("the modules agree")
     }

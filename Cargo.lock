@@ -1175,6 +1175,7 @@ dependencies = [
 name = "brocanth-robots"
 version = "0.1.0"
 dependencies = [
+ "brocanth-cli",
  "brocanth-scaffold",
 ]
 
