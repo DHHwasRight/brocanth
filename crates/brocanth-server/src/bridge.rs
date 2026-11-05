@@ -443,14 +443,18 @@ pub fn streaming(
 
 /// [`buffered`] and [`streaming`], which differ only in the body.
 fn answered(status: u16, headers: Vec<(String, String)>, body: CoreBody) -> CoreResponse {
+    // A 101 has no body, so it has no type to default to.
+    let switches = matches!(&body, CoreBody::Streaming(stream) if stream.is_upgrade());
     let mut out = CoreResponse::new(body);
     *out.status_mut() =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     let map = out.headers_mut();
-    map.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
+    if !switches {
+        map.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+    }
     let mut typed = false;
     for (name, value) in headers {
         let (Ok(name), Ok(value)) = (

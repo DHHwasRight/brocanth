@@ -14,6 +14,19 @@
 //! Body::Streaming(Streaming) a promise of bytes, polled by the transport.
 //! ```
 //!
+//! # The third exit: an upgrade
+//!
+//! A WebSocket answers `101 Switching Protocols` and then leaves HTTP. It has
+//! no body at all. [`Streaming::upgrade`] carries that exit through the same
+//! pipeline: it is a [`Streaming`] that yields no bytes and holds an
+//! [`Upgrade`], an opaque value that only the transport can read. The
+//! response hooks see the 101 and its headers ([`ResponseHook::on_headers`]
+//! runs), [`ResponseHook::on_body`] does not run, and [`Streaming::wrap`]
+//! leaves it alone, so no hook can put a compressor around a socket.
+//!
+//! [`ResponseHook::on_headers`]: crate::plugin_hooks::ResponseHook::on_headers
+//! [`ResponseHook::on_body`]: crate::plugin_hooks::ResponseHook::on_body
+//!
 //! # No runtime, and no `futures`
 //!
 //! The core has three dependencies and
@@ -59,6 +72,7 @@
 //! [`ShutdownCx::open_streams`](crate::plugin_shutdown::ShutdownCx::open_streams)
 //! is what a plugin reads to see how many are left.
 
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -92,6 +106,12 @@ impl Body {
     /// A body the transport will poll.
     pub fn stream(stream: impl BodyStream) -> Self {
         Self::Streaming(Streaming::new(stream))
+    }
+
+    /// No body: the connection leaves HTTP after the headers. See
+    /// [`Streaming::upgrade`].
+    pub fn upgrade(upgrade: Upgrade) -> Self {
+        Self::Streaming(Streaming::upgrade(upgrade))
     }
 
     /// Whether this body has to be polled to be read.
@@ -278,6 +298,68 @@ pub trait BodyStream: Send + 'static {
     /// a truncated response. That is the failure this method exists to avoid,
     /// so a long-lived stream should implement it.
     fn finish(&mut self) {}
+
+    /// The protocol switch this stream carries in place of bytes, once.
+    ///
+    /// [`None`] for every real body, which is the default. Only the stream
+    /// [`Streaming::upgrade`] builds answers [`Some`]; a transport calls it
+    /// through [`Streaming::take_upgrade`].
+    fn take_upgrade(&mut self) -> Option<Upgrade> {
+        None
+    }
+}
+
+/// What the connection becomes after a `101 Switching Protocols`.
+///
+/// Opaque on purpose. The core has no runtime and no socket type, so it
+/// cannot name what an upgraded connection is. The transport puts its own
+/// callback in here and takes it out again with [`Upgrade::downcast`];
+/// `brocanth-server` does it with a function over its `upgrade::Socket`.
+/// Everything between the page and the transport carries the value without
+/// reading it.
+pub struct Upgrade(Box<dyn Any + Send>);
+
+impl Upgrade {
+    /// Wraps the transport's value.
+    pub fn new<T: Any + Send>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    /// The transport's value back, or `self` when it is of another type.
+    pub fn downcast<T: Any>(self) -> Result<Box<T>, Self> {
+        // `Box<dyn Any + Send>` and not `Box<dyn Any>`: the `Send` bound is
+        // what lets the value cross to the task that owns the socket.
+        if self.0.is::<T>() {
+            let any: Box<dyn Any> = self.0;
+            Ok(any.downcast::<T>().expect("checked by `is` above"))
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl std::fmt::Debug for Upgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Upgrade(..)")
+    }
+}
+
+/// The stream [`Streaming::upgrade`] builds: no bytes, and an [`Upgrade`].
+///
+/// A transport that does not know upgrades polls it, reads the end at once
+/// and sends the 101 with an empty body. The client then sees a connection
+/// that switched to nothing, which is a failure it can detect, and not a
+/// page that pretends to be a socket.
+struct Switch(Option<Upgrade>);
+
+impl BodyStream for Switch {
+    fn poll_chunk(&mut self, _cx: &mut Context<'_>) -> Chunk {
+        Poll::Ready(None)
+    }
+
+    fn take_upgrade(&mut self) -> Option<Upgrade> {
+        self.0.take()
+    }
 }
 
 /// A [`BodyStream`] that ends immediately. The placeholder
@@ -303,6 +385,9 @@ impl BodyStream for Ended {
 pub struct Streaming {
     inner: Box<dyn BodyStream>,
     watched: bool,
+    /// Whether `inner` is a [`Switch`]. A flag beside the box and not a
+    /// second variant, so the destructor stays one indirect call.
+    upgrade: bool,
 }
 
 impl Streaming {
@@ -314,6 +399,38 @@ impl Streaming {
         Self {
             inner: stream,
             watched: false,
+            upgrade: false,
+        }
+    }
+
+    /// No bytes: the connection leaves HTTP after the headers.
+    ///
+    /// The page answers `101 Switching Protocols` with this as its body, and
+    /// the transport reads the [`Upgrade`] back with
+    /// [`Streaming::take_upgrade`] once the headers are written. Neither
+    /// [`Streaming::wrap`] nor [`Streaming::watch`] touches it: there is no
+    /// byte to compress, and the transport registers the socket with the
+    /// gate itself, for as long as it holds the socket.
+    pub fn upgrade(upgrade: Upgrade) -> Self {
+        Self {
+            inner: Box::new(Switch(Some(upgrade))),
+            watched: false,
+            upgrade: true,
+        }
+    }
+
+    /// Whether this is an upgrade and not a body.
+    pub fn is_upgrade(&self) -> bool {
+        self.upgrade
+    }
+
+    /// The upgrade, once. [`None`] for a body, and for an upgrade already
+    /// taken.
+    pub fn take_upgrade(&mut self) -> Option<Upgrade> {
+        if self.upgrade {
+            self.inner.take_upgrade()
+        } else {
+            None
         }
     }
 
@@ -333,6 +450,11 @@ impl Streaming {
     where
         F: FnOnce(Box<dyn BodyStream>) -> Box<dyn BodyStream>,
     {
+        // An upgrade has no bytes to rewrite, and a wrapper that does not
+        // forward `take_upgrade` would lose the socket.
+        if self.upgrade {
+            return;
+        }
         let inner = std::mem::replace(&mut self.inner, Box::new(Ended));
         self.inner = f(inner);
     }
@@ -347,6 +469,9 @@ impl Streaming {
     /// calling it twice puts the body under the gate twice, which is what
     /// [`Streaming::is_watched`] exists to let a caller avoid.
     pub fn watch(&mut self, gate: &StreamGate) {
+        if self.upgrade {
+            return;
+        }
         let ticket = gate.ticket();
         self.wrap(|inner| {
             Box::new(Gated {
@@ -418,6 +543,7 @@ impl std::fmt::Debug for Streaming {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Streaming")
             .field("watched", &self.watched)
+            .field("upgrade", &self.upgrade)
             .finish()
     }
 }
@@ -541,6 +667,27 @@ impl StreamTicket {
     /// Whether the application has asked this body to end.
     pub fn is_closing(&self) -> bool {
         self.gate.closing.load(Ordering::Acquire)
+    }
+
+    /// [`Poll::Ready`] once the application asks this body to end; until
+    /// then [`Poll::Pending`], with the waker left where
+    /// [`StreamGate::close`] wakes it.
+    ///
+    /// For a transport that holds a ticket for something that is not a
+    /// [`BodyStream`], such as an upgraded socket: it awaits this beside its
+    /// reads and sends its last frame when it resolves.
+    pub fn poll_closing(&self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.is_closing() {
+            return Poll::Ready(());
+        }
+        self.park(cx.waker());
+        // Re-read after parking: `close` may have run between the load
+        // above and the park, and then it found no waker to wake.
+        if self.is_closing() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 
     /// Leaves the waker where [`StreamGate::close`] can reach it.
@@ -847,5 +994,48 @@ mod tests {
         };
         assert_eq!(e.message(), "the database went away");
         assert_eq!(gate.open_streams(), 0);
+    }
+
+    #[test]
+    fn an_upgrade_survives_a_wrap_and_a_watch_and_comes_out_once() {
+        let gate = StreamGate::new();
+        let mut body = Streaming::upgrade(Upgrade::new(41u32));
+        assert!(body.is_upgrade());
+
+        // A compressing hook and the application's gate both pass over it.
+        body.wrap(|_inner| Box::new(Canned::new(&["not a socket"])));
+        body.watch(&gate);
+        assert!(
+            !body.is_watched(),
+            "the transport registers a socket itself"
+        );
+        assert_eq!(gate.open_streams(), 0);
+
+        let upgrade = body.take_upgrade().expect("the upgrade");
+        let upgrade = upgrade.downcast::<String>().expect_err("not a String");
+        assert_eq!(*upgrade.downcast::<u32>().expect("a u32"), 41);
+        assert!(body.take_upgrade().is_none(), "taken once");
+
+        // A transport that knows no upgrade reads an empty body.
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(body.poll_chunk(&mut cx), Poll::Ready(None)));
+        assert!(Streaming::new(Canned::new(&[])).take_upgrade().is_none());
+    }
+
+    #[test]
+    fn a_ticket_reports_the_close_it_was_parked_for() {
+        let gate = StreamGate::new();
+        let ticket = gate.ticket();
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(ticket.poll_closing(&mut cx).is_pending());
+        gate.close();
+        assert!(
+            woken.0.load(Ordering::SeqCst),
+            "close wakes the parked socket"
+        );
+        assert!(ticket.poll_closing(&mut cx).is_ready());
     }
 }

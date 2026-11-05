@@ -1660,7 +1660,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // ask for, so it is held back and written once, after the others.
     let serde = serde_dep(&mut picked, needs_serde(a, built));
     // What a module's `build.rs` uses, in a table of its own.
-    let (for_build, picked): (Vec<Dep>, Vec<Dep>) = picked.into_iter().partition(|d| d.build);
+    let (for_build, mut picked): (Vec<Dep>, Vec<Dep>) = picked.into_iter().partition(|d| d.build);
     let build_deps = if for_build.is_empty() {
         String::new()
     } else {
@@ -1673,6 +1673,17 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
                 .join("\n")
         )
     };
+    // Every project gets the server line below. A module that needs one of
+    // its features (`realtime-websocket` needs `websocket`) asks for the
+    // crate, and the features join that line rather than a second one.
+    let mut server = core("brocanth-server").feature("bridge");
+    if let Some(at) = picked.iter().position(|dep| dep.name == "brocanth-server") {
+        for feature in picked.remove(at).features {
+            if !server.features.contains(&feature) {
+                server.features.push(feature);
+            }
+        }
+    }
     for mut dep in picked {
         // Accounts go to Postgres when the project already has a Postgres
         // database. A manifest is static, so this one feature depends on
@@ -1700,7 +1711,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     {
         // Every project serves, so every project gets a socket and a reactor.
         // `bridge` for the two conversions `handle` makes around the hooks.
-        deps.push(source_of(a, &core("brocanth-server").feature("bridge")));
+        deps.push(source_of(a, &server));
         deps.push(
             "tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"signal\", \"sync\", \"time\"] }  # the reactor `serve` runs on, and the signals that stop it"
                 .to_string(),
@@ -5111,6 +5122,13 @@ mod tests {
             // that authorises its topics. With a config file, so the
             // broker's limits come from `[realtime]`.
             ("realtime-sse", vec!["config", "realtime", "realtime-sse"]),
+            // The other transport: an upgrade, a loop over one socket, and
+            // a page that checks the Origin. Its server line gains the
+            // `websocket` feature.
+            (
+                "realtime-websocket",
+                vec!["config", "realtime", "realtime-websocket"],
+            ),
             // The queue, with a config file, which is the shape that opens
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
@@ -6520,20 +6538,22 @@ mod tests {
 
     #[test]
     fn a_module_this_build_cannot_make_is_refused_before_anything_is_written() {
-        // Twice over, because there are two front doors and a third way in
-        // for a test. The flags refuse by name with the reason; the module
-        // itself refuses if it is somehow reached anyway, so nothing can
-        // write half a project.
-        let flagged = unavailable(&["realtime", "realtime-websocket"])
-            .expect_err("a transport that is not written yet");
-        assert_eq!(flagged.len(), 1);
-
-        let reached = contributions(&answers(&["realtime", "realtime-websocket"]))
-            .expect_err("the module refuses even when it is called");
-        assert!(
-            format!("{reached:?}").contains("upgrade out of the request/response shape"),
-            "the refusal does not say why: {reached:?}"
-        );
+        // The flags refuse a blocked module by name, with its reason, so
+        // nothing can write half a project. No module in this build is
+        // blocked since `realtime-websocket` was unblocked; the loop holds
+        // the next one to the rule, and the TUI tests hold the menu to it
+        // with a fixture.
+        for key in all() {
+            let Some(why) = about(key).blocked else {
+                continue;
+            };
+            let flagged = unavailable(&[key]).expect_err("a blocked module");
+            assert!(
+                format!("{flagged:?}").contains(why),
+                "the refusal of {key} does not say why: {flagged:?}"
+            );
+        }
+        assert!(unavailable(&["realtime", "realtime-websocket"]).is_ok());
     }
 
     #[test]

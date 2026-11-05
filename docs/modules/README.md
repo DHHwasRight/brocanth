@@ -102,5 +102,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 
 ## Blocked
 
-`realtime-websocket` is on the menu and
-cannot be chosen. Each page gives the reason from the manifest.
+None. A module that is on the menu and cannot be chosen gives the reason
+on its page, from its manifest. `realtime-websocket` was the last; it
+needed an upgrade out of the request/response shape and a frame codec,
+which `brocanth-server` now has ([`docs/realtime.md`](../realtime.md)).

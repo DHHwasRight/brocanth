@@ -6,11 +6,10 @@ owner" into the key `(author_id, 7)` and files the subscriber under it. A
 write is then a map lookup with zero queries, not one query per subscriber.
 The broker holds the index, a bounded mailbox per client, and the encoded
 frames. It stops one layer short of the socket: the crate ships no
-transport, and the `realtime-sse` module writes one into your application.
-Use it to tell other parts of a process about a write (a cache
-invalidator, an audit log), to push changes to a browser over server-sent
-events, or for long polling. Do not use it if you need a WebSocket: that
-transport does not exist yet.
+transport, and the `realtime-sse` and `realtime-websocket` modules write
+one into your application. Use it to tell other parts of a process about a
+write (a cache invalidator, an audit log), to push changes to a browser
+over server-sent events or a WebSocket, or for long polling.
 
 ## Transports
 
@@ -19,7 +18,7 @@ transport does not exist yet.
 | In process (`Mailbox::recv_blocking`, `recv`, `drain`) | works | No socket. A thread or any executor reads the mailbox. |
 | Long polling (`Mailbox::recv_timeout` then `drain`) | works, you write the handler | The handler returns all frames as one complete body. Every response hook runs as usual. |
 | Server-sent events (`realtime-sse`) | works, generated | `brocanth create --with realtime,realtime-sse` writes `GET /realtime/events?topics=posts/*` and a `BodyStream` over the client's mailbox into the project. The code is generated and not in this crate, because this crate does not depend on `brocanth`: a transport is a response body, and a body belongs to the crate that owns the routes. |
-| WebSocket (`realtime-websocket`) | **blocked** in `brocanth create` | It needs an HTTP upgrade out of the request/response shape and a frame codec. Neither is a body. That is a second exit from `brocanth-server`, not a new body type. |
+| WebSocket (`realtime-websocket`) | works, generated | `brocanth create --with realtime,realtime-websocket` writes `GET /realtime/socket?topics=posts/*` and a loop over one socket: frames out, `subscribe` and `unsubscribe` in. The upgrade and the codec are in `brocanth-server` (`upgrade`, and the `websocket` feature); the loop is `templates/realtime_websocket.rs`, which `tests/websocket.rs` runs here. See `docs/realtime.md`. |
 
 The crate docs (`cargo doc -p brocanth-realtime --open`, section "The limit:
 this crate does not ship the transport") describe what the generated SSE
@@ -57,8 +56,15 @@ brocanth create my_app --with realtime,realtime-sse
 It writes `src/plugins/realtime_sse/mod.rs` (the stream) and
 `src/pages/realtime/events.rs` (the route). List a collection in `PUBLIC`
 there, or gate it by a policy in `authorise`, before a browser can follow
-it. `realtime-websocket` is on the menu but blocked; the CLI prints the
-reason above.
+it. `realtime-websocket` adds the duplex transport:
+
+```sh
+brocanth create my_app --with realtime,realtime-websocket
+```
+
+It writes `src/plugins/realtime_websocket/mod.rs` (the loop) and
+`src/pages/realtime/socket.rs` (the route, `PUBLIC`, `ALLOWED_ORIGINS` and
+`authorise`). A page on another site is refused by its `Origin`.
 
 ### By hand
 
@@ -225,6 +231,8 @@ not on CSS classes (see `crates/brocanth-test/README.md`).
 - `PLAN.md` §10: the design, and the PocketBase numbers it answers.
 - The crate docs: the three corrections, the fallback, the transport limit,
   long polling, and the payload seam (`FrameEmitter`).
-- `docs/module-map.md`: where `realtime` and its blocked children sit.
+- `docs/module-map.md`: where `realtime` and its children sit.
+- `docs/realtime.md`: the WebSocket design: the upgrade, the codec, the
+  shutdown and the Origin check.
 - `docs/module-flags.md`: how the settings become flags, variables and file
   keys.

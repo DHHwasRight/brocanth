@@ -19,8 +19,10 @@
 //! not: nothing here touches a request, a response or a route. [`Sse`] says
 //! why in full.
 //!
-//! A websocket is still blocked: it needs an HTTP upgrade below `Response`
-//! and a frame codec, neither of which is a body.
+//! [`WebSocket`] (`realtime-websocket`) writes the other transport: a loop
+//! over one socket, and the page `GET /realtime/socket` that checks the
+//! Origin and authorises the topics. The upgrade and the codec are in
+//! `brocanth-server`; `docs/realtime.md` has the design.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -549,13 +551,19 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
   ```
 "#;
 
-/// Websockets, listed and not available.
+/// WebSockets: the broker's frames to a browser, and commands back.
 ///
-/// A longer way off than [`Sse`]: everything server-sent events need, and
-/// then an upgrade out of the request/response shape, the frame protocol,
-/// and a second path for writes that no hook sees. The row says the part
-/// that is only true here, because a reason read beside a flag has no row
-/// above it to lean on.
+/// # Where the transport lives, and why
+///
+/// Where [`Sse`] puts it, for the same reasons: in the generated project,
+/// as `src/plugins/realtime_websocket/mod.rs` (the loop over one socket)
+/// and `src/pages/realtime/socket.rs` (the route, the Origin list and the
+/// one function that authorises a topic).
+///
+/// What this module needs that [`Sse`] does not is in `brocanth-server`:
+/// the upgrade out of the request/response shape (`upgrade`), and the
+/// handshake, the Origin check and the frame codec (`websocket`, a feature
+/// this module turns on). `docs/realtime.md` has the design.
 pub struct WebSocket;
 
 impl Module for WebSocket {
@@ -568,15 +576,66 @@ impl Module for WebSocket {
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
         .because("it carries the frames the broker makes, and the broker is realtime")
-        .blocked("an upgrade out of the request/response shape, plus a frame codec")
+        // The upgrade is in every server; the handshake and the codec are
+        // behind this feature, so a project without a socket links neither.
+        .krate(Dep::brocanth("brocanth-server").feature("websocket"))
+        // `RowChange` is what a page publishes, and the socket's own test
+        // publishes one.
+        .krate(Dep::brocanth("brocanth-events"))
     }
 
     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.refuse(
-            "realtime-websocket cannot be scaffolded: it needs everything server-sent              events need, and an upgrade out of the request/response shape on top, which              is a second exit from brocanth-server rather than a new body type",
+        s.file(
+            "src/plugins/realtime_websocket/mod.rs",
+            SOCKET_RS.to_string(),
         );
+        s.at(Slot::PluginsMod).line("pub mod realtime_websocket;");
+        s.file("src/pages/realtime/socket.rs", SOCKET_PAGE_RS.to_string());
+        // The table's own test lists every route.
+        s.at(Slot::PagesRoutes).line("/realtime/socket");
+        s.at(Slot::AgentsSections).block(SOCKET_AGENTS.to_string());
     }
 }
+
+/// `src/plugins/realtime_websocket/mod.rs`: one socket's loop.
+///
+/// A file of its own and not a string here, so that `tests/websocket.rs`
+/// compiles it and runs its tests in this workspace: the loop is checked by
+/// `cargo test`, not only by building a generated project.
+const SOCKET_RS: &str = include_str!("../templates/realtime_websocket.rs");
+
+/// `src/pages/realtime/socket.rs`: the route, the Origin list, and who may
+/// follow what.
+///
+/// A file of its own, like the loop, so rustfmt can format it. It is not
+/// compiled here: it names the generated project's `crate::pages`.
+const SOCKET_PAGE_RS: &str = include_str!("../templates/realtime_socket_page.rs");
+
+/// The `AGENTS.md` section: the socket, and reading it in a browser.
+const SOCKET_AGENTS: &str = r#"
+## Realtime over a WebSocket
+
+`GET /realtime/socket?topics=posts/*` upgrades to a WebSocket that carries
+the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
+`src/pages/realtime/socket.rs` is the route.
+
+- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+  It runs for the topics in the URL and for each `subscribe <topic>` the
+  browser sends later, so read what it needs (the user id) into `Viewer`
+  when the socket opens. Never filter frames after delivery.
+- A page on another site is refused by its `Origin`. List a second site of
+  your own in `ALLOWED_ORIGINS`; never turn the check off.
+- Each message is one record in the server-sent-events format: `id:`,
+  `event:` (the topic) and `data:` lines. `lagged` means the view may be
+  stale: fetch it again. A close with code 1001 means the server is
+  stopping: reconnect with `?last=<id>`.
+
+  ```js
+  const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
+  socket.onmessage = (e) => console.log(e.data);
+  socket.onopen = () => socket.send("subscribe posts/42");
+  ```
+"#;
 
 /// The `[realtime]` section, with the numbers the crate defaults to and the
 /// arithmetic that decides whether they are right here.
@@ -661,7 +720,9 @@ fn plugin_rs(project: &Project) -> String {
 //!    writes `GET /realtime/events?topics=posts/*` and the stream behind it
 //!    (`src/plugins/realtime_sse/mod.rs`): one `Client` per connection, a
 //!    heartbeat, `lagged` when frames were dropped, and an end on shutdown.
-//!    `brocanth add realtime-sse` adds it.
+//!    `brocanth add realtime-sse` adds it. `realtime-websocket` is the
+//!    duplex form: `GET /realtime/socket`, frames out and `subscribe`
+//!    commands in.
 //! 2. **In process.** `Broker::connect`, one subscription, and a thread on
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a

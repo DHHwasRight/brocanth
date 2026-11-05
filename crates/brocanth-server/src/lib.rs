@@ -111,6 +111,9 @@
 #[cfg(feature = "bridge")]
 pub mod bridge;
 pub mod sse;
+pub mod upgrade;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -343,6 +346,28 @@ impl Response {
         Self::stream(200, "text/event-stream", stream)
             .with_header("cache-control", "no-cache")
             .with_header("x-accel-buffering", "no")
+    }
+
+    /// `101 Switching Protocols` to `protocol`: the connection leaves HTTP
+    /// after these headers, and `on_socket` runs with it.
+    ///
+    /// The headers are `connection: upgrade` and `upgrade: <protocol>`. A
+    /// protocol with a handshake of its own adds its headers with
+    /// [`Response::with_header`]; the `websocket` feature's
+    /// `Handshake::response` does it for a WebSocket. See [`upgrade`].
+    pub fn upgrade<F, Fut>(protocol: &str, on_socket: F) -> Self
+    where
+        F: FnOnce(upgrade::Socket) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            status: 101,
+            body: Body::Stream(upgrade::switch(on_socket)),
+            headers: vec![
+                ("connection".to_string(), "upgrade".to_string()),
+                ("upgrade".to_string(), protocol.to_string()),
+            ],
+        }
     }
 
     /// `text/plain; charset=utf-8`.
@@ -578,13 +603,18 @@ impl Server {
             signals.abort();
         }
 
+        // hyper's connections first, then the sockets that left hyper after
+        // a 101: an upgraded connection is not hyper's to wait for, so it is
+        // counted on the gate instead (see `upgrade`).
+        let streams = self.streams.clone();
+        let drained = async move {
+            graceful.shutdown().await;
+            streams.drained().await;
+        };
         match self.drain {
-            None => graceful.shutdown().await,
+            None => drained.await,
             Some(grace) => {
-                if tokio::time::timeout(grace, graceful.shutdown())
-                    .await
-                    .is_err()
-                {
+                if tokio::time::timeout(grace, drained).await.is_err() {
                     // Dropping `graceful` drops the watchers, which drops the
                     // connections, which drops the bodies. A client mid-frame
                     // sees a truncated response; the alternative is a deploy
@@ -702,7 +732,7 @@ impl hyper::body::Body for OutBody {
 
 /// One request, from hyper's types into ours and back.
 async fn exchange<F, Fut>(
-    req: hyper::Request<Incoming>,
+    mut req: hyper::Request<Incoming>,
     peer: SocketAddr,
     handle: &F,
     streams: &StreamGate,
@@ -711,25 +741,33 @@ where
     F: Fn(Request) -> Fut,
     Fut: Future<Output = Response>,
 {
+    // Taken before the request is read into ours, because reading consumes
+    // it. Unused unless the page answers 101; then it is the connection.
+    let switched = hyper::upgrade::on(&mut req);
     let request = match read(req, peer).await {
         Ok(request) => request,
         // A verb the router has no name for cannot be dispatched, and 404
         // would be a claim about the path, which may be perfectly good.
         Err(Rejected::UnknownVerb) => {
-            return render(Response::text(501, "Not Implemented"), false, streams)
+            return render(Response::text(501, "Not Implemented"), false, streams, None)
         }
         // The handler is never called. Handing it the first two megabytes, or
         // an empty body, would let it act on a request nobody sent -- and an
         // empty body is indistinguishable from a legitimate empty POST.
         Err(Rejected::TooLarge) => {
-            return render(Response::text(413, "Payload Too Large"), false, streams)
+            return render(
+                Response::text(413, "Payload Too Large"),
+                false,
+                streams,
+                None,
+            )
         }
     };
 
     // HEAD is GET without the body, and a handler should not have to know
     // that. A page answers HEAD correctly by answering GET at all.
     let head_only = request.verb == Verb::Head;
-    render(handle(request).await, head_only, streams)
+    render(handle(request).await, head_only, streams, Some(switched))
 }
 
 /// Ours into hyper's.
@@ -739,8 +777,17 @@ where
 /// came through the bridge, because
 /// [`App::finish`](brocanth::plugin_app::App::finish) registers it -- is left
 /// alone rather than counted twice.
-fn render(response: Response, head_only: bool, streams: &StreamGate) -> hyper::Response<OutBody> {
+///
+/// `switched` is the connection, for a 101 whose body is an upgrade: the
+/// socket's function is spawned on it, under a ticket from `streams`.
+fn render(
+    response: Response,
+    head_only: bool,
+    streams: &StreamGate,
+    switched: Option<hyper::upgrade::OnUpgrade>,
+) -> hyper::Response<OutBody> {
     let length = response.body.len();
+    let status = response.status;
 
     let mut out = hyper::Response::builder().status(response.status);
     for (name, value) in &response.headers {
@@ -759,6 +806,27 @@ fn render(response: Response, head_only: bool, streams: &StreamGate) -> hyper::R
             OutBody::empty()
         }
         (false, Body::Bytes(bytes)) => OutBody::once(bytes),
+        (false, Body::Stream(mut stream)) if stream.is_upgrade() => {
+            let on_socket = upgrade::taken(&mut stream);
+            match (status, on_socket, switched) {
+                (101, Some(on_socket), Some(switched)) => {
+                    let ticket = streams.ticket();
+                    tokio::spawn(async move {
+                        // An error here is a client that left between the
+                        // 101 and the switch. Nobody is left to tell.
+                        if let Ok(io) = switched.await {
+                            on_socket(upgrade::Socket::upgraded(io, ticket)).await;
+                        }
+                    });
+                    OutBody::empty()
+                }
+                // A 101 needs a connection to switch and a function to run
+                // on it; another status with an upgrade is a page bug.
+                // Either way nothing can be switched, and saying 101 anyway
+                // would leave the client holding a dead connection.
+                _ => return failed(),
+            }
+        }
         (false, Body::Stream(mut stream)) => {
             if !stream.is_watched() {
                 stream.watch(streams);
@@ -767,14 +835,17 @@ fn render(response: Response, head_only: bool, streams: &StreamGate) -> hyper::R
         }
     };
 
-    out.body(body).unwrap_or_else(|_| {
-        // Only reachable from a header a handler built out of bytes hyper
-        // refuses. Losing the headers beats losing the response.
-        hyper::Response::builder()
-            .status(500)
-            .body(OutBody::once(Bytes::from_static(b"Internal Server Error")))
-            .expect("a response with no custom headers always builds")
-    })
+    // Only fails for a header a handler built out of bytes hyper refuses.
+    // Losing the headers beats losing the response.
+    out.body(body).unwrap_or_else(|_| failed())
+}
+
+/// A plain 500, built from literals so that it always builds.
+fn failed() -> hyper::Response<OutBody> {
+    hyper::Response::builder()
+        .status(500)
+        .body(OutBody::once(Bytes::from_static(b"Internal Server Error")))
+        .expect("a response with no custom headers always builds")
 }
 
 /// Why a request never reached the application.
@@ -885,7 +956,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_head_response_keeps_the_length_and_drops_the_body() {
-        let out = render(Response::text(200, "0123456789"), true, &StreamGate::new());
+        let out = render(
+            Response::text(200, "0123456789"),
+            true,
+            &StreamGate::new(),
+            None,
+        );
         assert_eq!(
             out.headers()
                 .get("content-length")
@@ -899,9 +975,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_get_response_keeps_its_body() {
-        let out = render(Response::text(200, "0123456789"), false, &StreamGate::new());
+        let out = render(
+            Response::text(200, "0123456789"),
+            false,
+            &StreamGate::new(),
+            None,
+        );
         let body = out.into_body().collect().await.expect("collect").to_bytes();
         assert_eq!(&body[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_with_nothing_to_switch_is_a_500_and_not_a_101() {
+        let gate = StreamGate::new();
+        // No connection to switch: an HTTP/2 stream, or a test.
+        let out = render(Response::upgrade("echo", |_| async {}), false, &gate, None);
+        assert_eq!(out.status(), 500);
+        // An upgrade under another status is a page bug, and the same 500.
+        let mut wrong = Response::upgrade("echo", |_| async {});
+        wrong.status = 200;
+        assert_eq!(render(wrong, false, &gate, None).status(), 500);
+        assert_eq!(gate.open_streams(), 0, "no socket, so no ticket");
     }
 
     #[tokio::test]

@@ -62,7 +62,7 @@ nothing holds this page.
 | [`observability-metrics`](modules/observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues |  | yes | part of `observability`, ticked with its parent |  |
 | [`openapi`](modules/openapi.md) | An OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Enhancer |  |  |  |
 | [`realtime-sse`](modules/realtime-sse.md) | One long response per subscriber, frames written as they are made |  |  | part of `realtime`, off until you tick it |  |
-| [`realtime-websocket`](modules/realtime-websocket.md) | A duplex socket per subscriber, frames both ways |  |  | part of `realtime`, off until you tick it | **blocked**: an upgrade out of the request/response shape, plus a frame codec |
+| [`realtime-websocket`](modules/realtime-websocket.md) | A duplex socket per subscriber, frames both ways |  |  | part of `realtime`, off until you tick it |  |
 | [`resource`](modules/resource.md) | Typed CRUD routes over one table, with the policy in the WHERE clause |  |  |  |  |
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
@@ -79,7 +79,7 @@ nothing holds this page.
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
-| [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` carries it to a browser | Middleware |  |  |  |
+| [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
 
 ### External (6)
@@ -124,8 +124,11 @@ shutdown_grace_secs` has a flag and a variable in every project
 
 ### 2. New modules
 
-1. **`realtime-websocket`.** Blocked: an upgrade out of the
-   request/response shape and a frame codec (`docs/modules/realtime-websocket.md`).
+1. ~~**`realtime-websocket`.**~~ Done: `brocanth-server` has the upgrade
+   (`upgrade`) and the codec (feature `websocket`), and the module writes
+   the socket loop and `GET /realtime/socket`. Open items are in
+   `docs/realtime.md` §10: RFC 8441 over HTTP/2, `permessage-deflate`,
+   subprotocols.
 
 ### 3. Module system
 

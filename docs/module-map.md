@@ -90,7 +90,7 @@ the file, or a literal in code.
 | `validation` | **Middleware** | AppContext ★ | | | |
 | `realtime` | **Enhancer**, Middleware | AppContext ★ | | | |
 | `realtime-sse` | Routes | PluginsMod, PagesRoutes (`/realtime/events`), AgentsSections | realtime | | |
-| `realtime-websocket` | Routes | blocked | realtime | | |
+| `realtime-websocket` | Routes | PluginsMod, PagesRoutes (`/realtime/socket`), AgentsSections | realtime | | |
 | `input` | **Enhancer**, Renderer | PagesItems (`describe`) | | | `rsx` |
 | `client` | **Enhancer** | CommandsMod (`api`) | | `input`, `commands` | |
 | `middleware` | **Middleware** | AppPlugins (5 hooks, commented) | | | |
@@ -190,7 +190,6 @@ flowchart LR
   k8s[docker-kubernetes]:::ex
   ci:::ex
   ci_gh[ci-github]:::ex
-  class rt_ws blocked
 
   obs ==> obs_logs & obs_health & obs_metrics & obs_tracing
   mwr ==> csrf & sech & rate

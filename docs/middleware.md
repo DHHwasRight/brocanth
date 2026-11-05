@@ -74,7 +74,7 @@ format strings over fields brocanth already has.
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
 | `gorilla/schema` | fills a struct from form values | `brocanth-schema` validates, it does not decode a form | **done**: `brocanth-input`, and a form, a JSON body and a query string all read the same struct. See `docs/input.md` |
-| `gorilla/websocket` | the WebSocket protocol | `realtime-websocket` is on the menu and blocked | open; needs an HTTP upgrade, a second exit from `brocanth-server` |
+| `gorilla/websocket` | the WebSocket protocol | `brocanth_server::websocket` (feature `websocket`), over `brocanth_server::upgrade` | **written**: the handshake, an Origin check and tungstenite's codec; `realtime-websocket` uses it (`docs/realtime.md`) |
 
 ## 4. What this leaves
 
