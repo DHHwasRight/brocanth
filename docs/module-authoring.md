@@ -81,6 +81,11 @@ Dep::git("jt", "https://github.com/DHHwasRight/jt", "main")
 Dep::version("serde", "1").feature("derive").no_default_features().note("why it is here")
 ```
 
+`.for_build()` puts the line in `[build-dependencies]`, for a `build.rs`
+the module writes with `s.file`. One crate may appear twice, once per
+table: `i18n` takes `brocanth-i18n` with its runtime for the binary and
+with its compiler for the build script.
+
 A third-party module uses `Dep::git` or `Dep::version` for its own crate.
 `Dep::brocanth` resolves only names inside this workspace.
 

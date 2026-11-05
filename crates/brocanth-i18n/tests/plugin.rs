@@ -10,7 +10,9 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_app::{App, AppBuilder};
 use brocanth::plugin_context::{After, Base, Context, Has};
 use brocanth::plugin_hooks::{Both, HookSource, NoHooks, Request, RequestState, Response};
-use brocanth_i18n::{Asked, I18n, I18nHook, Negotiated, Negotiator, NegotiatorConfig, Source};
+use brocanth_i18n::{
+    Asked, Current, I18n, I18nHook, Negotiated, Negotiator, NegotiatorConfig, Source,
+};
 use i18n::{t, Locale};
 
 /// What a generated project writes in `src/plugins/mod.rs`: the provider
@@ -52,6 +54,7 @@ fn a_cookie_name_nothing_can_send_stops_the_application() {
         .plugin(I18n::<Locale>::new(NegotiatorConfig {
             query: Some("locale".into()),
             cookie: Some("my locale".into()),
+            ..NegotiatorConfig::default()
         }))
         .build();
     assert!(built.is_err(), "a cookie name with a space was accepted");
@@ -146,4 +149,39 @@ fn a_handlers_own_content_language_is_kept() {
     assert_eq!(response.headers()["content-language"], "en");
     let vary: Vec<_> = response.headers().get_all("vary").iter().collect();
     assert_eq!(vary, ["Accept-Language", "cookie"]);
+}
+
+#[test]
+fn a_choice_made_by_link_is_remembered_in_the_cookie() {
+    let app = hooked();
+    let r = run(&app, get("/cart?locale=fr", &[("accept-language", "en")]));
+    let cookie = r.headers()["set-cookie"].to_str().expect("ascii");
+    assert!(cookie.starts_with("locale=fr; Path=/;"), "{cookie}");
+    // A cookie or a browser setting is not a new choice: nothing to write.
+    let r = run(&app, get("/cart", &[("cookie", "locale=fr")]));
+    assert!(r.headers().get("set-cookie").is_none());
+    let r = run(&app, get("/cart", &[("accept-language", "fr")]));
+    assert!(r.headers().get("set-cookie").is_none());
+}
+
+#[test]
+fn a_hook_that_cannot_name_the_locale_type_reads_current() {
+    let app = hooked();
+    let mut request = get("/", &[("accept-language", "fr-CA")]);
+    let mut state = RequestState::new();
+    app.run(&mut request, &mut state, |_, state| {
+        let current = state.get::<Current>().copied().expect("the hook wrote it");
+        assert_eq!(current.tag(), "fr-CA");
+        assert_eq!(current.source(), Source::AcceptLanguage);
+        // `fr-CA` has its own title; `nav.home` falls back to `fr`.
+        assert_eq!(
+            current.text("title").as_deref(),
+            Some("Votre panier d’achats")
+        );
+        assert_eq!(current.text("nav.home").as_deref(), Some("Accueil"));
+        // A key with an argument is a function only.
+        assert_eq!(current.text("greeting"), None);
+        assert_eq!(current.text("missing"), None);
+        Ok(http::Response::new(Vec::new().into()))
+    });
 }

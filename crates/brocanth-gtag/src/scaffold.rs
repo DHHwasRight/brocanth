@@ -26,6 +26,10 @@ impl Module for Gtag {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to(
+            "i18n",
+            "the banner's words come from the catalogs, in the request's locale",
+        )
         // The hook runs for the static export too, so a static site may
         // take it: the consent lives in the visitor's browser.
         .outside_runtime()
@@ -33,7 +37,11 @@ impl Module for Gtag {
             "operations",
             "Count visits with Google Analytics, after consent",
         )
-        .krate(Dep::brocanth("brocanth-gtag").feature_with("config", "config"))
+        .krate(
+            Dep::brocanth("brocanth-gtag")
+                .feature_with("config", "config")
+                .feature_with("i18n", "i18n"),
+        )
         .absent("gtag", "no Google tag; nothing on a page talks to Google")
     }
 
@@ -43,6 +51,13 @@ impl Module for Gtag {
         } else {
             "`--gtag.enabled=true` and\n        // `--gtag.measurement_id=G-…`, or the environment\n        // variables `--help` names"
         };
+        let words = if project.has("i18n") {
+            "\n        //\n        // The banner's words are the [gtag.banner] keys of\n        \
+             // locales/*.toml, in the request's locale. The\n        \
+             // `banner.*` settings are the fallback."
+        } else {
+            ""
+        };
         configurable_hooking(
             s,
             project,
@@ -51,7 +66,9 @@ impl Module for Gtag {
                 section: "gtag",
                 ty: "brocanth_gtag::Gtag",
                 config_ty: "brocanth_gtag::GtagConfig",
-                prelude: PRELUDE.replace("@TURN_ON@", turn_on),
+                prelude: PRELUDE
+                    .replace("@TURN_ON@", turn_on)
+                    .replace("@WORDS@", words),
                 adjust: None,
             },
             vec![
@@ -134,9 +151,14 @@ impl Module for Gtag {
                     "A link to the privacy policy, such as `/privacy`. Empty means no link.",
                 )
                 .optional(),
+                Setting::text("banner.policy", "Privacy policy", "The text of that link."),
             ],
         );
-        s.at(Slot::AgentsSections).block(AGENTS.to_string());
+        let mut agents = AGENTS.to_string();
+        if project.has("i18n") {
+            agents.push_str(AGENTS_I18N);
+        }
+        s.at(Slot::AgentsSections).block(agents);
     }
 }
 
@@ -149,7 +171,7 @@ const PRELUDE: &str = r#"
         // visitor accepts. Global Privacy Control counts as a refusal, the
         // page URL loses every query parameter not on the allow-list, and
         // /admin never gets the tag. Off until production turns it on:
-        // @TURN_ON@.
+        // @TURN_ON@.@WORDS@
 "#;
 
 /// What the generated `AGENTS.md` says about analytics.
@@ -169,3 +191,9 @@ const AGENTS: &str = "\n\
     The choice lives in the visitor's browser. To keep a record of it on\n\
     the server, set `consent_log` to a file: each choice is one JSON line\n\
     with no address and no user agent.\n";
+
+/// With `i18n`: where the banner's words are.
+const AGENTS_I18N: &str = "\n\
+    The banner speaks the request's locale. Its words are the\n\
+    `[gtag.banner]` keys of `locales/*.toml`; change them there, in every\n\
+    catalog. The `banner.*` settings are only the fallback.\n";

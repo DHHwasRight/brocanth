@@ -1,5 +1,10 @@
 //! The plugin and its two hooks: one inserts the banner and the tag, the
 //! other records a consent choice when a log is configured.
+//!
+//! With the `i18n` feature, both read `brocanth_i18n::Current` from the
+//! request state, which the `i18n` module's request hook writes. The banner
+//! then shows the catalog's `gtag.banner.*` strings in the request's
+//! locale, and the log records the version of the text that locale showed.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,10 +47,12 @@ impl HookSource for Gtag {
         if let Some(path) = &self.config.consent_log {
             registrar.request(
                 "consent-log",
-                brocanth::plugin_order::Order::new(),
+                // After the locale is known, so the record names the text
+                // this visitor's language showed.
+                brocanth::plugin_order::Order::new().after_if_present("i18n.negotiate"),
                 Record {
                     path: PathBuf::from(path),
-                    version: self.config.banner_version(),
+                    banner: self.config.banner.clone(),
                 },
             );
         }
@@ -56,6 +63,8 @@ impl HookSource for Gtag {
             Insert {
                 config: self.config.clone(),
                 markup,
+                #[cfg(feature = "i18n")]
+                translated: std::sync::Mutex::new(Vec::new()),
             },
         );
         Ok(())
@@ -65,11 +74,21 @@ impl HookSource for Gtag {
 /// Appends a consent choice to the log and answers `204`.
 struct Record {
     path: PathBuf,
-    version: String,
+    banner: crate::Banner,
 }
 
 impl Record {
-    fn append(&self, choice: &Choice) -> Result<(), PluginError> {
+    /// The version of the banner this request's locale shows.
+    fn version(&self, state: &RequestState) -> String {
+        #[cfg(feature = "i18n")]
+        if let Some(current) = state.get::<brocanth_i18n::Current>() {
+            return self.banner.translated(|key| current.text(key)).version();
+        }
+        let _ = state;
+        self.banner.version()
+    }
+
+    fn append(&self, choice: &Choice, version: &str) -> Result<(), PluginError> {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -77,7 +96,7 @@ impl Record {
         // saw: a record whose two differ answered older text.
         let line = format!(
             "{{\"at\":{at},\"choice\":\"{}\",\"id\":\"{}\",\"seen\":\"{}\",\"banner\":\"{}\"}}\n",
-            choice.choice, choice.id, choice.version, self.version
+            choice.choice, choice.id, choice.version, version
         );
         let failed = |e: std::io::Error| {
             PluginError::new(format!("gtag: consent log {}: {e}", self.path.display()))
@@ -98,7 +117,7 @@ impl RequestHook for Record {
     fn before_dispatch(
         &self,
         request: &mut Request,
-        _state: &mut RequestState,
+        state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
         if request.uri().path() != CONSENT_PATH {
             return Ok(Flow::Continue);
@@ -107,7 +126,7 @@ impl RequestHook for Record {
         let status = if request.method() != http::Method::GET {
             http::StatusCode::METHOD_NOT_ALLOWED
         } else if let Some(choice) = parse_choice(query) {
-            self.append(&choice)?;
+            self.append(&choice, &self.version(state))?;
             http::StatusCode::NO_CONTENT
         } else {
             http::StatusCode::BAD_REQUEST
@@ -126,6 +145,34 @@ impl RequestHook for Record {
 struct Insert {
     config: GtagConfig,
     markup: String,
+    /// The markup per locale tag, built on the first page in that locale.
+    #[cfg(feature = "i18n")]
+    translated: std::sync::Mutex<Vec<(&'static str, std::sync::Arc<str>)>>,
+}
+
+impl Insert {
+    /// The markup for this request: in its locale when the `i18n` hook
+    /// chose one, the settings' text otherwise.
+    #[cfg(feature = "i18n")]
+    fn markup_for(&self, state: &RequestState) -> std::sync::Arc<str> {
+        let Some(current) = state.get::<brocanth_i18n::Current>() else {
+            return self.markup.as_str().into();
+        };
+        let tag = current.tag();
+        // A poisoned lock only means another page panicked while it built
+        // a markup; the list is still whole.
+        let mut built = self
+            .translated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, markup)) = built.iter().find(|(t, _)| *t == tag) {
+            return std::sync::Arc::clone(markup);
+        }
+        let banner = self.config.banner.translated(|key| current.text(key));
+        let markup: std::sync::Arc<str> = self.config.markup_with(&banner, Some(tag)).into();
+        built.push((tag, std::sync::Arc::clone(&markup)));
+        markup
+    }
 }
 
 impl Insert {
@@ -179,7 +226,7 @@ impl ResponseHook for Insert {
         request: &Request,
         head: &mut ResponseHead,
         body: &mut Vec<u8>,
-        _state: &mut RequestState,
+        state: &mut RequestState,
     ) -> Result<(), PluginError> {
         if !self.wanted(request, head) {
             return Ok(());
@@ -187,7 +234,13 @@ impl ResponseHook for Insert {
         let Some(at) = last_close_body(body) else {
             return Ok(());
         };
-        body.splice(at..at, self.markup.bytes());
+        #[cfg(feature = "i18n")]
+        body.splice(at..at, self.markup_for(state).bytes());
+        #[cfg(not(feature = "i18n"))]
+        {
+            let _ = state;
+            body.splice(at..at, self.markup.bytes());
+        }
         Ok(())
     }
 }

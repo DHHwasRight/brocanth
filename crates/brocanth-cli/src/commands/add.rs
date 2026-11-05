@@ -498,6 +498,29 @@ fn merge_manifest(path: &str, current: &str, generated: &str) -> Result<String, 
         }
     }
 
+    // What a module's `build.rs` uses. No receipt here: the receipt is
+    // about `[dependencies]`.
+    if let Some(deps) = want.get("build-dependencies").and_then(Item::as_table) {
+        // A pinned brocanth source is pinned in `[dependencies]`.
+        let pins = doc
+            .get("dependencies")
+            .and_then(Item::as_table)
+            .cloned()
+            .unwrap_or_default();
+        let have = doc
+            .entry("build-dependencies")
+            .or_insert(Item::Table(Default::default()));
+        if let Some(have) = have.as_table_mut() {
+            for (key, item) in deps.iter() {
+                if let Some(old) = have.get_mut(key) {
+                    add_features(old, item);
+                    continue;
+                }
+                have.insert(key, same_source(&pins, item));
+            }
+        }
+    }
+
     // `cargo run` with two binaries and no default cannot choose, so a
     // module that brings a second one brings this with it.
     if let Some(run) = want.get("package").and_then(|p| p.get("default-run")) {

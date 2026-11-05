@@ -163,6 +163,9 @@ pub const ALL: &[&dyn Module] = &[
     // A sitemap.xml of the page table, from the same crate. `robots`
     // names it on its `Sitemap:` line when both are chosen.
     &brocanth_robots::scaffold::Sitemap,
+    // Translations checked at build time and a locale per request. Last
+    // in the pages question: a language is a choice made after the shape.
+    &brocanth_i18n::scaffold::I18n,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

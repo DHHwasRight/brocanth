@@ -44,6 +44,7 @@ brocanth-client = { path = "../brocanth-client", version = "0.1.0", default-feat
 brocanth-input = { path = "../brocanth-input", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-middleware = { path = "../brocanth-middleware", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-gtag = { path = "../brocanth-gtag", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-i18n = { path = "../brocanth-i18n", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-openapi = { path = "../brocanth-openapi", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }

@@ -23,13 +23,14 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (15)
+### Middleware (16)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`analytics`](modules/analytics.md) | Page views counted on the server: no cookie, no script, no third party; rows in your Postgres |  |  | needs `db`: the views are rows in the database the `db` module opens |  |
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
+| [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
 | [`gtag`](modules/gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts |  |  |  | static-site safe |
 | [`logging`](modules/logging.md) | A line per request; the core assumes no log layer |  |  |  |  |
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |
@@ -123,10 +124,7 @@ shutdown_grace_secs` has a flag and a variable in every project
 
 ### 2. New modules
 
-1. **`i18n`.** `brocanth-i18n` exists, but no module adds it to a project
-   (`docs/i18n.md` §7). It also unblocks translated banners in `gtag`,
-   which needs a catalogue a hook can read.
-2. **`realtime-websocket`.** Blocked: an upgrade out of the
+1. **`realtime-websocket`.** Blocked: an upgrade out of the
    request/response shape and a frame codec (`docs/modules/realtime-websocket.md`).
 
 ### 3. Module system
@@ -180,7 +178,8 @@ manifest rules, `admin eject` (CLI and project command), `robots`,
 `analytics` with `beacon`, `gtag`, `sitemap` (the base URL is
 `[sitemap] base_url`; see `docs/robots.md`), SQL migrations for `db`
 without `model` (`docs/migrations.md` §7; open: no checksum of an applied
-file), `migrate` and `dbshell` as project
+file), `i18n` (with the `gtag` banner in the request's locale,
+`docs/i18n.md` §7), `migrate` and `dbshell` as project
 commands, and a CLI with no module runtime.
 
 Also done: a test harness for out-of-tree modules

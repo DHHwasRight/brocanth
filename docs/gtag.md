@@ -201,7 +201,7 @@ module writes the policy. The `gtag` module needs nothing from it.
 | `exclude` | `["/admin"]` | The backoffice is staff, not visitors. |
 | `cookie_domain` | none | The domain Google's cookies live on, such as `example.co.uk`. Without it, the tag picks the domain, and withdrawal removes `_ga` cookies from the host and every parent domain (a browser ignores a public suffix such as `co.uk`). |
 | `consent_log` | none | A file for the consent log above. A server only. |
-| `banner.*` | English | Every string is a setting. |
+| `banner.*` | English | Every string is a setting. With `i18n`, the catalogs override them per locale. |
 
 `allow_params` and `exclude` are lists, so they live in the file only.
 
@@ -241,6 +241,27 @@ EU law that is personal data, which is why consent is needed at all.
 
 ## Decisions taken
 
+- **Translations.** With the `i18n` module, the banner follows the
+  request's locale. `gtag` declares `adapts_to("i18n")`, which turns on
+  the crate's `i18n` feature. The `i18n` module's hook writes
+  `brocanth_i18n::Current` in the request state, and the insert hook reads
+  the keys `gtag.banner.text`, `accept`, `refuse`, `manage` and `policy`
+  through `current.text(key)`. A key no catalog has keeps the `banner.*`
+  setting. The markup is built once per locale and kept. The banner gets
+  `lang="<tag>"`, because the page around it may say another language.
+  The `i18n` module writes the `[gtag.banner]` table in `en.toml` and
+  `fr.toml`.
+  - **Reason for a lookup by name:** the hook lives in a library and cannot
+    name the application's `Locale` type, so it cannot call
+    `t::gtag::banner::accept(locale)`.
+  - **The consent log** records the version of the text the request's
+    locale shows (`banner`), beside the one the browser saw (`seen`). Its
+    request hook runs after `i18n.negotiate`.
+  - **The link text** "Privacy policy" was fixed English. It is now
+    `banner.policy`, so it is a setting and a catalog key like the others.
+  - **A static site** gets the banner in the `default` locale of `i18n`,
+    because the export sends no `Accept-Language`.
+
 - **The wizard.** The "A static site" preset offers `gtag` in its
   operations question, unticked. A static site may count visits only in
   the browser, and Google needs consent, so the person decides.
@@ -252,14 +273,10 @@ EU law that is personal data, which is why consent is needed at all.
 
 ## Open questions
 
-1. **Translations.** The banner strings are settings, one language per
-   deployment. With the `i18n` module, the banner should follow the
-   request's locale. That needs a way for a hook to read a catalogue,
-   which `brocanth-i18n` does not offer yet. Not built.
-2. **Another provider.** The banner and the scrubber do not depend on
+1. **Another provider.** The banner and the scrubber do not depend on
    Google. A self-hosted counter that sets cookies (Matomo with cookies,
    for example) would reuse them with a different loader.
-3. **Retention of the consent log.** The module appends and never deletes.
+2. **Retention of the consent log.** The module appends and never deletes.
    Should it rotate the file, or leave that to the deployment?
 
 ## Sources

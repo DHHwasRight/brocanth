@@ -27,9 +27,18 @@ dates = ["runtime", "dep:icu_datetime", "dep:icu_calendar"]
 plugin = ["dep:brocanth", "dep:http"]
 # The catalog compiler, for a build script.
 build = ["dep:toml", "dep:serde_spanned"]
+# `NegotiatorConfig` deserialises, so an `[i18n]` section of a
+# brocanth-config file builds one. Off, so an application that builds its
+# configuration in code links no serde.
+config = ["dep:serde"]
+# The `i18n` module `brocanth create` and `brocanth add` offer. The CLI takes
+# it with `default-features = false`, so it links no CLDR data.
+scaffold = ["dep:brocanth-scaffold"]
 
 [dependencies]
 brocanth = { workspace = true, optional = true }
+brocanth-scaffold = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 http = { version = "1", optional = true }
 
 # ICU4X 2.x, compiled data. `icu_locale_core` and `icu_provider` are already
@@ -50,6 +59,7 @@ serde_spanned = { version = "1.1", default-features = false, optional = true }
 [dev-dependencies]
 # Every feature, so `cargo test -p brocanth-i18n` runs every test rather than
 # skipping the ones behind a feature without saying so.
-brocanth-i18n = { path = ".", features = ["dates", "plugin", "build"] }
+brocanth-i18n = { path = ".", features = ["dates", "plugin", "build", "config"] }
+brocanth-test.workspace = true
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }

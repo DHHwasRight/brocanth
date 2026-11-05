@@ -13,8 +13,9 @@
 //!   `.plugin_hooking(..)`, which widens the application's hook record.
 //!
 //! A single plugin that did both would force `.plugin_hooking` on an
-//! application that only wants the context value, and a generated project
-//! cannot name the widened hook record yet (`docs/middleware.md` §5).
+//! application that only wants the context value. A generated project
+//! registers [`I18nHook`]: it runs the hook pipeline, and a hook in another
+//! crate (the `gtag` banner) needs the locale before the page is rendered.
 
 use std::marker::PhantomData;
 
@@ -25,9 +26,9 @@ use brocanth::plugin_hooks::{
     RequestState, ResponseHead, ResponseHook,
 };
 use brocanth::plugin_order::Order;
-use http::header::{HeaderValue, CONTENT_LANGUAGE, COOKIE, VARY};
+use http::header::{HeaderValue, CONTENT_LANGUAGE, COOKIE, SET_COOKIE, VARY};
 
-use crate::negotiate::{Locales, Negotiated, Negotiator, NegotiatorConfig};
+use crate::negotiate::{Current, Locales, Negotiated, Negotiator, NegotiatorConfig, Source};
 
 impl<L: Locales> ContextItem for Negotiator<L> {}
 
@@ -59,7 +60,9 @@ pub struct I18n<L> {
 impl<L: Locales> Plugin for I18n<L> {
     type Config = NegotiatorConfig;
     type Provides = ProvidesContext<Negotiator<L>>;
-    const NAME: &'static str = "i18n";
+    /// Not `i18n`: that is the hook's name, the one a generated project
+    /// registers and the `[i18n]` section it reads.
+    const NAME: &'static str = "i18n-context";
 
     fn new(config: NegotiatorConfig) -> Self {
         Self {
@@ -68,7 +71,7 @@ impl<L: Locales> Plugin for I18n<L> {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.negotiator.config().check().map_err(PluginError::new)
+        self.negotiator.check().map_err(PluginError::new)
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
@@ -85,7 +88,10 @@ pub struct I18nHook<L> {
 impl<L: Locales> Plugin for I18nHook<L> {
     type Config = NegotiatorConfig;
     type Provides = NoContext;
-    const NAME: &'static str = "i18n-hook";
+    /// Also the configuration section and the flag prefix:
+    /// `--i18n.default=fr`. Another crate's hook that reads [`Current`]
+    /// orders itself after `i18n.negotiate`.
+    const NAME: &'static str = "i18n";
     const INSTALLS_HOOKS: bool = true;
 
     fn new(config: NegotiatorConfig) -> Self {
@@ -95,7 +101,7 @@ impl<L: Locales> Plugin for I18nHook<L> {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.negotiator.config().check().map_err(PluginError::new)
+        self.negotiator.check().map_err(PluginError::new)
     }
 }
 
@@ -110,11 +116,20 @@ impl<L: Locales> HookSource for I18nHook<L> {
                 negotiator: self.negotiator.clone(),
             },
         );
+        let config = self.negotiator.config();
+        // Only a choice the query made is written: a cookie the request
+        // already carried needs no answer, and `Accept-Language` is not a
+        // choice the visitor made on this site.
+        let remember = match (&config.query, &config.cookie) {
+            (Some(_), Some(cookie)) if config.remember => Some(cookie.clone()),
+            _ => None,
+        };
         registrar.response(
             "content-language",
             Order::new(),
             Stamp::<L> {
-                vary_cookie: self.negotiator.config().cookie.is_some(),
+                vary_cookie: config.cookie.is_some(),
+                remember,
                 _locales: PhantomData,
             },
         );
@@ -133,16 +148,21 @@ impl<L: Locales> RequestHook for Negotiate<L> {
         state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
         let negotiated = self.negotiator.negotiate_request(request);
-        // Both places: the state for the response hook below, the
-        // extensions for a handler that is given the request.
+        // Both places: the state for the response hook below and for a
+        // page (`ctx.hooked`), the extensions for a handler that is given
+        // the request. `Current` beside it, for a hook in a crate that
+        // cannot name `L`.
         request.extensions_mut().insert(negotiated);
         state.insert(negotiated);
+        state.insert(Current::of(negotiated));
         Ok(Flow::Continue)
     }
 }
 
 struct Stamp<L> {
     vary_cookie: bool,
+    /// The cookie a `?locale=` choice is written to, when `remember` is on.
+    remember: Option<String>,
     _locales: PhantomData<fn() -> L>,
 }
 
@@ -174,6 +194,17 @@ impl<L: Locales> ResponseHook for Stamp<L> {
         vary(head, "accept-language");
         if self.vary_cookie {
             vary(head, "cookie");
+        }
+        if let (Some(name), Source::Query) = (&self.remember, negotiated.source) {
+            // A year, the whole site, and no script access: a language
+            // switcher is a link, and the server reads the answer.
+            let cookie = format!(
+                "{name}={}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly",
+                negotiated.locale.tag()
+            );
+            if let Ok(value) = HeaderValue::from_str(&cookie) {
+                head.headers.append(SET_COOKIE, value);
+            }
         }
         Ok(())
     }

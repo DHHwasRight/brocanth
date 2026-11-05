@@ -18,7 +18,10 @@ the binary exists. Every brocanth project already reads TOML.
 
 ## Getting started
 
-There is no `brocanth add i18n` module yet. Add the crate by hand, twice:
+In a brocanth project, `brocanth add i18n` writes all of this: the two
+dependency lines, `build.rs`, `locales/en.toml` and `locales/fr.toml`, and
+the hook with its `[i18n]` settings (`docs/modules/i18n.md`). By hand, add
+the crate twice:
 
 ```toml
 [dependencies]
@@ -38,6 +41,8 @@ two feature sets apart.
 | `dates` | off | Date formatting. Separate, because the date data is the largest part of ICU4X. |
 | `plugin` | off | `I18n` and `I18nHook`, the brocanth plugins |
 | `build` | off | `build::compile`, the catalog compiler, for a build script |
+| `config` | off | `NegotiatorConfig` deserialises from an `[i18n]` section |
+| `scaffold` | off | the `i18n` module, for the `brocanth` CLI |
 
 Then write the catalog, the build script and the include:
 

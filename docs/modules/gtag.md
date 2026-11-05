@@ -13,7 +13,7 @@ The wizard calls it: *Count visits with Google Analytics, after consent*.
 | Part of | none |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`i18n`](i18n.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the hook runs in the static export too |
 | Crates | `brocanth-gtag` |
@@ -38,6 +38,12 @@ policy allows the consent script by its hash and adds Google's origins to
 `script-src`, `img-src` and `connect-src`. That adaptation is declared on
 the security headers' side.
 
+With [`i18n`](i18n.md), the banner follows the request's locale. The
+crate's `i18n` feature is on, and the hook reads `brocanth_i18n::Current`
+from the request state. Its words are the `[gtag.banner]` keys of
+`locales/*.toml`, which the `i18n` module writes. A key no catalog has
+keeps the `banner.*` setting.
+
 ## Settings
 
 Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key is `__`). Flag: `--gtag.<key>`. Rename a flag in `src/flags.rs`.
@@ -59,6 +65,7 @@ Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key i
 | `banner.refuse` | text | `"Refuse"` | `--gtag.banner.refuse` | The button that refuses. |
 | `banner.manage` | text | `"Cookie settings"` | `--gtag.banner.manage` | The button that opens the banner again. |
 | `banner.policy_url` | text | `""` | `--gtag.banner.policy_url` | A link to the privacy policy, such as `/privacy`. Empty means no link. |
+| `banner.policy` | text | `"Privacy policy"` | `--gtag.banner.policy` | The text of that link. |
 
 ## Read more
 

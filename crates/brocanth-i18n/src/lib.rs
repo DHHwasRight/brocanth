@@ -82,7 +82,7 @@
 
 mod negotiate;
 
-pub use negotiate::{Asked, Locales, Negotiated, Negotiator, NegotiatorConfig, Source};
+pub use negotiate::{Asked, Current, Locales, Negotiated, Negotiator, NegotiatorConfig, Source};
 
 #[cfg(feature = "runtime")]
 mod format;
@@ -98,3 +98,6 @@ pub use plugin::{I18n, I18nHook};
 
 #[cfg(feature = "build")]
 pub mod build;
+
+#[cfg(feature = "scaffold")]
+pub mod scaffold;

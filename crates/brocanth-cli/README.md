@@ -279,7 +279,7 @@ module with what it costs.
 
 | Category | Hooks in through | Modules |
 |---|---|---|
-| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag` |
+| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `i18n`, `gtag` |
 | Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `admin`, `admin-model`, `realtime-sse`, `realtime-websocket`, `robots`, `sitemap` |
 | Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `model`, `cache`, `jobs`, `storage`, `realtime`, `input`, `client`, `commands` |
 | Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt` |

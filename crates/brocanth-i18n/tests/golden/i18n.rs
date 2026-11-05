@@ -29,6 +29,15 @@ impl ::brocanth_i18n::Locales for Locale {
             Self::En | Self::Fr => ::core::option::Option::None,
         }
     }
+
+    fn message(self, key: &str) -> ::core::option::Option<::std::string::String> {
+        ::core::option::Option::Some(match key {
+            "braces" => t::braces(self),
+            "nav.home" => t::nav::home(self),
+            "title" => t::title(self),
+            _ => return ::core::option::Option::None,
+        })
+    }
 }
 
 impl Locale {
