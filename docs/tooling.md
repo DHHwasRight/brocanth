@@ -189,9 +189,10 @@ brocanth check --deploy --env staging  # another environment
 brocanth check --deploy --allow deploy/hsts --strict
 ```
 
-It reads `brocanth.toml`, loads the configuration of one environment through
-the application's own loader, and reads `src/` as text. It builds nothing and
-connects to nothing, so it runs in CI. Each finding has an id, a message, a
+The CLI half reads `brocanth.toml` as text. The project half loads the
+configuration of one environment through the application's own loader and
+reads `src/` as text. It builds the project, as every project command does,
+and connects to nothing, so it runs in CI. Each finding has an id, a message, a
 location when there is one, and a `help:` line:
 
 ```text

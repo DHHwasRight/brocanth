@@ -899,8 +899,8 @@ $ cargo run -- greet --name max
 There is no cargo alias. A project's command line is a framework concern and
 cargo is the build tool; hooking one into the other conflates them.
 
-`brocanth` knows one command of its own, `create`, and treats everything else
-as the project's: it walks up
+`brocanth` has four commands of its own, `create`, `add`, `check` and
+`admin`, and treats everything else as the project's: it walks up
 for `brocanth.toml`, runs `cargo build`, asks `cargo metadata` where the binary
 landed, and `exec`s it. So the command owns the terminal, its exit code is the one
 your shell sees, and Ctrl-C reaches the command rather than a wrapper.
@@ -927,10 +927,14 @@ from `--help`.
 
 ## What is not built yet
 
-**The global tool scaffolds and nothing else.** `brocanth` has one command of
-its own, `create`. There is no `routes`, no `check`, no `build`, no `dev` and
-no `generate`: they were removed, because a project's command line belongs to
-the project, where it can be tuned without forking anything.
+**The global tool scaffolds and hands over.** `brocanth` has four commands
+of its own: `create` and `add` write modules into a project, `check` reports
+the modules a project lacks, and `admin eject` copies a shipped admin
+screen. Every other command belongs to the project and runs in the
+project's own binary: `migrate` (with `model`), `dbshell` (with `db`),
+`settings` and the configuration half of `check` (with `config`). There is
+no `routes`, no `build`, no `dev` and no `generate`, because a project's
+command line belongs to the project, where you can tune it without a fork.
 
 So adding a page is writing a file, as above, and watching for changes is
 whatever you already use — `cargo watch`, `mise`, an editor task. If you want

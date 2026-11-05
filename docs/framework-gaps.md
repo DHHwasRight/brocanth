@@ -439,7 +439,7 @@ means it is not yet a feature.
 | Deployment checks that refuse to start (D23) | **yes** | a plugin's `configure` can refuse at startup, and `brocanth check --deploy` is the offline half: fifteen findings, each with an id and a `help:`. See `docs/tooling.md` §3 |
 | i18n (D24) | **yes, unwired** | `brocanth-i18n`: catalogs checked at build time, negotiation, CLDR plurals, numbers and dates; not on the menu. See `docs/i18n.md` |
 | Test client with transactional tests (D25) | **partial** | `Harness` wraps a database; no HTTP test client |
-| Shell / dbshell (D26) | **partial** | `brocanth dbshell` opens psql or sqlite3 on `[db] url`. No Rust console, on purpose: a project command runs application code. See `docs/tooling.md` §2 |
+| Shell / dbshell (D26) | **partial** | `brocanth dbshell`, a command the `db` module writes into the project, opens psql or sqlite3 on `[db] url`. No Rust console, on purpose: a project command runs application code. See `docs/tooling.md` §2 |
 | Fixtures (D27) | **partial** | `brocanth_model::Fixtures`: JSON, checked against the entities, loaded through their hooks, in the test harness's transaction. No `dumpdata`. See `docs/tooling.md` §1 |
 | Background jobs with retries and a dead letter | **yes, and further** | `brocanth-jobs`; Rails and Django both need a second product for this |
 | Single binary, embedded database (PocketBase) | **branch** | `brocanth-pgserver`, unmerged |
