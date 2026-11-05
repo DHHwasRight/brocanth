@@ -2576,7 +2576,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
             ""
         },
         plugins = "mod plugins;\n",
-        // Outside `src/`, where `brocanth migrate make` writes, so the path
+        // Outside `src/`, where `migrate make` writes, so the path
         // is spelled. Only with a command line: `migrate` is what reads it.
         migrations = if a.has("model") {
             "\n#[path = \"../migrations/mod.rs\"]\nmod migrations;"
@@ -5181,6 +5181,10 @@ mod tests {
             // Its static side: a site exported to files whose pages carry
             // the beacon snippet.
             ("beacon", vec!["static", "config", "commands", "beacon"]),
+            // The ORM with no command line: no `migrate` command, and the
+            // `migrate` tool in `src/bin/migrate.rs` still builds and runs
+            // on its own.
+            ("model", vec!["config", "db", "model"]),
             // The two modules that mount routes, and nothing else: no
             // config file and no renderer, so the admin's own rsx is the
             // only template engine in the tree and `mounted` is written

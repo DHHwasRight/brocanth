@@ -132,8 +132,8 @@ them; `brocanth serve` does the same from the project directory. Without
 
 ```sh
 brocanth add jobs                 # the same generator, one more module
-brocanth migrate make add_posts   # diff src/models, write a SeaORM migration
-brocanth migrate up               # apply, through the project's own command
+brocanth migrate make add_posts   # with `model`: the project's own command diffs src/models
+brocanth migrate up               # and applies, in the project's binary
 brocanth check --deploy           # secrets, cookies, CSRF, the database
 brocanth dbshell                  # psql or sqlite3 on this environment's database
 brocanth admin eject list         # copy a shipped admin screen into the project, as yours
@@ -169,7 +169,7 @@ puts the crate in a new project.
 | [`brocanth-command-macros`](crates/brocanth-command-macros/README.md) | The `#[cmd]` attribute, re-exported by `brocanth-command` | with `commands` |
 | [`brocanth-i18n`](crates/brocanth-i18n/README.md) | Message catalogs checked at build time, locale negotiation, CLDR plurals | |
 | [`brocanth-model`](crates/brocanth-model/README.md) | The model layer over SeaORM: validations, eager loading, N+1 detection, dirty tracking | `model` |
-| [`brocanth-migrate`](crates/brocanth-migrate/README.md) | Stable field ids, a schema snapshot and a rename-aware migration diff | used by `brocanth migrate` |
+| [`brocanth-migrate`](crates/brocanth-migrate/README.md) | Stable field ids, a schema snapshot and a rename-aware migration diff | the `migrate` tool, with `model` |
 | [`brocanth-events`](crates/brocanth-events/README.md) | `Change` and `ChangeSink`: the seam between writes and subscribers | with `model` |
 | [`brocanth-resource`](crates/brocanth-resource/README.md) | Typed CRUD routes over one table, with the policy in the `WHERE` | `resource` |
 | [`brocanth-cache`](crates/brocanth-cache/README.md) | A cache on unlogged Postgres tables, with tags | `cache` |

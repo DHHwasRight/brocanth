@@ -30,15 +30,7 @@ pub const MARKER: &str = "brocanth.toml";
 
 /// The subcommands `brocanth` defines itself, and their aliases. A project
 /// command with one of these names is not listed in `brocanth --help`.
-const BUILT_IN: &[&str] = &[
-    "create",
-    "new",
-    "add",
-    "migrate",
-    "dbshell",
-    "dbconsole",
-    "check",
-];
+const BUILT_IN: &[&str] = &["create", "new", "add", "dbshell", "dbconsole", "check"];
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {
@@ -320,9 +312,8 @@ fn parse_help(help: &str) -> Vec<(String, String)> {
         };
         let name = name.trim();
         // `help` is clap's, not the project's, and `brocanth` has its own.
-        // A built-in name is `brocanth`'s too: the project's `migrate` is
-        // what `brocanth migrate up` hands over to, and a second
-        // subcommand with one name is a clap panic.
+        // A built-in name is `brocanth`'s too: a second subcommand with
+        // one name is a clap panic.
         if name.is_empty() || name == "help" || BUILT_IN.contains(&name) {
             continue;
         }
@@ -363,9 +354,13 @@ Options:
                     "Serve the application over HTTP".to_string()
                 ),
                 ("ping".to_string(), "Answer pong".to_string()),
+                (
+                    "migrate".to_string(),
+                    "Apply, roll back or list the migrations in migrations/".to_string()
+                ),
             ],
-            "`help` and `migrate` are brocanth's own, and the options block is not a \
-             command list"
+            "`help` is clap's, `migrate` is the project's own since it left `brocanth`, \
+             and the options block is not a command list"
         );
     }
 

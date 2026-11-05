@@ -43,6 +43,14 @@ impl Module for Model {
                 .feature("plugin")
                 .note("`Orm` over the `db` pool, and on the request context"),
         )
+        // The `migrate` tool, `src/bin/migrate.rs`: it reads `src/models/`
+        // with a Rust parser and writes migrations. A dependency of the
+        // package, because cargo has no per-binary dependencies, but only
+        // the tool names it, so the server binary links none of it.
+        .krate(
+            Dep::brocanth("brocanth-migrate")
+                .note("the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs"),
+        )
         .absent(
             "brocanth-model",
             "no ORM, no sea-orm anywhere in the lock file",
@@ -51,13 +59,15 @@ impl Module for Model {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/model/mod.rs", plugin_rs(project));
-        // The list `brocanth migrate make` keeps, and the command that
-        // applies it. Without a command line nothing could run the list,
-        // so `src/main.rs` reaches it only when `commands` is here too.
-        s.file(
-            crate::owned::MIGRATOR,
-            crate::commands::migrate::migrator_file(&[]),
-        );
+        // The list the `migrate` tool keeps, and the tool. The tool is a
+        // second binary so the server never links a Rust parser: it reads
+        // `src/models/` as text, writes source, and is for development.
+        s.file(crate::owned::MIGRATOR, migrator_file());
+        s.file("src/bin/migrate.rs", MIGRATE_BIN);
+        s.binary("migrate", "src/bin/migrate.rs");
+        // The command that applies the list, and runs the tool for `ids`,
+        // `make` and `sync`. Without a command line the tool still runs:
+        // `cargo run --bin migrate -- make <name>`.
         if project.has("commands") {
             s.file("src/commands/migrate.rs", migrate_rs(project));
             s.at(Slot::CommandsMod).line("pub mod migrate;");
@@ -189,7 +199,55 @@ impl Plugin for Model {{
     )
 }
 
-/// `src/commands/migrate.rs`: `up`, `down [N]` and `status`.
+/// `migrations/mod.rs` as `create` writes it: stamped, and listing nothing.
+///
+/// The `migrate` tool (`brocanth_migrate::migrator`) writes every later
+/// list, and must write these same bytes for an empty one, or it would read
+/// this file as edited. `crates/brocanth-migrate/tests/golden/migrator-empty.rs`
+/// pins them, and a test on each side compares with it.
+pub(crate) fn migrator_file() -> String {
+    crate::owned::stamp(crate::owned::MIGRATOR, EMPTY_MIGRATOR)
+}
+
+const EMPTY_MIGRATOR: &str = "//! The migrations in this directory, oldest first.
+//!
+//! A file name starts with its UTC time, so the order of the names is the
+//! order the migrations were written. `src/commands/migrate.rs` applies this
+//! list, and `src/main.rs` reaches this file through `#[path]`.
+
+use brocanth_model::sea_orm_migration::prelude::*;
+
+/// Every migration this binary applies, oldest first.
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![]
+    }
+}
+";
+
+/// `src/bin/migrate.rs`: the `migrate` tool, a development binary.
+const MIGRATE_BIN: &str = r#"//! The `migrate` tool: write migrations from the models in `src/models/`.
+//!
+//! ```text
+//! cargo run --bin migrate -- ids              # an id on each model and field
+//! cargo run --bin migrate -- make add_posts   # a migration for what changed
+//! cargo run --bin migrate -- sync             # list every file in migrations/mod.rs
+//! ```
+//!
+//! A development tool, and a binary of its own: it parses Rust source, and
+//! the server has no reason to link a parser. It applies nothing. Apply
+//! with the application's own `migrate up`.
+
+fn main() -> std::process::ExitCode {
+    brocanth_migrate::tool::main()
+}
+"#;
+
+/// `src/commands/migrate.rs`: `up`, `down [N]` and `status`, plus `ids`,
+/// `make` and `sync`, which run the `migrate` tool.
 ///
 /// `brocanth migrate up` hands over to this command. It lives in the
 /// project because the migrations are compiled into the project's binary,
@@ -226,13 +284,16 @@ fn database() -> anyhow::Result<DbConfig> {
 
 const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations/` to `[db] url`.
 //!
-//! `brocanth migrate up`, `brocanth migrate down [N]` and
-//! `brocanth migrate status` run this command through this binary. Where
-//! there is no `brocanth` -- a container, a release job -- run the binary
-//! itself: `<binary> migrate up`.
+//! `up`, `down [N]` and `status` run in this binary, because the
+//! migrations are compiled into it. Where there is no `brocanth` -- a
+//! container, a release job -- run the binary itself: `<binary> migrate up`.
+//! `brocanth migrate up` hands over to this command too.
 //!
-//! `brocanth migrate make` writes a migration and lists it in
-//! `migrations/mod.rs`. This command applies what that list holds.
+//! `ids`, `make <NAME>` and `sync` write source, so they run the `migrate`
+//! tool, `src/bin/migrate.rs`, through cargo. The tool is a binary of its
+//! own so this one links no Rust parser.
+
+use std::collections::BTreeSet;
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
@@ -261,6 +322,19 @@ enum Action {
     },
     /// List each migration as applied or pending
     Status,
+    /// Write an id on each model and field in src/models that has none
+    Ids,
+    /// Write a migration for what changed in src/models since the last one
+    Make {
+        /// The name of the migration, in snake case: add_posts, rename_title
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Write the snapshot and no migration
+        #[arg(long)]
+        snapshot_only: bool,
+    },
+    /// List every migrations/m*.rs file in migrations/mod.rs
+    Sync,
 }
 
 impl Command for Migrate {
@@ -268,58 +342,151 @@ impl Command for Migrate {
         // The config files resolve from the project root, wherever the
         // command started.
         std::env::set_current_dir(ctx.root())?;
-        let config = database()?;
-        tokio::runtime::Runtime::new()?.block_on(async {
-            // The pool the server opens, and the ORM over it, as the
-            // `model` plugin builds it.
-            let pool = Db::connect(&config).await?;
-            let orm = Orm::from_db(&pool);
-            let db = orm.connection();
-            let before = Migrator::get_migration_with_status(db).await?;
-            let named = |status: MigrationStatus| -> Vec<String> {
-                before
-                    .iter()
-                    .filter(|m| m.status() == status)
-                    .map(|m| m.name().to_string())
-                    .collect()
-            };
-            match self.action {
-                Action::Up => {
-                    let pending = named(MigrationStatus::Pending);
-                    Migrator::up(db, None).await?;
-                    if pending.is_empty() {
-                        println!("Nothing to apply: each migration is applied.");
-                    }
-                    for name in pending {
-                        println!("applied      {name}");
-                    }
+        match self.action {
+            Action::Ids => tool(&["ids"]),
+            Action::Sync => tool(&["sync"]),
+            Action::Make {
+                name,
+                snapshot_only,
+            } => {
+                let mut args = vec!["make", name.as_str()];
+                if snapshot_only {
+                    args.push("--snapshot-only");
                 }
-                Action::Down { n } => {
-                    let applied = named(MigrationStatus::Applied);
-                    Migrator::down(db, Some(n)).await?;
-                    if applied.is_empty() {
-                        println!("Nothing to roll back: no migration is applied.");
-                    }
-                    for name in applied.iter().rev().take(n as usize) {
-                        println!("rolled back  {name}");
-                    }
-                }
-                Action::Status => {
-                    if before.is_empty() {
-                        println!("No migration in migrations/.");
-                    }
-                    for m in &before {
-                        let status = match m.status() {
-                            MigrationStatus::Applied => "applied",
-                            MigrationStatus::Pending => "pending",
-                        };
-                        println!("{status:<12} {}", m.name());
-                    }
-                }
+                tool(&args)
             }
-            Ok(())
-        })
+            Action::Up => apply(Apply::Up),
+            Action::Down { n } => apply(Apply::Down(n)),
+            Action::Status => apply(Apply::Status),
+        }
     }
 }
 
+/// What `up`, `down` and `status` do to the database.
+enum Apply {
+    Up,
+    Down(u32),
+    Status,
+}
+
+fn apply(what: Apply) -> anyhow::Result<()> {
+    unlisted()?;
+    let config = database()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        // The pool the server opens, and the ORM over it, as the `model`
+        // plugin builds it.
+        let pool = Db::connect(&config).await?;
+        let orm = Orm::from_db(&pool);
+        let db = orm.connection();
+        let before = Migrator::get_migration_with_status(db).await?;
+        let named = |status: MigrationStatus| -> Vec<String> {
+            before
+                .iter()
+                .filter(|m| m.status() == status)
+                .map(|m| m.name().to_string())
+                .collect()
+        };
+        match what {
+            Apply::Up => {
+                let pending = named(MigrationStatus::Pending);
+                Migrator::up(db, None).await?;
+                if pending.is_empty() {
+                    println!("Nothing to apply: each migration is applied.");
+                }
+                for name in pending {
+                    println!("applied      {name}");
+                }
+            }
+            Apply::Down(n) => {
+                let applied = named(MigrationStatus::Applied);
+                Migrator::down(db, Some(n)).await?;
+                if applied.is_empty() {
+                    println!("Nothing to roll back: no migration is applied.");
+                }
+                for name in applied.iter().rev().take(n as usize) {
+                    println!("rolled back  {name}");
+                }
+            }
+            Apply::Status => {
+                if before.is_empty() {
+                    println!("No migration in migrations/.");
+                }
+                for m in &before {
+                    let status = match m.status() {
+                        MigrationStatus::Applied => "applied",
+                        MigrationStatus::Pending => "pending",
+                    };
+                    println!("{status:<12} {}", m.name());
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Runs the `migrate` tool with these arguments, from the project root.
+fn tool(args: &[&str]) -> anyhow::Result<()> {
+    let status = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "--bin", "migrate", "--"])
+        .args(args)
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot run cargo: {e}\n\
+                 help: run `cargo run --bin migrate -- {}` where cargo is installed",
+                args.join(" ")
+            )
+        })?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Refuses when a file in `migrations/` is not in the list this binary was
+/// built with: it would be skipped without a word.
+fn unlisted() -> anyhow::Result<()> {
+    let built: BTreeSet<String> = Migrator::migrations()
+        .iter()
+        .map(|m| m.name().to_string())
+        .collect();
+    let mut missing: Vec<String> = std::fs::read_dir("migrations")
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let stem = name.strip_suffix(".rs")?.to_string();
+                    (stem.starts_with('m') && stem != "mod" && !built.contains(&stem))
+                        .then_some(stem)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    missing.sort();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this binary does not contain {}: migrations/mod.rs does not list it\n\
+         help: run `migrate sync` (or `cargo run --bin migrate -- sync`), then run this \
+         command again",
+        missing.join(", ")
+    )
+}
+
 @URL@"#;
+
+#[cfg(test)]
+mod tests {
+    /// The `migrate` tool reads a list as the tool's own only while its
+    /// digest matches what the tool would write. So the empty list `create`
+    /// writes must be, byte for byte, the empty list the tool writes. The
+    /// tool's side compares with the same file.
+    #[test]
+    fn the_empty_list_is_the_one_the_migrate_tool_writes() {
+        assert_eq!(
+            super::migrator_file(),
+            include_str!("../../../brocanth-migrate/tests/golden/migrator-empty.rs")
+        );
+    }
+}

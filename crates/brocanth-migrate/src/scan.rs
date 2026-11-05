@@ -526,7 +526,7 @@ pub fn schema_of(models: &[Model]) -> Result<Schema, Vec<Problem>> {
                 code: "no-id",
                 at: m.location(),
                 message: format!(
-                    "Model `{}` (table `{}`) has no id. Run `brocanth migrate ids`. \
+                    "Model `{}` (table `{}`) has no id. Run `migrate ids`. \
                      Then run this command again.",
                     m.ident, m.table
                 ),
@@ -546,7 +546,7 @@ pub fn schema_of(models: &[Model]) -> Result<Schema, Vec<Problem>> {
                     code: "no-id",
                     at: f.location(m),
                     message: format!(
-                        "Field `{}.{}` has no id. Run `brocanth migrate ids`. \
+                        "Field `{}.{}` has no id. Run `migrate ids`. \
                          Then run this command again.",
                         m.table, f.def.name
                     ),
@@ -576,7 +576,7 @@ fn claim(seen: &mut BTreeMap<String, String>, id: &str, at: String, problems: &m
             at,
             message: format!(
                 "The id `{id}` is also at {first}. Each id must occur one time. \
-                 Remove this attribute and run `brocanth migrate ids`."
+                 Remove this attribute and run `migrate ids`."
             ),
         });
         return;
@@ -665,7 +665,7 @@ pub struct NotATable {
         assert_eq!(problems[0].at, "post.rs:17:13");
         assert_eq!(
             problems[0].message,
-            "Field `post.body` has no id. Run `brocanth migrate ids`. Then run this command again."
+            "Field `post.body` has no id. Run `migrate ids`. Then run this command again."
         );
     }
 

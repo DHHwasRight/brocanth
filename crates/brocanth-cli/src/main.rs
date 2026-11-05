@@ -97,12 +97,6 @@ enum Command {
     /// and the config, and refuses rather than overwrite a file of yours.
     /// `--questions` prints the choices, with what this project has.
     Add(commands::add::AddArgs),
-    /// Write migrations from the models, and the ids that make renames visible
-    ///
-    /// `make` compares src/models with migrations/schema.json by id and
-    /// writes a SeaORM migration file. It applies nothing. `ids` writes the
-    /// ids that `make` needs.
-    Migrate(commands::migrate::MigrateArgs),
     /// Open psql or sqlite3 on this project's database
     ///
     /// Reads `[db] url` from the configuration of one environment and
@@ -218,11 +212,6 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
-        ),
-        Some(("migrate", m)) => commands::migrate::run(
-            &ui,
-            dir,
-            commands::migrate::MigrateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         Some(("dbshell", m)) => commands::dbshell::run(
             &ui,

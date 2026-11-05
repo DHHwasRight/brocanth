@@ -1,4 +1,4 @@
-// Written by `brocanth migrate make`. Read it before you commit it.
+// Written by `migrate make`. Read it before you commit it.
 //
 // It is a proposal: edit it when it is wrong. migrations/schema.json
 // records the models, not this file.

@@ -49,7 +49,7 @@ map.
 
 | Page | What it covers |
 |---|---|
-| [migrations.md](migrations.md) | `brocanth migrate make`, stable field ids, and why a rename stays a rename. |
+| [migrations.md](migrations.md) | The `migrate` command a project with `model` gets, stable field ids, and why a rename stays a rename. |
 | [cache.md](cache.md) | Tags, the route cache, fragments and invalidation. |
 | [auth-store.md](auth-store.md) | Where accounts live: `MemoryStore`, `PgStore`, the conformance suite. |
 

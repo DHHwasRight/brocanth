@@ -91,14 +91,16 @@ fn instead(path: &str) -> &'static str {
         }
         "brocanth.toml" => "Change the module list with `brocanth add`, not here.",
         "AGENTS.md" => "Notes of your own go in a file of your own, beside this one.",
-        MIGRATOR => "A migration is a file beside this one; `brocanth migrate` lists it here.",
+        MIGRATOR => {
+            "A migration is a file beside this one; `migrate make` and `migrate sync` list it here."
+        }
         _ => "Something else belongs here? Put it in `src/app.rs`, which is yours.",
     }
 }
 
-/// The migration list. Stamped like an owned file, and rewritten by
-/// `brocanth migrate make` and `migrate up`, `down` and `status` rather than
-/// by `brocanth add`: what it lists follows from the files in
+/// The migration list. Stamped like an owned file, and rewritten by the
+/// project's `migrate` tool (`brocanth_migrate::tool`, `src/bin/migrate.rs`)
+/// rather than by `brocanth add`: what it lists follows from the files in
 /// `migrations/`, not from the module list. To `add` it is the
 /// developer's, so a module added later never empties it.
 pub const MIGRATOR: &str = "migrations/mod.rs";
@@ -106,7 +108,7 @@ pub const MIGRATOR: &str = "migrations/mod.rs";
 /// Which command rewrites a stamped file, for its header.
 fn rewriter(path: &str) -> &'static str {
     match path {
-        MIGRATOR => "`brocanth migrate`",
+        MIGRATOR => "the `migrate` tool",
         _ => "`brocanth add`",
     }
 }

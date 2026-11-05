@@ -11,7 +11,6 @@ pub mod check;
 pub mod create;
 pub mod dbshell;
 pub mod delegate;
-pub mod migrate;
 pub mod project;
 
 /// What every command returns.

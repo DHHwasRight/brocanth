@@ -1,6 +1,7 @@
 # Migrations from the models
 
-How `brocanth migrate` writes a migration, and why a rename stays a rename.
+How the `migrate` command of a project with `model` writes a migration, and
+why a rename stays a rename.
 
 Written 30 October 2026, with `brocanth-migrate`. PLAN.md §11, gap G7.
 
@@ -33,7 +34,7 @@ pub struct Model {
 ```
 
 - Each model and each column field has one id: a ULID, 26 characters.
-- `brocanth migrate ids` writes them. It also writes `#[brocanth_model::ids]`
+- `migrate ids` writes them. It also writes `#[brocanth_model::ids]`
   when the model has neither it nor `#[brocanth_model::validates]`. Both
   attributes remove the ids before SeaORM sees them, and refuse an id with
   the wrong shape.
@@ -45,14 +46,44 @@ pub struct Model {
 
 ## 3. The commands
 
+The `model` module writes them into the project. `brocanth` itself has no
+`migrate` command: only a project with an ORM has migrations, and `ids` and
+`make` parse Rust source, so the parser stays out of the global CLI.
+
 | Command | Reads | Writes |
 |---|---|---|
-| `brocanth migrate ids` | `src/models/**/*.rs` | the same files, one new line per missing id |
-| `brocanth migrate make <name>` | `src/models/**/*.rs`, `migrations/schema.json` | `migrations/m<UTC>_<name>.rs`, `migrations/schema.json`, `migrations/mod.rs` |
-| `brocanth migrate make <name> --snapshot-only` | the same | `migrations/schema.json` only |
-| `brocanth migrate up` | `migrations/`, `[db] url` | the database: each pending migration, oldest first |
-| `brocanth migrate down [N]` | the same | the database: the newest N applied migrations are rolled back (default 1) |
-| `brocanth migrate status` | the same | nothing; prints `applied` or `pending` per migration |
+| `migrate ids` | `src/models/**/*.rs` | the same files, one new line per missing id |
+| `migrate make <name>` | `src/models/**/*.rs`, `migrations/schema.json` | `migrations/m<UTC>_<name>.rs`, `migrations/schema.json`, `migrations/mod.rs` |
+| `migrate make <name> --snapshot-only` | the same | `migrations/schema.json` only |
+| `migrate sync` | `migrations/` | `migrations/mod.rs` |
+| `migrate up` | `migrations/`, `[db] url` | the database: each pending migration, oldest first |
+| `migrate down [N]` | the same | the database: the newest N applied migrations are rolled back (default 1) |
+| `migrate status` | the same | nothing; prints `applied` or `pending` per migration |
+
+How to run them:
+
+- With `commands`: `cargo run -- migrate make add_posts`, or
+  `brocanth migrate make add_posts`, which hands over to the project's
+  binary like every project command.
+- Without `commands`, `ids`, `make` and `sync` still run:
+  `cargo run --bin migrate -- make add_posts`. `up`, `down` and `status`
+  need `commands` (section 5).
+
+### Two binaries, and why
+
+`ids`, `make` and `sync` run in the `migrate` tool, `src/bin/migrate.rs`,
+a second binary of the project whose `main` is `brocanth_migrate::tool::main`.
+The application's `migrate ids|make|sync` runs it with
+`cargo run --bin migrate`. They parse Rust source with `syn`, and the server
+binary has no reason to link a parser. The tool is for development: it
+writes source files and never touches a database.
+
+`up`, `down` and `status` run in the application's binary, because the
+migrations are compiled into it.
+
+`brocanth-migrate` is a dependency of the whole package, because cargo has
+no per-binary dependencies. Only the tool names it, so the server binary
+links none of it, and `syn` is already in the build for the derive macros.
 
 `make` applies nothing. The generator proposes and the developer commits.
 Use `--snapshot-only` one time in a project whose tables a hand-written
@@ -63,10 +94,16 @@ migration already made.
 `migrations/mod.rs` holds the `Migrator`: one `mod` line and one
 `Box::new(<name>::Migration)` per file in `migrations/`, sorted by name. A
 name starts with its UTC time, so that order is the order of writing.
-`make`, `up`, `down` and `status` rewrite the list from the directory, so a
-migration written by hand is listed too. The file carries a digest, like the
-files `brocanth add` owns. When you edit it, the commands do not rewrite it:
-they name the files it does not list.
+`make` and `sync` rewrite the list from the directory, so a migration
+written by hand is listed by the next `sync`. The file carries a digest,
+like the files `brocanth add` owns. When you edit it, the tool does not
+rewrite it: it names the files it does not list.
+
+`up`, `down` and `status` refuse when a file in `migrations/` is not in the
+list the binary was built with: the binary would skip it without a word.
+The `help:` line says to run `migrate sync`. Before the tool moved, the CLI
+rewrote the list before each `up`; a binary cannot, because it is already
+compiled when it runs.
 
 `up`, `down` and `status` run `migrate` in the project's own binary, the way
 every project command runs: the migrations are compiled into that binary.
@@ -116,8 +153,11 @@ The file marks each step that needs a check with `// Check:`. Examples: a
 
 - It does not diff foreign keys, indexes or default values. Write those by
   hand in the generated file.
-- `up` without `commands` cannot run: there is no project binary command to
-  hand over to. `brocanth add commands` gives one.
+- `up` without `commands` cannot run: the application has no command line.
+  `brocanth add commands` gives one.
+- A project with `db` and no `model` (sea-query, no ORM) has no models to
+  diff, so no `make`. Migrations for it are not decided yet (TBD): plain SQL
+  files applied by `brocanth-db`, or sea-query statements.
 - SQLite cannot alter a column. An alter step runs on Postgres only.
 - Two fields that swap names in one step make two renames that collide. Make
   that change in two migrations.
@@ -129,7 +169,9 @@ The file marks each step that needs a check with `// Check:`. Examples: a
   migrations and run them up and down on SQLite.
 - `crates/brocanth-model-derive`: `#[ids]`, and the id removal in
   `#[validates]`.
-- `crates/brocanth-cli/src/commands/migrate.rs`: the command, and the
-  `migrations/mod.rs` list.
+- `crates/brocanth-migrate/src/tool.rs`: the `migrate` tool (`ids`, `make`,
+  `sync`). `src/migrator.rs`: the `migrations/mod.rs` list and its digest.
 - `crates/brocanth-cli/src/modules/model.rs`: the project's
-  `src/commands/migrate.rs`.
+  `src/commands/migrate.rs`, `src/bin/migrate.rs` and the first, empty
+  list. `crates/brocanth-migrate/tests/golden/migrator-empty.rs` holds the
+  CLI and the tool to the same bytes.

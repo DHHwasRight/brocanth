@@ -19,7 +19,7 @@ const SMALL_WIDTH: usize = 60;
 /// the file stem by SeaORM's convention: `m20261030_120000_rename_title`.
 pub fn render(name: &str, changes: &[Change]) -> String {
     let mut out = String::from(
-        "// Written by `brocanth migrate make`. Read it before you commit it.\n\
+        "// Written by `migrate make`. Read it before you commit it.\n\
          //\n\
          // It is a proposal: edit it when it is wrong. migrations/schema.json\n\
          // records the models, not this file.\n\

@@ -18,8 +18,8 @@
 //! }
 //! ```
 //!
-//! `brocanth migrate ids` writes the ids. Nobody edits them by hand. Then
-//! `brocanth migrate make <name>` compares the models with the last snapshot
+//! `migrate ids` writes the ids. Nobody edits them by hand. Then
+//! `migrate make <name>` compares the models with the last snapshot
 //! by id, and writes a migration file plus a new snapshot. It applies nothing:
 //! the generator proposes and the developer commits.
 //!
@@ -31,16 +31,21 @@
 //! - [`diff`] compares two snapshots by id.
 //! - [`render`] writes the SeaORM migration file.
 //! - [`stamp`] writes missing ids into source text.
+//! - [`migrator`] writes `migrations/mod.rs`, the list a binary applies.
+//! - [`tool`] is the `migrate` binary a project with `model` gets:
+//!   `ids`, `make` and `sync`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod diff;
 pub mod id;
+pub mod migrator;
 pub mod render;
 pub mod scan;
 pub mod schema;
 pub mod stamp;
+pub mod tool;
 
 pub use diff::{diff, Change};
 pub use scan::{scan_source, Model, Problem, ScannedField};

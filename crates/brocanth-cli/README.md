@@ -121,17 +121,30 @@ writes its adaptation too. `ci-github` adapts to `jobs`: in a project made
 with the default modules, `brocanth add jobs` also rewrites
 `.github/workflows/ci.yml`, if you have not edited it.
 
-### `brocanth migrate`
+### Migrations: a command of the project, not of `brocanth`
 
-Writes migrations from the models in `src/models/`.
+`brocanth` has no `migrate` command. The `model` module (SeaORM) writes
+the migration commands into the project, because only a project with an
+ORM has migrations, and because `ids` and `make` parse Rust source: the
+parser (`syn`) stays out of this CLI.
 
-| Subcommand | Does |
-|---|---|
-| `ids` | Writes an id on each model and field that has none. An id never changes, so a rename keeps it. |
-| `make <NAME>` | Compares the models with `migrations/schema.json` by id. Writes `migrations/m<UTC time>_<NAME>.rs` and a new snapshot. Applies nothing. `--snapshot-only` writes the snapshot alone. |
-| `up` | Applies each pending migration, through the project's binary. Needs `model` and `commands`. |
-| `down [N]` | Rolls back the newest `N` migrations (default 1). |
-| `status` | Lists each migration as applied or pending. |
+| Command | Where it runs | Does |
+|---|---|---|
+| `migrate ids` | the `migrate` tool, `src/bin/migrate.rs` | Writes an id on each model and field that has none. An id never changes, so a rename keeps it. |
+| `migrate make <NAME>` | the `migrate` tool | Compares the models with `migrations/schema.json` by id. Writes `migrations/m<UTC time>_<NAME>.rs` and a new snapshot, and lists it in `migrations/mod.rs`. Applies nothing. `--snapshot-only` writes the snapshot alone. |
+| `migrate sync` | the `migrate` tool | Lists every `migrations/m*.rs` in `migrations/mod.rs`, for a file written by hand. |
+| `migrate up` | the application's binary | Applies each pending migration. Needs `commands`. |
+| `migrate down [N]` | the application's binary | Rolls back the newest `N` migrations (default 1). |
+| `migrate status` | the application's binary | Lists each migration as applied or pending. |
+
+With `commands`, all six are one command of the project:
+`cargo run -- migrate make add_posts`. `brocanth migrate make add_posts`
+still works: `brocanth` hands every command it does not know to the
+project's binary. Without `commands`, run the tool directly:
+`cargo run --bin migrate -- make add_posts`.
+
+`up` refuses when a file in `migrations/` is not in `migrations/mod.rs`:
+the binary was built without it. Run `migrate sync`, then `up` again.
 
 See [docs/migrations.md](../../docs/migrations.md).
 
@@ -293,7 +306,7 @@ The binary crate has no doctests. Its examples are shell commands, and
   module.
 - [docs/module-flags.md](../../docs/module-flags.md): settings, flags and
   the settings report.
-- [docs/migrations.md](../../docs/migrations.md): `brocanth migrate`.
+- [docs/migrations.md](../../docs/migrations.md): the `migrate` command a project with `model` gets.
 - [docs/tooling.md](../../docs/tooling.md): `dbshell` and `check`.
 - [docs/admin-customization.md](../../docs/admin-customization.md):
   `brocanth admin eject` (level 8).

@@ -16,7 +16,7 @@ The wizard calls it: *An ORM with validations and migrations*.
 | Adapts to | [`config`](config.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-model` (features `db`, `plugin`) |
+| Crates | `brocanth-model` (features `db`, `plugin`), `brocanth-migrate` (the `migrate` tool) |
 | Without it | no ORM, no sea-orm anywhere in the lock file |
 
 ## What it writes
@@ -25,8 +25,12 @@ Files:
 
 - `migrations/mod.rs`
 - `src/plugins/model/mod.rs`
+- `src/bin/migrate.rs`: the `migrate` tool, a second binary: `ids`, `make`
+  and `sync`. It parses `src/models/`, so the server binary does not link
+  it. `cargo run --bin migrate -- make add_posts`
 - `src/commands/migrate.rs`, with `commands`: `up`, `down [N]` and
-  `status`, over the pool `[db]` configures
+  `status`, over the pool `[db]` configures, and `ids`, `make` and `sync`,
+  which run the tool
 
 Slots:
 
