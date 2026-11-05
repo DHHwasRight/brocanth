@@ -24,6 +24,11 @@ use std::fmt;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+#[cfg(feature = "scaffold")]
+mod scaffold_sitemap;
+pub mod sitemap;
+
+pub use sitemap::{Sitemap, SitemapError};
 
 /// One rule inside a group.
 #[derive(Debug, Clone, PartialEq, Eq)]

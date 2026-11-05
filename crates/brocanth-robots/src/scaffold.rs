@@ -19,6 +19,8 @@
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
+pub use crate::scaffold_sitemap::Sitemap;
+
 /// The robots.txt, as a choice on the `brocanth create` menu.
 pub struct Robots;
 
@@ -35,6 +37,10 @@ impl Module for Robots {
             "its settings are read from the config file, not written as a literal",
         )
         .adapts_to("admin", "/admin is disallowed")
+        .adapts_to(
+            "sitemap",
+            "the Sitemap: line names /sitemap.xml at the sitemap's base URL, unless `sitemap` is set",
+        )
         .adapts_to(
             "static",
             "the file says index = true, because the export is what gets published",
@@ -164,13 +170,30 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 fn expected(project: &Project) -> String {
     let open = !project.has("config") || index_in_file(project);
     let text = if open {
-        disallowed(project)
+        let text = disallowed(project)
             .into_iter()
-            .fold(crate::Robots::new(), crate::Robots::disallow)
+            .fold(crate::Robots::new(), crate::Robots::disallow);
+        if project.has("sitemap") {
+            let base = crate::scaffold_sitemap::DEFAULT_BASE;
+            text.sitemap(format!("{base}/sitemap.xml"))
+        } else {
+            text
+        }
     } else {
         crate::Robots::closed()
     };
     text.render().expect("the generator's own paths are valid")
+}
+
+/// The text as a literal after `const GENERATED: &str =`, on the same line
+/// when it fits and on the next when it does not, as rustfmt writes it.
+fn generated_literal(text: &str) -> String {
+    let literal = format!("{text:?}");
+    if "    const GENERATED: &str = ".len() + literal.len() < 100 {
+        format!(" {literal}")
+    } else {
+        format!("\n        {literal}")
+    }
 }
 
 /// `src/pages/robots.txt.rs`: the route, and a test that sends a request
@@ -185,7 +208,7 @@ mod tests {{
 
     /// What this project answered the day it was generated. Change the
     /// `[robots]` settings and this line with them.
-    const GENERATED: &str = {expected:?};
+    const GENERATED: &str ={expected};
 
     #[tokio::test]
     async fn the_application_answers_robots_txt_as_text() {{
@@ -201,9 +224,38 @@ mod tests {{
     }}
 }}
 "#,
-        expected = expected(project)
+        expected = generated_literal(&expected(project))
     )
 }
+
+const SITEMAP_FROM_SETTING: &str = "        if let Some(url) = &self.settings.sitemap {
+            text = text.sitemap(url.as_str());
+        }";
+
+/// With the `sitemap` module: the setting wins, and the sitemap plugin's
+/// own URL is the default.
+const SITEMAP_FROM_PLUGIN: &str =
+    "        // Unset, the line names the sitemap this application serves.
+        let own = self.settings.sitemap.as_deref();
+        let sitemap = own.or(crate::plugins::sitemap::location());
+        if let Some(url) = sitemap {
+            text = text.sitemap(url);
+        }";
+
+const RENDER_AT_CONFIGURE: &str =
+    "    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let _ = RENDERED.set(self.rendered()?);
+        Ok(())
+    }";
+
+/// After `configure`, because the sitemap plugin sets its URL there.
+const RENDER_AFTER_CONFIG: &str =
+    "    // After `configure`: the sitemap plugin sets its URL there, and every
+    // plugin finishes one stage before any plugin starts the next.
+    fn after_config(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let _ = RENDERED.set(self.rendered()?);
+        Ok(())
+    }";
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "robots");
@@ -211,6 +263,16 @@ fn plugin_rs(project: &Project) -> String {
         "#[derive(Debug, Clone, Default, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
     } else {
         "#[derive(Debug, Clone, Default)]"
+    };
+    let sitemap_line = if project.has("sitemap") {
+        SITEMAP_FROM_PLUGIN
+    } else {
+        SITEMAP_FROM_SETTING
+    };
+    let stage = if project.has("sitemap") {
+        RENDER_AFTER_CONFIG
+    } else {
+        RENDER_AT_CONFIGURE
     };
     let disallow = disallowed(project)
         .iter()
@@ -237,7 +299,7 @@ use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::NoContext;
 use brocanth_robots::{{Group, Robots as Text}};
 
-/// The rendered text, set once at `configure`.
+/// The rendered text, set once at startup.
 static RENDERED: OnceLock<String> = OnceLock::new();
 
 /// The text, or `None` when this plugin was never registered.
@@ -323,9 +385,7 @@ impl Robots {{
             }}
             text = text.group(group);
         }}
-        if let Some(url) = &self.settings.sitemap {{
-            text = text.sitemap(url.as_str());
-        }}
+{sitemap_line}
         Ok(text)
     }}
 
@@ -346,10 +406,7 @@ impl Plugin for Robots {{
         Self {{ settings: config }}
     }}
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        let _ = RENDERED.set(self.rendered()?);
-        Ok(())
-    }}
+{stage}
 }}
 
 #[cfg(test)]

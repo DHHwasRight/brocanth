@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 43 modules. Each name links to its own page
+what to build next. There are 44 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -51,7 +51,7 @@ nothing holds this page.
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |
 | [`rsx-htmx`](modules/rsx-htmx.md) | A click swaps what changed; the server renders from the shared layout down |  |  | part of `rsx`, ticked with its parent | static-site safe |
 
-### Routes (9)
+### Routes (10)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -64,6 +64,7 @@ nothing holds this page.
 | [`realtime-websocket`](modules/realtime-websocket.md) | A duplex socket per subscriber, frames both ways |  |  | part of `realtime`, off until you tick it | **blocked**: an upgrade out of the request/response shape, plus a frame codec |
 | [`resource`](modules/resource.md) | Typed CRUD routes over one table, with the policy in the WHERE clause |  |  |  |  |
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
+| [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
 ### Enhancer (10)
 
@@ -125,12 +126,10 @@ shutdown_grace_secs` has a flag and a variable in every project
 1. **`i18n`.** `brocanth-i18n` exists, but no module adds it to a project
    (`docs/i18n.md` §7). It also unblocks translated banners in `gtag`,
    which needs a catalogue a hook can read.
-2. **`sitemap`.** The next module after `robots`. It needs a site-origin
-   setting that no module holds today (`docs/robots.md`).
-3. **Migrations for `db` without `model`.** sea-query has no models to
+2. **Migrations for `db` without `model`.** sea-query has no models to
    diff, so there is no `make`. Plain SQL files are one option; not decided
    (`docs/migrations.md` §5).
-4. **`realtime-websocket`.** Blocked: an upgrade out of the
+3. **`realtime-websocket`.** Blocked: an upgrade out of the
    request/response shape and a frame codec (`docs/modules/realtime-websocket.md`).
 
 ### 3. Module system
@@ -181,7 +180,8 @@ What remains, from `docs/admin-customization.md`, "Open":
 
 For context, not to do: per-module settings with flags and config, the
 manifest rules, `admin eject` (CLI and project command), `robots`,
-`analytics` with `beacon`, `gtag`, `migrate` and `dbshell` as project
+`analytics` with `beacon`, `gtag`, `sitemap` (the base URL is
+`[sitemap] base_url`; see `docs/robots.md`), `migrate` and `dbshell` as project
 commands, and a CLI with no module runtime.
 
 Also done: a test harness for out-of-tree modules

@@ -8,13 +8,13 @@
 //! The module is passed as a `&dyn Module`, so the test runs the module this
 //! crate compiles, and a module the CLI does not list works the same way.
 
-use brocanth_robots::scaffold::Robots;
+use brocanth_robots::scaffold::{Robots, Sitemap};
 use brocanth_scaffold::testing;
 
 /// Generates `picks`, checks it, and compares it with
 /// `tests/golden/<name>.txt`.
 fn shape(name: &str, picks: &[&'static str]) {
-    let files = brocanth_cli::testing::generate("my-blog", picks, &[&Robots])
+    let files = brocanth_cli::testing::generate("my-blog", picks, &[&Robots, &Sitemap])
         .unwrap_or_else(|e| panic!("{e}"));
     testing::assert_formatted(&files);
     testing::golden(
@@ -22,8 +22,9 @@ fn shape(name: &str, picks: &[&'static str]) {
         &testing::snapshot(&files),
     );
     if testing::building() {
-        let files = brocanth_cli::testing::generate_for_build("my-blog", picks, &[&Robots])
-            .unwrap_or_else(|e| panic!("{e}"));
+        let files =
+            brocanth_cli::testing::generate_for_build("my-blog", picks, &[&Robots, &Sitemap])
+                .unwrap_or_else(|e| panic!("{e}"));
         testing::build(&files).unwrap_or_else(|e| panic!("{e}"));
     }
 }
@@ -40,6 +41,23 @@ fn a_server_project_serves_robots_txt_from_its_settings() {
 #[test]
 fn a_static_site_exports_robots_txt_as_a_file() {
     shape("robots-static", &["static", "config", "commands", "robots"]);
+}
+
+/// A sitemap with no config file: the base URL is a flag, and the admin
+/// page is kept out of the list.
+#[test]
+fn a_server_project_serves_sitemap_xml_from_its_pages() {
+    shape("sitemap", &["admin", "sitemap"]);
+}
+
+/// Both crawler files on a static site: robots.txt names the sitemap, and
+/// the export writes both.
+#[test]
+fn a_static_site_exports_sitemap_xml_and_robots_txt_names_it() {
+    shape(
+        "sitemap-static",
+        &["static", "config", "commands", "robots", "sitemap"],
+    );
 }
 
 /// A key no module has comes back as an error with its help line.

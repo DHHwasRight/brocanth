@@ -13,7 +13,7 @@ The wizard calls it: *A robots.txt that says what crawlers may read*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`admin`](admin.md), [`static`](static.md) |
+| Adapts to | [`config`](config.md), [`admin`](admin.md), [`sitemap`](sitemap.md), [`static`](static.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-robots` |
@@ -43,7 +43,7 @@ Section `[robots]`. Environment variable: `$<APP>_ROBOTS__<KEY>`. Flag: `--robot
 | `index` | bool | `false` (`true` with `static`) | `--robots.index` | Let crawlers read this site. False answers `Disallow: /` and nothing else. |
 | `disallow` | list | `[]` (`["/admin"]` with `admin`) | none | Paths no crawler may read, each from the root. |
 | `allow` | list | `[]` | none | Paths a crawler may read under a disallowed one. |
-| `sitemap` | text, optional | commented out | `--robots.sitemap` | Where the sitemap is, as a full URL. |
+| `sitemap` | text, optional | commented out | `--robots.sitemap` | Where the sitemap is, as a full URL. With `sitemap`, unset means the sitemap module's URL. |
 | `groups` | records, `[[robots.groups]]` | an AI-crawler example, commented out | none | Groups for named crawlers: `agents`, `allow`, `disallow`. File only. |
 
 The plugin's own default for `index` is `true`: a production server with no

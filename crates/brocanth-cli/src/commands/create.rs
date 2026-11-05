@@ -6912,6 +6912,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The static export writes `/sitemap.xml` as a file, and robots.txt
+    /// names it.
+    #[test]
+    #[ignore = "runs cargo run over a generated application"]
+    fn the_static_export_writes_sitemap_xml() {
+        let brocanth = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("brocanth")
+            .canonicalize()
+            .expect("the framework is beside the cli");
+        let root = std::env::temp_dir().join(format!("brocanth-sitemap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = Answers {
+            local: Some(brocanth.display().to_string()),
+            ..answers(&["static", "config", "commands", "robots", "sitemap"])
+        };
+        for (path, contents) in scaffold(&a).expect("the modules agree") {
+            let full = root.join(&path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["run", "-q", "--", "export"])
+            .current_dir(&root)
+            .output()
+            .expect("run cargo");
+        assert!(
+            output.status.success(),
+            "the export failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let robots = std::fs::read_to_string(root.join("dist/robots.txt"))
+            .expect("the export wrote dist/robots.txt");
+        assert!(
+            robots.ends_with("Sitemap: http://localhost:3000/sitemap.xml\n"),
+            "{robots}"
+        );
+        let xml = std::fs::read_to_string(root.join("dist/sitemap.xml"))
+            .expect("the export wrote dist/sitemap.xml");
+        assert!(xml.contains("<loc>http://localhost:3000/</loc>"), "{xml}");
+        assert!(
+            xml.contains("<loc>http://localhost:3000/about</loc>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("users"), "{xml}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The beacon reaches the exported files once a collector is set: the
     /// export runs each page through the hooks, the beacon's included.
     #[test]

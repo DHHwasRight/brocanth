@@ -1,13 +1,14 @@
 # brocanth-robots
 
-`brocanth-robots` writes a `robots.txt` from a builder and checks it before
-anything serves it. It refuses the two lines crawlers silently ignore: a
-rule path that does not start with `/`, and a sitemap that is not a full
-URL. It has no dependencies.
+`brocanth-robots` writes a `robots.txt` and a `sitemap.xml` from builders
+and checks them before anything serves them. It refuses the lines crawlers
+silently ignore: a rule path that does not start with `/`, and a sitemap or
+a `<loc>` that is not a full URL. It has no dependencies.
 
-It also ships the `robots` module. The module serves the file at
-`/robots.txt` from settings, and answers `Disallow: /` on development and
-staging servers so they are never indexed.
+It also ships two modules. `robots` serves `/robots.txt` from settings, and
+answers `Disallow: /` on development and staging servers so they are never
+indexed. `sitemap` serves `/sitemap.xml`: every GET page with no parameter,
+from the page table. With both, the robots.txt names the sitemap.
 
 Use it when a site is public. Do not use it to hide private pages: a
 robots.txt is a request to polite crawlers, and it lists the paths it
@@ -119,6 +120,32 @@ assert_eq!(error, RobotsError::Path("admin".to_string()));
 assert!(error.to_string().contains("help:"));
 ```
 
+### A sitemap
+
+```rust
+use brocanth_robots::sitemap::{listed, Sitemap};
+
+let pages = ["/", "/about", "/users/{id}", "/robots.txt"];
+let xml = pages
+    .into_iter()
+    .filter(|page| listed(page))
+    .fold(Sitemap::new("https://example.com"), Sitemap::path)
+    .path_modified("/users/7", "2026-11-05")
+    .render()
+    .unwrap();
+assert!(xml.contains("<loc>https://example.com/about</loc>"));
+assert!(xml.contains("<loc>https://example.com/users/7</loc>\n    <lastmod>2026-11-05</lastmod>"));
+assert!(!xml.contains("robots.txt"));
+```
+
+`listed` keeps a route pattern with no parameter whose last segment has no
+dot. The base URL may carry a base path: `https://user.github.io/repo`.
+`render` refuses a relative base, a path that does not start with `/`, a
+date that is not a W3C date, and more than 50,000 URLs.
+
+The `sitemap` module reads `[sitemap] base_url`, `extra` and `exclude`. See
+`docs/modules/sitemap.md`.
+
 ## Testing
 
 ```text
@@ -127,11 +154,11 @@ cargo test -p brocanth-robots --features scaffold
 ```
 
 No database or network is needed. In an application, test the route with
-`brocanth-test` (see its README): send `GET /robots.txt` and assert on the
-body and the `content-type`.
+`brocanth-test` (see its README): send `GET /robots.txt` or
+`GET /sitemap.xml` and assert on the body and the `content-type`.
 
 ## More
 
-- `docs/robots.md`: the design and what is left for later (sitemap.xml).
-- `docs/modules/robots.md`: the module's manifest.
+- `docs/robots.md`: the design of both files, and where the base URL lives.
+- `docs/modules/robots.md` and `docs/modules/sitemap.md`: the manifests.
 - `docs/static-export.md`: how the export writes `robots.txt`.

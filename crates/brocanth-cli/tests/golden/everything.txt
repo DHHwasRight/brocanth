@@ -1725,6 +1725,7 @@ mod tests {
                 "/openapi.yaml",
                 "/realtime/events",
                 "/robots.txt",
+                "/sitemap.xml",
                 "/status",
                 "/users/{id}"
             ]
@@ -1850,6 +1851,7 @@ pub mod realtime_sse;
 pub mod resource;
 pub mod robots;
 pub mod sessions;
+pub mod sitemap;
 pub mod storage;
 pub mod validation;
 
@@ -2002,6 +2004,9 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::robots::Robots>("robots")
             .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::sitemap::Sitemap>("sitemap")
+            .map_err(|e| e.to_string())?;
 
         // -- brocanth-analytics: page views ---------------------------------
         //
@@ -2087,7 +2092,8 @@ type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
 type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
-type WithAnalytics = After<brocanth_analytics::Analytics, WithRobots>;
+type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
+type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
@@ -2695,6 +2701,13 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "sitemap.base_url",
+        help: "The site's address: scheme, host, and base path if any.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "analytics.enabled",
         help: "Count page views. Off installs no hook.",
         flag: true,
@@ -3073,6 +3086,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
     let robots = crate::plugins::robots::Settings::default();
+    let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
@@ -3191,6 +3205,7 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("realtime.overflow", format!("{:?}", realtime.overflow)),
         ("robots.index", format!("{:?}", robots.index)),
         ("robots.sitemap", format!("{:?}", robots.sitemap)),
+        ("sitemap.base_url", format!("{:?}", sitemap.base_url)),
         ("analytics.enabled", format!("{:?}", analytics.enabled)),
         ("analytics.site", format!("{:?}", analytics.site)),
         (
@@ -3387,7 +3402,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 4119a3f3ad59191c
+// brocanth-digest: 9c79cfce8f84f67a
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3679,6 +3694,17 @@ allow = []
 # [[robots.groups]]
 # agents = ["GPTBot", "CCBot", "Google-Extended", "ClaudeBot"]
 # disallow = ["/"]
+
+[sitemap]
+# The site's address: scheme, host, and base path if any.
+# This file is the development one. Set the production address in
+# production's file or with the environment, or every <loc> names
+# localhost.
+base_url = "http://localhost:3000"
+# More paths to list, such as the pages of a route with a parameter: "/users/7".
+extra = []
+# Path prefixes kept out of the sitemap: "/drafts".
+exclude = ["/admin", "/status", "/realtime"]
 
 [analytics]
 # Count page views. Off installs no hook.
@@ -5206,6 +5232,59 @@ mod tests {
         );
         let body = response.body.bytes().expect("a whole body");
         assert_eq!(std::str::from_utf8(body).expect("utf-8"), GENERATED);
+    }
+}
+===== src/pages/sitemap.xml.rs =====
+//! `/sitemap.xml` -- because the file is called `sitemap.xml.rs`.
+//!
+//! The XML was rendered once, at startup, by `src/plugins/sitemap/mod.rs`.
+//! This page hands it out and does nothing else.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/sitemap.xml`.
+///
+/// An hour of cache: the list changes only when the application is built
+/// again.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::sitemap::text().ok_or_else(|| {
+        Error::internal("the sitemap plugin is not registered, so there is no sitemap.xml to serve")
+    })?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            (
+                "content-type".to_string(),
+                "application/xml; charset=utf-8".to_string(),
+            ),
+            ("cache-control".to_string(), "max-age=3600".to_string()),
+        ],
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn the_application_answers_sitemap_xml_with_its_pages() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/sitemap.xml")).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/xml; charset=utf-8")
+        );
+        let body = response.body.bytes().expect("a whole body");
+        let xml = std::str::from_utf8(body).expect("utf-8");
+        assert!(xml.starts_with("<?xml"), "{xml}");
+        // The index page, at the base URL of the development file.
+        assert!(xml.contains("/</loc>"), "{xml}");
+        // No route with a parameter, and not this file itself.
+        assert!(!xml.contains('{'), "{xml}");
+        assert!(!xml.contains("sitemap.xml"), "{xml}");
     }
 }
 ===== src/pages/status.jt =====
@@ -7782,7 +7861,7 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_robots::{Group, Robots as Text};
 
-/// The rendered text, set once at `configure`.
+/// The rendered text, set once at startup.
 static RENDERED: OnceLock<String> = OnceLock::new();
 
 /// The text, or `None` when this plugin was never registered.
@@ -7872,8 +7951,11 @@ impl Robots {
             }
             text = text.group(group);
         }
-        if let Some(url) = &self.settings.sitemap {
-            text = text.sitemap(url.as_str());
+        // Unset, the line names the sitemap this application serves.
+        let own = self.settings.sitemap.as_deref();
+        let sitemap = own.or(crate::plugins::sitemap::location());
+        if let Some(url) = sitemap {
+            text = text.sitemap(url);
         }
         Ok(text)
     }
@@ -7895,7 +7977,9 @@ impl Plugin for Robots {
         Self { settings: config }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    // After `configure`: the sitemap plugin sets its URL there, and every
+    // plugin finishes one stage before any plugin starts the next.
+    fn after_config(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let _ = RENDERED.set(self.rendered()?);
         Ok(())
     }
@@ -8056,6 +8140,169 @@ impl Plugin for Sessions {
 /// awaited here and holds no thread.
 pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFuture<'a, Response> {
     next.run(ctx)
+}
+===== src/plugins/sitemap/mod.rs =====
+//! The sitemap.xml, as this application answers it.
+//!
+//! Rendered once at startup from the page table and `Settings`, then
+//! served by `src/pages/sitemap.xml.rs`. Every GET page with no parameter
+//! is listed, except a file (a last segment with a dot, such as
+//! `/robots.txt`) and the paths under `exclude`. A route with a parameter
+//! is many pages: list the ones that exist in `extra`.
+//!
+//! A base URL that is not a full `http(s)` address stops the build here: a
+//! crawler ignores every relative `<loc>`.
+//!
+//! To give a page a `<lastmod>`, call `path_modified` in `sitemap` below.
+
+use std::sync::OnceLock;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::routing::Verb;
+use brocanth_robots::sitemap::{listed, under, Sitemap as Xml};
+
+/// The rendered XML, set once at `configure`.
+static RENDERED: OnceLock<String> = OnceLock::new();
+
+/// The full URL of `/sitemap.xml`, set once at `configure`.
+static LOCATION: OnceLock<String> = OnceLock::new();
+
+/// The XML, or `None` when this plugin was never registered.
+pub fn text() -> Option<&'static str> {
+    RENDERED.get().map(String::as_str)
+}
+
+/// The full URL of `/sitemap.xml`, for the `Sitemap:` line of a
+/// robots.txt. `None` before `configure`.
+#[allow(dead_code)]
+pub fn location() -> Option<&'static str> {
+    LOCATION.get().map(String::as_str)
+}
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[sitemap]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The site's address: scheme, host, and base path if any.
+    pub base_url: String,
+    /// More paths to list.
+    pub extra: Vec<String>,
+    /// Path prefixes kept out of the sitemap.
+    pub exclude: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:3000".to_string(),
+            extra: Vec::new(),
+            exclude: vec![
+                "/admin".to_string(),
+                "/status".to_string(),
+                "/realtime".to_string(),
+            ],
+        }
+    }
+}
+
+pub struct Sitemap {
+    settings: Settings,
+}
+
+impl Sitemap {
+    /// The builder these settings and these routes describe.
+    fn sitemap<'a>(&self, routes: impl IntoIterator<Item = (Verb, &'a str)>) -> Xml {
+        let kept = |path: &str| !self.settings.exclude.iter().any(|p| under(path, p));
+        let mut xml = Xml::new(self.settings.base_url.as_str());
+        for (verb, pattern) in routes {
+            if verb == Verb::Get && listed(pattern) && kept(pattern) {
+                xml = xml.path(pattern);
+            }
+        }
+        for path in &self.settings.extra {
+            if kept(path) {
+                xml = xml.path(path.as_str());
+            }
+        }
+        xml
+    }
+}
+
+impl Plugin for Sitemap {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "sitemap";
+
+    fn new(config: Settings) -> Self {
+        Self { settings: config }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let routes = crate::pages::handlers()
+            .iter()
+            .map(|(verb, pattern, _)| (*verb, *pattern));
+        let xml = self.sitemap(routes);
+        let text = xml
+            .render()
+            .map_err(|e| PluginError::new(format!("[sitemap] {e}")))?;
+        let _ = RENDERED.set(text);
+        let _ = LOCATION.set(xml.location());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROUTES: &[(Verb, &str)] = &[
+        (Verb::Get, "/"),
+        (Verb::Get, "/about"),
+        (Verb::Post, "/signup"),
+        (Verb::Get, "/users/{id}"),
+        (Verb::Get, "/robots.txt"),
+        (Verb::Get, "/drafts/one"),
+    ];
+
+    fn rendered(settings: Settings) -> Result<String, String> {
+        let plugin = Sitemap::new(settings);
+        plugin
+            .sitemap(ROUTES.iter().copied())
+            .render()
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn pages_with_no_parameter_are_listed_and_the_rest_are_not() {
+        let xml = rendered(Settings {
+            base_url: "https://example.com".to_string(),
+            extra: vec!["/users/7".to_string()],
+            exclude: vec!["/drafts".to_string()],
+        })
+        .unwrap();
+        for present in ["/</loc>", "/about</loc>", "/users/7</loc>"] {
+            let loc = format!("<loc>https://example.com{present}");
+            assert!(xml.contains(&loc), "{loc} in {xml}");
+        }
+        for absent in ["/signup", "{id}", "robots.txt", "/drafts"] {
+            assert!(!xml.contains(absent), "{absent} in {xml}");
+        }
+    }
+
+    #[test]
+    fn a_relative_base_url_stops_the_build_with_the_fix() {
+        let error = rendered(Settings {
+            base_url: "example.com".to_string(),
+            ..Settings::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("help:"), "{error}");
+    }
 }
 ===== src/plugins/storage/mod.rs =====
 //! File storage, as this application registers it.
@@ -8483,6 +8730,7 @@ request.
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
+- `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -8865,7 +9113,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 18eeee30c291c47e -->
+<!-- brocanth-digest: 87aada2a5737627b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -8877,7 +9125,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -9122,7 +9370,14 @@ kind = ["routes"]
 files = ["src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
 crates = ["brocanth-robots"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config", "admin", "sitemap"]
+
+[modules.sitemap]
+kind = ["routes"]
+files = ["src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
+config = ["sitemap"]
+crates = ["brocanth-robots"]
+adapted_to = ["config", "admin", "jt", "realtime-sse"]
 
 [modules.docker]
 kind = ["external"]
@@ -9152,4 +9407,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: d21d641765683cbb
+# brocanth-digest: 8f74205a93b24567

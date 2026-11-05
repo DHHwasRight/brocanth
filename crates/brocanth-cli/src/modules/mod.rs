@@ -160,6 +160,9 @@ pub const ALL: &[&dyn Module] = &[
     // A robots.txt from settings. `outside_runtime`, so the static preset
     // takes it: the export writes `/robots.txt` as a file.
     &brocanth_robots::scaffold::Robots,
+    // A sitemap.xml of the page table, from the same crate. `robots`
+    // names it on its `Sitemap:` line when both are chosen.
+    &brocanth_robots::scaffold::Sitemap,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

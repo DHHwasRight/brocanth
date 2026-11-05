@@ -101,20 +101,57 @@ Not adapted: `openapi` and `resource`. An API path in robots.txt is
 harmless and rarely wanted; a developer adds `/api` to `disallow` if they
 want it.
 
-## Later: sitemap.xml
+## sitemap.xml
 
-A sitemap is the natural next module, and it is not built here. Notes for
-it:
+The `sitemap` module serves `/sitemap.xml`. Its page is
+`docs/modules/sitemap.md`.
 
-- The route table already knows every GET route without a parameter; the
-  static export uses the same list. A sitemap is that list plus concrete
-  paths for the routes with parameters.
-- It needs the site's absolute origin (`https://example.com`), which no
-  setting holds today. Both modules would read it.
-- With a sitemap module, `robots.sitemap` defaults to its URL.
+- **The list.** Every GET page from the page table
+  (`crate::pages::handlers()`) whose pattern has no parameter and whose
+  last segment has no dot, plus `extra`, minus the prefixes in `exclude`.
+  The static export reads the same table, so the sitemap and the export
+  agree on which pages exist.
+- **The base URL.** A setting of the sitemap, `[sitemap] base_url`. It may
+  carry a base path (`https://user.github.io/repo`), so the sitemap of a
+  GitHub Pages project site is right.
+- **With `robots`.** `robots.sitemap` defaults to
+  `crate::plugins::sitemap::location()`. The robots plugin then renders in
+  `after_config`, because the sitemap plugin sets its URL in `configure`
+  and every plugin finishes a stage before the next starts.
+- **lastmod.** The builder takes one per page (`path_modified`). The
+  settings do not: the page table has no dates, and one date for every page
+  says nothing true.
+
+### Where the base URL lives
+
+Decision: in `[sitemap] base_url`, read by `robots` through the sitemap
+plugin. Reasons:
+
+- The sitemap is the only reader that needs an absolute address today.
+  `analytics` names a site by its host, `gtag` needs none, and `beacon`
+  names another server.
+- A framework-level `[app] url` needs a framework setting with a flag and
+  an environment variable. The framework has no such setting yet:
+  `[server] shutdown_grace_secs` has no flag for that reason
+  (`docs/module-flags.md`).
+- One place still holds it: `robots` reads the sitemap's value, it does not
+  repeat it.
+
+Move it to `[app]` when a second module needs the address.
+
+### Why in this crate
+
+`brocanth-robots` holds both builders and both modules. Both files are for
+crawlers, both have no dependencies, and the `Sitemap:` line of one is the
+location of the other. A crate of its own would add a crate and save
+nothing. `analytics` and `beacon` share a crate for the same reason.
 
 ## Decisions
 
 1. The `index` setting stays explicit. It is not derived from `$<APP>_ENV`.
 2. The "A static site" preset ticks `robots`.
 3. Per-crawler groups are settings: `[[robots.groups]]`, file-only.
+4. The site's base URL is `[sitemap] base_url`, not a framework setting,
+   until a second module needs it.
+5. The preset does not tick `sitemap`: its development base URL is
+   localhost, and a published sitemap of localhost URLs is worse than none.
