@@ -201,6 +201,19 @@ impl SecurityHeadersConfig {
         self
     }
 
+    /// Allow a script a module inlines and the origins it loads from: the
+    /// hash of the exact text in `script-src`, and each `(directive,
+    /// sources)` pair added on top of the policy. The rest of the policy
+    /// stays as the file set it.
+    #[must_use]
+    pub fn page_script(mut self, text: &str, sources: &[(&str, &[&str])]) -> Self {
+        self.csp = self.csp.inline_script(text);
+        for (name, list) in sources {
+            self.csp = self.csp.allow(*name, list.iter().copied());
+        }
+        self
+    }
+
     /// Set the `Permissions-Policy`.
     #[must_use]
     pub fn permissions_policy(mut self, policy: impl Into<String>) -> Self {
@@ -444,6 +457,12 @@ pub struct Csp {
     /// Directives over the base, by name. An empty list removes the
     /// directive.
     pub directives: BTreeMap<String, Vec<String>>,
+    /// Sources added to a directive after the base and the overrides, by
+    /// name. [`Csp::allow`] fills it, for a third-party script a module
+    /// loads: the file keeps every directive it set, and the module's
+    /// origins go in on top. A directive the overrides removed stays
+    /// removed.
+    pub allow: BTreeMap<String, Vec<String>>,
     /// `report-uri`: where a browser posts what it blocked.
     pub report_uri: Option<String>,
 }
@@ -457,6 +476,7 @@ impl Default for Csp {
             inline_styles: true,
             script_hashes: Vec::new(),
             directives: BTreeMap::new(),
+            allow: BTreeMap::new(),
             report_uri: None,
         }
     }
@@ -504,6 +524,24 @@ impl Csp {
     #[must_use]
     pub fn inline_script(mut self, text: &str) -> Self {
         self.script_hashes.push(script_hash(text));
+        self
+    }
+
+    /// Add sources to one directive, on top of whatever the base and the
+    /// overrides give it. A source already there is not repeated.
+    #[must_use]
+    pub fn allow(
+        mut self,
+        name: impl Into<String>,
+        sources: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let entry = self.allow.entry(name.into()).or_default();
+        for source in sources {
+            let source = source.into();
+            if !entry.contains(&source) {
+                entry.push(source);
+            }
+        }
         self
     }
 
@@ -566,6 +604,27 @@ impl Csp {
             }
             match policy.iter_mut().find(|(n, _)| n == name) {
                 Some(slot) => slot.1 = sources.clone(),
+                None => policy.push((name.clone(), sources.clone())),
+            }
+        }
+        for (name, sources) in &self.allow {
+            if name == "frame-ancestors" {
+                return Err(
+                    "`csp.allow` adds to `frame-ancestors`, and `frames` owns it. \
+                     help: set `frames` instead"
+                        .to_string(),
+                );
+            }
+            match policy.iter_mut().find(|(n, _)| n == name) {
+                // Removed on purpose: an added origin does not bring it back.
+                Some((_, existing)) if existing.is_empty() => {}
+                Some((_, existing)) => {
+                    for source in sources {
+                        if !existing.contains(source) {
+                            existing.push(source.clone());
+                        }
+                    }
+                }
                 None => policy.push((name.clone(), sources.clone())),
             }
         }

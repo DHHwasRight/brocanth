@@ -26,6 +26,7 @@ brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
@@ -1936,6 +1937,18 @@ macro_rules! register {
         //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
         //     ),
         // );
+
+        // -- brocanth-gtag: Google Analytics, after consent ----------
+        //
+        // A banner on every HTML page, and Google's tag only once the
+        // visitor accepts. Global Privacy Control counts as a refusal, the
+        // page URL loses every query parameter not on the allow-list, and
+        // /admin never gets the tag. Off until production turns it on:
+        // `enabled = true` and `measurement_id` under
+        // [gtag] in config/production.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_gtag::Gtag>("gtag")
+            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
@@ -2004,7 +2017,11 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config_with::<brocanth_middleware::SecurityHeaders>(
                 "security_headers",
-                |config| config.inline_script(brocanth_admin::INLINE_SCRIPT),
+                |config| {
+                    config
+                        .inline_script(brocanth_admin::INLINE_SCRIPT)
+                        .page_script(brocanth_gtag::SCRIPT, brocanth_gtag::CSP)
+                },
             )
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -2043,7 +2060,8 @@ pub(crate) use register;
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
-type WithAdmin = After<crate::plugins::admin::AdminSettings, WithSessions>;
+type WithGtag = After<brocanth_gtag::Gtag, WithSessions>;
+type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
 type WithObservability = After<crate::plugins::observability::Observe, WithAdmin>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
@@ -2061,7 +2079,8 @@ type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurity
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
 
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
+type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedGtag>;
 type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedCsrf>;
 type HookedRateLimit =
@@ -2203,6 +2222,97 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         none_as: None,
         text: false,
+    },
+    Setting {
+        path: "gtag.enabled",
+        help: "Insert the consent banner and the Google tag into every HTML page.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.measurement_id",
+        help: "The GA4 measurement id, `G-` then capitals and digits.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.consent_mode",
+        help: "`basic`: no Google script before consent. `advanced`: cookieless pings before it.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.respect_gpc",
+        help: "Treat Global Privacy Control and Do Not Track as a refusal.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.consent_days",
+        help: "How long a choice is kept before the banner asks again, in days.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.send_title",
+        help: "Send the page title. Off: the scrubbed path stands in for it.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.cookie_domain",
+        help: "The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.consent_log",
+        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.text",
+        help: "The sentence the banner asks with.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.accept",
+        help: "The button that accepts.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.refuse",
+        help: "The button that refuses.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.manage",
+        help: "The button that opens the banner again.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.policy_url",
+        help: "A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
     },
     Setting {
         path: "admin.title",
@@ -2864,6 +2974,7 @@ pub fn flag_args(
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
+    let gtag = brocanth_gtag::GtagConfig::default();
     let admin = crate::plugins::admin::Settings::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
@@ -2882,6 +2993,22 @@ fn defaults() -> Vec<(&'static str, String)> {
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
+        ("gtag.enabled", format!("{:?}", gtag.enabled)),
+        ("gtag.measurement_id", format!("{:?}", gtag.measurement_id)),
+        ("gtag.consent_mode", format!("{:?}", gtag.consent_mode)),
+        ("gtag.respect_gpc", format!("{:?}", gtag.respect_gpc)),
+        ("gtag.consent_days", format!("{:?}", gtag.consent_days)),
+        ("gtag.send_title", format!("{:?}", gtag.send_title)),
+        ("gtag.cookie_domain", format!("{:?}", gtag.cookie_domain)),
+        ("gtag.consent_log", format!("{:?}", gtag.consent_log)),
+        ("gtag.banner.text", format!("{:?}", gtag.banner.text)),
+        ("gtag.banner.accept", format!("{:?}", gtag.banner.accept)),
+        ("gtag.banner.refuse", format!("{:?}", gtag.banner.refuse)),
+        ("gtag.banner.manage", format!("{:?}", gtag.banner.manage)),
+        (
+            "gtag.banner.policy_url",
+            format!("{:?}", gtag.banner.policy_url),
+        ),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
@@ -3128,7 +3255,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: ec21bafe985eae5b
+// brocanth-digest: ef10d13bda35b871
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
@@ -3183,6 +3310,43 @@ cookie = "_my_blog_session"
 # Send the cookie over HTTPS only.
 # Development only. Anywhere a browser reaches over HTTPS, this is true.
 secure = false
+
+[gtag]
+# Insert the consent banner and the Google tag into every HTML page.
+# Off outside production, so a developer's visits are not counted.
+enabled = false
+# The GA4 measurement id, `G-` then capitals and digits.
+measurement_id = ""
+# `basic`: no Google script before consent. `advanced`: cookieless pings before it.
+consent_mode = "basic"
+# Treat Global Privacy Control and Do Not Track as a refusal.
+respect_gpc = true
+# How long a choice is kept before the banner asks again, in days.
+# Six months is what the CNIL recommends.
+consent_days = 182
+# Send the page title. Off: the scrubbed path stands in for it.
+send_title = false
+# The query parameters that reach Google; every other one is removed.
+allow_params = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
+# Paths that never get the tag, each with everything under it.
+exclude = ["/admin"]
+# The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.
+# cookie_domain = ""
+# A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.
+# A server only: a static export has no one to report a choice to.
+# consent_log = ""
+
+[gtag.banner]
+# The sentence the banner asks with.
+text = "We would like to measure visits with Google Analytics. It sets cookies only if you accept."
+# The button that accepts.
+accept = "Accept"
+# The button that refuses.
+refuse = "Refuse"
+# The button that opens the banner again.
+manage = "Cookie settings"
+# A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
+# policy_url = ""
 
 [admin]
 # The end of every <title>, and the header and index heading unless set.
@@ -7892,6 +8056,7 @@ request.
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `middleware-rate-limit`  a fixed window per address, session or user, per group of routes; 429 with Retry-After
+- `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
@@ -8116,6 +8281,22 @@ make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
 
+## Google Analytics
+
+`brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
+Its hook puts a consent banner and Google's tag into every HTML page,
+before `</body>`. Nothing reaches Google before the visitor accepts.
+
+Do not add a second Google tag, and do not send a page view yourself:
+the hook scrubs the URL first. Never put an email address, a name or a
+user id in a URL, a page title or an event: Google's terms forbid it,
+and the scrubber only catches what it can recognise. A link with
+`data-consent-manage` reopens the banner.
+
+The choice lives in the visitor's browser. To keep a record of it on
+the server, set `consent_log` to a file: each choice is one JSON line
+with no address and no user agent.
+
 ## The admin
 
 `src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
@@ -8256,7 +8437,7 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
-<!-- brocanth-digest: 61ad79d2bb3ca1ac -->
+<!-- brocanth-digest: ff6a4c8e16c018a5 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -8268,7 +8449,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 kind = ["middleware", "enhancer", "routes"]
@@ -8401,13 +8582,20 @@ kind = ["middleware"]
 files = []
 config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
-adapted_to = ["admin", "config"]
+adapted_to = ["admin", "gtag", "config"]
 
 [modules.middleware-rate-limit]
 kind = ["middleware"]
 files = []
 config = ["rate_limit"]
 crates = []
+adapted_to = ["config"]
+
+[modules.gtag]
+kind = ["middleware"]
+files = []
+config = ["gtag", "gtag.banner"]
+crates = ["brocanth-gtag"]
 adapted_to = ["config"]
 
 [modules.openapi]
@@ -8529,4 +8717,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: d1ab027250a75d0b
+# brocanth-digest: f6d51ce285b715eb

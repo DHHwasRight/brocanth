@@ -358,4 +358,28 @@ mod tests {
     fn with_no_shape_taken_every_question_is_still_on_the_table() {
         assert_eq!(plan(None).len(), plan(Some(4)).len());
     }
+
+    #[test]
+    fn the_static_site_offers_the_google_tag_without_ticking_it() {
+        // A static site may count visits only in the browser, and Google
+        // needs consent, so the choice is offered and left to the person.
+        let preset = PRESETS
+            .iter()
+            .position(|p| p.name == "A static site")
+            .expect("the static preset");
+        assert!(!PRESETS[preset].picks.contains(&"gtag"));
+        let asked: Vec<&str> = plan(Some(preset))
+            .into_iter()
+            .map(|at| QUESTIONS[at].key)
+            .collect();
+        let question = QUESTIONS
+            .iter()
+            .find(|q| members(q.key).contains(&"gtag"))
+            .expect("gtag is asked about");
+        assert!(
+            asked.contains(&question.key),
+            "the static site skips `{}`, where gtag is asked",
+            question.key
+        );
+    }
 }

@@ -4,6 +4,7 @@ members = [
     "crates/brocanth",
     "crates/brocanth-admin",
     "crates/brocanth-admin-model",
+    "crates/brocanth-gtag",
     "crates/brocanth-assets",
     "crates/brocanth-bundle",
     "crates/brocanth-auth",
@@ -89,6 +90,7 @@ brocanth-scaffold = { path = "crates/brocanth-scaffold", version = "0.1.0" }
 brocanth-test = { path = "crates/brocanth-test", version = "0.1.0" }
 brocanth-mail = { path = "crates/brocanth-mail", version = "0.1.0" }
 brocanth-middleware = { path = "crates/brocanth-middleware", version = "0.1.0" }
+brocanth-gtag = { path = "crates/brocanth-gtag", version = "0.1.0" }
 brocanth-migrate = { path = "crates/brocanth-migrate", version = "0.1.0" }
 brocanth-input = { path = "crates/brocanth-input", version = "0.1.0" }
 brocanth-client = { path = "crates/brocanth-client", version = "0.1.0" }

@@ -35,17 +35,18 @@ default-run = "my-blog"
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
-#   serde                 nothing here is deserialised
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-static = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
+brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
+serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
 ===== .gitignore =====
 /target
 /dist
@@ -99,6 +100,7 @@ run = "cargo run -- css --watch"
 mod app;
 mod assets;
 mod commands;
+mod flags;
 mod pages;
 mod plugins;
 
@@ -117,10 +119,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main(brocanth_command::Context::boot()?)
+    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
 }
 
-// brocanth-digest: 54738851cb19117e
+// brocanth-digest: e19f2808bd04d0f1
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1540,7 +1542,8 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
-use brocanth::plugin_context::Base;
+use brocanth::plugin_context::{After, Base};
+use brocanth::plugin_hooks::{Both, HookSource, NoHooks};
 use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::AsyncNext;
 
@@ -1559,15 +1562,26 @@ use crate::pages::{Ctx, Response};
 /// Each registration is still one line, and a line a reader can delete.
 macro_rules! register {
     ($builder:expr) => {{
-        use brocanth_config::{AppBuilderConfigExt, Loader};
+        use brocanth_config::AppBuilderConfigExt;
 
-        // The core takes already-built values; finding the files, layering
-        // them and typing each section is `brocanth-config`'s job, and it is
-        // the only reason a TOML parser is in the tree.
-        let config = Loader::new(crate::app::APP)
-            .load()
+        // The files, the environment and, once `src/flags.rs` turns them
+        // on, the flags: `brocanth-config` layers them and types each
+        // section, and it is the only reason a TOML parser is in the tree.
+        let config = crate::plugins::config()?;
+        let builder = $builder.with_config(config);
+
+        // -- brocanth-gtag: Google Analytics, after consent ----------
+        //
+        // A banner on every HTML page, and Google's tag only once the
+        // visitor accepts. Global Privacy Control counts as a refusal, the
+        // page URL loses every query parameter not on the allow-list, and
+        // /admin never gets the tag. Off until production turns it on:
+        // `enabled = true` and `measurement_id` under
+        // [gtag] in config/production.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_gtag::Gtag>("gtag")
             .map_err(|e| e.to_string())?;
-        $builder.with_config(config)
+        builder
     }};
 }
 pub(crate) use register;
@@ -1582,7 +1596,10 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-pub type Installed = Base;
+type WithGtag = After<brocanth_gtag::Gtag, Base>;
+pub type Installed = WithGtag;
+
+type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1590,7 +1607,7 @@ pub type Installed = Base;
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = brocanth::plugin_hooks::NoHooks;
+pub type Hooks = HookedGtag;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1652,6 +1669,338 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
+/// One setting a module declared, by the key it sets.
+pub struct Setting {
+    /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
+    /// unless `src/flags.rs` renames it.
+    pub path: &'static str,
+    /// The line `--help` prints.
+    pub help: &'static str,
+    /// Whether a flag may set it. A secret has none: every user on the host
+    /// can read a process's arguments.
+    pub flag: bool,
+    /// A value that means `None` as well as an empty one does.
+    pub none_as: Option<&'static str>,
+    /// Whether a flag's value stays a string whatever it looks like.
+    pub text: bool,
+}
+
+/// Every setting the modules declared. `brocanth add` rewrites this list;
+/// `src/flags.rs` renames or hides a flag.
+pub const SETTINGS: &[Setting] = &[
+    Setting {
+        path: "gtag.enabled",
+        help: "Insert the consent banner and the Google tag into every HTML page.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.measurement_id",
+        help: "The GA4 measurement id, `G-` then capitals and digits.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.consent_mode",
+        help: "`basic`: no Google script before consent. `advanced`: cookieless pings before it.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.respect_gpc",
+        help: "Treat Global Privacy Control and Do Not Track as a refusal.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.consent_days",
+        help: "How long a choice is kept before the banner asks again, in days.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.send_title",
+        help: "Send the page title. Off: the scrubbed path stands in for it.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "gtag.cookie_domain",
+        help: "The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.consent_log",
+        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.text",
+        help: "The sentence the banner asks with.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.accept",
+        help: "The button that accepts.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.refuse",
+        help: "The button that refuses.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.manage",
+        help: "The button that opens the banner again.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "gtag.banner.policy_url",
+        help: "A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.",
+        flag: true,
+        none_as: None,
+        text: true,
+    },
+];
+
+/// One value this run was given, above the defaults.
+pub struct Given {
+    /// What it sets.
+    pub setting: &'static Setting,
+    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    pub from: String,
+    /// The value, as typed. Empty is `None` for an `Option` setting.
+    pub value: String,
+}
+
+/// The name each flag answers to after `src/flags.rs`, whether the flags are
+/// read or not.
+///
+/// A rename of a key no flag sets, a name that is not spelled as a flag, and
+/// two flags under one name each stop the binary: each would otherwise be a
+/// flag that does nothing, or does something else.
+fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
+    for (path, _) in crate::flags::RENAMES {
+        if !flags().any(|setting| setting.path == *path) {
+            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
+            return Err(format!(
+                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
+                known.join(", ")
+            ));
+        }
+    }
+    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
+    for setting in flags() {
+        let name = crate::flags::RENAMES
+            .iter()
+            .find(|(path, _)| *path == setting.path)
+            .map_or(setting.path, |(_, name)| *name);
+        if name.is_empty() {
+            continue;
+        }
+        let spelled = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        let taken = ["help", "version", "settings"].contains(&name);
+        if !spelled || name.starts_with(['-', '.', '_']) || taken {
+            return Err(format!(
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
+            ));
+        }
+        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            return Err(format!(
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                other.path, setting.path
+            ));
+        }
+        names.push((setting, name));
+    }
+    Ok(names)
+}
+
+/// The flags this run reads: none unless `src/flags.rs` turns them on,
+/// because with a config file the file is the source.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    if !crate::flags::WITH_CONFIG {
+        return Ok(Vec::new());
+    }
+    names()
+}
+
+/// A flag given while the flags are off, refused by name with what to do
+/// instead. Silently ignoring it would run with a value nobody chose.
+pub fn refuse_off_flags() -> Result<(), String> {
+    if crate::flags::WITH_CONFIG {
+        return Ok(());
+    }
+    let names = names()?;
+    for arg in std::env::args_os().skip(1) {
+        let arg = arg.to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) {
+            let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
+            return Err(format!(
+                "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set WITH_CONFIG = true in src/flags.rs, or set `{key}` under [{section}] in config/<env>.toml"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The flags this run was given, in the order typed. The environment is not
+/// here: `brocanth-config` reads it, under the file and over the flags.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
+    let names = flag_names()?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline) = match written.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (written, None),
+        };
+        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => rest
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
+        };
+        given.push(Given {
+            setting,
+            from: format!("--{name}"),
+            value,
+        });
+    }
+    Ok(given)
+}
+
+/// The configuration this run reads: the files, the environment, and the
+/// flags on top once `src/flags.rs` turns them on.
+pub fn config() -> Result<brocanth_config::Config, String> {
+    refuse_off_flags()?;
+    let mut loader = brocanth_config::Loader::new(crate::app::APP);
+    for setting in SETTINGS {
+        if let Some(alias) = setting.none_as {
+            loader = loader.none_as(setting.path, alias);
+        }
+    }
+    for given in given()? {
+        let flag = given.from.trim_start_matches('-');
+        loader = loader.flag(given.setting.path, flag, &given.value, given.setting.text);
+    }
+    loader.load().map_err(|e| e.to_string())
+}
+
+/// The flags, as arguments every command takes.
+///
+/// A name a command already takes is refused here: `clap` panics on it in a
+/// debug build and lets one of the two win in a release one.
+pub fn flag_args(
+    command: brocanth_command::clap::Command,
+) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
+    use brocanth_command::{anyhow, clap};
+
+    refuse_off_flags().map_err(anyhow::Error::msg)?;
+    let mut command = command;
+    for (setting, name) in flag_names().map_err(anyhow::Error::msg)? {
+        let taken = command
+            .get_subcommands()
+            .flat_map(|sub| sub.get_arguments())
+            .any(|arg| arg.get_long() == Some(name));
+        if taken {
+            anyhow::bail!(
+                "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in src/flags.rs",
+                setting.path
+            );
+        }
+        command = command.arg(
+            clap::Arg::new(name)
+                .long(name)
+                .value_name("VALUE")
+                .help(setting.help)
+                .global(true)
+                .action(clap::ArgAction::Append),
+        );
+    }
+    Ok(command)
+}
+
+/// Each setting as the plugin's `Default` says, before any layer.
+fn defaults() -> Vec<(&'static str, String)> {
+    let gtag = brocanth_gtag::GtagConfig::default();
+    vec![
+        ("gtag.enabled", format!("{:?}", gtag.enabled)),
+        ("gtag.measurement_id", format!("{:?}", gtag.measurement_id)),
+        ("gtag.consent_mode", format!("{:?}", gtag.consent_mode)),
+        ("gtag.respect_gpc", format!("{:?}", gtag.respect_gpc)),
+        ("gtag.consent_days", format!("{:?}", gtag.consent_days)),
+        ("gtag.send_title", format!("{:?}", gtag.send_title)),
+        ("gtag.cookie_domain", format!("{:?}", gtag.cookie_domain)),
+        ("gtag.consent_log", format!("{:?}", gtag.consent_log)),
+        ("gtag.banner.text", format!("{:?}", gtag.banner.text)),
+        ("gtag.banner.accept", format!("{:?}", gtag.banner.accept)),
+        ("gtag.banner.refuse", format!("{:?}", gtag.banner.refuse)),
+        ("gtag.banner.manage", format!("{:?}", gtag.banner.manage)),
+        (
+            "gtag.banner.policy_url",
+            format!("{:?}", gtag.banner.policy_url),
+        ),
+    ]
+}
+
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let config = config()?;
+    let mut layers = config.layers().defaults(defaults());
+    for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
+        layers = layers.secret(setting.path);
+    }
+    Ok(layers.to_string())
+}
+
 /// `[server] shutdown_grace_secs`, or
 /// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
@@ -1707,7 +2056,35 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 94054a3d2b88e5f4
+// brocanth-digest: 6f72d30f2cc07e8a
+===== src/flags.rs =====
+//! The command-line flags of this binary, and the one place to rename them.
+//!
+//! A module declares each of its settings once. From that the binary takes a
+//! flag, `--<module>.<key>=VALUE`, an environment variable,
+//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list in
+//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
+//! and never again.
+
+/// Whether a project with a config file reads the flags too.
+///
+/// Off: with the `config` module, the file and the environment are the
+/// sources, and a flag is refused with a pointer to this line. On: a flag
+/// outranks both, for one run. Without the `config` module the flags are
+/// always read, and this is not.
+#[allow(dead_code)]
+pub const WITH_CONFIG: bool = false;
+
+/// Flags under another name: the key as the module declares it, and the flag
+/// this binary answers to instead, without `--`. An empty name hides the
+/// flag.
+///
+/// ```text
+/// ("sessions.cookie", "cookie"),
+/// ("storage.root", ""),
+/// ```
+pub const RENAMES: &[(&str, &str)] = &[];
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -1727,6 +2104,43 @@ name = "My Blog"
 # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
+
+[gtag]
+# Insert the consent banner and the Google tag into every HTML page.
+# Off outside production, so a developer's visits are not counted.
+enabled = false
+# The GA4 measurement id, `G-` then capitals and digits.
+measurement_id = ""
+# `basic`: no Google script before consent. `advanced`: cookieless pings before it.
+consent_mode = "basic"
+# Treat Global Privacy Control and Do Not Track as a refusal.
+respect_gpc = true
+# How long a choice is kept before the banner asks again, in days.
+# Six months is what the CNIL recommends.
+consent_days = 182
+# Send the page title. Off: the scrubbed path stands in for it.
+send_title = false
+# The query parameters that reach Google; every other one is removed.
+allow_params = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
+# Paths that never get the tag, each with everything under it.
+exclude = ["/admin"]
+# The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.
+# cookie_domain = ""
+# A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.
+# A server only: a static export has no one to report a choice to.
+# consent_log = ""
+
+[gtag.banner]
+# The sentence the banner asks with.
+text = "We would like to measure visits with Google Analytics. It sets cookies only if you accept."
+# The button that accepts.
+accept = "Accept"
+# The button that refuses.
+refuse = "Refuse"
+# The button that opens the banner again.
+manage = "Cookie settings"
+# A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
+# policy_url = ""
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -1744,8 +2158,9 @@ pub mod css;
 pub mod export;
 pub mod routes;
 pub mod serve;
+pub mod settings;
 
-// brocanth-digest: bfabd2cc47c153ac
+// brocanth-digest: a64b19fe5b2f13e9
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -1767,6 +2182,28 @@ pub struct Serve {
 impl Command for Serve {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
         crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+===== src/commands/settings.rs =====
+//! `settings` -- every settings layer on its own, then the merged values.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Show each settings layer, lowest precedence first, then the merged values.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Settings {}
+
+impl Command for Settings {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        print!(
+            "{}",
+            crate::plugins::settings_report().map_err(anyhow::Error::msg)?
+        );
+        Ok(())
     }
 }
 ===== .github/workflows/ci.yml =====
@@ -2298,6 +2735,7 @@ request.
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
+- `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 
 **Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `jt`, `robots`, `docker`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
@@ -2478,6 +2916,22 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
+## Google Analytics
+
+`brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
+Its hook puts a consent banner and Google's tag into every HTML page,
+before `</body>`. Nothing reaches Google before the visitor accepts.
+
+Do not add a second Google tag, and do not send a page view yourself:
+the hook scrubs the URL first. Never put an email address, a name or a
+user id in a URL, a page title or an event: Google's terms forbid it,
+and the scrubber only catches what it can recognise. A link with
+`data-consent-manage` reopens the banner.
+
+The choice lives in the visitor's browser. To keep a record of it on
+the server, set `consent_log` to a file: each choice is one JSON line
+with no address and no user agent.
+
 ## Static site
 
 This project compiles to files. `cargo run -- export` writes every
@@ -2495,7 +2949,7 @@ is the preview, not the deployment.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
 
-<!-- brocanth-digest: 5b209c5150705170 -->
+<!-- brocanth-digest: 0af23663152c6a97 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.
@@ -2507,7 +2961,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github"]
+enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github", "gtag"]
 
 [modules.static]
 kind = ["external", "enhancer"]
@@ -2565,4 +3019,11 @@ config = []
 crates = []
 adapted_to = ["static"]
 
-# brocanth-digest: c4d83b56ec3d901c
+[modules.gtag]
+kind = ["middleware"]
+files = ["src/flags.rs", "src/commands/settings.rs"]
+config = ["gtag", "gtag.banner"]
+crates = ["brocanth-gtag"]
+adapted_to = ["config"]
+
+# brocanth-digest: 3ccdcc1c78b6072e

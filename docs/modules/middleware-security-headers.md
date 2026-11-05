@@ -13,7 +13,7 @@ The wizard calls it: *Send the headers a browser reads as policy*.
 | Part of | [`middleware`](middleware.md), ticked with its parent |
 | Needs | none |
 | After | [`middleware-csrf`](middleware-csrf.md) |
-| Adapts to | [`admin`](admin.md), [`config`](config.md) |
+| Adapts to | [`admin`](admin.md), [`gtag`](gtag.md), [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

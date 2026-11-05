@@ -24,6 +24,7 @@ default-run = "my-blog"
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   gtag                  no Google tag; nothing on a page talks to Google
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
@@ -2582,7 +2583,7 @@ request.
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 
-**Absent:** `logging`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability-tracing`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker-kubernetes` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2679,7 +2680,7 @@ HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
 is in front. Set `include_subdomains` or `preload` only when the
 person who owns the domain says so.
 
-<!-- brocanth-digest: f40755d90e396bde -->
+<!-- brocanth-digest: e22d3271c99ac44f -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

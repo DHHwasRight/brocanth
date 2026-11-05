@@ -113,6 +113,9 @@ pub const ALL: &[&dyn Module] = &[
     // asked for, because its rules are a fact about one application.
     &brocanth_middleware::scaffold::SecurityHeaders,
     &brocanth_middleware::scaffold::RateLimit,
+    // Google Analytics behind a consent banner. A response hook, so it
+    // reaches every HTML page whatever renders it, and the static export.
+    &brocanth_gtag::scaffold::Gtag,
     // The document, served at `/openapi.json` as a page, because a route
     // here is a file.
     &brocanth_openapi::scaffold::OpenApi,

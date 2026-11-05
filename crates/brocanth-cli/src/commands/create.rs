@@ -5138,6 +5138,7 @@ mod tests {
                     "rsx-htmx",
                     "ci",
                     "ci-github",
+                    "gtag",
                 ],
             ),
             // A robots.txt with a config file and an admin to keep crawlers
@@ -5148,6 +5149,14 @@ mod tests {
             (
                 "robots-static",
                 vec!["static", "config", "commands", "robots"],
+            ),
+            // The consent banner and the tag, with the policy that allows
+            // them and no config file: the literal branch of a hooking
+            // plugin, and the one adjustment a second module makes to the
+            // security headers.
+            (
+                "gtag",
+                vec!["middleware", "middleware-security-headers", "gtag"],
             ),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin

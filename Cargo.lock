@@ -767,6 +767,7 @@ dependencies = [
  "brocanth-client",
  "brocanth-config",
  "brocanth-db",
+ "brocanth-gtag",
  "brocanth-input",
  "brocanth-jobs",
  "brocanth-middleware",
@@ -858,6 +859,20 @@ dependencies = [
 name = "brocanth-events"
 version = "0.1.0"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "brocanth-gtag"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-config",
+ "brocanth-gtag",
+ "brocanth-middleware",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "http",
  "serde",
 ]
 

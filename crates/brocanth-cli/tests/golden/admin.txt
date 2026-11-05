@@ -27,6 +27,7 @@ edition = "2021"
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   security-headers      no security headers; a browser sniffs types, frames the pages and runs any inline script
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   gtag                  no Google tag; nothing on a page talks to Google
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-admin-model  the admin reads no table; its data source is an empty fixture
@@ -2152,7 +2153,7 @@ request.
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `openapi`, `validation`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `admin-model`, `realtime`, `realtime-sse`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2223,7 +2224,7 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
 
-<!-- brocanth-digest: d3a20bbb58a60abc -->
+<!-- brocanth-digest: 356776974f9dee0b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` rewrites this file.
 # Change the module list with `brocanth add`, not here.

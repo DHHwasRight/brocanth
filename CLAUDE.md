@@ -1,7 +1,7 @@
 # brocanth
 
 A server framework for HTML-first applications in Rust. Cargo workspace of
-39 crates under `crates/`, two examples under `examples/`.
+40 crates under `crates/`, two examples under `examples/`.
 
 ## Read first
 

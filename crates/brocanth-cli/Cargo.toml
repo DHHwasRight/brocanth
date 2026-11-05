@@ -36,6 +36,7 @@ brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features
 brocanth-client = { path = "../brocanth-client", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-input = { path = "../brocanth-input", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-middleware = { workspace = true, features = ["scaffold"] }
+brocanth-gtag = { workspace = true, default-features = false, features = ["scaffold"] }
 brocanth-openapi = { workspace = true, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }

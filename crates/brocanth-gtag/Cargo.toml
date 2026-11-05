@@ -1,0 +1,43 @@
+[package]
+name = "brocanth-gtag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Google Analytics 4 behind a consent banner: nothing sent before consent, privacy signals honoured, URLs scrubbed."
+
+# Two dependencies with `runtime` (on by default), both already in every
+# application: the core and `http`. The banner and the consent script are a
+# string constant; no JavaScript toolchain and no template engine.
+#
+# Both are optional. The CLI depends on this crate with
+# `default-features = false, features = ["scaffold"]`, so writing a project
+# does not link the runtime the project will run.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+
+# `config`: the configuration types deserialise, so an `[gtag]` section
+# of a brocanth-config file builds one. Off, so an application that builds
+# its configuration in code links no serde.
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dependencies.brocanth-scaffold]
+workspace = true
+optional = true
+
+[dev-dependencies]
+brocanth-test.workspace = true
+# `tests/csp.rs` checks that the security headers allow what the tag loads.
+brocanth-middleware.workspace = true
+# This crate with `config` on, so `cargo test -p brocanth-gtag` runs
+# the configuration test rather than compiling it out.
+brocanth-gtag = { path = ".", features = ["config"] }
+brocanth-config.workspace = true
+
+[features]
+default = ["runtime"]
+# The plugin and its hooks: what an application links.
+runtime = ["dep:brocanth", "dep:http"]
+scaffold = ["dep:brocanth-scaffold"]
+config = ["dep:serde"]

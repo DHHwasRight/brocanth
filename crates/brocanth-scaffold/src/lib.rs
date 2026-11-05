@@ -1631,6 +1631,36 @@ pub mod snippet {
         pub adjust: Option<String>,
     }
 
+    /// A method chain, one call per line, as rustfmt breaks a chain that
+    /// does not fit: `.a(x).b(y)` at `indent` spaces, `last` after the
+    /// final call.
+    fn broken_chain(chain: &str, indent: usize, last: &str) -> String {
+        let mut calls = Vec::new();
+        let (mut depth, mut start) = (0usize, 0usize);
+        for (at, c) in chain.char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                '.' if depth == 0 && at > start => {
+                    calls.push(&chain[start..at]);
+                    start = at;
+                }
+                _ => {}
+            }
+        }
+        calls.push(&chain[start..]);
+        let pad = " ".repeat(indent);
+        let count = calls.len();
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| {
+                let end = if i + 1 == count { last } else { "" };
+                format!("{pad}{call}{end}\n")
+            })
+            .collect()
+    }
+
     /// Registers a hooking plugin whose settings are declared, and writes
     /// everything that follows from the declaration.
     ///
@@ -1671,30 +1701,69 @@ pub mod snippet {
                      \x20           .plugin_hooking_from_config::<{ty}>({section:?})\n\
                      \x20           .map_err(|e| e.to_string())?;\n"
                 ),
-                Some(adjust) => format!(
-                    "        let builder = builder\n\
-                     \x20           .plugin_hooking_from_config_with::<{ty}>(\n\
-                     \x20               {section:?},\n\
-                     \x20               |config| config{adjust},\n\
-                     \x20           )\n\
-                     \x20           .map_err(|e| e.to_string())?;\n"
-                ),
+                Some(adjust) => {
+                    let one = format!("                |config| config{adjust},\n");
+                    let closure = if one.trim_end().len() <= 100 {
+                        one
+                    } else {
+                        format!(
+                            "                |config| {{\n\
+                             \x20                   config\n\
+                             {}\
+                             \x20               }},\n",
+                            broken_chain(adjust, 24, "")
+                        )
+                    };
+                    format!(
+                        "        let builder = builder\n\
+                         \x20           .plugin_hooking_from_config_with::<{ty}>(\n\
+                         \x20               {section:?},\n\
+                         {closure}\
+                         \x20           )\n\
+                         \x20           .map_err(|e| e.to_string())?;\n"
+                    )
+                }
             }
         } else {
             let ident = section.replace('-', "_");
             let value = match &adjust {
                 None => format!("                crate::plugins::{ident}_settings(&given)?,\n"),
                 Some(adjust) => {
-                    format!("                crate::plugins::{ident}_settings(&given)?{adjust},\n")
+                    let one = format!(
+                        "                crate::plugins::{ident}_settings(&given)?{adjust},\n"
+                    );
+                    if one.trim_end().len() <= 100 {
+                        one
+                    } else {
+                        format!(
+                            "                crate::plugins::{ident}_settings(&given)?\n{}",
+                            broken_chain(adjust, 20, ",")
+                        )
+                    }
                 }
             };
-            format!(
-                "        let builder = builder.plugin_hooking(\n\
-                 \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
-                 {value}\
-                 \x20           ),\n\
-                 \x20       );\n"
-            )
+            // rustfmt keeps the call and the constructor on one line after
+            // `let builder =` when they fit in 100 columns, which a short
+            // type name does.
+            let head = format!(
+                "            builder.plugin_hooking(<{ty} as brocanth::plugin_api::Plugin>::new("
+            );
+            if head.len() <= 100 {
+                format!(
+                    "        let builder =\n\
+                     {head}\n\
+                     {value}\
+                     \x20           ));\n"
+                )
+            } else {
+                format!(
+                    "        let builder = builder.plugin_hooking(\n\
+                     \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
+                     {value}\
+                     \x20           ),\n\
+                     \x20       );\n"
+                )
+            }
         };
         s.at(Slot::AppPlugins)
             .block(format!("{prelude}{statement}"));

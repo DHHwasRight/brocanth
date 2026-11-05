@@ -299,6 +299,10 @@ impl Module for SecurityHeaders {
         .category(Category::Middleware)
         .adapts_to("admin", "the CSP allows the admin's inline script by hash")
         .adapts_to(
+            "gtag",
+            "the CSP allows the consent script by hash and Google's origins",
+        )
+        .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
         )
@@ -318,9 +322,17 @@ impl Module for SecurityHeaders {
         // The admin layout inlines dp-swap's vendored copy, which the
         // default policy does not know. Its hash goes in on top of what the
         // file says, or the policy blocks the admin's script.
-        let adjust = project
-            .has("admin")
-            .then(|| ".inline_script(brocanth_admin::INLINE_SCRIPT)".to_string());
+        //
+        // The gtag consent script likewise, and the origins Google's
+        // tag loads from once a visitor accepts.
+        let mut adjust = String::new();
+        if project.has("admin") {
+            adjust.push_str(".inline_script(brocanth_admin::INLINE_SCRIPT)");
+        }
+        if project.has("gtag") {
+            adjust.push_str(".page_script(brocanth_gtag::SCRIPT, brocanth_gtag::CSP)");
+        }
+        let adjust = (!adjust.is_empty()).then_some(adjust);
         let behind_tls = if project.has("config") {
             "`behind_tls = true` under\n        // [security_headers] in config/<env>.toml"
         } else {
