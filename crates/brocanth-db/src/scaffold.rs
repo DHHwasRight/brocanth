@@ -43,6 +43,7 @@ impl Module for Database {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to("commands", "a `dbshell` command opens psql on `[db] url`")
         .asked_in("data", "A Postgres pool, and SQL built with sea-query")
         .recommends(
             "observability-health",
@@ -66,6 +67,10 @@ impl Module for Database {
         s.file("src/plugins/db/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod db;");
         configurable(s, project, "db", "Database", settings(project));
+        if project.has("commands") {
+            s.file("src/commands/dbshell.rs", dbshell_rs(project));
+            s.at(Slot::CommandsMod).line("pub mod dbshell;");
+        }
         if !project.has("config") {
             // The literal form calls `Plugin::new`, a trait method, so the
             // trait has to be in scope. Every plugin module needs the same
@@ -178,6 +183,94 @@ impl Ctx {
              `brocanth_db::Db` of its own",
         )
     }
+}
+"#;
+
+/// `src/commands/dbshell.rs`: `brocanth_db::shell` on the URL the server reads.
+///
+/// A command of the project and not of the `brocanth` CLI: only the
+/// project knows how its configuration is read, and the CLI links no
+/// configuration loader.
+fn dbshell_rs(project: &Project) -> String {
+    let configured = project.has("config");
+    let env_arg = if configured {
+        "    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]\n    \
+         #[arg(long, short, value_name = \"ENV\")]\n    \
+         env: Option<String>,\n"
+    } else {
+        ""
+    };
+    let call = if configured {
+        "url(self.env.as_deref(), ctx.root())?"
+    } else {
+        "url()?"
+    };
+    let url = if configured {
+        DBSHELL_URL_FROM_CONFIG
+    } else {
+        DBSHELL_URL_FROM_ENV
+    };
+    DBSHELL_RS
+        .replace("@ENV_ARG@", env_arg)
+        .replace("@CALL@", call)
+        .replace("@URL@", url)
+}
+
+const DBSHELL_RS: &str = r#"//! `dbshell` -- the database's own client, on this application's database.
+//!
+//! Reads `[db] url` the way the server does and replaces itself with `psql`
+//! or `sqlite3` on it. `--print` shows the command line; a password goes in
+//! `PGPASSWORD` and never on it. See `brocanth_db::shell`.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use std::ffi::OsString;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Open psql or sqlite3 on the database in `[db] url`
+#[cmd]
+#[derive(clap::Args)]
+pub struct Dbshell {
+@ENV_ARG@    /// Print the command line instead of running it. The password is not printed
+    #[arg(long)]
+    print: bool,
+    /// Passed to psql or sqlite3 unchanged, after `--`
+    #[arg(last = true, value_name = "CLIENT ARGS")]
+    rest: Vec<OsString>,
+}
+
+impl Command for Dbshell {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let url = @CALL@;
+        brocanth_db::shell::run(&url, ctx.root(), self.print, &self.rest)?;
+        Ok(())
+    }
+}
+@URL@"#;
+
+const DBSHELL_URL_FROM_CONFIG: &str = r#"
+/// `[db] url`, through the loader the server uses, so the files,
+/// `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server sees.
+fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
+    let mut loader = brocanth_config::Loader::new(crate::app::APP).cwd(root);
+    if let Some(env) = env {
+        loader = loader.env(env);
+    }
+    Ok(loader
+        .load()?
+        .section::<crate::plugins::db::Settings>("db")?
+        .url)
+}
+"#;
+
+const DBSHELL_URL_FROM_ENV: &str = r#"
+/// `[db] url`: the default, or `$<APP>_DB__URL`, as the server reads it.
+fn url() -> anyhow::Result<String> {
+    Ok(crate::plugins::db_settings(&[])
+        .map_err(anyhow::Error::msg)?
+        .url)
 }
 "#;
 

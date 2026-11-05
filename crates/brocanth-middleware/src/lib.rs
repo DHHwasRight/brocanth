@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! ---
 //!
@@ -79,27 +79,45 @@
 //! [`RequestHook`]: brocanth::plugin_hooks::RequestHook
 //! [`ResponseHook`]: brocanth::plugin_hooks::ResponseHook
 
+#[cfg(feature = "runtime")]
 mod canonical_host;
+#[cfg(feature = "runtime")]
 mod content_types;
+#[cfg(feature = "runtime")]
 mod cors;
+#[cfg(feature = "runtime")]
 mod csrf;
+#[cfg(feature = "runtime")]
 pub mod dp;
+#[cfg(feature = "runtime")]
 mod method_override;
+#[cfg(feature = "runtime")]
 mod proxy_headers;
+#[cfg(feature = "runtime")]
 pub mod rate_limit;
+#[cfg(feature = "runtime")]
 mod security_headers;
 
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
+#[cfg(feature = "runtime")]
 pub use canonical_host::{CanonicalHost, CanonicalHostConfig};
+#[cfg(feature = "runtime")]
 pub use content_types::{ContentTypes, ContentTypesConfig};
+#[cfg(feature = "runtime")]
 pub use cors::{Cors, CorsConfig, Origins};
+#[cfg(feature = "runtime")]
 pub use csrf::{Csrf, CsrfConfig, CsrfToken};
+#[cfg(feature = "runtime")]
 pub use dp::{Directive, DpRequest, DpSwap, Oob};
+#[cfg(feature = "runtime")]
 pub use method_override::{MethodOverride, MethodOverrideConfig};
+#[cfg(feature = "runtime")]
 pub use proxy_headers::{ClientInfo, PeerAddress, ProxyHeaders, ProxyHeadersConfig};
+#[cfg(feature = "runtime")]
 pub use rate_limit::{RateLimit, RateLimitConfig, Rule, SharedRateLimit};
+#[cfg(feature = "runtime")]
 pub use security_headers::{
     script_hash, Csp, Frames, Hsts, SecurityHeaders, SecurityHeadersConfig, ONE_YEAR,
 };
@@ -109,10 +127,12 @@ pub use security_headers::{
 /// A header value is bytes. Every header this crate reads is a token or a
 /// host name, so one that is not UTF-8 is malformed rather than exotic, and
 /// treating it as absent is the same answer with less code than refusing it.
+#[cfg(feature = "runtime")]
 fn text(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<&str> {
     headers.get(name)?.to_str().ok()
 }
 
+#[cfg(feature = "runtime")]
 /// Adds the tokens in `add` to the response's `Vary`, keeping the ones
 /// already there.
 ///
@@ -149,11 +169,13 @@ fn add_vary(headers: &mut http::HeaderMap, add: &str) {
     }
 }
 
+#[cfg(feature = "runtime")]
 /// The first comma-separated element of a header, trimmed.
 fn first(value: &str) -> &str {
     value.split(',').next().unwrap_or(value).trim()
 }
 
+#[cfg(feature = "runtime")]
 /// One field out of an `application/x-www-form-urlencoded` body.
 ///
 /// `None` for a body of any other media type, which is the answer a
@@ -180,6 +202,7 @@ fn form_field(request: &brocanth::plugin_hooks::Request, field: &str) -> Option<
     })
 }
 
+#[cfg(feature = "runtime")]
 /// Percent and plus decoding, enough for a field name and a short value.
 ///
 /// A full form decoder belongs in the crate that fills a struct from a

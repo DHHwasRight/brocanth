@@ -13,7 +13,7 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-db` (feature `plugin`) |

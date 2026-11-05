@@ -23,6 +23,8 @@ pub mod error;
 pub mod exec;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+#[cfg(feature = "runtime")]
+pub mod shell;
 
 #[cfg(feature = "runtime")]
 pub use config::DbConfig;

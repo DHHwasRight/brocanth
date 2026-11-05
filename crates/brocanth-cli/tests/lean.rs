@@ -142,6 +142,56 @@ fn the_cli_links_no_rust_parser() {
     );
 }
 
+/// The framework itself: the core and the configuration loader.
+///
+/// The CLI writes files and edits TOML. Loading a project's configuration
+/// is the project's job (its `check` and `dbshell` commands do it), and a
+/// module crate's `scaffold` side reaches neither. Tests may use both, as
+/// dev-dependencies, which this graph leaves out.
+const FRAMEWORK: &[&str] = &["brocanth", "brocanth-config"];
+
+#[test]
+fn the_cli_links_neither_the_core_nor_the_config_loader() {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let out = Command::new(cargo)
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            "brocanth-cli",
+            "-e",
+            "normal",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cargo tree");
+    assert!(
+        out.status.success(),
+        "cargo tree failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8_lossy(&out.stdout);
+    let mut found: Vec<&str> = tree
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| FRAMEWORK.contains(name))
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    assert!(
+        found.is_empty(),
+        "the CLI links the framework: {found:?}\n\
+         help: run `cargo tree -p brocanth-cli -e normal -i brocanth` to see which \
+         dependency brings it. A module crate keeps the core behind its `runtime` \
+         feature and the CLI takes it with `default-features = false`; code that \
+         loads a configuration belongs in a project command"
+    );
+}
+
 #[test]
 fn the_list_matches_what_it_should() {
     assert!(is_runtime("sqlx-postgres"));

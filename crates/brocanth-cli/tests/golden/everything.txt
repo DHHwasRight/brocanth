@@ -15,7 +15,7 @@ default-run = "my-blog"
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel"], default-features = false }
 brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
-brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["check"] }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
@@ -3758,13 +3758,15 @@ window_secs = 60
 
 pub mod admin;
 pub mod api;
+pub mod check;
 pub mod css;
+pub mod dbshell;
 pub mod migrate;
 pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: c2e856f21e86d507
+// brocanth-digest: ed561dbe0c5ec6f9
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -4276,6 +4278,54 @@ impl Command for Api {
         Ok(())
     }
 }
+===== src/commands/check.rs =====
+//! `check` -- what is wrong before it is live.
+//!
+//! Reads the configuration of one environment the way the application does,
+//! `brocanth.toml`, and `src/` as text. Nothing is built and nothing
+//! connects, so it runs in CI. `--deploy` adds the production checks; the
+//! list is in `brocanth_config::check`. `brocanth check` runs this command
+//! after the checks only the CLI can make.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_config::check::{self, Options};
+
+/// Check the configuration and the source; --deploy adds the production checks.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Check {
+    /// Add the production checks: secrets, cookies, CSRF, the admin, the database
+    #[arg(long)]
+    deploy: bool,
+    /// The environment to load [default: production with --deploy, else $<APP>_ENV or development]
+    #[arg(long, short, value_name = "ENV")]
+    env: Option<String>,
+    /// Silence one finding by its id, such as deploy/hsts. Repeat for more
+    #[arg(long, value_name = "ID")]
+    allow: Vec<String>,
+    /// Exit 1 on a warning too
+    #[arg(long)]
+    strict: bool,
+}
+
+impl Command for Check {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let options = Options {
+            deploy: self.deploy,
+            env: self.env,
+            allow: self.allow,
+        };
+        let report = check::run(crate::app::APP, ctx.root(), &options)?;
+        eprint!("{report}");
+        if report.failed(self.strict) {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+}
 ===== src/commands/css.rs =====
 //! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
 //!
@@ -4371,6 +4421,55 @@ fn touch(path: &Path) -> anyhow::Result<()> {
     let same = std::fs::read(path)?;
     std::fs::write(path, same)?;
     Ok(())
+}
+===== src/commands/dbshell.rs =====
+//! `dbshell` -- the database's own client, on this application's database.
+//!
+//! Reads `[db] url` the way the server does and replaces itself with `psql`
+//! or `sqlite3` on it. `--print` shows the command line; a password goes in
+//! `PGPASSWORD` and never on it. See `brocanth_db::shell`.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use std::ffi::OsString;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Open psql or sqlite3 on the database in `[db] url`
+#[cmd]
+#[derive(clap::Args)]
+pub struct Dbshell {
+    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]
+    #[arg(long, short, value_name = "ENV")]
+    env: Option<String>,
+    /// Print the command line instead of running it. The password is not printed
+    #[arg(long)]
+    print: bool,
+    /// Passed to psql or sqlite3 unchanged, after `--`
+    #[arg(last = true, value_name = "CLIENT ARGS")]
+    rest: Vec<OsString>,
+}
+
+impl Command for Dbshell {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let url = url(self.env.as_deref(), ctx.root())?;
+        brocanth_db::shell::run(&url, ctx.root(), self.print, &self.rest)?;
+        Ok(())
+    }
+}
+
+/// `[db] url`, through the loader the server uses, so the files,
+/// `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server sees.
+fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
+    let mut loader = brocanth_config::Loader::new(crate::app::APP).cwd(root);
+    if let Some(env) = env {
+        loader = loader.env(env);
+    }
+    Ok(loader
+        .load()?
+        .section::<crate::plugins::db::Settings>("db")?
+        .url)
 }
 ===== src/commands/migrate.rs =====
 //! `migrate` -- apply the migrations in `migrations/` to `[db] url`.
@@ -8761,10 +8860,10 @@ adapted_to = ["config"]
 
 [modules.config]
 kind = ["enhancer"]
-files = ["config/development.toml"]
+files = ["config/development.toml", "src/commands/check.rs"]
 config = []
 crates = ["brocanth-config"]
-adapted_to = []
+adapted_to = ["commands"]
 
 [modules.sessions]
 kind = ["middleware"]
@@ -8775,10 +8874,10 @@ adapted_to = ["config"]
 
 [modules.db]
 kind = ["enhancer", "middleware", "renderer"]
-files = ["src/plugins/db/"]
+files = ["src/commands/dbshell.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
-adapted_to = ["config"]
+adapted_to = ["config", "commands"]
 
 [modules.model]
 kind = ["enhancer", "middleware", "renderer"]
@@ -8990,4 +9089,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: c6675c009ff26e1f
+# brocanth-digest: 544227c715e057e3

@@ -12,9 +12,9 @@ readme = "README.md"
 # structure rather than whitespace. An application that does not name this
 # plugin in `main` links none of it.
 [dependencies]
-brocanth.workspace = true
-http = "1"
-thiserror = "2"
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+thiserror = { version = "2", optional = true }
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
 # `openapi`. It lives beside the crate it writes into a project, and not in
@@ -70,7 +70,11 @@ async-trait = { version = "0.1", optional = true }
 brocanth-test.workspace = true
 
 [features]
-default = []
+default = ["runtime"]
+
+# The document, the plugin and the drift check: everything an application
+# runs. Off only in the brocanth CLI, which links the `scaffold` side alone.
+runtime = ["dep:brocanth", "dep:http", "dep:thiserror"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's
@@ -78,8 +82,8 @@ default = []
 scaffold = ["dep:brocanth-scaffold"]
 
 # The backoffice tab. Off, like every other way out of this crate.
-admin = ["dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
+admin = ["runtime", "dep:brocanth-admin", "dep:rsx", "dep:async-trait"]
 
 # Read a schema out of a `zod::Node`, so a struct that derives
 # `zod::Entry` describes its own request and response bodies.
-zod = ["dep:zod"]
+zod = ["runtime", "dep:zod"]

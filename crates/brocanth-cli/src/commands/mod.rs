@@ -9,7 +9,6 @@ pub mod add;
 pub mod admin;
 pub mod check;
 pub mod create;
-pub mod dbshell;
 pub mod delegate;
 pub mod project;
 

@@ -101,3 +101,18 @@ brocanth-client = { path = "crates/brocanth-client", version = "0.1.0" }
 # like rsx: it is a Rust library about rules and literals, and nothing in it
 # knows what HTTP is.
 zod = { path = "../zod", version = "0.1.0" }
+
+# The build `cargo install --path crates/brocanth-cli --profile dist` uses
+# for the installed CLI: no debug info, no symbols, thin LTO, one codegen
+# unit. About 2.6 MB against 3.7 MB for plain `release`.
+#
+# A named profile and not `[profile.release]`: a profile in the workspace
+# root applies to every member, and an application built here in release
+# keeps its symbols, so a panic in production names the function. Cargo has
+# no per-package `lto` or `strip`, so the CLI cannot have them alone.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

@@ -129,7 +129,13 @@ Not done: `dumpdata`, and a JSON, array, `Decimal` or `Uuid` column. Those
 types are behind SeaORM features that `brocanth-model` does not turn on, and
 the error says so.
 
-## 2. `brocanth dbshell` (Django D26)
+## 2. `dbshell` (Django D26)
+
+A command of the generated project: the `db` module writes
+`src/commands/dbshell.rs` when the project has `commands`. `brocanth
+dbshell` hands it to the project's binary, like any project command. It
+lives in the project because only the project knows how its configuration
+is read; the `brocanth` CLI links no configuration loader.
 
 ```text
 brocanth dbshell                      # the development database
@@ -138,8 +144,8 @@ brocanth dbshell -- -c 'select 1'     # arguments after -- go to the client
 brocanth dbshell --print              # print the command line, run nothing
 ```
 
-It reads `[db] url` through the same `brocanth_config::Loader` the
-application uses, so the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree
+It reads `[db] url` the way the server does (through the project's
+`brocanth_config::Loader` with `config`, else `$<APP>_DB__URL`), so the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree
 with what the application sees. Then it replaces itself with the database's
 own client:
 
@@ -170,6 +176,11 @@ A console has two uses, and each one has an honest tool:
   again.
 
 ## 3. `brocanth check --deploy` (Django D23)
+
+Two halves. The `brocanth` CLI checks the modules: one the chosen ones
+recommend and the project lacks. Then it runs the project's own `check`
+command with the same arguments, which reads the configuration and
+`src/`. That half needs `config` and `commands`.
 
 ```text
 brocanth check                         # the checks for every environment

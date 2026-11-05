@@ -201,6 +201,12 @@
 
 #![warn(missing_docs)]
 
+/// `check` and `check --deploy`, as a project command runs them.
+///
+/// Behind the `check` feature, which is off: an application that does not
+/// run the checks compiles none of them.
+#[cfg(feature = "check")]
+pub mod check;
 mod config;
 mod de;
 mod dump;

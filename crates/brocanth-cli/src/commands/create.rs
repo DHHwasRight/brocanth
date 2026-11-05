@@ -42,6 +42,11 @@ use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 /// Where the generated `Cargo.toml` points for the framework itself.
 const REPOSITORY: &str = "https://github.com/DHHwasRight/brocanth.git";
 
+/// The environment a new project's first config file is for:
+/// `brocanth_config::DEFAULT_ENV`, spelled here because this tool links no
+/// configuration loader. A test holds the two equal.
+pub const DEFAULT_ENV: &str = "development";
+
 #[derive(Args)]
 pub struct CreateArgs {
     /// Directory to create, and the cargo package name
@@ -971,7 +976,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     }
     if a.has("config") {
         files.push((
-            format!("config/{}.toml", brocanth_config::DEFAULT_ENV),
+            format!("config/{}.toml", DEFAULT_ENV),
             config_toml(a, &built),
         ));
     }
@@ -5071,7 +5076,7 @@ fn config_toml(a: &Answers, built: &Built) -> String {
          shutdown_grace_secs = 25\n",
         upper = a.ident().to_uppercase(),
         ident = a.ident(),
-        env = brocanth_config::DEFAULT_ENV,
+        env = DEFAULT_ENV,
         title = a.title,
     );
     for section in built.slot(Slot::ConfigSections) {
@@ -5083,6 +5088,11 @@ fn config_toml(a: &Answers, built: &Built) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_config_file_is_the_one_the_loader_reads_by_default() {
+        assert_eq!(DEFAULT_ENV, brocanth_config::DEFAULT_ENV);
+    }
 
     fn answers(picks: &[&'static str]) -> Answers {
         Answers {

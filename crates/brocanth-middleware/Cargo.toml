@@ -12,8 +12,8 @@ description = "The middleware every application rewrites: proxy headers, method 
 # links is a cost every application that wants a canonical-host redirect
 # also pays.
 [dependencies]
-brocanth.workspace = true
-http = "1"
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
 
 # The OS CSPRNG, and the reason the count above went from two to three: a
 # CSRF token a visitor can predict is not a CSRF token, and std has no
@@ -22,15 +22,15 @@ http = "1"
 # three links one copy. The constant-time comparison is written here
 # rather than taken from `subtle`, because the one this needs folds the
 # lengths in as well and does not return early on them.
-getrandom = "0.4"
+getrandom = { version = "0.4", optional = true }
 
 # The Content-Security-Policy hashes. dp-swap's two scripts are inlined
 # as compile-time constants, and a `'sha256-...'` source is what lets them
 # run without `'unsafe-inline'`. `brocanth-auth` and `brocanth-storage`
 # take the same two versions, so this adds no second copy. The rate
 # limiter uses the same digest to keep a session cookie out of its store.
-sha2 = "0.11"
-base64 = "0.23"
+sha2 = { version = "0.11", optional = true }
+base64 = { version = "0.23", optional = true }
 
 # `config`: the configuration types deserialise, so a `[security_headers]`
 # or `[rate_limit]` section of a brocanth-config file builds one. Off, so
@@ -65,12 +65,15 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 brocanth-middleware = { path = ".", features = ["config", "postgres"] }
 
 [features]
-default = []
+default = ["runtime"]
+# Everything an application runs: the hooks and their configuration types.
+# Off only in the brocanth CLI, which links the `scaffold` side alone.
+runtime = ["dep:brocanth", "dep:http", "dep:getrandom", "dep:sha2", "dep:base64"]
 scaffold = ["dep:brocanth-scaffold"]
 # The configuration types deserialise from a brocanth-config section.
-config = ["dep:serde"]
+config = ["runtime", "dep:serde"]
 # `rate_limit::PgStore`, the shared counter store.
-postgres = ["dep:sqlx"]
+postgres = ["runtime", "dep:sqlx"]
 
 [dependencies.brocanth-scaffold]
 workspace = true

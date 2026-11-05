@@ -148,7 +148,7 @@ silence. A refusal is easier to debug than a missing command.
 ## How `brocanth` runs a project command
 
 `brocanth` is installed once. It knows its own subcommands: `create`,
-`add`, `migrate`, `dbshell` and `check`. It hands every other subcommand
+`add`, `check` and `admin`. It hands every other subcommand
 to the project, the way `rails` hands off to `bin/rails`:
 
 1. It walks up from the current directory to `brocanth.toml`. Without it

@@ -2,10 +2,10 @@
 
 `brocanth-cli` builds `brocanth`, the command line of the framework. It
 writes a new project from a list of modules, adds a module to a project
-that exists, writes migrations, opens the database client, checks a
-configuration before a deploy, and copies a shipped admin screen into a
-project. Inside a project it also runs the
-project's own commands. Use it to start and grow a brocanth application.
+that exists, checks the modules a project is missing, and copies a
+shipped admin screen into a project. Inside a project it also runs the
+project's own commands: `migrate`, `dbshell`, `settings` and the
+configuration checks live in the project, not here. Use it to start and grow a brocanth application.
 It is a binary, not a library: an application never depends on it. A
 generated project's own binary (`my-app serve`, `my-app settings`) comes
 from `brocanth-command`, not from this crate.
@@ -15,8 +15,13 @@ from `brocanth-command`, not from this crate.
 brocanth is not published. Install the CLI from a checkout:
 
 ```text
-cargo install --path crates/brocanth-cli
+cargo install --path crates/brocanth-cli --profile dist
 ```
+
+The `dist` profile strips symbols and debug info and uses thin LTO: about
+2.6 MB instead of 3.7 MB with plain `release`. It is a named profile, not
+`[profile.release]`, because a workspace profile applies to every member
+and an application built in release should keep its symbols.
 
 To work on the CLI itself, use `cargo run -p brocanth-cli --` in place of
 `brocanth`.
@@ -148,19 +153,15 @@ the binary was built without it. Run `migrate sync`, then `up` again.
 
 See [docs/migrations.md](../../docs/migrations.md).
 
-### `brocanth dbshell`
-
-Opens `psql` or `sqlite3` on the database in `[db] url`. Alias:
-`brocanth dbconsole`. `--env <ENV>` picks the environment (default
-`$<APP>_ENV`, else `development`). `--print` prints the command line
-without the password. Arguments after `--` go to the client. A Postgres
-password goes in `PGPASSWORD`, not on the command line. See
-[docs/tooling.md](../../docs/tooling.md).
-
 ### `brocanth check`
 
-Reads `brocanth.toml`, the configuration of one environment, and `src/`
-as text. It builds nothing and connects to nothing, so it runs in CI.
+Two halves. The CLI runs the module checks: a module that the chosen ones
+recommend and the project lacks. Then it runs the project's own `check`
+command with the same arguments, which reads the configuration of one
+environment and `src/` as text. That half exists when the project has
+`config` and `commands`; it lives in the project because only the project
+knows how its configuration is read, and the CLI links no configuration
+loader.
 
 - `--deploy` adds the production checks: secrets, cookies, CSRF, HSTS,
   the admin, the database. The environment is then `production`.
@@ -169,12 +170,18 @@ as text. It builds nothing and connects to nothing, so it runs in CI.
 - `--strict` exits 1 on a warning too.
 
 Each finding has an id, a location and a `help:` line. The exit code is 1
-when an error remains. The ids are `check/dialect` and `deploy/env`,
-`deploy/no-config`, `deploy/cookie-insecure`, `deploy/cookie-prefix`,
-`deploy/signing-key`, `deploy/default-secret`, `deploy/secret-in-file`,
-`deploy/debug-logging`, `deploy/jobs-migrate`, `deploy/database`,
-`deploy/csrf-off`, `deploy/hooks-not-run`, `deploy/hsts`,
-`deploy/admin-unscoped`. See [docs/tooling.md](../../docs/tooling.md).
+when an error remains. See [docs/tooling.md](../../docs/tooling.md).
+
+### Project commands: `dbshell`, `migrate`, `settings`
+
+These are commands of the generated project, and `brocanth <name>` hands
+them to the project's binary, like any project command:
+
+- `dbshell` (alias `dbconsole`) comes with `db` and `commands`. It opens
+  `psql` or `sqlite3` on `[db] url`; a Postgres password goes in
+  `PGPASSWORD`, not on the command line.
+- `migrate` comes with `model`.
+- `settings` prints every configuration layer and the merged values.
 
 ### `brocanth admin`
 
@@ -281,9 +288,12 @@ No database and no environment variable is needed.
 - **Formatting.** `every_generated_rust_file_is_already_formatted` runs
   rustfmt over every generated `.rs` file. A file must come out the same.
 - **Modules.** `src/modules/mod.rs` checks each manifest in `ALL`.
-- **Binary tests.** `tests/check.rs`, `tests/dbshell.rs`,
-  `tests/migrate.rs` and `tests/plain_text.rs` run the built `brocanth`
-  over projects on disk. `tests/readme.rs` checks that this README names
+- **Binary tests.** `tests/migrate.rs` and `tests/plain_text.rs` run the
+  built `brocanth`
+  over projects on disk. The configuration checks are tested in
+  `brocanth-config` (`src/check.rs`) and `dbshell` in `brocanth-db`
+  (`src/shell.rs`), the crates that own them. `tests/lean.rs` fails if the
+  CLI's graph regains a runtime crate. `tests/readme.rs` checks that this README names
   every command and every module that `brocanth --help` lists, and no
   command that does not exist.
 - **Slow tests.** Some tests generate a project and run `cargo build` on

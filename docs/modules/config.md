@@ -13,7 +13,7 @@ The wizard calls it: *Settings in config/<env>.toml, layered per environment*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | none |
+| Adapts to | [`commands`](commands.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-config` |

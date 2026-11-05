@@ -1,50 +1,26 @@
-//! `brocanth dbshell` -- the database's own client, on the project's database.
+//! `dbshell`: the database's own client, on the application's database.
 //!
-//! Django's `dbshell`, Rails' `dbconsole`. It reads `[db] url` from the
-//! configuration of one environment and replaces itself with `psql` or
-//! `sqlite3` on that database.
+//! Django's `dbshell`, Rails' `dbconsole`. A generated project with `db`
+//! and `commands` has a `dbshell` command: it reads `[db] url` the way the
+//! application does, and calls [`run`], which replaces the process with
+//! `psql` or `sqlite3` on that database.
+//!
+//! It is a command of the project and not of the `brocanth` CLI because
+//! only the project knows how its configuration is read.
 //!
 //! # Why not a Rust shell
 //!
 //! `rails console` and `manage.py shell` evaluate the language the
 //! application is written in, against the application's loaded classes.
 //! Rust has no interpreter, and a project's types exist only inside its
-//! compiled binary. A REPL such as `evcxr` compiles each line as a new
-//! crate: it cannot see a project's private modules, it cannot hold the
-//! application's running state, and it rebuilds the dependency tree on the
-//! first line. Calling that a console would promise a thing it cannot do.
-//!
-//! What a console is *for* splits in two, and each half has an honest tool:
-//!
-//! * **Look at the data.** This command: the database's own client, which
-//!   is a better data shell than anything written here.
-//! * **Run application code once.** A command in the project
-//!   (`src/commands/<name>.rs`, run as `brocanth <name>`). It is compiled
-//!   against the project, so it sees every type, and it is a file, so it can
-//!   be reviewed and run again.
+//! compiled binary. What a console is *for* splits in two, and each half
+//! has an honest tool: the database's own client to look at the data, and
+//! a command of the project (`src/commands/<name>.rs`) to run application
+//! code once.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-
-use clap::Args;
-
-use crate::commands::project::Project;
-use crate::commands::Outcome;
-use crate::ui::{paint, Diagnostic, Ui, ACCENT, DIM};
-
-#[derive(Args)]
-pub struct DbshellArgs {
-    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]
-    #[arg(long, short, value_name = "ENV")]
-    pub env: Option<String>,
-    /// Print the command line instead of running it. The password is not printed
-    #[arg(long)]
-    pub print: bool,
-    /// Passed to psql or sqlite3 unchanged, after `--`
-    #[arg(last = true, value_name = "CLIENT ARGS")]
-    pub rest: Vec<OsString>,
-}
 
 /// The client to run, worked out from a URL.
 #[derive(Debug, PartialEq, Eq)]
@@ -58,78 +34,88 @@ pub struct Client {
     pub password: Option<String>,
 }
 
-pub fn run(ui: &Ui, dir: Option<&Path>, args: DbshellArgs) -> Outcome {
-    let project = Project::find(dir)?;
-    // An empty list is a marker from before the list, which says nothing.
-    if !project.modules.is_empty() && !project.has("db") {
-        return Err(vec![Diagnostic::error(
-            "dbshell/no-db",
-            "this project has no `db` module, so it names no database",
-        )
-        .help("`brocanth add db` gives it one, with `[db] url` in the config")]);
-    }
-    let config = project.config(args.env.as_deref())?;
-    let env = config.env().to_owned();
+/// Why the client does not start, and what to do.
+#[derive(Debug)]
+pub struct ShellError {
+    /// The rule, such as `dbshell/memory`.
+    pub id: &'static str,
+    /// What is wrong.
+    pub message: String,
+    /// What to do about it.
+    pub help: Option<String>,
+}
 
-    let Some(url) = config.root().at("db.url").and_then(|v| v.as_str()) else {
-        return Err(vec![Diagnostic::error(
-            "dbshell/no-url",
-            format!("the `{env}` configuration has no `[db] url`"),
-        )
-        .help(format!(
-            "set `url` under `[db]` in {}, or set ${}",
-            project.config_file(&env),
-            project.variable("db", "url")
-        ))]);
-    };
-    let from = config
-        .provenance("db.url")
-        .map(ToString::to_string)
-        .unwrap_or_default();
-
-    let client = client_for(url, &project.root)
-        .map_err(|d| vec![d.note(format!("`[db] url` is set at {from}"))])?;
-
-    if args.print {
-        let mut line = String::new();
-        if client.password.is_some() {
-            line.push_str("PGPASSWORD=... ");
+impl ShellError {
+    fn new(id: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            message: message.into(),
+            help: None,
         }
-        line.push_str(client.program);
+    }
+
+    fn help(mut self, text: impl Into<String>) -> Self {
+        self.help = Some(text.into());
+        self
+    }
+}
+
+impl fmt::Display for ShellError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "error[{}]: {}", self.id, self.message)?;
+        if let Some(help) = &self.help {
+            write!(f, "\nhelp: {help}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ShellError {}
+
+/// Opens the client on `url`, or prints its command line with `print`.
+///
+/// `root` is the project root: a relative SQLite path is read from there.
+/// `rest` goes to the client unchanged. On Unix this returns only on
+/// failure, because the process becomes the client.
+pub fn run(url: &str, root: &Path, print: bool, rest: &[OsString]) -> Result<(), ShellError> {
+    let client = client_for(url, root)?;
+    if print {
+        println!("{}", command_line(&client, rest));
+        return Ok(());
+    }
+    eprintln!("{} {}", client.program, client.target);
+    handoff(&client, rest)
+}
+
+/// The command line, with the password left out.
+pub fn command_line(client: &Client, rest: &[OsString]) -> String {
+    let mut line = String::new();
+    if client.password.is_some() {
+        line.push_str("PGPASSWORD=... ");
+    }
+    line.push_str(client.program);
+    line.push(' ');
+    line.push_str(&shell_quote(&client.target));
+    for arg in rest {
         line.push(' ');
-        line.push_str(&shell_quote(&client.target));
-        for arg in &args.rest {
-            line.push(' ');
-            line.push_str(&shell_quote(&arg.to_string_lossy()));
-        }
-        ui.result(line);
-        return Ok(ExitCode::SUCCESS);
+        line.push_str(&shell_quote(&arg.to_string_lossy()));
     }
-
-    ui.note(format!(
-        "{} {} {}",
-        paint(ACCENT, client.program),
-        client.target,
-        paint(DIM, format!("({env}, from {from})"))
-    ));
-    handoff(&client, &args.rest)
+    line
 }
 
 /// `psql` for a Postgres URL, `sqlite3` for a SQLite one.
-pub fn client_for(url: &str, root: &Path) -> Result<Client, Box<Diagnostic>> {
+pub fn client_for(url: &str, root: &Path) -> Result<Client, ShellError> {
     if let Some(rest) = url
         .strip_prefix("sqlite://")
         .or_else(|| url.strip_prefix("sqlite:"))
     {
         let path = rest.split('?').next().unwrap_or(rest);
         if path.is_empty() || path == ":memory:" || rest.contains("mode=memory") {
-            return Err(Box::new(
-                Diagnostic::error(
-                    "dbshell/memory",
-                    "the database is in memory, so no other process can open it",
-                )
-                .help("point the URL at a file, such as sqlite://db/development.sqlite?mode=rwc"),
-            ));
+            return Err(ShellError::new(
+                "dbshell/memory",
+                "the database is in memory, so no other process can open it",
+            )
+            .help("point the URL at a file, such as sqlite://db/development.sqlite?mode=rwc"));
         }
         let file = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -139,13 +125,11 @@ pub fn client_for(url: &str, root: &Path) -> Result<Client, Box<Diagnostic>> {
         if !file.is_file() {
             // `sqlite3` would create an empty file here and open it without a
             // word, which looks exactly like a database whose tables vanished.
-            return Err(Box::new(
-                Diagnostic::error(
-                    "dbshell/no-file",
-                    format!("the database file {} does not exist", file.display()),
-                )
-                .help("start the application or run its migrations once; that creates the file"),
-            ));
+            return Err(ShellError::new(
+                "dbshell/no-file",
+                format!("the database file {} does not exist", file.display()),
+            )
+            .help("start the application or run its migrations once; that creates the file"));
         }
         return Ok(Client {
             program: "sqlite3",
@@ -164,13 +148,11 @@ pub fn client_for(url: &str, root: &Path) -> Result<Client, Box<Diagnostic>> {
     }
 
     let scheme = url.split(':').next().unwrap_or(url);
-    Err(Box::new(
-        Diagnostic::error(
-            "dbshell/scheme",
-            format!("brocanth has no client for a `{scheme}` URL"),
-        )
-        .help("`[db] url` is a postgres:// URL; dbshell also opens a sqlite:// file"),
-    ))
+    Err(ShellError::new(
+        "dbshell/scheme",
+        format!("dbshell has no client for a `{scheme}` URL"),
+    )
+    .help("`[db] url` is a postgres:// URL; dbshell also opens a sqlite:// file"))
 }
 
 /// The URL with `user:password@` turned into `user@`, and the password.
@@ -225,14 +207,14 @@ fn shell_quote(text: &str) -> String {
     }
 }
 
-fn not_found(client: &Client) -> Diagnostic {
+fn not_found(client: &Client) -> ShellError {
     let install = match client.program {
         "psql" => {
             "install the PostgreSQL client (`brew install libpq`, `apt install postgresql-client`)"
         }
         _ => "install SQLite's shell (`brew install sqlite`, `apt install sqlite3`)",
     };
-    Diagnostic::error(
+    ShellError::new(
         "dbshell/no-client",
         format!("`{}` is not on PATH", client.program),
     )
@@ -240,7 +222,7 @@ fn not_found(client: &Client) -> Diagnostic {
 }
 
 #[cfg(unix)]
-fn handoff(client: &Client, rest: &[OsString]) -> Outcome {
+fn handoff(client: &Client, rest: &[OsString]) -> Result<(), ShellError> {
     use std::os::unix::process::CommandExt;
 
     let mut command = std::process::Command::new(client.program);
@@ -250,33 +232,28 @@ fn handoff(client: &Client, rest: &[OsString]) -> Outcome {
     }
     let error = command.exec();
     if error.kind() == std::io::ErrorKind::NotFound {
-        return Err(vec![not_found(client)]);
+        return Err(not_found(client));
     }
-    Err(vec![Diagnostic::error(
+    Err(ShellError::new(
         "dbshell/exec",
         format!("cannot run `{}`: {error}", client.program),
-    )])
+    ))
 }
 
 #[cfg(not(unix))]
-fn handoff(client: &Client, rest: &[OsString]) -> Outcome {
+fn handoff(client: &Client, rest: &[OsString]) -> Result<(), ShellError> {
     let mut command = std::process::Command::new(client.program);
     command.arg(&client.target).args(rest);
     if let Some(password) = &client.password {
         command.env("PGPASSWORD", password);
     }
     match command.status() {
-        Ok(status) => Ok(ExitCode::from(
-            status
-                .code()
-                .and_then(|c| u8::try_from(c).ok())
-                .unwrap_or(1),
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(vec![not_found(client)]),
-        Err(e) => Err(vec![Diagnostic::error(
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found(client)),
+        Err(e) => Err(ShellError::new(
             "dbshell/exec",
             format!("cannot run `{}`: {e}", client.program),
-        )]),
+        )),
     }
 }
 
@@ -297,6 +274,9 @@ mod tests {
             "postgres://app@db.internal:5432/blog?sslmode=require"
         );
         assert_eq!(c.password.as_deref(), Some("s@cret"));
+        let line = command_line(&c, &[]);
+        assert!(line.starts_with("PGPASSWORD=... psql "), "{line}");
+        assert!(!line.contains("s@cret"), "{line}");
     }
 
     #[test]
@@ -319,18 +299,18 @@ mod tests {
 
     #[test]
     fn a_missing_sqlite_file_is_refused_rather_than_created() {
-        let d = client_for("sqlite://db/absent.sqlite", Path::new("/nonexistent")).unwrap_err();
-        assert_eq!(d.code.as_deref(), Some("dbshell/no-file"));
-        assert!(d.render().contains("help:"), "{}", d.render());
+        let e = client_for("sqlite://db/absent.sqlite", Path::new("/nonexistent")).unwrap_err();
+        assert_eq!(e.id, "dbshell/no-file");
+        assert!(e.to_string().contains("help:"), "{e}");
     }
 
     #[test]
     fn memory_and_unknown_schemes_say_why() {
-        let d = client_for("sqlite::memory:", Path::new("/")).unwrap_err();
-        assert_eq!(d.code.as_deref(), Some("dbshell/memory"));
-        let d = client_for("mysql://localhost/x", Path::new("/")).unwrap_err();
-        assert_eq!(d.code.as_deref(), Some("dbshell/scheme"));
-        assert!(d.render().contains("help:"));
+        let e = client_for("sqlite::memory:", Path::new("/")).unwrap_err();
+        assert_eq!(e.id, "dbshell/memory");
+        let e = client_for("mysql://localhost/x", Path::new("/")).unwrap_err();
+        assert_eq!(e.id, "dbshell/scheme");
+        assert!(e.to_string().contains("help:"));
     }
 
     #[test]

@@ -97,20 +97,13 @@ enum Command {
     /// and the config, and refuses rather than overwrite a file of yours.
     /// `--questions` prints the choices, with what this project has.
     Add(commands::add::AddArgs),
-    /// Open psql or sqlite3 on this project's database
+    /// Find what is wrong with the modules, the configuration and the source
     ///
-    /// Reads `[db] url` from the configuration of one environment and
-    /// runs the database's own client on it. A Postgres password goes in
-    /// PGPASSWORD, not on the command line. This is a data shell: Rust has
-    /// no interpreter, so code runs as a project command instead.
-    #[command(alias = "dbconsole")]
-    Dbshell(commands::dbshell::DbshellArgs),
-    /// Find what is wrong with the configuration and the source, before a deploy
-    ///
-    /// Reads brocanth.toml, the configuration of one environment and src/
-    /// as text. Builds nothing and connects to nothing. --deploy adds the
-    /// production checks. Each finding has an id, a location and a help
-    /// line; the exit code is 1 when an error remains.
+    /// The module checks run here: a module the chosen ones recommend and
+    /// the project lacks. The configuration and source checks are the
+    /// project's own `check` command, which this then runs with the same
+    /// arguments; it exists with `config` and `commands`. --deploy adds
+    /// the production checks. The exit code is 1 when an error remains.
     Check(commands::check::CheckArgs),
     /// Work on the project's admin: `eject` copies a shipped screen into it
     ///
@@ -212,11 +205,6 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
-        ),
-        Some(("dbshell", m)) => commands::dbshell::run(
-            &ui,
-            dir,
-            commands::dbshell::DbshellArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         Some(("check", m)) => commands::check::run(
             &ui,

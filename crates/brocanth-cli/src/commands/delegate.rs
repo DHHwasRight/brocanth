@@ -29,8 +29,13 @@ use crate::ui::{Diagnostic, Ui, ACCENT};
 pub const MARKER: &str = "brocanth.toml";
 
 /// The subcommands `brocanth` defines itself, and their aliases. A project
-/// command with one of these names is not listed in `brocanth --help`.
-const BUILT_IN: &[&str] = &["create", "new", "add", "dbshell", "dbconsole", "check"];
+/// command with one of these names is not listed in `brocanth --help`: the
+/// built-in always wins, so listing the project's twin would show a command
+/// that `brocanth <name>` never reaches. `check` and `admin` each have a
+/// twin in a generated project, and each built-in runs that twin itself
+/// when it needs the project: `check` after its module checks, `admin
+/// eject` never (the project's `admin eject` calls this tool).
+pub const BUILT_IN: &[&str] = &["create", "new", "add", "check", "admin"];
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {
@@ -68,6 +73,27 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     // the root. Without `-C`, the caller is already inside the project, and
     // a relative path argument keeps meaning what the caller meant.
     handoff(&binary, &args, dir.map(|_| root.as_path()))
+}
+
+/// Builds the project at `root` and runs its binary with `args`, waiting
+/// for it, so the caller can add its own findings to the exit code.
+///
+/// [`run`] replaces this process instead; a built-in that runs a project
+/// command as one half of its work cannot.
+pub fn run_and_wait(root: &Path, args: &[OsString]) -> Result<bool, Vec<Diagnostic>> {
+    build(root)?;
+    let binary = binary_path(root)?;
+    let status = Command::new(&binary)
+        .current_dir(root)
+        .args(args)
+        .status()
+        .map_err(|e| {
+            vec![Diagnostic::error(
+                "spawn",
+                format!("cannot run {}: {e}", binary.display()),
+            )]
+        })?;
+    Ok(status.success())
 }
 
 /// The nearest ancestor of `start` holding [`MARKER`].

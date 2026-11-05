@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //! An OpenAPI 3.1 document, derived from a brocanth route table.
 //!
 //! # The argument
@@ -146,6 +146,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "runtime")]
 pub mod adapter;
 
 /// The document's tab in `brocanth-admin`.
@@ -154,11 +155,17 @@ pub mod adapter;
 /// document and has no backoffice links neither the admin nor a renderer.
 #[cfg(feature = "admin")]
 pub mod admin;
+#[cfg(feature = "runtime")]
 pub mod document;
+#[cfg(feature = "runtime")]
 pub mod drift;
+#[cfg(feature = "runtime")]
 pub mod json;
+#[cfg(feature = "runtime")]
 pub mod plugin;
+#[cfg(feature = "runtime")]
 pub mod schema;
+#[cfg(feature = "runtime")]
 pub mod spec;
 
 /// Reading a `zod` schema into the document.
@@ -183,21 +190,28 @@ mod admin_templates {
     rsx::load_dir!("src/admin_templates");
 }
 
+#[cfg(feature = "runtime")]
 pub use crate::adapter::{schema_for, SchemaNode};
+#[cfg(feature = "runtime")]
 pub use crate::document::{
     ApiKeyIn, ComponentError, Components, Contact, Document, ExternalDocs, Header, Info, License,
     MediaType, Operation, ParamIn, Parameter, PathItem, RequestBody, Response, SecurityRequirement,
     SecurityScheme, Server, Tag, Validation, OPENAPI_VERSION,
 };
+#[cfg(feature = "runtime")]
 pub use crate::drift::{
     check, check_file, render, write, write_as, Change, Difference, Drift, DriftError, Format,
 };
+#[cfg(feature = "runtime")]
 pub use crate::json::{Json, JsonError};
+#[cfg(feature = "runtime")]
 pub use crate::plugin::{document_of, OpenApiConfig, OpenApiPlugin, SharedDocument};
+#[cfg(feature = "runtime")]
 pub use crate::schema::{Additional, NamedSchema, Schema, SchemaKind, SchemaSource, SchemaType};
 #[cfg(feature = "zod")]
 pub use crate::zod_node::{body_for, body_of, Body};
 
+#[cfg(feature = "runtime")]
 pub use crate::spec::{
     check_path_parameters, openapi_path, operation_id_for, DescribeOperation, HeadPolicy,
     OperationIdStyle, OperationSpec, SpecBuilder, SpecError,

@@ -38,7 +38,7 @@ default-run = "my-blog"
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics"], default-features = false }
-brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["check"] }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -2150,11 +2150,12 @@ metrics_path = "/metrics"
 //! `serve` arrived with the scaffold and is ordinary code here: rename it,
 //! give it flags, or delete it. The framework does not own this command line.
 
+pub mod check;
 pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 490a12f75e8c158c
+// brocanth-digest: c378ffc0cd707f1e
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -2314,6 +2315,54 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
 # default). Give `docker stop` more than that: `docker stop -t 30`.
 STOPSIGNAL SIGTERM
 CMD ["/app/my-blog", "serve"]
+===== src/commands/check.rs =====
+//! `check` -- what is wrong before it is live.
+//!
+//! Reads the configuration of one environment the way the application does,
+//! `brocanth.toml`, and `src/` as text. Nothing is built and nothing
+//! connects, so it runs in CI. `--deploy` adds the production checks; the
+//! list is in `brocanth_config::check`. `brocanth check` runs this command
+//! after the checks only the CLI can make.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_config::check::{self, Options};
+
+/// Check the configuration and the source; --deploy adds the production checks.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Check {
+    /// Add the production checks: secrets, cookies, CSRF, the admin, the database
+    #[arg(long)]
+    deploy: bool,
+    /// The environment to load [default: production with --deploy, else $<APP>_ENV or development]
+    #[arg(long, short, value_name = "ENV")]
+    env: Option<String>,
+    /// Silence one finding by its id, such as deploy/hsts. Repeat for more
+    #[arg(long, value_name = "ID")]
+    allow: Vec<String>,
+    /// Exit 1 on a warning too
+    #[arg(long)]
+    strict: bool,
+}
+
+impl Command for Check {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        let options = Options {
+            deploy: self.deploy,
+            env: self.env,
+            allow: self.allow,
+        };
+        let report = check::run(crate::app::APP, ctx.root(), &options)?;
+        eprint!("{report}");
+        if report.failed(self.strict) {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+}
 ===== src/commands/routes.rs =====
 //! Every route this application answers.
 //!
@@ -2725,10 +2774,10 @@ adapted_to = []
 
 [modules.config]
 kind = ["enhancer"]
-files = ["config/development.toml"]
+files = ["config/development.toml", "src/commands/check.rs"]
 config = []
 crates = ["brocanth-config"]
-adapted_to = []
+adapted_to = ["commands"]
 
 [modules.commands]
 kind = ["enhancer"]
@@ -2772,4 +2821,4 @@ config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
 adapted_to = ["config"]
 
-# brocanth-digest: c77a168b83b5a6da
+# brocanth-digest: 028a887e916b7365

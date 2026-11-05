@@ -135,7 +135,7 @@ brocanth add jobs                 # the same generator, one more module
 brocanth migrate make add_posts   # with `model`: the project's own command diffs src/models
 brocanth migrate up               # and applies, in the project's binary
 brocanth check --deploy           # secrets, cookies, CSRF, the database
-brocanth dbshell                  # psql or sqlite3 on this environment's database
+brocanth dbshell                  # with `db`: the project's command, psql or sqlite3
 brocanth admin eject list         # copy a shipped admin screen into the project, as yours
 brocanth --help                   # also lists the project's own commands
 ```
@@ -189,7 +189,7 @@ puts the crate in a new project.
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
 | [`brocanth-analytics`](crates/brocanth-analytics/README.md) | Page views counted on the server: a daily visitor hash, no cookie, no third party; a beacon for static sites | `analytics`, `beacon` |
-| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `migrate`, `dbshell`, `check`, `admin eject` | |
+| [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `check`, `admin eject`; it hands every other command to the project | |
 | [`brocanth-scaffold`](crates/brocanth-scaffold/README.md) | The contract a scaffold module implements | |
 | [`brocanth-test`](crates/brocanth-test/README.md) | An HTTP test client and an HTML reader for a built `App` | |
 

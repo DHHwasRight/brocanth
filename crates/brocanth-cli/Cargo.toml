@@ -11,12 +11,6 @@ name = "brocanth"
 path = "src/main.rs"
 
 [dependencies]
-brocanth.workspace = true
-# The configuration plugin, because `brocanth create` writes a config/<env>.toml
-# and a scaffold whose own loader would reject its own file must not ship: the
-# generated document is parsed and validated by the real crate in a test. The
-# core's no-hidden-dependencies rule is the core's; this is the tool.
-brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
 
 # The cache, for its scaffold module alone. `brocanth create` offers a module
 # that lives in the crate it writes, and `features = ["scaffold"]` is the
@@ -41,9 +35,9 @@ brocanth-auth = { path = "../brocanth-auth", version = "0.1.0", default-features
 brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-client = { path = "../brocanth-client", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-input = { path = "../brocanth-input", version = "0.1.0", default-features = false, features = ["scaffold"] }
-brocanth-middleware = { workspace = true, features = ["scaffold"] }
-brocanth-gtag = { workspace = true, default-features = false, features = ["scaffold"] }
-brocanth-openapi = { workspace = true, features = ["scaffold"] }
+brocanth-middleware = { path = "../brocanth-middleware", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-gtag = { path = "../brocanth-gtag", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-openapi = { path = "../brocanth-openapi", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }
 # `default-features = false` keeps `regex`, the `Validate` proc macro and a
@@ -99,3 +93,12 @@ toml_edit = "0.25"
 # `vendor/dpswap.min.js` is embedded with include_str! rather than listed
 # here. See vendor/README.md: a scaffold that needs the network to finish is
 # a scaffold that fails on a train.
+
+[dev-dependencies]
+# The core and the configuration loader, for tests only. The tool writes
+# text and links neither (tests/lean.rs holds that line). The tests use them
+# to check that what it writes is what the real crates accept: a generated
+# config/<env>.toml is parsed and validated by the loader the application
+# runs, so a scaffold whose own loader would reject its own file cannot ship.
+brocanth.workspace = true
+brocanth-config = { path = "../brocanth-config", version = "0.1.0" }

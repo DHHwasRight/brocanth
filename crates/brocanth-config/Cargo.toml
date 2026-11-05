@@ -88,6 +88,11 @@ json = ["dep:jsonc-parser"]
 # YAML 1.2, through `saphyr` 0.2.
 yaml = ["dep:saphyr"]
 
+# `check::run`: the checks a generated project runs as its `check` command.
+# Off, so an application that runs no checks compiles none. Needs TOML
+# because the checks read `brocanth.toml` and `config/<env>.toml`.
+check = ["toml"]
+
 # The backoffice tab. Off, like every parser is until it is asked for. `admin`
 # off means the code is absent and not merely unreachable: `src/admin.rs` and
 # the template beside it are `#[cfg]`-ed out of the crate entirely. It needs

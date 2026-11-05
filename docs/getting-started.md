@@ -275,16 +275,14 @@ brocanth --help
 Commands:
   create    Scaffold an application
   add       Put a module into a project that already exists
-  migrate   Write migrations from the models, and the ids that make renames visible
-  dbshell   Open psql or sqlite3 on this project's database
-  check     Find what is wrong with the configuration and the source, before a deploy
+  check     Find what is wrong with the modules, the configuration and the source
   admin     Work on the project's admin: `eject` copies a shipped screen into it
   routes    Every route this application answers
   serve     Serve the application over HTTP
   help      Print this message or the help of the given subcommand(s)
 ```
 
-The first six are `brocanth`'s own. Everything below them is **your
+The first four are `brocanth`'s own. Everything below them is **your
 project's**, read out of the built binary, so a command you add appears here
 once it has been compiled. `brocanth <command>` builds the project and runs
 it: `brocanth fixtures load blog` (see `docs/tooling.md`) is a project
