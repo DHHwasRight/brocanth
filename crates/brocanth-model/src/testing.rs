@@ -124,10 +124,11 @@ impl Harness {
     /// test that quietly passes because there was no Postgres is worse than no
     /// test at all.
     pub fn postgres_url() -> Option<String> {
-        Self::POSTGRES_URL_VARS
-            .iter()
-            .find_map(|name| std::env::var(name).ok())
-            .filter(|url| !url.is_empty())
+        Self::POSTGRES_URL_VARS.iter().find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+        })
     }
 
     /// A connection to `url`.

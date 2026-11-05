@@ -15,7 +15,10 @@ async fn main() {
     let sqs: Arc<dyn DynBackend> = Arc::new(brocanth_queue_memory::Memory::sqs_shaped());
     println!("{}", brocanth_queue_conformance::run(sqs).await);
 
-    if let Ok(url) = std::env::var("BROCANTH_QUEUE_TEST_DATABASE_URL") {
+    if let Some(url) = std::env::var("BROCANTH_QUEUE_TEST_DATABASE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+    {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(8)
             .connect(&url)

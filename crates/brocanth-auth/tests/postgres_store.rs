@@ -32,10 +32,9 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 
 fn url() -> Option<String> {
-    std::env::var("BROCANTH_AUTH_TEST_POSTGRES")
-        .or_else(|_| std::env::var("BROCANTH_TEST_DATABASE_URL"))
-        .ok()
-        .filter(|u| !u.trim().is_empty())
+    ["BROCANTH_AUTH_TEST_POSTGRES", "BROCANTH_TEST_DATABASE_URL"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|u| !u.trim().is_empty()))
 }
 
 /// A `PgStore` in a schema of its own, which [`Fixture::finish`] drops.

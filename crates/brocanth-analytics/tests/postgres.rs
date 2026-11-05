@@ -20,8 +20,7 @@ fn url() -> Option<String> {
         "BROCANTH_TEST_DATABASE_URL",
     ]
     .iter()
-    .find_map(|v| std::env::var(v).ok())
-    .filter(|u| !u.trim().is_empty())
+    .find_map(|v| std::env::var(v).ok().filter(|u| !u.trim().is_empty()))
 }
 
 fn skipped() {

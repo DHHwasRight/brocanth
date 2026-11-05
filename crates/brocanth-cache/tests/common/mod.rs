@@ -53,12 +53,16 @@ use std::time::Duration;
 use brocanth_cache::{Cache, ManualClock, Namespace, PgCache};
 use chrono::{TimeZone, Utc};
 
-/// The URL of a database to test against, from either variable.
+/// The URL of a database to test against, from either variable. An empty
+/// variable counts as unset.
 pub fn test_database_url() -> Option<String> {
-    std::env::var("BROCANTH_CACHE_TEST_POSTGRES")
-        .or_else(|_| std::env::var("BROCANTH_TEST_DATABASE_URL"))
-        .ok()
-        .filter(|url| !url.trim().is_empty())
+    ["BROCANTH_CACHE_TEST_POSTGRES", "BROCANTH_TEST_DATABASE_URL"]
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+        })
 }
 
 /// Writes straight to the real standard error, bypassing libtest's capture.

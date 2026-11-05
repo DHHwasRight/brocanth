@@ -23,7 +23,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 async fn pool() -> Option<PgPool> {
-    let url = std::env::var("BROCANTH_QUEUE_TEST_DATABASE_URL").ok()?;
+    // An empty variable counts as unset.
+    let url = std::env::var("BROCANTH_QUEUE_TEST_DATABASE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())?;
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&url)

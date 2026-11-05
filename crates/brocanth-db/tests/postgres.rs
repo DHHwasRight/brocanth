@@ -18,8 +18,7 @@ use brocanth_db::{Db, DbConfig, DbError, Exec};
 fn url() -> Option<String> {
     ["BROCANTH_DB_TEST_POSTGRES", "BROCANTH_TEST_DATABASE_URL"]
         .iter()
-        .find_map(|v| std::env::var(v).ok())
-        .filter(|u| !u.trim().is_empty())
+        .find_map(|v| std::env::var(v).ok().filter(|u| !u.trim().is_empty()))
 }
 
 /// Writes to the real stderr, which libtest does not capture, so a skip is

@@ -1443,7 +1443,10 @@ mod pg {
     where
         F: AsyncFnOnce(Postgres),
     {
-        let Ok(url) = std::env::var("BROCANTH_TEST_DATABASE_URL") else {
+        let Some(url) = std::env::var("BROCANTH_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+        else {
             announce_skip();
             return;
         };

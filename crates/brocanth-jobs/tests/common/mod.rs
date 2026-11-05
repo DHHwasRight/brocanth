@@ -43,11 +43,15 @@ pub async fn sqlite_queue() -> (Queue, tempfile::TempDir) {
 }
 
 /// The Postgres test server's URL, or `None` when no variable names one.
+/// An empty variable counts as unset.
 pub fn postgres_url() -> Option<String> {
     ["BROCANTH_JOBS_TEST_POSTGRES", "BROCANTH_TEST_DATABASE_URL"]
         .iter()
-        .find_map(|name| std::env::var(name).ok())
-        .filter(|url| !url.is_empty())
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+        })
 }
 
 /// Announce that a test did not run, where the announcement cannot be

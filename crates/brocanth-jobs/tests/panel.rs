@@ -481,7 +481,7 @@ async fn the_history_screen_plots_what_the_archive_kept() {
     use brocanth_queue_postgres::{migrate, PgQueue};
     use sqlx::postgres::PgPoolOptions;
 
-    let Ok(url) = std::env::var("BROCANTH_TEST_DATABASE_URL") else {
+    let Some(url) = common::postgres_url() else {
         eprintln!("!! SKIPPED the_history_screen_plots_what_the_archive_kept: no Postgres server");
         return;
     };

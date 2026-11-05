@@ -94,7 +94,10 @@ fn migrate_outside_a_project_with_a_command_line_says_what_to_add() {
 #[test]
 #[ignore = "runs cargo build over a generated application and needs Postgres"]
 fn ids_make_up_status_and_down_run_in_the_project() {
-    let Ok(url) = std::env::var("BROCANTH_TEST_DATABASE_URL") else {
+    let Some(url) = std::env::var("BROCANTH_TEST_DATABASE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+    else {
         eprintln!("SKIPPED: BROCANTH_TEST_DATABASE_URL is not set");
         return;
     };
