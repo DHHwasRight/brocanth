@@ -114,15 +114,11 @@ the rest. Each item says where it is recorded.
 
 ### 1. Small fixes a user can hit
 
-1. **Stale docs.** `docs/getting-started.md` "What is not built yet" says
-   `brocanth` has only `create`; it has `create`, `add`, `check` and
-   `admin`. `docs/i18n.md` §7 says a generated project does not run the
-   hook pipeline; it does.
-2. **An empty `BROCANTH_TEST_DATABASE_URL`** is read as a database URL by
-   `brocanth-jobs` tests (`the_history_screen_plots_what_the_archive_kept`).
-   Treat an empty value as unset, as the other crates do.
-3. **`[server] shutdown_grace_secs` has no flag.** It belongs to the
-   framework, not to a module (`docs/module-flags.md`, open questions).
+Done. The docs no longer say that `brocanth` has only `create` or that a
+generated project skips the hook pipeline. Every test that reads a test
+database variable treats an empty value as unset. `[server]
+shutdown_grace_secs` has a flag and a variable in every project
+(`docs/module-flags.md`, "The framework's own settings").
 
 ### 2. New modules
 

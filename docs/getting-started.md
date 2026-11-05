@@ -184,7 +184,7 @@ enabled = ["observability", "config", "jobs", "commands"]
 
 [modules.jobs]
 kind = ["enhancer"]
-files = ["src/flags.rs", "src/commands/settings.rs", "src/plugins/jobs/"]
+files = ["src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]

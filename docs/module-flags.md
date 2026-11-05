@@ -262,13 +262,14 @@ from the process arguments and stops at `--`.
 
 | File | Owner | Holds |
 |---|---|---|
-| `src/plugins/mod.rs` | generator | `SETTINGS`, `given`, `flag_args` or `read_line`, `settings_report`; with config `config()` and `refuse_off_flags`; without config one `<section>_settings` per section |
+| `src/plugins/mod.rs` | generator | `SETTINGS`, `given`, `flag_args` or `read_line`, `settings_report`; with config `config()` and `refuse_off_flags`; without config one `<section>_settings` per section; `ServerSettings` and `shutdown_grace` |
 | `src/flags.rs` | project | `WITH_CONFIG`, `RENAMES` |
 | `src/commands/settings.rs` | project | the `settings` command, with `commands` |
 | `src/main.rs` | generator | `mod flags;` and the reader call |
 | `config/<env>.toml` | shared | the declared sections, with config |
 
-A project with no declared setting gets none of this.
+Every project gets these files, because the framework declares
+`[server] shutdown_grace_secs` (see below).
 
 ## Tests
 
@@ -330,7 +331,42 @@ change the CSRF cookie name, the policy header and the referrer policy
 that a response carries. The file's one-GET rule answers the second GET
 with 429.
 
+## The framework's own settings: `[server]`
+
+The framework declares `[server] shutdown_grace_secs` the way a module
+declares its settings. So it has the same three ways in:
+
+- the flag `--server.shutdown_grace_secs=SECS`;
+- the variable `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`;
+- with `config`, the key in `config/<env>.toml`, as before.
+
+The settings report shows it beside the modules' settings, and
+`src/flags.rs` can rename it.
+
+**Decision: every project declares it.** Every project serves, and every
+`serve` drains for the grace period. So every project gets the flag
+machinery, `src/flags.rs` and, with `commands`, the `settings` command,
+also `--core-only`.
+
+**Reason:** one rule for every setting. A setting that has a flag in some
+projects and not in others is a rule an operator must look up. Before
+this, a project without `config` had no way to change the grace period
+except an edit of `SHUTDOWN_GRACE` in `src/app.rs`, and a project with
+`config` read the file and the variable but no flag.
+
+How it is built:
+
+- The CLI records the declaration after the modules, under the owner
+  `brocanth`, which is not a module key. A module that declares
+  `server.shutdown_grace_secs` too is named in the error.
+- The type is `crate::plugins::ServerSettings`, generated in
+  `src/plugins/mod.rs`. Its `Default` is `crate::app::SHUTDOWN_GRACE`
+  (25 s), so the constant in `src/app.rs` stays the one default.
+- `plugins::shutdown_grace` reads `plugins::config()` with `config`, and
+  `server_settings(&given()?)` without it.
+- `config/<env>.toml` still writes `[server]` itself, beside `[app]`,
+  because `brocanth-config` owns both sections (`CORE_SECTIONS`).
+
 ## Open questions
 
-1. **The `[server]` section.** `shutdown_grace_secs` belongs to the
-   framework, not to a module, so it has no flag yet.
+None now.

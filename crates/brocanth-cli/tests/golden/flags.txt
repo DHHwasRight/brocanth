@@ -73,7 +73,7 @@ run = "cargo test"
 //! My Blog -- a brocanth application.
 //!
 //! No command line was asked for, so this binary does one thing. It takes the
-//! flags its modules declared, which `--help` lists and `src/flags.rs`
+//! flags its settings declare, which `--help` lists and `src/flags.rs`
 //! renames, and nothing else. Everything it contains is in `src/app.rs`;
 //! `brocanth add commands` turns this into a command line with `serve` as one
 //! of its commands.
@@ -104,7 +104,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 5c625988c80ed3bd
+// brocanth-digest: b5f00348e17ca817
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -249,9 +249,10 @@ fn headers(request: &hooks::Request) -> Vec<(String, String)> {
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
-/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
-/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
-/// `plugins::shutdown_grace`.
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit.
+/// `[server] shutdown_grace_secs` overrides it: `--server.shutdown_grace_secs`,
+/// `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`, or with the config plugin the file.
+/// See `plugins::shutdown_grace`.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 
 /// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
@@ -1448,7 +1449,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-/// One setting a module declared, by the key it sets.
+/// One declared setting, by the key it sets.
 pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
     /// unless `src/flags.rs` renames it.
@@ -1462,8 +1463,8 @@ pub struct Setting {
     pub env: &'static str,
 }
 
-/// Every setting the modules declared. `brocanth add` rewrites this list;
-/// `src/flags.rs` renames or hides a flag.
+/// Every setting the framework and the modules declared. `brocanth add`
+/// rewrites this list; `src/flags.rs` renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
         path: "sessions.cookie",
@@ -1494,6 +1495,12 @@ pub const SETTINGS: &[Setting] = &[
         help: "Seconds a file token lives.",
         flag: true,
         env: "MY_BLOG_STORAGE__TOKEN_TTL",
+    },
+    Setting {
+        path: "server.shutdown_grace_secs",
+        help: "Seconds a stop waits for open requests, then for the plugins.",
+        flag: true,
+        env: "MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS",
     },
 ];
 
@@ -1655,12 +1662,17 @@ pub fn read_line() -> Result<bool, String> {
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
+    let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
+        (
+            "server.shutdown_grace_secs",
+            format!("{:?}", server.shutdown_grace_secs),
+        ),
     ]
 }
 
@@ -1705,16 +1717,33 @@ pub fn storage_settings(given: &[Given]) -> Result<crate::plugins::storage::Sett
     Ok(settings)
 }
 
+/// `[server]`, as this binary runs it without a file: the plugin's
+/// defaults, then the environment, then the flags.
+pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings, String> {
+    let mut settings = crate::plugins::ServerSettings::default();
+    for given in given {
+        if given.setting.path == "server.shutdown_grace_secs" {
+            settings.shutdown_grace_secs = parsed(given)?;
+        }
+    }
+    Ok(settings)
+}
+
 /// Each setting as the plugin holds it, after every layer.
 fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
     let sessions = sessions_settings(given)?;
     let storage = storage_settings(given)?;
+    let server = server_settings(given)?;
     Ok(vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
+        (
+            "server.shutdown_grace_secs",
+            format!("{:?}", server.shutdown_grace_secs),
+        ),
     ])
 }
 
@@ -1769,12 +1798,28 @@ pub fn settings_report() -> Result<String, String> {
     Ok(out)
 }
 
-/// How long a stop waits: [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE).
-///
-/// This project has no configuration file, so the constant is the answer.
-/// `brocanth add config` makes it `[server] shutdown_grace_secs`.
+/// `[server]`: the settings the framework reads itself. It declares them as
+/// a module declares its own, so each has a flag, a variable and a line in
+/// the settings report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerSettings {
+    /// Seconds a stop waits for open requests, then for the plugins.
+    pub shutdown_grace_secs: u64,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+        }
+    }
+}
+
+/// `[server] shutdown_grace_secs` from the environment and the flags, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when neither sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    Ok(crate::app::SHUTDOWN_GRACE)
+    let server = server_settings(&given()?)?;
+    Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
 }
 
 /// What the server is handed for one request.
@@ -1806,7 +1851,7 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: e2129fbee550c0e6
+// brocanth-digest: d6a05cd85e073f46
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!

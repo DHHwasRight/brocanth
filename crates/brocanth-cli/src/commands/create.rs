@@ -827,6 +827,7 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
             .unwrap_or_else(|| unreachable!("`{key}` is not a module this CLI has"))
             .contribute(&project, &mut built);
     }
+    framework_settings(&mut built);
 
     // A registration the provider list does not know about. `register!`
     // widens the builder's type and `plugins::Installed` does not, so the
@@ -873,6 +874,39 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
     } else {
         Err(wrong)
     }
+}
+
+/// The owner the framework's own settings are recorded under. Not a module
+/// key, so no module's sections include them.
+const FRAMEWORK: &str = "brocanth";
+
+/// The settings the framework reads itself: `[server]`.
+///
+/// Declared the way a module declares its own, so `[server]
+/// shutdown_grace_secs` gets a flag, a variable and a line in the settings
+/// report from the same code (`docs/module-flags.md`, "The `[server]`
+/// section"). Every project serves, so every project declares it. After the
+/// modules, so a module that declares the same key is the one named.
+fn framework_settings(built: &mut Built) {
+    built.now_writing(FRAMEWORK);
+    built.setting(
+        "server",
+        Setting::integer(
+            "shutdown_grace_secs",
+            25,
+            "Seconds a stop waits for open requests, then for the plugins.",
+        ),
+    );
+    built.settings_type("server", "crate::plugins::ServerSettings");
+}
+
+/// Whether a module declared a setting. The framework always declares
+/// `[server]`, so [`has_settings`] is true for every project; this is the
+/// question of whether a plugin reads what this run was given.
+fn module_settings(built: &Built) -> bool {
+    built
+        .settings()
+        .any(|(by, _, setting)| by != FRAMEWORK && setting.kind != Kind::List)
 }
 
 /// Every file this project is, with the header and digest on the ones the
@@ -2126,9 +2160,9 @@ fn app_rs(a: &Answers, built: &Built) -> String {
 ///
 /// The same text whatever the module list is: `src/app.rs` is the
 /// developer's, and `brocanth add` does not rewrite it. Where the grace
-/// period comes from does vary -- `[server] shutdown_grace_secs` with the
-/// config plugin, the constant without -- so that question goes to
-/// `plugins::shutdown_grace`, which the generator owns.
+/// period comes from does vary -- the files, the environment and the flags
+/// with the config plugin, the environment and the flags without -- so that
+/// question goes to `plugins::shutdown_grace`, which the generator owns.
 fn serve_fns(a: &Answers) -> String {
     let dispatch = if a.has("rsx-tailwind") || a.has("rsx-htmx") {
         // Static files never reach a page. They are bytes with a content
@@ -2149,9 +2183,10 @@ fn serve_fns(a: &Answers) -> String {
 const SERVE_FN: &str = r#"/// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
-/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
-/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
-/// `plugins::shutdown_grace`.
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit.
+/// `[server] shutdown_grace_secs` overrides it: `--server.shutdown_grace_secs`,
+/// `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`, or with the config plugin the file.
+/// See `plugins::shutdown_grace`.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 
 /// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
@@ -2485,14 +2520,14 @@ fn main() -> ExitCode {{
     )
 }
 
-/// `src/main.rs` with no command line, and flags a module declared: it reads
-/// them, refuses anything else, and serves.
+/// `src/main.rs` with no command line: it reads the declared flags, refuses
+/// anything else, and serves.
 fn main_serve_only_with_flags_rs(a: &Answers) -> String {
     format!(
         r##"//! {title} -- a brocanth application.
 //!
 //! No command line was asked for, so this binary does one thing. It takes the
-//! flags its modules declared, which `--help` lists and `src/flags.rs`
+//! flags its settings declare, which `--help` lists and `src/flags.rs`
 //! renames, and nothing else. Everything it contains is in `src/app.rs`;
 //! `brocanth add commands` turns this into a command line with `serve` as one
 //! of its commands.
@@ -3958,12 +3993,11 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // the extern prelude, so they mean the same thing here and at the macro's
     // expansion site. Sorted, because rustfmt sorts them.
     let mut uses: Vec<String> = built.slot(Slot::AppUses).map(str::to_string).collect();
-    if a.has("config") && has_settings(built) {
+    if a.has("config") {
         // `plugins::config` loads the file, so the chain needs only the
-        // extension.
+        // extension. Every project declares `[server]`, so it always has
+        // `plugins::config`.
         uses.push("use brocanth_config::AppBuilderConfigExt;\n".to_string());
-    } else if a.has("config") {
-        uses.push("use brocanth_config::{AppBuilderConfigExt, Loader};\n".to_string());
     }
     uses.sort();
     for line in &uses {
@@ -3982,7 +4016,7 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         "let builder = $builder"
     };
-    if a.has("config") && has_settings(built) {
+    if a.has("config") {
         out.push_str(&format!(
             "        // The files, the environment and, once `src/flags.rs` turns them\n\
             \x20       // on, the flags: `brocanth-config` layers them and types each\n\
@@ -3991,24 +4025,13 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
             \x20       {head}.with_config(config){end}\n",
             end = if registrations.is_empty() { "" } else { ";" },
         ));
-    } else if !a.has("config") && has_settings(built) {
+    } else if !a.has("config") && module_settings(built) {
         out.push_str(&format!(
             "        // No file and no TOML parser. Each plugin below starts from its\n\
             \x20       // defaults and takes what this run was given on top: the\n\
             \x20       // environment, then the flags.\n\
             \x20       let given = crate::plugins::given()?;\n\
             \x20       {head}{end}\n",
-            end = if registrations.is_empty() { "" } else { ";" },
-        ));
-    } else if a.has("config") {
-        out.push_str(&format!(
-            "        // The core takes already-built values; finding the files, layering\n\
-            \x20       // them and typing each section is `brocanth-config`'s job, and it is\n\
-            \x20       // the only reason a TOML parser is in the tree.\n\
-            \x20       let config = Loader::new(crate::app::APP)\n\
-            \x20           .load()\n\
-            \x20           .map_err(|e| e.to_string())?;\n\
-            \x20       {head}.with_config(config){end}\n",
             end = if registrations.is_empty() { "" } else { ";" },
         ));
     } else {
@@ -4162,13 +4185,16 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // -- the grace period ---------------------------------------------
     //
     // Here and not in `src/app.rs`, because where it comes from varies with
-    // the module list: a file with the config plugin, the constant without.
+    // the module list: the configuration with the config plugin, the
+    // environment and the flags without.
     out.push('\n');
-    if a.has("config") {
-        out.push_str(&GRACE_FROM_CONFIG.replace("@UPPER@", &a.ident().to_uppercase()));
+    out.push_str(SERVER_SETTINGS);
+    out.push('\n');
+    out.push_str(if a.has("config") {
+        GRACE_FROM_CONFIG
     } else {
-        out.push_str(GRACE_CONST);
-    }
+        GRACE_PLAIN
+    });
 
     // -- serving ------------------------------------------------------
     //
@@ -4289,20 +4315,40 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
 }
 "#;
 
+/// `[server]` as a struct, so the framework's settings have a type with a
+/// `Default`, as each plugin's settings do. The report and the readers
+/// without a file start from it.
+const SERVER_SETTINGS: &str = r#"/// `[server]`: the settings the framework reads itself. It declares them as
+/// a module declares its own, so each has a flag, a variable and a line in
+/// the settings report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerSettings {
+    /// Seconds a stop waits for open requests, then for the plugins.
+    pub shutdown_grace_secs: u64,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+        }
+    }
+}
+"#;
+
 /// `plugins::shutdown_grace` with the config plugin.
-const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs`, or
-/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
+const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs` from the files, the environment and the
+/// flags, or [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    let config = brocanth_config::Loader::new(crate::app::APP)
-        .load()
-        .map_err(|e| e.to_string())?;
+    let config = config()?;
     let Some(value) = config
         .raw_section("server")
         .and_then(|server| server.get("shutdown_grace_secs"))
     else {
         return Ok(crate::app::SHUTDOWN_GRACE);
     };
-    // An integer in a file, and a string in `$@UPPER@_SERVER__SHUTDOWN_GRACE_SECS`.
+    // An integer in a file, a flag or a variable; a string when a layer
+    // could not type it.
     value
         .as_integer()
         .and_then(|secs| u64::try_from(secs).ok())
@@ -4310,7 +4356,7 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
         .map(std::time::Duration::from_secs)
         .ok_or_else(|| {
             format!(
-                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds",
+                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds\nhelp: set it to a whole number of seconds, such as 25",
                 value.display()
             )
         })
@@ -4318,17 +4364,18 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 "#;
 
 /// `plugins::shutdown_grace` without it.
-const GRACE_CONST: &str = r#"/// How long a stop waits: [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE).
-///
-/// This project has no configuration file, so the constant is the answer.
-/// `brocanth add config` makes it `[server] shutdown_grace_secs`.
+const GRACE_PLAIN: &str = r#"/// `[server] shutdown_grace_secs` from the environment and the flags, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when neither sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    Ok(crate::app::SHUTDOWN_GRACE)
+    let server = server_settings(&given()?)?;
+    Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
 }
 "#;
 
-/// Whether any module declared a setting the binary reads itself: one that
-/// is not a list, which only the file holds.
+/// Whether anything declared a setting the binary reads itself: one that is
+/// not a list, which only the file holds. True for every generated project,
+/// because the framework declares `[server] shutdown_grace_secs`; a `Built`
+/// made without [`contributions`] can still say no.
 fn has_settings(built: &Built) -> bool {
     !declared(built).is_empty()
 }
@@ -4377,8 +4424,8 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     out.push_str(
         "}\n\
          \n\
-         /// Every setting the modules declared. `brocanth add` rewrites this list;\n\
-         /// `src/flags.rs` renames or hides a flag.\n\
+         /// Every setting the framework and the modules declared. `brocanth add`\n\
+         /// rewrites this list; `src/flags.rs` renames or hides a flag.\n\
          pub const SETTINGS: &[Setting] = &[",
     );
     // rustfmt folds a list of one struct onto the `&[`, one level shallower.
@@ -4546,6 +4593,17 @@ fn field_list(declared: &[(&str, &Setting)], source: impl Fn(&str) -> String) ->
     let single = format!("    vec![{}]\n", entries.join(", "));
     if entries.len() == 1 && single.len() <= 4 + 60 + 7 {
         out.push_str(&single);
+    } else if let [(section, setting)] = declared {
+        // One tuple too long for a line: rustfmt hugs it to the brackets,
+        // `vec![(` and `)]`, one level shallower than in a list of many.
+        out.push_str(&format!(
+            "    vec![(\n\
+            \x20       \"{section}.{key}\",\n\
+            \x20       format!(\"{{:?}}\", {ident}.{key}),\n\
+            \x20   )]\n",
+            key = setting.key,
+            ident = section.replace('-', "_"),
+        ));
     } else {
         out.push_str("    vec![\n");
         for entry in entries {
@@ -4678,7 +4736,7 @@ impl Command for Settings {
 }
 "#;
 
-const SETTING_STRUCT_HEAD: &str = r#"/// One setting a module declared, by the key it sets.
+const SETTING_STRUCT_HEAD: &str = r#"/// One declared setting, by the key it sets.
 pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
     /// unless `src/flags.rs` renames it.
@@ -6851,6 +6909,17 @@ mod tests {
         );
         let (ok, out) = run(&bare, "flags-bare", &["--help"], &[]);
         assert!(ok && out.contains("--sessions.cookie <VALUE>"), "{out}");
+        // The framework's own setting has a flag too, typed as its field.
+        assert!(
+            out.contains("--server.shutdown_grace_secs <VALUE>"),
+            "{out}"
+        );
+        let line = ["--server.shutdown_grace_secs=soon"];
+        let (ok, out) = run(&bare, "flags-bare", &line, &[]);
+        assert!(
+            !ok && out.contains("--server.shutdown_grace_secs is \"soon\""),
+            "{out}"
+        );
         // A variable reaches the plugin; a secret has one even with no flag.
         let env = [("FLAGS_BARE_SESSIONS__COOKIE", "")];
         let (ok, out) = run(&bare, "flags-bare", &[], &env);
@@ -6909,6 +6978,13 @@ mod tests {
         let (ok, out) = run(&configured, name, &["settings", "--cookie=x"], &[]);
         assert!(
             ok && out.contains("--cookie") && out.contains("4 flags"),
+            "{out}"
+        );
+        // `[server]` takes a flag on top of the file, like a module's section.
+        let line = ["serve", "--server.shutdown_grace_secs=soon"];
+        let (ok, out) = run(&configured, name, &line, &[]);
+        assert!(
+            !ok && out.contains("`[server] shutdown_grace_secs` is") && out.contains("help: "),
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&configured);

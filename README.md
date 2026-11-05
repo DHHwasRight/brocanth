@@ -318,7 +318,8 @@ opt-in, and the wizard's **Operations** question can untick them.
 - [x] **Background jobs that do not lose work.** Retries with backoff and
   jitter, a dead-letter table, scheduled and recurring jobs.
 - [x] **Two-phase shutdown.** `serve` stops accepting, drains, and runs
-  `App::shutdown` inside `[server] shutdown_grace_secs` (25 s). With
+  `App::shutdown` inside `[server] shutdown_grace_secs` (25 s, or
+  `--server.shutdown_grace_secs`). With
   `observability-health`, `/readyz` fails first.
 - [x] **Logs, probes, metrics, traces** (`observability-logs`, `-health`,
   `-metrics`, `-tracing`). JSON on stdout, `/up` and `/readyz`, Prometheus

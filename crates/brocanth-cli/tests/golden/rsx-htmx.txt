@@ -72,19 +72,29 @@ run = "cargo test"
 //!
 //! My Blog -- a brocanth application.
 //!
-//! No command line was asked for, so this binary does one thing. Everything it
-//! contains is in `src/app.rs`; `brocanth add commands` turns this into a
-//! command line with `serve` as one of its commands.
+//! No command line was asked for, so this binary does one thing. It takes the
+//! flags its settings declare, which `--help` lists and `src/flags.rs`
+//! renames, and nothing else. Everything it contains is in `src/app.rs`;
+//! `brocanth add commands` turns this into a command line with `serve` as one
+//! of its commands.
 
 mod app;
 mod assets;
+mod flags;
 mod pages;
 mod plugins;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match app::serve(&app::default_addr()) {
+    let served = plugins::read_line().and_then(|helped| {
+        if helped {
+            Ok(())
+        } else {
+            app::serve(&app::default_addr())
+        }
+    });
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             // Through `say!`: a JSON line when the log subscriber is up,
@@ -95,7 +105,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 81cccd928e54c0f5
+// brocanth-digest: e10cff701f59667f
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -293,9 +303,10 @@ fn holding(request: &hooks::Request) -> u32 {
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
-/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
-/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
-/// `plugins::shutdown_grace`.
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit.
+/// `[server] shutdown_grace_secs` overrides it: `--server.shutdown_grace_secs`,
+/// `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`, or with the config plugin the file.
+/// See `plugins::shutdown_grace`.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 
 /// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
@@ -1623,12 +1634,298 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
-/// How long a stop waits: [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE).
+/// One declared setting, by the key it sets.
+pub struct Setting {
+    /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
+    /// unless `src/flags.rs` renames it.
+    pub path: &'static str,
+    /// The line `--help` prints.
+    pub help: &'static str,
+    /// Whether a flag may set it. A secret has none: every user on the host
+    /// can read a process's arguments.
+    pub flag: bool,
+    /// The environment variable that sets it.
+    pub env: &'static str,
+}
+
+/// Every setting the framework and the modules declared. `brocanth add`
+/// rewrites this list; `src/flags.rs` renames or hides a flag.
+pub const SETTINGS: &[Setting] = &[Setting {
+    path: "server.shutdown_grace_secs",
+    help: "Seconds a stop waits for open requests, then for the plugins.",
+    flag: true,
+    env: "MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS",
+}];
+
+/// One value this run was given, above the defaults.
+pub struct Given {
+    /// What it sets.
+    pub setting: &'static Setting,
+    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    pub from: String,
+    /// The value, as typed. Empty is `None` for an `Option` setting.
+    pub value: String,
+}
+
+/// The name each flag answers to after `src/flags.rs`, whether the flags are
+/// read or not.
 ///
-/// This project has no configuration file, so the constant is the answer.
-/// `brocanth add config` makes it `[server] shutdown_grace_secs`.
+/// A rename of a key no flag sets, a name that is not spelled as a flag, and
+/// two flags under one name each stop the binary: each would otherwise be a
+/// flag that does nothing, or does something else.
+fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
+    for (path, _) in crate::flags::RENAMES {
+        if !flags().any(|setting| setting.path == *path) {
+            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
+            return Err(format!(
+                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
+                known.join(", ")
+            ));
+        }
+    }
+    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
+    for setting in flags() {
+        let name = crate::flags::RENAMES
+            .iter()
+            .find(|(path, _)| *path == setting.path)
+            .map_or(setting.path, |(_, name)| *name);
+        if name.is_empty() {
+            continue;
+        }
+        let spelled = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        let taken = ["help", "version", "settings"].contains(&name);
+        if !spelled || name.starts_with(['-', '.', '_']) || taken {
+            return Err(format!(
+                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
+            ));
+        }
+        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            return Err(format!(
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                other.path, setting.path
+            ));
+        }
+        names.push((setting, name));
+    }
+    Ok(names)
+}
+
+/// The flags this run reads: every one, because there is no file.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    names()
+}
+
+/// What this run was given above the defaults, lowest first: each variable
+/// that is set, then each flag in the order typed. A later value for one key
+/// replaces an earlier one.
+///
+/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
+/// is a command's, and the command line's own parser has already refused what
+/// nobody declared.
+pub fn given() -> Result<Vec<Given>, String> {
+    let mut given = Vec::new();
+    for setting in SETTINGS {
+        if let Some(value) = std::env::var_os(setting.env) {
+            given.push(Given {
+                setting,
+                from: format!("${}", setting.env),
+                value: value.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    let names = flag_names()?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            break;
+        }
+        let Some(written) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline) = match written.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (written, None),
+        };
+        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => rest
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
+        };
+        given.push(Given {
+            setting,
+            from: format!("--{name}"),
+            value,
+        });
+    }
+    Ok(given)
+}
+
+/// Refuses anything on the command line that is not a flag, and answers
+/// `--help` and `--settings`. `true` when it printed one of those, so `main`
+/// stops there.
+///
+/// This binary has no command line of its own: `brocanth add commands` gives
+/// it one, and `clap` does this.
+pub fn read_line() -> Result<bool, String> {
+    let names = flag_names()?;
+    let mut rest = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = rest.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("Flags:");
+            for (setting, name) in &names {
+                println!("  --{name} <VALUE>  {}", setting.help);
+            }
+            println!("  --settings  every settings layer, then the merged values");
+            return Ok(true);
+        }
+        if arg == "--settings" {
+            print!("{}", settings_report()?);
+            return Ok(true);
+        }
+        let written = arg.strip_prefix("--").unwrap_or_default();
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if name.is_empty() || !names.iter().any(|(_, known)| *known == name) {
+            return Err(format!(
+                "unknown argument `{arg}`\nhelp: `--help` lists the flags"
+            ));
+        }
+        // `--name VALUE`: the next argument is the value, not a flag.
+        if !written.contains('=') {
+            rest.next();
+        }
+    }
+    Ok(false)
+}
+
+/// Each setting as the plugin's `Default` says, before any layer.
+fn defaults() -> Vec<(&'static str, String)> {
+    let server = crate::plugins::ServerSettings::default();
+    vec![(
+        "server.shutdown_grace_secs",
+        format!("{:?}", server.shutdown_grace_secs),
+    )]
+}
+
+/// One value, as the type of the field it sets.
+fn parsed<T>(given: &Given) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    given
+        .value
+        .parse()
+        .map_err(|e| format!("{} is {:?}: {e}", given.from, given.value))
+}
+
+/// `[server]`, as this binary runs it without a file: the plugin's
+/// defaults, then the environment, then the flags.
+pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings, String> {
+    let mut settings = crate::plugins::ServerSettings::default();
+    for given in given {
+        if given.setting.path == "server.shutdown_grace_secs" {
+            settings.shutdown_grace_secs = parsed(given)?;
+        }
+    }
+    Ok(settings)
+}
+
+/// Each setting as the plugin holds it, after every layer.
+fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
+    let server = server_settings(given)?;
+    Ok(vec![(
+        "server.shutdown_grace_secs",
+        format!("{:?}", server.shutdown_grace_secs),
+    )])
+}
+
+/// Every settings layer on its own, lowest first, then the merged values.
+/// A secret is masked in every layer.
+pub fn settings_report() -> Result<String, String> {
+    let given = given()?;
+    let secret = |path: &str| SETTINGS.iter().any(|s| s.path == path && !s.flag);
+    let shown = |path: &str, value: String| {
+        if secret(path) {
+            "(secret)".to_string()
+        } else {
+            value
+        }
+    };
+    let width = SETTINGS.iter().map(|s| s.path.len()).max().unwrap_or(0);
+    let mut out = String::from("layers, lowest precedence first\n\n   1  defaults\n");
+    for (path, value) in defaults() {
+        out.push_str(&format!(
+            "        {path:<width$}  = {}\n",
+            shown(path, value)
+        ));
+    }
+    for (n, label, prefix) in [(2, "environment", "$"), (3, "flags", "--")] {
+        out.push_str(&format!("\n  {n:>2}  {label}\n"));
+        let mine: Vec<&Given> = given
+            .iter()
+            .filter(|g| g.from.starts_with(prefix))
+            .collect();
+        if mine.is_empty() {
+            out.push_str("        (sets nothing)\n");
+        }
+        for g in mine {
+            let value = shown(g.setting.path, format!("{:?}", g.value));
+            let path = g.setting.path;
+            out.push_str(&format!("        {path:<width$}  = {value}  {}\n", g.from));
+        }
+    }
+    out.push_str("\nmerged\n");
+    for (path, value) in merged(&given)? {
+        let layer = match given.iter().rev().find(|g| g.setting.path == path) {
+            Some(g) if g.from.starts_with('$') => "2 environment",
+            Some(_) => "3 flags",
+            None => "1 defaults",
+        };
+        let value = shown(path, value);
+        out.push_str(&format!(
+            "  {path:<w$}  = {value}  {layer}\n",
+            w = width + 6
+        ));
+    }
+    Ok(out)
+}
+
+/// `[server]`: the settings the framework reads itself. It declares them as
+/// a module declares its own, so each has a flag, a variable and a line in
+/// the settings report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerSettings {
+    /// Seconds a stop waits for open requests, then for the plugins.
+    pub shutdown_grace_secs: u64,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+        }
+    }
+}
+
+/// `[server] shutdown_grace_secs` from the environment and the flags, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when neither sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    Ok(crate::app::SHUTDOWN_GRACE)
+    let server = server_settings(&given()?)?;
+    Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
 }
 
 /// What the server is handed for one request.
@@ -1660,7 +1957,35 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: b3cc665c126ddbf0
+// brocanth-digest: 9f7711f958524b08
+===== src/flags.rs =====
+//! The command-line flags of this binary, and the one place to rename them.
+//!
+//! A module declares each of its settings once. From that the binary takes a
+//! flag, `--<module>.<key>=VALUE`, an environment variable,
+//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
+//! `config/<env>.toml`. `brocanth add` rewrites the list in
+//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
+//! and never again.
+
+/// Whether a project with a config file reads the flags too.
+///
+/// Off: with the `config` module, the file and the environment are the
+/// sources, and a flag is refused with a pointer to this line. On: a flag
+/// outranks both, for one run. Without the `config` module the flags are
+/// always read, and this is not.
+#[allow(dead_code)]
+pub const WITH_CONFIG: bool = false;
+
+/// Flags under another name: the key as the module declares it, and the flag
+/// this binary answers to instead, without `--`. An empty name hides the
+/// flag.
+///
+/// ```text
+/// ("sessions.cookie", "cookie"),
+/// ("storage.root", ""),
+/// ```
+pub const RENAMES: &[(&str, &str)] = &[];
 ===== public/dpswap.min.js =====
 "use strict";var dpswap=(()=>{var T=Object.defineProperty;var se=Object.getOwnPropertyDescriptor;var ae=Object.getOwnPropertyNames;var le=Object.prototype.hasOwnProperty;var k=(e,t)=>{for(var r in t)T(e,r,{get:t[r],enumerable:!0})},ue=(e,t,r,n)=>{if(t&&typeof t=="object"||typeof t=="function")for(let o of ae(t))!le.call(e,o)&&o!==r&&T(e,o,{get:()=>t[o],enumerable:!(n=se(t,o))||n.enumerable});return e};var ce=e=>ue(T({},"__esModule",{value:!0}),e);var Be={};k(Be,{config:()=>a,configure:()=>K,fragmentUrl:()=>h,hydrate:()=>E,perform:()=>m,prefetch:()=>Ve,process:()=>L,start:()=>$,swapping:()=>Ue});var a={fragmentSuffix:"/_fragment.html",fragmentMode:"suffix",partialHeader:"DP-Partial",layoutAttr:"dp-layout",requestClass:"dp-request",settlingClass:"dp-settling",defaultBoostTarget:"body",timeout:1e4,prefetchLimit:32,fetch:(...e)=>globalThis.fetch(...e)};function K(e){Object.assign(a,e)}function h(e,t){let r=new URL(e,t??"http://localhost");return a.fragmentMode==="header"||(r.pathname=r.pathname.replace(/\/+$/,"")+a.fragmentSuffix),r.pathname+r.search+r.hash}function b(e,t=1){let r={"DP-Request":"true"};return e&&a.fragmentMode==="header"&&(r[a.partialHeader]=t>1?String(t):"true"),r}var v=["innerHTML","outerHTML","beforebegin","afterbegin","beforeend","afterend","delete","none"];var A="dp-";function f(e,t){return e.getAttribute(A+t)}function q(e,t){return e.hasAttribute(A+t)}function l(e,t){let r=e;for(;r;){let n=r.getAttribute(A+t);if(n!==null)return n;r=r.parentElement}return null}function w(e,t){return!t||t==="this"?e:t.startsWith("closest ")?e.closest(t.slice(8).trim()):t.startsWith("find ")?e.querySelector(t.slice(5).trim()):t==="next"?e.nextElementSibling:t==="previous"?e.previousElementSibling:e.ownerDocument.querySelector(t)}var Y={style:"innerHTML",scroll:null,delay:0};function H(e){if(!e)return{...Y};let t=e.trim().split(/\s+/),r={...Y};for(let n of t)fe(n)?r.style=n:n==="scroll:top"||n==="scroll:bottom"?r.scroll=n.slice(7):n.startsWith("swap:")&&(r.delay=D(n.slice(5)));return r}function fe(e){return v.includes(e)}function j(e,t){let r={event:de(t),once:!1,delay:0,throttle:0,from:null,changed:!1};if(!e)return r;let n=e.trim().split(/\s+/),[o,...i]=n;o&&(r.event=o);for(let s of i)s==="once"?r.once=!0:s==="changed"?r.changed=!0:s.startsWith("delay:")?r.delay=D(s.slice(6)):s.startsWith("throttle:")?r.throttle=D(s.slice(9)):s.startsWith("from:")&&(r.from=s.slice(5));return r}function de(e){let t=e.tagName.toLowerCase();return t==="form"?"submit":t==="input"||t==="textarea"||t==="select"?"change":"click"}function D(e){let t=/^(\d+(?:\.\d+)?)(ms|s)?$/.exec(e.trim());if(!t)return 0;let r=Number(t[1]);return t[2]==="s"?r*1e3:r}function u(e,t,r={}){let o=e.ownerDocument.defaultView?.CustomEvent??globalThis.CustomEvent;return e.dispatchEvent(new o(t,{detail:r,bubbles:!0,cancelable:!0}))}var z=new WeakSet;function E(e){for(let t of Array.from(e.querySelectorAll("[dp-island]")))J(t);pe(e)&&e.hasAttribute("dp-island")&&J(e)}function pe(e){return"hasAttribute"in e}function J(e){if(z.has(e))return;z.add(e);let t=me(f(e,"client")),r=()=>void ge(e);switch(t.kind){case"load":r();return;case"idle":ye(e,r);return;case"visible":we(e,r);return;case"media":be(e,t.query,r);return}}function me(e){if(!e)return{kind:"load"};let t=e.trim();return t.startsWith("media:")?{kind:"media",query:t.slice(6).trim()}:t==="idle"?{kind:"idle"}:t==="visible"?{kind:"visible"}:{kind:"load"}}async function ge(e){let t=f(e,"island");if(t)try{let r=await import(t),n=r.default??r.mount;if(typeof n!="function")throw new TypeError(`${t} exports no default function and no mount`);n(e,he(e)),u(e,"dp:island",{source:t})}catch(r){u(e,"dp:islandError",{source:t,error:r})}}function he(e){let t=f(e,"props");if(!t)return{};try{let r=JSON.parse(t);return r&&typeof r=="object"?r:{}}catch{return{}}}function ye(e,t){let r=e.ownerDocument.defaultView,n=r?.requestIdleCallback;n?n.call(r,()=>t()):setTimeout(t,1)}function we(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t();return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t())});n.observe(e)}function be(e,t,r){let n=e.ownerDocument.defaultView;if(!n||typeof n.matchMedia!="function"){r();return}let o=n.matchMedia(t);if(o.matches){r();return}let i=()=>{o.matches&&(o.removeEventListener("change",i),r())};o.addEventListener("change",i)}var M="dpswap";function X(e,t,r){e.defaultView?.history?.pushState({[M]:r},"",t)}function G(e,t,r){e.defaultView?.history?.replaceState({[M]:r},"",t)}function C(e){if(!e||typeof e!="object")return null;let t=e[M];if(!t||typeof t!="object")return null;let{target:r,select:n}=t;return typeof r!="string"?null:{target:r,select:typeof n=="string"?n:null}}var N={};k(N,{clear:()=>Ee,prefetch:()=>R,size:()=>Se,take:()=>P});var d=new Map;function Ee(){d.clear()}function Se(){return d.size}function R(e,t){let r=h(e,t);d.has(r)||(Le(),d.set(r,xe(r)))}function P(e){return d.get(e)??null}async function xe(e){try{let t=await a.fetch(e,{headers:b(!0)});return t.ok?await t.text():(d.delete(e),null)}catch{return d.delete(e),null}}function Le(){if(d.size<a.prefetchLimit)return;let e=d.keys().next();e.done||d.delete(e.value)}var _={};k(_,{applyOutOfBand:()=>O,layerTarget:()=>I,narrowToSharedLayout:()=>V,parseFragment:()=>W,selectFrom:()=>F,settle:()=>U,sharedLayerDepth:()=>B,swapInto:()=>S});function W(e,t){let r=e.createElement("template");return r.innerHTML=t,r.content}function F(e,t,r){if(!r)return t;let n=e.createDocumentFragment();for(let o of Array.from(t.querySelectorAll(r)))n.appendChild(o);return n}function O(e,t){let r=Array.from(t.querySelectorAll("[dp-swap-oob]"));for(let n of r){let o=f(n,"swap-oob")??"outerHTML",[i,s]=Te(o),c=s??(n.id?`#${n.id}`:null);if(n.removeAttribute("dp-swap-oob"),n.remove(),!c)continue;let p=e.querySelector(c);if(!p)continue;let g=e.createDocumentFragment();i==="outerHTML"?g.appendChild(n):g.append(...Array.from(n.childNodes)),S(p,g,{style:i,scroll:null,delay:0})}}function Te(e){let t=e.indexOf(":"),r=t===-1?e:e.slice(0,t),n=t===-1?null:e.slice(t+1);return[ke(r)?r:"outerHTML",n||null]}function ke(e){return v.includes(e)}function S(e,t,r){switch(r.style){case"innerHTML":e.replaceChildren(t);break;case"outerHTML":e.replaceWith(t);break;case"beforebegin":e.parentElement?.insertBefore(t,e);break;case"afterbegin":e.insertBefore(t,e.firstChild);break;case"beforeend":e.appendChild(t);break;case"afterend":e.parentElement?.insertBefore(t,e.nextSibling);break;case"delete":e.remove();break;case"none":break}}function U(e,t){t.style==="delete"||t.style==="none"||e.isConnected&&(e.classList.add(a.settlingClass),queueMicrotask(()=>e.classList.remove(a.settlingClass)),t.scroll==="top"&&(e.scrollTop=0),t.scroll==="bottom"&&(e.scrollTop=e.scrollHeight))}function V(e,t){let r=a.layoutAttr;if(!r)return{target:e,content:t};let n=`[${r}]`,o=e,i=t;for(;;){let c=o.querySelector(n),p=i.querySelector(n);if(!c||!p||c.getAttribute(r)!==p.getAttribute(r))break;o=c,i=p}if(o===e)return{target:e,content:t};let s=e.ownerDocument.createDocumentFragment();return s.append(...Array.from(i.childNodes)),{target:o,content:s}}function B(e,t){let r=a.layoutAttr;if(!r)return 1;let n=new URL(t,e.defaultView?.location?.href??"http://localhost").pathname,o=[...e.querySelectorAll(`[${r}]`)].map(s=>s.getAttribute(r)??""),i=0;for(let s of o){if(!(s==="/"||n===s||n.startsWith(`${s}/`)))break;i++}return Math.max(1,i)}function I(e,t){let r=a.layoutAttr;if(!r||t<1)return null;let n=e,o=null;for(let i=0;i<t;i++){let s=n.querySelector(`[${r}]`);if(!s)return null;o=s,n=s}return o}async function m(e){if(!u(e.source,"dp:beforeRequest",{spec:e}))return;let t=Ae(e),r=e.indicator;r?.classList.add(a.requestClass);try{let n=e.fragment?B(e.target.ownerDocument,e.url):1,o=await P(t)?.catch(()=>null);if(o!=null){Q(e,o,n);return}let i=await qe(t,e.fragment,n);if(!i.ok){u(e.source,"dp:responseError",{spec:e,response:i}),e.boosted&&Z(e.source,e.url);return}Q(e,await i.text(),n)}catch(n){u(e.source,"dp:sendError",{spec:e,error:n}),e.boosted&&Z(e.source,e.url)}finally{r?.classList.remove(a.requestClass),u(e.source,"dp:afterRequest",{spec:e})}}function Q(e,t,r=1){let n=e.target.ownerDocument,o=W(n,t);O(n,o);let i=F(n,o,e.select),s=e.target;if(!e.select&&e.swap.style==="innerHTML"){let p=r>1?I(n,r):null;if(p)s=p;else{let g=V(s,i);s=g.target,i=g.content}}if(!u(s,"dp:beforeSwap",{spec:e,content:i}))return;let c=De({...e,target:s});S(s,i,e.swap),u(c,"dp:afterSwap",{spec:e}),U(s,e.swap),u(c,"dp:afterSettle",{spec:e})}function De(e){switch(e.swap.style){case"innerHTML":case"afterbegin":case"beforeend":case"none":return e.target;default:return e.target.parentElement??e.target.ownerDocument.documentElement}}function Ae(e){let t=He(e.source);if(e.fragment)return h(e.url,t);let r=new URL(e.url,t??"http://localhost");return r.pathname+r.search+r.hash}async function qe(e,t,r){let n=new AbortController,o=setTimeout(()=>n.abort(),a.timeout);try{return await a.fetch(e,{signal:n.signal,headers:b(t,r)})}finally{clearTimeout(o)}}function He(e){return e.ownerDocument.defaultView?.location.href}function Z(e,t){e.ownerDocument.defaultView?.location?.assign(t)}var x=new WeakSet;function L(e){for(let t of Array.from(e.querySelectorAll("[dp-get]")))te(t);ee(e)&&q(e,"get")&&te(e);for(let t of Array.from(e.querySelectorAll("[dp-boost]")))re(t);ee(e)&&q(e,"boost")&&re(e)}function ee(e){return"getAttribute"in e}function te(e){if(x.has(e))return;x.add(e);let t=j(f(e,"trigger"),e),r=Fe(t.throttle,o=>{if(Ne(e)&&o.preventDefault(),t.changed&&!We(e))return;let i=Me(e);i&&(t.delay>0?setTimeout(()=>void m(i),t.delay):m(i))});if(t.event==="load"){r(new Event("load"));return}if(t.event==="revealed"){Oe(e,r);return}(t.from?e.ownerDocument.querySelector(t.from)??e:e).addEventListener(t.event,r,{once:t.once})}function Me(e){let t=f(e,"get");if(!t)return null;let r=w(e,l(e,"target"));if(!r)return null;let n=l(e,"push-url");return{source:e,url:t,target:r,swap:H(l(e,"swap")),select:l(e,"select"),pushUrl:n==="true"?t:n==="false"||n===null?null:n,indicator:w(e,l(e,"indicator")),boosted:!1,fragment:l(e,"fragment")!==null}}function re(e){x.has(e)||(x.add(e),Ce(e),e.addEventListener("click",t=>{let r=oe(t);if(!r)return;t.preventDefault();let n=l(r,"target")??a.defaultBoostTarget,o=w(r,n);if(!o)return;let i=l(r,"select"),s=r.getAttribute("href")??"";X(r.ownerDocument,s,{target:n,select:i}),m({source:r,url:s,target:o,swap:H(l(r,"swap")??"innerHTML"),select:i,pushUrl:s,indicator:w(r,l(r,"indicator")),boosted:!0,fragment:!0})}))}function oe(e){if(e.defaultPrevented)return null;let t=e;if(typeof t.button=="number"&&t.button!==0||t.metaKey||t.ctrlKey||t.shiftKey||t.altKey)return null;let r=e.target?.closest("a");if(!r||r.tagName.toLowerCase()!=="a")return null;let n=r.getAttribute("href");if(!n||n.startsWith("#")||r.hasAttribute("download"))return null;let o=r.getAttribute("target");if(o&&o!=="_self"||f(r,"boost")==="false")return null;let i=r.ownerDocument.defaultView;return i&&new URL(n,i.location.href).origin!==i.location.origin?null:r}function Ce(e){let t=r=>{let n=oe(r)??Re(r);if(!n)return;let o=l(n,"prefetch");if(o===null||o==="false")return;let i=n.getAttribute("href");i&&R(i,n.ownerDocument.defaultView?.location.href)};e.addEventListener("pointerenter",t,{capture:!0}),e.addEventListener("focusin",t),e.addEventListener("touchstart",t,{passive:!0})}function Re(e){let t=e.target?.closest("a");if(!t||t.tagName.toLowerCase()!=="a")return null;let r=t.getAttribute("href");return!r||r.startsWith("#")||r.includes("://")?null:t}function Pe(e){return e.querySelector("[dp-boost][dp-target]")?.getAttribute("dp-target")||a.defaultBoostTarget}function ie(e){let t=e.defaultView;t&&(C(t.history?.state)||G(e,t.location.pathname+t.location.search,{target:Pe(e),select:null}),t.addEventListener("popstate",r=>{let n=C(r.state);if(!n)return;let o=e.querySelector(n.target);o&&m({source:e.documentElement,url:t.location.pathname+t.location.search,target:o,swap:{style:"innerHTML",scroll:"top",delay:0},select:n.select,pushUrl:null,indicator:null,boosted:!0,fragment:!0})}))}function Ne(e){let t=e.tagName.toLowerCase();return t==="a"||t==="form"||t==="button"}var ne=new WeakMap;function We(e){let t=e.value??"";return ne.get(e)===t?!1:(ne.set(e,t),!0)}function Fe(e,t){if(e<=0)return t;let r=0;return n=>{let o=Date.now();o-r<e||(r=o,t(n))}}function Oe(e,t){let r=e.ownerDocument.defaultView;if(!r||typeof r.IntersectionObserver!="function"){t(new Event("revealed"));return}let n=new r.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(n.disconnect(),t(new Event("revealed")))});n.observe(e)}function $(e=document){L(e),E(e),ie(e),e.addEventListener("dp:afterSwap",t=>{let r=t.target;!r||!("querySelectorAll"in r)||(L(r),E(r))})}var Ue=_,Ve=N,y=globalThis.document;y&&y.currentScript?.getAttribute("data-dp-auto")!=="false"&&(y.readyState==="loading"?y.addEventListener("DOMContentLoaded",()=>$(y),{once:!0}):$(y));return ce(Be);})();
 //# sourceMappingURL=dpswap.min.js.map

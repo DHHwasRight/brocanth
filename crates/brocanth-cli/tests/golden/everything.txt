@@ -314,9 +314,10 @@ fn holding(request: &hooks::Request) -> u32 {
 /// How long a stop waits for open requests and then for the plugins.
 ///
 /// Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (30 by
-/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit. With
-/// the config plugin, `[server] shutdown_grace_secs` overrides it: see
-/// `plugins::shutdown_grace`.
+/// default) and then sends SIGKILL. 25 seconds leaves 5 for the exit.
+/// `[server] shutdown_grace_secs` overrides it: `--server.shutdown_grace_secs`,
+/// `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`, or with the config plugin the file.
+/// See `plugins::shutdown_grace`.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 
 /// Serves until SIGTERM or SIGINT, then stops in two phases (PLAN.md ADR 2).
@@ -2205,7 +2206,7 @@ pub fn layer(name: &str) -> Option<Layer> {
     }
 }
 
-/// One setting a module declared, by the key it sets.
+/// One declared setting, by the key it sets.
 pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
     /// unless `src/flags.rs` renames it.
@@ -2221,8 +2222,8 @@ pub struct Setting {
     pub text: bool,
 }
 
-/// Every setting the modules declared. `brocanth add` rewrites this list;
-/// `src/flags.rs` renames or hides a flag.
+/// Every setting the framework and the modules declared. `brocanth add`
+/// rewrites this list; `src/flags.rs` renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
         path: "sessions.cookie",
@@ -2861,6 +2862,13 @@ pub const SETTINGS: &[Setting] = &[
         none_as: None,
         text: false,
     },
+    Setting {
+        path: "server.shutdown_grace_secs",
+        help: "Seconds a stop waits for open requests, then for the plugins.",
+        flag: true,
+        none_as: None,
+        text: false,
+    },
 ];
 
 /// One value this run was given, above the defaults.
@@ -3069,6 +3077,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
@@ -3263,6 +3272,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
+        (
+            "server.shutdown_grace_secs",
+            format!("{:?}", server.shutdown_grace_secs),
+        ),
     ]
 }
 
@@ -3277,19 +3290,35 @@ pub fn settings_report() -> Result<String, String> {
     Ok(layers.to_string())
 }
 
-/// `[server] shutdown_grace_secs`, or
-/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when it is not set.
+/// `[server]`: the settings the framework reads itself. It declares them as
+/// a module declares its own, so each has a flag, a variable and a line in
+/// the settings report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerSettings {
+    /// Seconds a stop waits for open requests, then for the plugins.
+    pub shutdown_grace_secs: u64,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+        }
+    }
+}
+
+/// `[server] shutdown_grace_secs` from the files, the environment and the
+/// flags, or [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    let config = brocanth_config::Loader::new(crate::app::APP)
-        .load()
-        .map_err(|e| e.to_string())?;
+    let config = config()?;
     let Some(value) = config
         .raw_section("server")
         .and_then(|server| server.get("shutdown_grace_secs"))
     else {
         return Ok(crate::app::SHUTDOWN_GRACE);
     };
-    // An integer in a file, and a string in `$MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS`.
+    // An integer in a file, a flag or a variable; a string when a layer
+    // could not type it.
     value
         .as_integer()
         .and_then(|secs| u64::try_from(secs).ok())
@@ -3297,7 +3326,7 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
         .map(std::time::Duration::from_secs)
         .ok_or_else(|| {
             format!(
-                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds",
+                "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds\nhelp: set it to a whole number of seconds, such as 25",
                 value.display()
             )
         })
@@ -3358,7 +3387,7 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
         .expect("`observability` is registered in `register!`")
 }
 
-// brocanth-digest: 02d7eb90cbc2f194
+// brocanth-digest: 4119a3f3ad59191c
 ===== src/flags.rs =====
 //! The command-line flags of this binary, and the one place to rename them.
 //!
