@@ -226,6 +226,9 @@ impl Analytics {
 
 impl HookSource for Analytics {
     type Families = OnRequest;
+    /// `count` exists only while `enabled` is true, and `collect` only
+    /// while `collector_origins` names an origin too.
+    const HOOKS: &'static [&'static str] = &["count", "collect"];
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if !self.config.enabled {

@@ -23,6 +23,9 @@ the server that counts are two projects. A static site cannot hold
 `analytics`, which needs a running server and a database, and a child
 cannot be chosen without its parent.
 
+Hooks: `beacon.insert`, required: it is the module. It installs only while
+`collector` is set.
+
 ## What it writes
 
 Files: none.

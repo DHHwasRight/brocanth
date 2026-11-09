@@ -207,6 +207,11 @@ impl Module for StaticBeacon {
         // No `absent` line: its crate is `analytics`'s too, so "not here"
         // would be untrue in a project that counts on the server.
         .outside_runtime()
+        .hook(
+            "insert",
+            "put the snippet into each HTML page, while `collector` is set",
+            Hook::required(),
+        )
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
