@@ -323,11 +323,26 @@ struct Registered {
     /// Set by `plugin_hooking`, which is the only call that knows the instance
     /// implements [`HookSource`]. A plain function pointer, so an instance
     /// that hooks nothing carries one null-sized `Option` and no closure.
-    installer: Option<HookInstaller>,
+    installer: Option<Installer>,
 }
 
 /// Re-entry into a `HookSource` from a type-erased instance.
 type HookInstaller = fn(&dyn Any, &mut HookRegistrar<'_>) -> Result<(), PluginError>;
+
+/// What `plugin_hooking` keeps of a [`HookSource`]: how to install its
+/// hooks, and [`HookSource::HOOKS`], the names it may install.
+#[derive(Clone, Copy)]
+struct Installer {
+    install: HookInstaller,
+    declared: &'static [&'static str],
+}
+
+fn installer_of<P: HookSource>() -> Option<Installer> {
+    Some(Installer {
+        install: install_hooks_of::<P>,
+        declared: P::HOOKS,
+    })
+}
 
 fn install_hooks_of<P: HookSource>(
     plugin: &dyn Any,
@@ -462,13 +477,8 @@ impl<E, H> AppBuilder<E, H> {
         plugin: P,
     ) -> AppBuilder<<P::Provides as Provided>::Install<E>, crate::plugin_hooks::Both<P::Families, H>>
     {
-        self.add(
-            P::NAME.to_string(),
-            plugin,
-            true,
-            Some(install_hooks_of::<P>),
-        )
-        .retype()
+        self.add(P::NAME.to_string(), plugin, true, installer_of::<P>())
+            .retype()
     }
 
     /// [`AppBuilder::plugin_hooking`], under a name of the application's
@@ -479,7 +489,7 @@ impl<E, H> AppBuilder<E, H> {
         plugin: P,
     ) -> AppBuilder<<P::Provides as Provided>::Install<E>, crate::plugin_hooks::Both<P::Families, H>>
     {
-        self.add(name.into(), plugin, true, Some(install_hooks_of::<P>))
+        self.add(name.into(), plugin, true, installer_of::<P>())
             .retype()
     }
 
@@ -494,7 +504,7 @@ impl<E, H> AppBuilder<E, H> {
         name: impl Into<String>,
         plugin: P,
     ) -> AppBuilder<E, crate::plugin_hooks::Both<P::Families, H>> {
-        self.add(name.into(), plugin, false, Some(install_hooks_of::<P>))
+        self.add(name.into(), plugin, false, installer_of::<P>())
             .retype()
     }
 
@@ -616,7 +626,7 @@ impl<E, H> AppBuilder<E, H> {
         name: String,
         plugin: P,
         provides_context: bool,
-        installer: Option<HookInstaller>,
+        installer: Option<Installer>,
     ) -> Self {
         let primary = !self
             .instances
@@ -753,6 +763,9 @@ impl<E, H> AppBuilder<E, H> {
         let mut error: Vec<Ordered<Box<dyn ErrorHook>>> = Vec::new();
         let mut model = ModelHooks::new();
         let mut skipped: Vec<Skipped> = Vec::new();
+        // Off, declared in `HookSource::HOOKS`, and not installed by this
+        // configuration: in no chain, so no order can depend on it.
+        let mut absent: Vec<(&'static str, &'static str)> = Vec::new();
 
         // A `hooks_off` call for an instance that does not exist is a typo.
         let registered: Vec<String> = self
@@ -783,7 +796,7 @@ impl<E, H> AppBuilder<E, H> {
                 // makes the opposite mistake detectable is missing.
                 (Some(_), false) => return Err(BuildError::HooksNotDeclared { instance, plugin }),
                 (None, false) => {}
-                (Some(install), true) => {
+                (Some(installer), true) => {
                     let mut registrar = HookRegistrar::new(
                         &instance,
                         &mut request,
@@ -799,25 +812,41 @@ impl<E, H> AppBuilder<E, H> {
                             skipped: &mut skipped,
                         });
                     }
-                    install(reg.inner.plugin_any(), &mut registrar).map_err(|source| {
-                        BuildError::Hook {
+                    (installer.install)(reg.inner.plugin_any(), &mut registrar).map_err(
+                        |source| BuildError::Hook {
                             instance: instance.clone(),
                             stage: Stage::ConfigureRouter,
                             source,
-                        }
-                    })?;
+                        },
+                    )?;
                 }
             }
 
             // Each name turned off must be a hook the instance registers.
             // Otherwise the toggle would do nothing, and nobody would know.
+            // A name in `HookSource::HOOKS` that this configuration did not
+            // install is not a typo: it is off and absent, and `skipped`
+            // lists it, so a report still says the file turned it off.
             if let Some(off) = off {
-                if let Some(&name) = off.names.iter().find(|n| !seen.iter().any(|s| s == *n)) {
+                let declared = reg.installer.map_or(&[][..], |i| i.declared);
+                for &name in &off.names {
+                    if seen.iter().any(|s| s == name) {
+                        continue;
+                    }
+                    if declared.contains(&name) {
+                        absent.push((off.instance, name));
+                        continue;
+                    }
+                    let registered: Vec<String> = if declared.is_empty() {
+                        seen
+                    } else {
+                        declared.iter().map(|n| n.to_string()).collect()
+                    };
                     return Err(BuildError::HooksOffUnknownHook {
                         instance: off.instance,
                         name,
-                        suggestion: nearest_name(name, &seen),
-                        registered: seen,
+                        suggestion: nearest_name(name, &registered),
+                        registered,
                     });
                 }
             }
@@ -887,7 +916,11 @@ impl<E, H> AppBuilder<E, H> {
             sort(request)?,
             sort(response)?,
             sort(error)?,
-            skipped.iter().map(|s| (s.instance, s.name)).collect(),
+            skipped
+                .iter()
+                .map(|s| (s.instance, s.name))
+                .chain(absent)
+                .collect(),
         );
         Ok((pipeline, model.finish()?))
     }
