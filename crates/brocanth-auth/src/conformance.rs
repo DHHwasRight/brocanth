@@ -260,6 +260,8 @@ macro_rules! lockout_store_conformance {
                 failures_count_within_a_window_and_start_again_after_it,
                 a_lock_resets_the_count_and_clear_forgets_it,
                 concurrent_failures_all_count,
+                the_first_second_of_a_window_is_inside_it,
+                an_account_with_no_row_is_not_locked_and_clears,
             ]
         );
     };
@@ -1329,5 +1331,41 @@ pub mod lockout_store {
         let seen: HashSet<u32> = counts.iter().copied().collect();
         assert_eq!(seen.len(), RACERS, "a count was seen twice: {counts:?}");
         assert_eq!(seen.iter().max().copied(), Some(RACERS as u32));
+    }
+
+    /// A window that began exactly at `window_start` is not over: the
+    /// boundary belongs to the window, on every store.
+    pub async fn the_first_second_of_a_window_is_inside_it<S: LockoutStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        store.record_failed_login(&ada, T0, T0 - 600).await.unwrap();
+        assert_eq!(
+            store.record_failed_login(&ada, T0 + 600, T0).await.unwrap(),
+            2,
+            "the window began at T0, and T0 is its start"
+        );
+        assert_eq!(
+            store
+                .record_failed_login(&ada, T0 + 601, T0 + 1)
+                .await
+                .unwrap(),
+            1,
+            "one second later it is over"
+        );
+    }
+
+    /// An account that never failed has no lock, and clearing it is no
+    /// error. A lock that ended is still read back: the caller compares.
+    pub async fn an_account_with_no_row_is_not_locked_and_clears<S: LockoutStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        assert_eq!(store.locked_until(&ada).await.unwrap(), None);
+        store.clear_failed_logins(&ada).await.unwrap();
+        store.lock_account(&ada, T0 - 1).await.unwrap();
+        assert_eq!(store.locked_until(&ada).await.unwrap(), Some(T0 - 1));
+        store.lock_account(&ada, T0 + 900).await.unwrap();
+        assert_eq!(
+            store.locked_until(&ada).await.unwrap(),
+            Some(T0 + 900),
+            "a second lock replaces the first"
+        );
     }
 }

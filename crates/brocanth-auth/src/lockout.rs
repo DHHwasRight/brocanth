@@ -345,6 +345,164 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_failure_on_the_last_second_of_the_window_still_counts() {
+        let f = fixture(policy()).await;
+        wrong(&f, "ada@example.com").await;
+        f.clock.advance(300);
+        wrong(&f, "ada@example.com").await;
+        // The window began 600 seconds ago: this second is still inside it.
+        f.clock.advance(300);
+        assert!(
+            matches!(
+                wrong(&f, "ada@example.com").await,
+                Attempt::JustLocked { .. }
+            ),
+            "three failures in 600 seconds lock"
+        );
+
+        let g = fixture(policy()).await;
+        wrong(&g, "ada@example.com").await;
+        g.clock.advance(300);
+        wrong(&g, "ada@example.com").await;
+        g.clock.advance(301);
+        assert!(
+            matches!(wrong(&g, "ada@example.com").await, Attempt::Refused),
+            "one second later the first failure is out of the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_lock_ends_on_its_last_second_and_not_before() {
+        let f = fixture(policy()).await;
+        for _ in 0..2 {
+            wrong(&f, "ada@example.com").await;
+        }
+        let Attempt::JustLocked { account, until } = wrong(&f, "ada@example.com").await else {
+            panic!("locked");
+        };
+        f.clock.advance(299);
+        assert!(
+            matches!(right(&f).await, Attempt::Refused),
+            "one second left"
+        );
+        assert_eq!(
+            f.lockout.locked_until(&account.id).await.unwrap(),
+            Some(until),
+            "the right password during a lock neither lifts nor stretches it"
+        );
+        f.clock.advance(1);
+        assert_eq!(f.clock.now(), until);
+        assert!(matches!(right(&f).await, Attempt::Admitted(_)));
+    }
+
+    #[tokio::test]
+    async fn after_a_lock_ends_the_count_starts_from_zero() {
+        let f = fixture(policy()).await;
+        for _ in 0..2 {
+            wrong(&f, "ada@example.com").await;
+        }
+        assert!(matches!(
+            wrong(&f, "ada@example.com").await,
+            Attempt::JustLocked { .. }
+        ));
+        // The lock (300 s) ends inside the window (600 s).
+        f.clock.advance(300);
+        assert!(matches!(
+            wrong(&f, "ada@example.com").await,
+            Attempt::Refused
+        ));
+        assert!(matches!(
+            wrong(&f, "ada@example.com").await,
+            Attempt::Refused
+        ));
+        assert!(
+            matches!(
+                wrong(&f, "ada@example.com").await,
+                Attempt::JustLocked { .. }
+            ),
+            "three new failures lock again, and the owner gets a new mail"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_spelling_of_the_address_counts_against_the_same_account() {
+        let f = fixture(policy()).await;
+        wrong(&f, "ADA@Example.com").await;
+        wrong(&f, "  ada@EXAMPLE.COM ").await;
+        assert!(
+            matches!(
+                wrong(&f, "Ada@example.com").await,
+                Attempt::JustLocked { .. }
+            ),
+            "case and spaces must not give a guessing run a fresh count"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_or_malformed_address_counts_against_the_sentinel() {
+        let f = fixture(policy()).await;
+        let sentinel = f.lockout.sentinel.clone();
+        assert!(matches!(
+            wrong(&f, "nobody@example.com").await,
+            Attempt::Refused
+        ));
+        assert!(
+            matches!(wrong(&f, "not an address").await, Attempt::Refused),
+            "a malformed address is a refusal, not an error a page shows apart"
+        );
+        assert_eq!(f.lockout.locked_until(&sentinel).await.unwrap(), None);
+        assert!(matches!(wrong(&f, "").await, Attempt::Refused));
+        assert!(
+            f.lockout.locked_until(&sentinel).await.unwrap().is_some(),
+            "the unknown addresses did the store work a known one does"
+        );
+        assert!(
+            matches!(
+                f.lockout
+                    .login(&f.accounts, "nobody@example.com", "anything")
+                    .await
+                    .unwrap(),
+                Attempt::Refused
+            ),
+            "the sentinel never admits"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_locked_account_leaves_another_open() {
+        let f = fixture(policy()).await;
+        f.accounts
+            .register("eve@example.com", "eve's own password")
+            .await
+            .expect("register");
+        for _ in 0..3 {
+            wrong(&f, "ada@example.com").await;
+        }
+        assert!(matches!(right(&f).await, Attempt::Refused));
+        assert!(matches!(
+            f.lockout
+                .login(&f.accounts, "eve@example.com", "eve's own password")
+                .await
+                .unwrap(),
+            Attempt::Admitted(_)
+        ));
+    }
+
+    #[test]
+    fn a_policy_takes_each_bound_and_refuses_one_past_it() {
+        assert!(LockoutPolicy::new(3, 60, 60).is_ok());
+        assert!(LockoutPolicy::new(3, 86_400, 86_400).is_ok());
+        assert!(LockoutPolicy::new(3, 59, 60).is_err());
+        assert!(LockoutPolicy::new(3, 60, 59).is_err());
+        assert!(LockoutPolicy::new(3, 86_401, 60).is_err());
+        assert!(LockoutPolicy::new(3, 60, 86_401).is_err());
+        let p = LockoutPolicy::new(4, 120, 180).unwrap();
+        assert_eq!((p.max_failures(), p.window(), p.lock_for()), (4, 120, 180));
+        let r = LockoutPolicy::recommended();
+        assert_eq!((r.max_failures(), r.window(), r.lock_for()), (10, 900, 900));
+    }
+
     #[test]
     fn a_policy_that_locks_out_typos_or_lasts_for_days_is_refused() {
         assert!(LockoutPolicy::new(2, 600, 600).is_err());
