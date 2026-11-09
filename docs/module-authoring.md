@@ -514,6 +514,31 @@ Order::new().after("proxy-headers.read").before_if_present("csrf.check")
 `after_if_present` and `before_if_present` do not fail when the other hook
 is missing. `after` and `before` do.
 
+**A hook can be off.** The application calls
+`AppBuilder::hooks_off(instance, names)` after the registration. The
+registrar drops each named hook: it enters no chain, never runs, and
+`Pipeline::skipped()` lists it as `(instance, name)`. The plugin needs no
+code for this, and its services, routes and readiness checks stay.
+`build()` refuses three mistakes:
+
+| Mistake | Error |
+|---|---|
+| no instance has the name | `` `hooks_off` names `analytix`, and no plugin instance has that name `` |
+| the instance never registers the hook | `analytics has no hook "colect"` |
+| a hard `after` or `before` names a hook that is off | `` `audit.trail` runs after `rate_limit.headers`, which src/modules/middleware_rate_limit.rs turns off `` |
+
+Each error has a `help:` line. For ordering, an off hook is absent:
+`after_if_present` on it does nothing. A generated project calls
+`hooks_off_from(instance, file, names)`, which is `hooks_off` with the
+module file, so the `help:` line names the field to set in that file
+(`set headers: true in src/modules/middleware_rate_limit.rs`). The core
+does not know which module registered an instance, so only the caller can
+name the file. See `docs/module-config.md` §2.3.
+
+So choose hook names with care: a name is the key of a toggle in the
+project's module file. Rename a hook and every project that turned it off
+fails to build with `has no hook`.
+
 **`RequestState`** carries values between hooks and into the page. It is
 a type map: `insert<T>(value) -> Option<T>` and `get<T>() -> Option<&T>`,
 for `T: Send + Sync + 'static`. Use a type you own as the key, not a

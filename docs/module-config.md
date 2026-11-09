@@ -1,6 +1,8 @@
 # Module configuration in the source: `src/modules/`
 
-Status: **proposal**. Nothing here is built yet.
+Status: **proposal**, partly built. The core side of hook toggles (§2.3,
+§3.2) is built: `AppBuilder::hooks_off`, `hooks_off_from` and
+`Pipeline::skipped`.
 
 ## The request
 
@@ -634,6 +636,34 @@ hook and forgets the manifest fails its own test.
 - `Pipeline::skipped()`, for the settings report and the routes command.
 - The "nothing answers to that name" error names a skipped hook and its
   module file.
+
+**Built** (`crates/brocanth`, tests in `tests/hooks_off.rs`):
+
+- `hooks_off(instance, names)` and `Pipeline::skipped() -> &[(&'static str, &'static str)]`,
+  as above. Two calls for one instance add up. An empty list does nothing.
+- `hooks_off_from(instance, file, names)`: the same, with the module file.
+  **Reason:** the core does not know which module registered an instance
+  (`rate_limit` comes from `middleware-rate-limit`), so it cannot find the
+  file. Only the generator knows it. With the file, a hard `after` on an
+  off hook gives the message of §2.3 exactly. The field in `help:` is the
+  hook name with `-` written as `_` (`consent-log` is `consent_log`).
+  Without the file, the message names the call:
+  ``which `hooks_off("rate_limit", ..)` turns off``, and
+  ``help: remove "headers" from `hooks_off("rate_limit", ..)` ``. The
+  generated line is therefore
+  `.hooks_off_from("rate_limit", "src/modules/middleware_rate_limit.rs", crate::modules::middleware_rate_limit::MODULE.hooks.off())`.
+- `build()` refuses an unknown instance, an unknown hook name
+  (`analytics has no hook "colect"`, with `did you mean` and the names the
+  instance registers), and a hard `after` or `before` on an off hook. The
+  last check runs before the sort, per chain: an `Order` resolves inside
+  one chain only (request, response, error, or one model event), so an off
+  response hook does not refuse an `after` of a request hook. The check
+  also covers an `after("rate_limit")` when every hook of `rate_limit` in
+  that chain is off.
+- `after_if_present` and `before_if_present` on an off hook do nothing.
+- Not built: the warning for a plugin that installs no hook (§2.3). The
+  core does not know the module key for its `help:` line. The generated
+  code can read `Pipeline::skipped()` and print it.
 
 ### 3.3 Where each mistake is found
 

@@ -692,12 +692,51 @@ pub trait ErrorHook: Send + Sync + 'static {
 /// Handed to [`HookSource::install_hooks`]. Each call takes a name, which is
 /// qualified with the instance name so that two instances of one plugin get
 /// two distinguishable hooks, and an [`Order`].
+///
+/// A name that the application turned off with
+/// [`AppBuilder::hooks_off`](crate::plugin_app::AppBuilder::hooks_off) is
+/// dropped here: the hook never enters a chain, so it costs nothing per
+/// request, and [`Pipeline::skipped`] lists it. The plugin does not see the
+/// difference, so it needs no code for the toggle.
 pub struct HookRegistrar<'a> {
     instance: &'a str,
     request: &'a mut Vec<Ordered<RequestStep>>,
     response: &'a mut Vec<Ordered<Box<dyn ResponseHook>>>,
     error: &'a mut Vec<Ordered<Box<dyn ErrorHook>>>,
     model: &'a mut ModelHooks,
+    toggles: Option<Toggles<'a>>,
+}
+
+/// The `hooks_off` part of a registrar: what to drop, and where to say so.
+pub(crate) struct Toggles<'a> {
+    /// The instance, as `hooks_off` received it.
+    pub(crate) instance: &'static str,
+    /// The names to drop.
+    pub(crate) off: &'a [&'static str],
+    /// Every name the plugin registered, dropped or not, in order.
+    pub(crate) seen: &'a mut Vec<String>,
+    /// The hooks dropped so far, for every instance.
+    pub(crate) skipped: &'a mut Vec<Skipped>,
+}
+
+/// One hook that `hooks_off` dropped, and the chain it would have joined.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Skipped {
+    pub(crate) instance: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) chain: Chain,
+}
+
+/// A list of hooks that sort together. An `Order` resolves inside one chain
+/// only, so a skipped hook matters only to its own chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chain {
+    /// The sync and the async request hooks share one chain.
+    Request,
+    Response,
+    Error,
+    /// One chain per model event type.
+    Model(TypeId),
 }
 
 impl<'a> HookRegistrar<'a> {
@@ -714,7 +753,14 @@ impl<'a> HookRegistrar<'a> {
             response,
             error,
             model,
+            toggles: None,
         }
+    }
+
+    /// Drops the hooks named in `toggles` instead of installing them.
+    pub(crate) fn with_toggles(mut self, toggles: Toggles<'a>) -> Self {
+        self.toggles = Some(toggles);
+        self
     }
 
     /// The instance registering. The core fills this in; a plugin cannot claim
@@ -723,7 +769,27 @@ impl<'a> HookRegistrar<'a> {
         self.instance
     }
 
+    /// Records `name`, and says whether `hooks_off` turned it off.
+    fn is_off(&mut self, name: &str, chain: Chain) -> bool {
+        let Some(toggles) = self.toggles.as_mut() else {
+            return false;
+        };
+        toggles.seen.push(name.to_string());
+        let Some(&off) = toggles.off.iter().find(|off| **off == name) else {
+            return false;
+        };
+        toggles.skipped.push(Skipped {
+            instance: toggles.instance,
+            name: off,
+            chain,
+        });
+        true
+    }
+
     pub fn request(&mut self, name: &str, order: Order, hook: impl RequestHook) -> &mut Self {
+        if self.is_off(name, Chain::Request) {
+            return self;
+        }
         self.request.push(Ordered::new(
             HookId::new(self.instance, name),
             order,
@@ -747,6 +813,9 @@ impl<'a> HookRegistrar<'a> {
         order: Order,
         hook: impl AsyncRequestHook,
     ) -> &mut Self {
+        if self.is_off(name, Chain::Request) {
+            return self;
+        }
         self.request.push(Ordered::new(
             HookId::new(self.instance, name),
             order,
@@ -756,6 +825,9 @@ impl<'a> HookRegistrar<'a> {
     }
 
     pub fn response(&mut self, name: &str, order: Order, hook: impl ResponseHook) -> &mut Self {
+        if self.is_off(name, Chain::Response) {
+            return self;
+        }
         self.response.push(Ordered::new(
             HookId::new(self.instance, name),
             order,
@@ -765,6 +837,9 @@ impl<'a> HookRegistrar<'a> {
     }
 
     pub fn error(&mut self, name: &str, order: Order, hook: impl ErrorHook) -> &mut Self {
+        if self.is_off(name, Chain::Error) {
+            return self;
+        }
         self.error.push(Ordered::new(
             HookId::new(self.instance, name),
             order,
@@ -780,6 +855,9 @@ impl<'a> HookRegistrar<'a> {
         order: Order,
         hook: impl ModelHook<Ev>,
     ) -> &mut Self {
+        if self.is_off(name, Chain::Model(TypeId::of::<Ev>())) {
+            return self;
+        }
         self.model
             .register::<Ev>(HookId::new(self.instance, name), order, hook);
         self
@@ -820,6 +898,8 @@ pub struct Pipeline {
     request: Vec<RequestStep>,
     response: Vec<Box<dyn ResponseHook>>,
     error: Vec<Box<dyn ErrorHook>>,
+    /// The hooks `hooks_off` dropped, as (instance, hook name).
+    skipped: Vec<(&'static str, &'static str)>,
 }
 
 impl Pipeline {
@@ -827,12 +907,25 @@ impl Pipeline {
         request: Vec<RequestStep>,
         response: Vec<Box<dyn ResponseHook>>,
         error: Vec<Box<dyn ErrorHook>>,
+        skipped: Vec<(&'static str, &'static str)>,
     ) -> Self {
         Self {
             request,
             response,
             error,
+            skipped,
         }
+    }
+
+    /// The hooks that the application turned off with
+    /// [`AppBuilder::hooks_off`](crate::plugin_app::AppBuilder::hooks_off),
+    /// as `(instance, hook name)`, in registration order.
+    ///
+    /// A skipped hook is in no chain and never runs. This list is for a
+    /// report: the settings report and the routes command print it, so a
+    /// reader sees why `analytics.count` does not count.
+    pub fn skipped(&self) -> &[(&'static str, &'static str)] {
+        &self.skipped
     }
 
     /// How many [`RequestHook`]s are installed.
@@ -1279,6 +1372,7 @@ impl std::fmt::Debug for Pipeline {
             .field("async_request", &self.async_request_hooks())
             .field("response", &self.response.len())
             .field("error", &self.error.len())
+            .field("skipped", &self.skipped)
             .finish()
     }
 }

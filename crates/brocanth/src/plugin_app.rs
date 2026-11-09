@@ -46,11 +46,11 @@ use crate::plugin_body::StreamGate;
 use crate::plugin_context::{Base, Context, ContextBuilder, Provided};
 use crate::plugin_health::Readiness;
 use crate::plugin_hooks::{
-    Begin, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks, Pipeline,
-    Request, RequestState, RequestStep, Response, ResponseHook,
+    Begin, Chain, ErrorHook, HandlerError, HookFamilies, HookRegistrar, HookSource, NoHooks,
+    Pipeline, Request, RequestState, RequestStep, Response, ResponseHook, Skipped, Toggles,
 };
 use crate::plugin_model::{ModelDispatch, ModelHooks};
-use crate::plugin_order::{sort, OrderError, Ordered};
+use crate::plugin_order::{dependency_on_off_hook, sort, OrderError, Ordered};
 use crate::plugin_routes::{no_such_plugin, RouteBundle, RouteError, RoutePlan, RouteSource};
 use crate::plugin_shutdown::{ShutdownCx, ShutdownPhase, ShutdownReason, ShutdownReport};
 use crate::suggest::nearest_name;
@@ -126,6 +126,45 @@ pub enum BuildError {
         #[source]
         OrderError,
     ),
+
+    #[error(
+        "`hooks_off` names `{instance}`, and no plugin instance has that name\nhelp: {}registered: {}",
+        crate::plugin_app::did_you_mean(.suggestion, "`"),
+        if .registered.is_empty() { "nothing".to_string() } else { .registered.join(", ") }
+    )]
+    HooksOffUnknownInstance {
+        instance: &'static str,
+        suggestion: Option<String>,
+        registered: Vec<String>,
+    },
+
+    #[error(
+        "{instance} has no hook \"{name}\"\nhelp: {}`{instance}` registers {}",
+        crate::plugin_app::did_you_mean(.suggestion, "\""),
+        if .registered.is_empty() { "no hook".to_string() } else { .registered.join(", ") }
+    )]
+    HooksOffUnknownHook {
+        instance: &'static str,
+        name: &'static str,
+        suggestion: Option<String>,
+        registered: Vec<String>,
+    },
+
+    /// A required `after` or `before` names a hook that `hooks_off` turned
+    /// off. With the file, this is the message of docs/module-config.md §2.3.
+    #[error("{}", crate::plugin_app::order_on_off_hook(.hook, .relation, .instance, .name, *.file))]
+    OrderOnOffHook {
+        /// The hook that declared the order, `instance.name`.
+        hook: String,
+        /// `after` or `before`.
+        relation: &'static str,
+        /// The instance of the hook that is off.
+        instance: &'static str,
+        /// The name of the hook that is off.
+        name: &'static str,
+        /// The module file that turned it off, when the call named one.
+        file: Option<&'static str>,
+    },
 }
 
 #[doc(hidden)]
@@ -133,6 +172,39 @@ pub fn mount_hint(suggestion: &Option<String>) -> String {
     match suggestion {
         Some(s) => format!("; did you mean `{s}`?"),
         None => String::new(),
+    }
+}
+
+#[doc(hidden)]
+pub fn did_you_mean(suggestion: &Option<String>, quote: &str) -> String {
+    match suggestion {
+        Some(s) => format!("did you mean {quote}{s}{quote}? "),
+        None => String::new(),
+    }
+}
+
+#[doc(hidden)]
+pub fn order_on_off_hook(
+    hook: &str,
+    relation: &str,
+    instance: &str,
+    name: &str,
+    file: Option<&str>,
+) -> String {
+    match file {
+        // A module file holds one `bool` per hook. Its field is the hook
+        // name, with `-` written as `_`.
+        Some(file) => format!(
+            "`{hook}` runs {relation} `{instance}.{name}`, which {file} turns off\n\
+             help: set `{field}: true` in {file}, or change the order of `{hook}`",
+            field = name.replace('-', "_"),
+        ),
+        None => format!(
+            "`{hook}` runs {relation} `{instance}.{name}`, which `hooks_off(\"{instance}\", ..)` \
+             turns off\n\
+             help: remove \"{name}\" from `hooks_off(\"{instance}\", ..)`, or change the order of \
+             `{hook}`"
+        ),
     }
 }
 
@@ -283,8 +355,17 @@ pub struct AppBuilder<E = Base, H = NoHooks> {
     services: Services,
     readiness: Readiness,
     setup: Option<SetupBlock>,
+    hooks_off: Vec<HooksOff>,
     _providers: PhantomData<fn() -> E>,
     _families: PhantomData<fn() -> H>,
+}
+
+/// The hooks one instance must not install. See [`AppBuilder::hooks_off`].
+struct HooksOff {
+    instance: &'static str,
+    /// The module file that holds the choice, for the `help:` line.
+    file: Option<&'static str>,
+    names: Vec<&'static str>,
 }
 
 impl<E, H> std::fmt::Debug for AppBuilder<E, H> {
@@ -310,6 +391,7 @@ impl AppBuilder<Base, NoHooks> {
             services: Services::new(),
             readiness: Readiness::new(),
             setup: None,
+            hooks_off: Vec::new(),
             _providers: PhantomData,
             _families: PhantomData,
         }
@@ -444,6 +526,91 @@ impl<E, H> AppBuilder<E, H> {
         self
     }
 
+    /// Turns off some hooks of one instance. The plugin is still registered:
+    /// its services, its routes and its readiness checks stay.
+    ///
+    /// `build()` drops each named hook when the instance registers it, so the
+    /// hook never enters a chain and costs nothing per request.
+    /// [`Pipeline::skipped`] lists it. A name is the one the plugin passes to
+    /// the [`HookRegistrar`], without the instance: `"count"`, not
+    /// `"analytics.count"`.
+    ///
+    /// A generated project calls this from `src/plugins/mod.rs`, right after
+    /// the registration, with the choices of `src/modules/<key>.rs`:
+    ///
+    /// ```text
+    /// .hooks_off("analytics", crate::modules::analytics::MODULE.hooks.off())
+    /// ```
+    ///
+    /// An empty list does nothing. Two calls for one instance add up.
+    ///
+    /// # Errors at build
+    ///
+    /// - [`BuildError::HooksOffUnknownInstance`]: no instance has the name.
+    /// - [`BuildError::HooksOffUnknownHook`]: the instance never registers a
+    ///   hook with that name (`analytics has no hook "colect"`).
+    /// - [`BuildError::OrderOnOffHook`]: another hook declares a hard `after`
+    ///   or `before` on a hook that is off. An `after_if_present` or
+    ///   `before_if_present` on it does nothing, as for an absent plugin.
+    ///
+    /// The `help:` line of the last error names this call. Use
+    /// [`AppBuilder::hooks_off_from`] to name the file that holds the choice.
+    pub fn hooks_off(
+        self,
+        instance: &'static str,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.record_hooks_off(instance, None, names)
+    }
+
+    /// [`AppBuilder::hooks_off`], with the file that holds the choice.
+    ///
+    /// The core does not know which module registered an instance, so it
+    /// cannot find the file. The generator knows it, and passes it here. The
+    /// `help:` line of [`BuildError::OrderOnOffHook`] then names the field to
+    /// set in that file:
+    ///
+    /// ```text
+    /// `audit.trail` runs after `rate_limit.headers`, which src/modules/middleware_rate_limit.rs turns off
+    /// help: set `headers: true` in src/modules/middleware_rate_limit.rs, or change the order of `audit.trail`
+    /// ```
+    pub fn hooks_off_from(
+        self,
+        instance: &'static str,
+        file: &'static str,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.record_hooks_off(instance, Some(file), names)
+    }
+
+    fn record_hooks_off(
+        mut self,
+        instance: &'static str,
+        file: Option<&'static str>,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let names: Vec<&'static str> = names.into_iter().collect();
+        if names.is_empty() {
+            return self;
+        }
+        match self.hooks_off.iter_mut().find(|h| h.instance == instance) {
+            Some(entry) => {
+                entry.file = file.or(entry.file);
+                for name in names {
+                    if !entry.names.contains(&name) {
+                        entry.names.push(name);
+                    }
+                }
+            }
+            None => self.hooks_off.push(HooksOff {
+                instance,
+                file,
+                names,
+            }),
+        }
+        self
+    }
+
     fn add<P: Plugin>(
         mut self,
         name: String,
@@ -470,6 +637,7 @@ impl<E, H> AppBuilder<E, H> {
             services: self.services,
             readiness: self.readiness,
             setup: self.setup,
+            hooks_off: self.hooks_off,
             _providers: PhantomData,
             _families: PhantomData,
         }
@@ -584,10 +752,29 @@ impl<E, H> AppBuilder<E, H> {
         let mut response: Vec<Ordered<Box<dyn ResponseHook>>> = Vec::new();
         let mut error: Vec<Ordered<Box<dyn ErrorHook>>> = Vec::new();
         let mut model = ModelHooks::new();
+        let mut skipped: Vec<Skipped> = Vec::new();
+
+        // A `hooks_off` call for an instance that does not exist is a typo.
+        let registered: Vec<String> = self
+            .instances
+            .iter()
+            .map(|r| r.inner.name().to_string())
+            .collect();
+        for off in &self.hooks_off {
+            if !registered.iter().any(|name| name == off.instance) {
+                return Err(BuildError::HooksOffUnknownInstance {
+                    instance: off.instance,
+                    suggestion: nearest_name(off.instance, &registered),
+                    registered,
+                });
+            }
+        }
 
         for reg in &self.instances {
             let instance = reg.inner.name().to_string();
             let plugin = reg.inner.plugin_type_name().to_string();
+            let off = self.hooks_off.iter().find(|h| h.instance == instance);
+            let mut seen: Vec<String> = Vec::new();
             match (reg.installer, reg.inner.installs_hooks()) {
                 // Registered with `plugin(..)`, but it hooks. The hooks would
                 // go quiet, so the build stops and says what to write.
@@ -604,6 +791,14 @@ impl<E, H> AppBuilder<E, H> {
                         &mut error,
                         &mut model,
                     );
+                    if let Some(off) = off {
+                        registrar = registrar.with_toggles(Toggles {
+                            instance: off.instance,
+                            off: &off.names,
+                            seen: &mut seen,
+                            skipped: &mut skipped,
+                        });
+                    }
                     install(reg.inner.plugin_any(), &mut registrar).map_err(|source| {
                         BuildError::Hook {
                             instance: instance.clone(),
@@ -611,6 +806,19 @@ impl<E, H> AppBuilder<E, H> {
                             source,
                         }
                     })?;
+                }
+            }
+
+            // Each name turned off must be a hook the instance registers.
+            // Otherwise the toggle would do nothing, and nobody would know.
+            if let Some(off) = off {
+                if let Some(&name) = off.names.iter().find(|n| !seen.iter().any(|s| s == *n)) {
+                    return Err(BuildError::HooksOffUnknownHook {
+                        instance: off.instance,
+                        name,
+                        suggestion: nearest_name(name, &seen),
+                        registered: seen,
+                    });
                 }
             }
         }
@@ -664,8 +872,54 @@ impl<E, H> AppBuilder<E, H> {
             }
         }
 
-        let pipeline = Pipeline::from_parts(sort(request)?, sort(response)?, sort(error)?);
+        // A hard `after` or `before` on a hook that is off. `sort` would call
+        // it unknown, or say nothing with one hook in the chain, so this check
+        // runs first and names the toggle. An `_if_present` dependency on it
+        // stays silent: the hook is absent, as an absent plugin is.
+        self.refuse_order_on_off_hooks(&skipped, Chain::Request, &request)?;
+        self.refuse_order_on_off_hooks(&skipped, Chain::Response, &response)?;
+        self.refuse_order_on_off_hooks(&skipped, Chain::Error, &error)?;
+        for (event, items) in model.pending_chains() {
+            self.refuse_order_on_off_hooks(&skipped, Chain::Model(event), items)?;
+        }
+
+        let pipeline = Pipeline::from_parts(
+            sort(request)?,
+            sort(response)?,
+            sort(error)?,
+            skipped.iter().map(|s| (s.instance, s.name)).collect(),
+        );
         Ok((pipeline, model.finish()?))
+    }
+
+    fn refuse_order_on_off_hooks<T>(
+        &self,
+        skipped: &[Skipped],
+        chain: Chain,
+        items: &[Ordered<T>],
+    ) -> Result<(), BuildError> {
+        let off: Vec<(&'static str, &'static str)> = skipped
+            .iter()
+            .filter(|s| s.chain == chain)
+            .map(|s| (s.instance, s.name))
+            .collect();
+        match dependency_on_off_hook(items, &off) {
+            None => Ok(()),
+            Some(found) => {
+                let (instance, name) = found.off;
+                Err(BuildError::OrderOnOffHook {
+                    hook: found.hook,
+                    relation: found.relation,
+                    instance,
+                    name,
+                    file: self
+                        .hooks_off
+                        .iter()
+                        .find(|h| h.instance == instance)
+                        .and_then(|h| h.file),
+                })
+            }
+        }
     }
 }
 

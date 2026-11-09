@@ -337,6 +337,62 @@ pub fn sort<T>(items: Vec<Ordered<T>>) -> Result<Vec<T>, OrderError> {
         .collect())
 }
 
+/// A required `after` or `before` whose target is absent from its chain
+/// because the application turned it off.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OnOffHook<'s> {
+    /// The hook that declared the dependency, `instance.name`.
+    pub(crate) hook: String,
+    /// `after` or `before`.
+    pub(crate) relation: &'static str,
+    /// The hook that is off, as (instance, name).
+    pub(crate) off: (&'s str, &'s str),
+}
+
+/// Finds the first required dependency in `items` that resolves to nothing in
+/// the chain and to a hook in `off`.
+///
+/// [`sort`] would report such a dependency as unknown, or, with fewer than
+/// two hooks, not at all. This check runs first, so the message can say why
+/// the hook is absent. `off` holds the skipped hooks of this chain only.
+pub(crate) fn dependency_on_off_hook<'s, T>(
+    items: &[Ordered<T>],
+    off: &[(&'s str, &'s str)],
+) -> Option<OnOffHook<'s>> {
+    if off.is_empty() {
+        return None;
+    }
+    let present = |target: &str| {
+        items
+            .iter()
+            .any(|o| o.id.instance() == target || o.id.qualified() == target)
+    };
+    let names = |target: &str, (instance, name): (&str, &str)| {
+        target == instance
+            || target
+                .strip_prefix(instance)
+                .and_then(|rest| rest.strip_prefix('.'))
+                == Some(name)
+    };
+    for item in items {
+        for (relation, deps) in [("after", &item.order.after), ("before", &item.order.before)] {
+            for dep in deps.iter().filter(|d| d.required) {
+                if present(&dep.target) {
+                    continue;
+                }
+                if let Some(&hit) = off.iter().find(|&&o| names(&dep.target, o)) {
+                    return Some(OnOffHook {
+                        hook: item.id.to_string(),
+                        relation,
+                        off: hit,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Walks the remaining graph until it revisits a node, which is the cycle.
 fn cycle_error<T>(items: &[Ordered<T>], edges: &[Vec<usize>], stuck: &[usize]) -> OrderError {
     let start = stuck[0];

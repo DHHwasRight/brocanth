@@ -157,6 +157,14 @@ impl ModelHooks {
         self.pending.values().flatten().map(|o| &o.id).next()
     }
 
+    /// Each event's hooks before [`Self::finish`], for a check that reads
+    /// the declarations of one chain.
+    pub(crate) fn pending_chains(
+        &self,
+    ) -> impl Iterator<Item = (TypeId, &[Ordered<Box<dyn Any + Send + Sync>>])> {
+        self.pending.iter().map(|(k, v)| (*k, v.as_slice()))
+    }
+
     /// How many hooks are registered for `Ev`.
     pub fn len_for<Ev: ModelEvent>(&self) -> usize {
         self.sorted
