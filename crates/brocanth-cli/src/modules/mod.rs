@@ -94,6 +94,12 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_cache::scaffold::Cache,
     // The queue, from the crate that is the queue.
     &brocanth_jobs::scaffold::Jobs,
+    // Feature flags: rules in a table of the `db` database, read from a
+    // copy in memory, so a page never waits on a flag.
+    &brocanth_flags::scaffold::FeatureFlags,
+    // The change history: the model layer's changes and the admin's
+    // writes, in a table of the `db` database.
+    &brocanth_audit::scaffold::Audit,
     // Accounts, from the crate that is the accounts. The local path only:
     // there is one `AuthStore` in the workspace and it is a `HashMap`, and
     // a provider cannot be a second choice until a crate can appear in two
@@ -138,6 +144,7 @@ pub const ALL: &[&dyn Module] = &[
     // reads rows through the ORM the model plugin builds on the `db` pool.
     &brocanth_admin::scaffold::Backoffice,
     &brocanth_admin::scaffold::BackofficeModels,
+    &brocanth_admin::scaffold::BackofficeActions,
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,

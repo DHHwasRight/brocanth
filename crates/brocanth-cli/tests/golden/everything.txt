@@ -21,6 +21,8 @@ brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-flags = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the flag rules, their in-process copy and their Postgres store
+brocanth-audit = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the change history, its model hook and its Postgres store
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1786,9 +1788,11 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! is yours.
 
 pub mod admin;
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod db;
+pub mod flags;
 pub mod i18n;
 pub mod jobs;
 pub mod model;
@@ -1993,6 +1997,9 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
             .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::flags::Flags>("flags")
+            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -2015,6 +2022,20 @@ macro_rules! register {
                 },
             )
             .map_err(|e| e.to_string())?;
+
+        // -- brocanth-audit: change history ---------------------------------
+        //
+        // A model hook: each change the model layer publishes becomes a row
+        // of `brocanth_audit`, written every `flush_secs` seconds, never
+        // during a request. Rows older than `retention_days` go once a day.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_audit::AuditPlugin>("audit")
+            .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "audit",
+            "src/modules/audit.rs",
+            crate::modules::audit::MODULE.hooks.off(),
+        );
         let builder = builder
             .plugin_from_config::<crate::plugins::policy::Policies>("policy")
             .map_err(|e| e.to_string())?;
@@ -2073,8 +2094,10 @@ type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
 type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
 type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
-type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
+type WithFlags = After<crate::plugins::flags::Flags, WithModel>;
+type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithFlags>;
+type WithAudit = After<brocanth_audit::AuditPlugin, WithMiddlewareSecurityHeaders>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithAudit>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
 
@@ -2084,8 +2107,10 @@ type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, Hook
 type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
 type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
+type HookedAuditPlugin =
+    Both<<brocanth_audit::AuditPlugin as HookSource>::Families, HookedSecurityHeaders>;
 type HookedRateLimit =
-    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
+    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedAuditPlugin>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2194,9 +2219,23 @@ pub fn layer(name: &str) -> Option<Layer> {
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
 pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+    // "Delete selected" on every model that allows a delete, after a
+    // confirmation page. A model leaves it off with
+    // `m.without_action("delete_selected")` in src/plugins/admin/mod.rs.
+    config = config.action(brocanth_admin::actions::BulkAction::delete_selected());
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    }
+    // The feature flags, as a tab that turns each one on or off.
+    if crate::modules::flags::MODULE.integrate.admin {
+        config = config.panel(brocanth_flags::admin::FlagsPanel::installed(
+            crate::plugins::flags::ALL,
+        ));
+    }
+    // The change history: a tab, a link on every record, every admin write.
+    if crate::modules::audit::MODULE.integrate.admin {
+        config = brocanth_audit::admin::install(config);
     }
     config
 }
@@ -2972,6 +3011,24 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "flags.refresh_secs",
+        help: "Seconds between two reads of the table. 0 reads only at start.",
+        flag: true,
+        file: "src/modules/flags.rs",
+        flags: crate::modules::flags::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "flags.migrate",
+        help: "Create the brocanth_flags table on the first readiness check.",
+        flag: true,
+        file: "src/modules/flags.rs",
+        flags: crate::modules::flags::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "security_headers.behind_tls",
         help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
         flag: true,
@@ -3069,6 +3126,33 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::middleware_security_headers::MODULE.flags,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "audit.retention_days",
+        help: "Days a change is kept. 0 keeps every change.",
+        flag: true,
+        file: "src/modules/audit.rs",
+        flags: crate::modules::audit::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "audit.flush_secs",
+        help: "Seconds between two writes of the queue.",
+        flag: true,
+        file: "src/modules/audit.rs",
+        flags: crate::modules::audit::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "audit.migrate",
+        help: "Create the brocanth_audit table on the first readiness check.",
+        flag: true,
+        file: "src/modules/audit.rs",
+        flags: crate::modules::audit::MODULE.flags,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "policy.dialect",
@@ -3193,6 +3277,12 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::jobs::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::flags::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::audit::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::auth::MODULE.rename {
@@ -3409,7 +3499,9 @@ fn defaults() -> Vec<(&'static str, String)> {
     let robots = crate::plugins::robots::Settings::default();
     let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
+    let flags = brocanth_flags::FlagsConfig::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
+    let audit = brocanth_audit::AuditConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let server = crate::plugins::ServerSettings::default();
@@ -3557,6 +3649,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             "analytics.collector_path",
             format!("{:?}", analytics.collector_path),
         ),
+        ("flags.refresh_secs", format!("{:?}", flags.refresh_secs)),
+        ("flags.migrate", format!("{:?}", flags.migrate)),
         (
             "security_headers.behind_tls",
             format!("{:?}", security_headers.behind_tls),
@@ -3601,6 +3695,12 @@ fn defaults() -> Vec<(&'static str, String)> {
             "security_headers.csp.report_uri",
             format!("{:?}", security_headers.csp.report_uri),
         ),
+        (
+            "audit.retention_days",
+            format!("{:?}", audit.retention_days),
+        ),
+        ("audit.flush_secs", format!("{:?}", audit.flush_secs)),
+        ("audit.migrate", format!("{:?}", audit.migrate)),
         ("policy.dialect", format!("{:?}", policy.dialect)),
         (
             "rate_limit.ip_header",
@@ -3754,7 +3854,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: 32ce9477c52cb7ad
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4223,6 +4323,143 @@ pub mod jobs {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/flags.rs.
+pub mod flags {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[flags]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        RefreshSecs,
+        Migrate,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::RefreshSecs => "flags.refresh_secs",
+                Key::Migrate => "flags.migrate",
+            }
+        }
+    }
+
+    /// The code `flags` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a tab at /admin/flags that turns each declared flag on or
+        /// off.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/flags.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/audit.rs.
+pub mod audit {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[audit]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        RetentionDays,
+        FlushSecs,
+        Migrate,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::RetentionDays => "audit.retention_days",
+                Key::FlushSecs => "audit.flush_secs",
+                Key::Migrate => "audit.migrate",
+            }
+        }
+    }
+
+    /// The hooks of `audit` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `audit.record`: record each change the model layer publishes through
+        /// `HookSink`.
+        pub record: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { record: true };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.record {
+                off.push("record");
+            }
+            off
+        }
+    }
+
+    /// The code `audit` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a History tab at /admin/history, a History link on every
+        /// record, and every admin write recorded with its values.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/audit.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            hooks: Hooks::DEFAULT,
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -4758,6 +4995,17 @@ pub mod admin_model {
     }
 }
 
+/// The shape of src/modules/admin_actions.rs.
+pub mod admin_actions {
+    /// What src/modules/admin_actions.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/realtime.rs.
 pub mod realtime {
     pub use super::{Flag, Flags};
@@ -5041,7 +5289,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 278840667821655b
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5061,8 +5309,10 @@ pub mod ci_github {
 pub mod brocanth;
 
 pub mod admin;
+pub mod admin_actions;
 pub mod admin_model;
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod ci;
@@ -5073,6 +5323,7 @@ pub mod config;
 pub mod db;
 pub mod docker;
 pub mod docker_kubernetes;
+pub mod flags;
 pub mod gtag;
 pub mod i18n;
 pub mod input;
@@ -5118,6 +5369,8 @@ pub const ALL: &[&str] = &[
     "model",
     "cache",
     "jobs",
+    "flags",
+    "audit",
     "auth",
     "policy",
     "storage",
@@ -5133,6 +5386,7 @@ pub const ALL: &[&str] = &[
     "resource",
     "admin",
     "admin-model",
+    "admin-actions",
     "realtime",
     "realtime-sse",
     "realtime-websocket",
@@ -5150,7 +5404,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: 0d56b72095b10bf4
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5453,6 +5707,88 @@ pub const MODULE: Module = Module {
     //   (Key::Migrate, Flag::As("migrate")),
     //   (Key::Migrate, Flag::Hidden),
     rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/flags.rs =====
+//! `flags`: feature flags: on for all, a percentage, users or groups; rows in
+//! your Postgres.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [flags] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::flags::{Flag, Flags, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [flags]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::RefreshSecs, Flag::As("refresh-secs")),
+    //   (Key::RefreshSecs, Flag::Hidden),
+    rename: &[],
+
+    integrate: Integrate {
+        // A tab at /admin/flags that turns each declared flag on or off. Without
+        // the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/audit.rs =====
+//! `audit`: change history: who changed which row, when, and what; rows in your
+//! Postgres.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [audit] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::audit::{Flag, Flags, Hooks, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [audit]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::RetentionDays, Flag::As("retention-days")),
+    //   (Key::RetentionDays, Flag::Hidden),
+    rename: &[],
+
+    hooks: Hooks {
+        // `audit.record`: record each change the model layer publishes through
+        // `HookSink`.
+        record: true,
+        ..Hooks::DEFAULT
+    },
+
+    integrate: Integrate {
+        // A History tab at /admin/history, a History link on every record, and
+        // every admin write recorded with its values. Without the `admin` module
+        // this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -5836,6 +6172,20 @@ pub const MODULE: Module = Module {
 //! choice, this file takes its default.
 
 use crate::plugins::shape::admin_model::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/admin_actions.rs =====
+//! `admin-actions`: "Delete selected" on every admin list, with a confirmation
+//! page.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::admin_actions::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
@@ -6439,6 +6789,14 @@ collector_path = "/_a/v"
 # A beacon from any other origin is answered 204 and not counted.
 collector_origins = []
 
+[flags]
+# Seconds between two reads of the table. 0 reads only at start.
+# A change made in another process shows here within this time.
+refresh_secs = 10
+# Create the brocanth_flags table on the first readiness check.
+# Off, for a project that keeps brocanth_flags::PgStore::SCHEMA in a migration.
+migrate = true
+
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
 # False in development: HSTS from localhost pins the name in the browser.
@@ -6469,6 +6827,16 @@ enabled = true
 report_only = false
 # Where a browser reports what the policy blocked. Empty means none.
 # report_uri = "/csp-reports"
+
+[audit]
+# Days a change is kept. 0 keeps every change.
+# Older changes are deleted once a day.
+retention_days = 365
+# Seconds between two writes of the queue.
+flush_secs = 5
+# Create the brocanth_audit table on the first readiness check.
+# Off, for a project that keeps brocanth_audit::PgStore::SCHEMA in a migration.
+migrate = true
 
 [policy]
 # The SQL a condition compiles to: postgres or sqlite.
@@ -8676,6 +9044,50 @@ brocanth_admin_model::admin_source! {
     /// Every model this admin shows, over the ORM's connection.
     pub struct Models;
 }
+===== src/plugins/audit/mod.rs =====
+//! The change history: who is asking, and the sink a page writes through.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! A write through the model layer is recorded when it is published to the
+//! sink below:
+//!
+//! ```ignore
+//! post.insert_published(ctx.orm(), &crate::plugins::audit::sink(ctx)).await?;
+//! ```
+//!
+//! The history is the `brocanth_audit` table of the `[db]` database. With
+//! the `admin` module, the History tab at `/admin/history` lists it, every
+//! record has a History link, and every admin write is recorded with the
+//! values before and after.
+
+use brocanth_audit::{By, Trail};
+
+use crate::pages::Ctx;
+
+/// A sink that records each change as made by whoever made this request.
+///
+/// Records nothing on a `Ctx` built by hand, which has no plugin behind it.
+#[allow(dead_code)]
+pub fn sink(ctx: &Ctx) -> By {
+    match ctx.provided::<Trail, _>() {
+        Some(trail) => trail.sink(actor(ctx)),
+        None => By::nothing(),
+    }
+}
+
+/// Who is asking, as the history names them.
+///
+/// Nobody until this reads your user off the request. With a user on the
+/// context, this is one line:
+///
+/// ```ignore
+/// ctx.provided::<CurrentUser, _>().map(|user| user.email.clone())
+/// ```
+#[allow(dead_code)]
+fn actor(_ctx: &Ctx) -> Option<String> {
+    None
+}
 ===== src/plugins/auth/mod.rs =====
 //! Accounts and sessions, as this application registers them.
 //!
@@ -9433,6 +9845,68 @@ impl Plugin for Database {
             cx.insert(db.clone());
         }
     }
+}
+===== src/plugins/flags/mod.rs =====
+//! Feature flags: the list this application reads, and the call a page
+//! makes.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! Declare a flag here as a constant, add it to [`ALL`], and read it in a
+//! page with [`enabled`]:
+//!
+//! ```ignore
+//! if crate::plugins::flags::enabled(ctx, crate::plugins::flags::NEW_CHECKOUT) {
+//!     // the new flow
+//! }
+//! ```
+//!
+//! The constant, not a string: a misspelt flag does not compile. A flag
+//! with no stored rule is off, so code can ship before anybody turns it on.
+//!
+//! The rules are rows in the `brocanth_flags` table of the `[db]` database.
+//! The plugin reads them before the server listens and again every
+//! `refresh_secs`, so a page never waits on the database for a flag. With
+//! the `admin` module, the tab at `/admin/flags` turns each flag on for
+//! everyone, for a percentage of signed-in users, or for a list of users
+//! and groups.
+
+use brocanth_flags::{Actor, Flag};
+
+use crate::pages::Ctx;
+
+/// The plugin, from the library. `[flags]` configures it.
+pub use brocanth_flags::FlagsPlugin as Flags;
+
+/// An example. Rename it, or delete it and its line in [`ALL`].
+pub const NEW_CHECKOUT: Flag = Flag::new("new_checkout", "The checkout flow from the redesign.");
+
+/// Every flag this application reads. The admin tab lists these, so a flag
+/// can be turned on before anybody stored a rule for it.
+#[allow(dead_code)]
+pub const ALL: &[Flag] = &[NEW_CHECKOUT];
+
+/// Whether `flag` is on for whoever made this request.
+///
+/// Off on a `Ctx` built by hand, which has no plugin behind it.
+#[allow(dead_code)]
+pub fn enabled(ctx: &Ctx, flag: Flag) -> bool {
+    ctx.provided::<brocanth_flags::Flags, _>()
+        .is_some_and(|flags| flags.enabled(flag, &actor(ctx)))
+}
+
+/// Who is asking, as the flags see it.
+///
+/// Anonymous until this reads your user off the request, and an anonymous
+/// request sees only a flag that is on for everyone. With a user on the
+/// context, this is two lines:
+///
+/// ```ignore
+/// ctx.provided::<CurrentUser, _>()
+///     .map_or_else(Actor::anonymous, |user| Actor::new(user.id.to_string()).in_group("staff"))
+/// ```
+fn actor(_ctx: &Ctx) -> Actor {
+    Actor::anonymous()
 }
 ===== src/plugins/i18n/mod.rs =====
 //! Written by `brocanth`. The catalogs in `locales/`, compiled by
@@ -12277,6 +12751,8 @@ request.
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
+- `flags`  feature flags: on for all, a percentage, users or groups; rows in your Postgres
+- `audit`  change history: who changed which row, when, and what; rows in your Postgres
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
@@ -12292,6 +12768,7 @@ request.
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `admin-model`  the admin's rows over SeaORM, one line per entity
+- `admin-actions`  "Delete selected" on every admin list, with a confirmation page
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
 - `realtime-websocket`  a duplex socket per subscriber, frames both ways
@@ -12401,6 +12878,17 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 `brocanth_admin::AdminResource` with a `brocanth_policy::Policy` over
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
+
+## Admin actions
+
+An action over selected rows belongs to one model, in
+`src/plugins/admin/mod.rs`:
+`.model("post", |m| m.action(BulkAction::set("publish", "Publish selected", [("published", true)])))`.
+`BulkAction::set` writes fixed values; the admin refuses a column the
+model lacks when it starts. `BulkAction::custom` runs your function and
+writes through `cx.update` and `cx.delete`, which keep the row policy.
+Never write to the database directly in an action: the policy and the
+journal would not see the write.
 
 ## Realtime over server-sent events
 
@@ -12582,6 +13070,18 @@ or an account number is not. Do not add a column to
 With the admin, the numbers are at `/admin/analytics`, behind the
 admin's policy like every tab.
 
+## Feature flags
+
+Declare every flag as a `Flag` constant in `src/plugins/flags/mod.rs`
+and add it to `ALL`. Read it with
+`crate::plugins::flags::enabled(ctx, crate::plugins::flags::NAME)`, never
+with a string key: a constant cannot be misspelt.
+
+A flag with no stored rule is off. Ship the code first, then turn the
+flag on. When a flag is on for everyone for good, delete the constant
+and the branch that reads it; the admin tab then lists the stored rule
+as not declared, so it can be removed.
+
 ## Security headers
 
 `brocanth_middleware::SecurityHeaders` is registered in
@@ -12699,6 +13199,17 @@ A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
 `html!` resolves that into a `match` over the chain. A handler never reads the
 header and never changes for it.
 
+## Change history
+
+Publish every write of the model layer to
+`crate::plugins::audit::sink(ctx)`: `insert_published`,
+`update_published`, `delete_published`. A write that is not published
+is not in the history. Fill `actor` in `src/plugins/audit/mod.rs` once
+the project has users, so each change names who made it.
+
+Do not put a secret in a column you write through the sink with the
+admin: the admin records the values before and after.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -12748,7 +13259,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 2236fa26e7aea706 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +13271,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "flags", "audit", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -12857,6 +13368,22 @@ files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
+
+[modules.flags]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/flags.rs", "src/plugins/flags/"]
+config = ["flags"]
+crates = ["brocanth-flags"]
+adapted_to = ["config", "admin"]
+
+[modules.audit]
+version = "0.1.0"
+kind = ["middleware", "enhancer"]
+files = ["src/modules/audit.rs", "src/plugins/audit/"]
+config = ["audit"]
+crates = ["brocanth-audit"]
+adapted_to = ["config", "admin"]
 
 [modules.auth]
 version = "0.1.0"
@@ -12976,6 +13503,14 @@ kind = ["routes"]
 files = ["src/modules/admin_model.rs", "src/plugins/admin/models.rs"]
 config = []
 crates = ["brocanth-admin-model"]
+adapted_to = []
+
+[modules.admin-actions]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/admin_actions.rs"]
+config = []
+crates = []
 adapted_to = []
 
 [modules.realtime]
@@ -13098,4 +13633,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: 5f8c9606288dd654

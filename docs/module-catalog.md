@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 44 modules. Each name links to its own page
+what to build next. There are 47 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,11 +23,12 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (16)
+### Middleware (17)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`analytics`](modules/analytics.md) | Page views counted on the server: no cookie, no script, no third party; rows in your Postgres |  |  | needs `db`: the views are rows in the database the `db` module opens |  |
+| [`audit`](modules/audit.md) | Change history: who changed which row, when, and what; rows in your Postgres | Enhancer |  | needs `db`: the history is rows in the database the `db` module opens; `model`: it records the changes the model layer publishes |  |
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
 | [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
@@ -67,15 +68,17 @@ nothing holds this page.
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
-### Enhancer (10)
+### Enhancer (12)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`admin-actions`](modules/admin-actions.md) | "Delete selected" on every admin list, with a confirmation page |  |  | part of `admin`, off until you tick it |  |
 | [`cache`](modules/cache.md) | A cache on an unlogged Postgres table, not Redis; without it no cache at all |  |  |  |  |
 | [`client`](modules/client.md) | A subcommand that calls this application's own API, built from its routes |  |  | needs `input`: the client is built from what each page takes and gives, and that table is what `input` writes; `commands`: the client is a subcommand, and a project with no command line has nowhere to put one |  |
 | [`commands`](modules/commands.md) | This project's own command line, `serve` plus whatever you add |  | yes |  | static-site safe |
 | [`config`](modules/config.md) | Config/<env>.toml, merged; without it nothing links a TOML parser |  | yes |  | static-site safe |
 | [`db`](modules/db.md) | One Postgres pool and sea-query statements, read as `ctx.db()`; without it no SQL driver | Middleware, Renderer |  |  | with `commands` and no `model`: SQL migrations in migrations/ |
+| [`flags`](modules/flags.md) | Feature flags: on for all, a percentage, users or groups; rows in your Postgres |  |  | needs `db`: the rules are rows in the database the `db` module opens |  |
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
