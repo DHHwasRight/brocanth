@@ -128,3 +128,74 @@ fn a_key_only_order_needs_a_one_key_cursor() {
     assert!(wrong.to_string().contains("help:"));
     assert_eq!(keyset.order_by::<Post>().unwrap(), "\"posts\".\"id\" ASC");
 }
+
+/// Reads one page inside `rule`, as a handler does: the rule AND the cursor.
+fn read_within(
+    rule: &Pred<PostColumn>,
+    keyset: &Keyset<PostColumn>,
+    after: Option<&Cursor>,
+    limit: u64,
+) -> Vec<(i64, i64)> {
+    let pred = rule.clone().and(keyset.after(after).expect("right width"));
+    let mut admitted: Vec<(i64, i64)> = rows()
+        .into_iter()
+        .filter(|(id, score)| pred.admits(&row(*id, *score)).expect("no opaque part"))
+        .collect();
+    admitted.sort_by_key(|(id, score)| (*score, *id));
+    admitted.truncate(usize::try_from(limit).unwrap());
+    admitted
+}
+
+#[test]
+fn a_forged_cursor_moves_the_window_and_never_passes_the_rule() {
+    // The rule admits scores 1 and 3 only. A client can write any cursor;
+    // each one only picks where the window starts.
+    let rule = Pred::one_of(PostColumn::Score, [1_i64, 3]);
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    for score in [i64::MIN, -1, 0, 1, 2, 3, 4, 99, i64::MAX] {
+        for id in [i64::MIN, 0, 5, 12, i64::MAX] {
+            let forged = Cursor::new([Key::Int(score), Key::Int(id)]);
+            for (row_id, row_score) in read_within(&rule, &keyset, Some(&forged), 100) {
+                assert!(
+                    row_score == 1 || row_score == 3,
+                    "cursor ({score}, {id}) reached score {row_score}"
+                );
+                assert!(
+                    (row_score, row_id) > (score, id),
+                    "cursor ({score}, {id}) returned ({row_score}, {row_id}), before it"
+                );
+            }
+        }
+    }
+    let past = Cursor::new([Key::Int(i64::MAX), Key::Int(i64::MAX)]);
+    assert!(read_within(&rule, &keyset, Some(&past), 100).is_empty());
+}
+
+#[test]
+fn ties_on_the_sort_column_are_split_by_the_key_at_the_page_edge() {
+    // Five rows share score 2 (ids 1, 6, 11, 16, 21). A page that ends
+    // inside the tie starts the next page at the next id, not the next
+    // score.
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    let cursor = Cursor::new([Key::Int(2), Key::Int(6)]);
+    let next = read_within(&Pred::Always, &keyset, Some(&cursor), 3);
+    assert_eq!(next, [(11, 2), (16, 2), (21, 2)]);
+
+    let descending = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Descending);
+    let pred = descending.after(Some(&cursor)).unwrap();
+    assert!(pred.admits(&row(1, 2)).unwrap(), "a lower id in the tie");
+    assert!(!pred.admits(&row(11, 2)).unwrap(), "a higher id in the tie");
+    assert!(!pred.admits(&row(6, 2)).unwrap(), "the cursor row itself");
+}
+
+#[test]
+fn a_cursor_from_the_query_string_of_the_wrong_width_is_a_help_line() {
+    use brocanth_pagination::Params;
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    let params = Params::parse("after=i3").unwrap();
+    let error = keyset.after(params.after.as_ref()).unwrap_err();
+    assert!(error.to_string().contains("2 key(s)"));
+    assert!(error.to_string().contains("help:"));
+    let params = Params::parse("after=i3.i4.i5").unwrap();
+    assert!(keyset.after(params.after.as_ref()).is_err());
+}
