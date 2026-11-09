@@ -96,7 +96,7 @@ runtime = [
 # The idempotency keys in Postgres.
 postgres = ["runtime", "dep:brocanth-db"]
 # Signed outgoing webhooks: the tables, the job, the worker, the client.
-out = ["runtime", "postgres", "dep:brocanth-jobs", "dep:brocanth-events", "dep:reqwest", "dep:url"]
+out = ["runtime", "postgres", "dep:brocanth-jobs", "dep:brocanth-events", "dep:reqwest", "dep:url", "tokio/net"]
 # `OutgoingConfig` reads from a `[webhooks_out]` section.
 config = ["runtime"]
 admin = ["out", "dep:brocanth-admin"]

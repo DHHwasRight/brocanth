@@ -46,7 +46,8 @@ reads; the job is the attempt.
 
 **Why `allow_private` is off in production:** whoever registers an endpoint
 chooses its URL. Off, an endpoint on a loopback or private address is
-refused, so a webhook cannot reach your own network. The development file
+refused, and so is a name that resolves only to such addresses when the
+delivery connects. A webhook cannot reach your own network. The development file
 turns it on, because the receiver is often on the same machine.
 
 ## What it writes

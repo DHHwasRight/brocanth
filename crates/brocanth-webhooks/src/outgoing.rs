@@ -35,11 +35,15 @@
 //! * An endpoint whose host is a loopback, private or link-local address,
 //!   or `localhost`, unless `allow_private` is on. A webhook URL is chosen
 //!   by whoever registers it, and without this check it is a way to make the
-//!   server call its own network. A name that resolves to a private address
-//!   is not caught: that needs a resolver hook, and it is an open item.
+//!   server call its own network. The URL is checked when the endpoint is
+//!   added and again before each attempt.
+//! * A name that resolves to such an address, unless `allow_private` is on.
+//!   The client resolves through [`PublicOnly`], which drops every address
+//!   on this server's network at connect time. A check before the request
+//!   would not do: the name can resolve to another address a moment later.
 //! * A redirect: a 3xx answer is a failed attempt, not a hop to follow.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -216,12 +220,7 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
     /// # Errors
     /// The client cannot be built.
     pub fn new(db: Db, config: &OutgoingConfig) -> Result<Self, OutError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs.max(1)))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("brocanth-webhooks/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| OutError(format!("webhooks: building the HTTP client: {e}")))?;
+        let client = client(config)?;
         let queue = Queue::from_pool(db.pool().clone());
         Ok(Self {
             inner: Arc::new(Inner {
@@ -455,6 +454,13 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
         let message_id: String = row.get("message_id");
         let payload: String = row.get("payload");
         let url: String = row.get("url");
+        // Again here: the row may predate `allow_private = false`, or come
+        // from SQL that never passed `add_endpoint`.
+        if let Err(refused) = check_url(&url, self.inner.allow_private) {
+            self.record(delivery, "failed", None, Some(&refused.0))
+                .await?;
+            return Ok(());
+        }
         let secret: String = row.get("secret");
         let key = decode_secret(&secret).map_err(|e| e.to_string())?;
         let now = unix_now();
@@ -733,24 +739,92 @@ pub fn check_url(url: &str, allow_private: bool) -> Result<(), OutError> {
     Ok(())
 }
 
+/// The HTTP client every attempt uses: no redirect, a timeout, and
+/// [`PublicOnly`] as its resolver unless `allow_private` is on.
+fn client(config: &OutgoingConfig) -> Result<reqwest::Client, OutError> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.timeout_secs.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("brocanth-webhooks/", env!("CARGO_PKG_VERSION")));
+    if !config.allow_private {
+        builder = builder.dns_resolver(PublicOnly);
+    }
+    builder
+        .build()
+        .map_err(|e| OutError(format!("webhooks: building the HTTP client: {e}")))
+}
+
+/// A resolver that keeps only public addresses.
+///
+/// It runs when the client connects, so a name that resolves to a public
+/// address when the endpoint is added and to `127.0.0.1` when it is called
+/// still reaches nothing here.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let public = public_only(&host, found)?;
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The addresses of `found` that are not on this server's network.
+///
+/// # Errors
+/// None is left, with a `help:` line.
+pub fn public_only(
+    host: &str,
+    found: impl IntoIterator<Item = SocketAddr>,
+) -> Result<Vec<SocketAddr>, OutError> {
+    let public: Vec<SocketAddr> = found
+        .into_iter()
+        .filter(|addr| !is_private(addr.ip()))
+        .collect();
+    if public.is_empty() {
+        return Err(OutError(format!(
+            "webhooks: `{host}` resolves to no public address
+             help: use a public address, or set `allow_private = true` in development"
+        )));
+    }
+    Ok(public)
+}
+
 fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                || v4.is_unspecified()
+                // 0.0.0.0/8: "this network", and 0.0.0.0 reaches this host.
+                || a == 0
                 || v4.is_broadcast()
-                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
+                || v4.is_multicast()
+                // 100.64.0.0/10: carrier-grade NAT.
+                || a == 100 && (b & 0xc0) == 64
         }
         IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_private(IpAddr::V4(v4)))
+                || v6.is_multicast()
+                // fc00::/7, unique local.
+                || (first & 0xfe00) == 0xfc00
+                // fe80::/10, link-local, and fec0::/10, the old site-local.
+                || (first & 0xffc0) == 0xfe80
+                || (first & 0xffc0) == 0xfec0
+                // An IPv4 address inside: `::ffff:a.b.c.d`, `::a.b.c.d`,
+                // and the NAT64 prefix 64:ff9b::/96.
+                || v6.to_ipv4().is_some_and(|v4| is_private(IpAddr::V4(v4)))
+                || (v6.segments()[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
+                    && is_private(IpAddr::V4(std::net::Ipv4Addr::from_bits(
+                        (v6.to_bits() & 0xffff_ffff) as u32,
+                    ))))
         }
     }
 }
