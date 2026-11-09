@@ -120,6 +120,10 @@ pub const ALL: &[&dyn Module] = &[
     // asked for, because its rules are a fact about one application.
     &brocanth_middleware::scaffold::SecurityHeaders,
     &brocanth_middleware::scaffold::RateLimit,
+    // The bytes on the wire: a weak ETag and 304, then gzip or brotli.
+    // Both wait to be asked for: a CDN in front often does both.
+    &brocanth_middleware::scaffold::ConditionalGet,
+    &brocanth_middleware::scaffold::Compression,
     // Google Analytics behind a consent banner. A response hook, so it
     // reaches every HTML page whatever renders it, and the static export.
     &brocanth_gtag::scaffold::Gtag,
@@ -154,6 +158,10 @@ pub const ALL: &[&dyn Module] = &[
     &jt::Jt,
     &rsx::Tailwind,
     &rsx::Htmx,
+    // After the template engines, so their rows lead the pages question.
+    // HTML a user wrote, cleaned by an allow-list into a `SafeHtml` the
+    // templates write as markup. Its own crate: it links an HTML parser.
+    &brocanth_sanitize::scaffold::Sanitize,
     // The pages as files, for a static host. It refuses every module that
     // needs a running server.
     &static_site::StaticSite,

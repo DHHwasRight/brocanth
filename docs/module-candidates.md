@@ -25,11 +25,11 @@ then what the module unblocks. Both scans put `mail` first.
 | 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. | Next.js metadata, next-seo, django-meta | M |
 | 6 | `storage-routes` | Upload and download routes, `?thumb=`, protected file tokens over `storage` | Active Storage, uploadthing, PocketBase files | S |
 | 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
-| 8 | `compression` | gzip and brotli on responses | GZipMiddleware, Rack::Deflater | S |
-| 9 | `conditional-get` | Dynamic `ETag` and 304 | ConditionalGetMiddleware, `fresh_when` | S |
+| 8 | `compression` | gzip and brotli on responses. **Built** as `middleware-compression`. | GZipMiddleware, Rack::Deflater | S |
+| 9 | `conditional-get` | Dynamic `ETag` and 304. **Built** as `middleware-conditional-get`. | ConditionalGetMiddleware, `fresh_when` | S |
 | 10 | `superuser` | Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |
 | 11 | `webhooks-in` | Incoming webhooks: signature check, replay window, idempotency key | Stripe/svix receivers, PocketHost | S |
-| 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown | bleach/nh3, Rails sanitize | S |
+| 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown. **Built**: crate `brocanth-sanitize`. | bleach/nh3, Rails sanitize | S |
 | 13 | `pagination` | One public paginator, offset and keyset; admin and `resource` each have a private one | pagy, kaminari, Django Paginator | S |
 | 14 | `auth-lockout` | Locks an account after failed logins | django-axes, Devise lockable | S |
 | 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed | next-intl, i18n_patterns | S |
@@ -130,8 +130,8 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `mail-preview` | Dev screen that lists and renders each mail | django-mail-viewer; mailer previews, letter_opener_web | no | Routes | S | 3 | GET-only dev screen; cheap once `mail` exists; could be part of `mail` |
 | `auth-screens` | Sign-up, sign-in, sign-out, reset, verify, TOTP screens in rsx, on the Postgres store | django-allauth, contrib.auth views, django-otp; Devise views, Rails 8 auth generator | no: `auth` writes a plugin only | Routes | M | 5 | Devise is in half of Rails apps; the auth crate has 8,875 lines and no page |
 | `flash` | One-shot messages across a redirect, with levels | contrib.messages; `flash` | no | Middleware | S | 5 | Every POST-redirect-GET form needs it; sessions already exist |
-| `compression` | gzip and brotli on text responses, `Vary: Accept-Encoding` | GZipMiddleware; Rack::Deflater, Thruster | no | Middleware | S | 4 | HTML pages compress 5–10x; the route cache already expects it |
-| `conditional-get` | Dynamic `ETag` and `Last-Modified`, 304 | ConditionalGetMiddleware, `@condition`; `fresh_when`, `stale?` | partly: assets only | Middleware | S | 4 | The hook contract was designed for it; dp-swap GETs gain most |
+| `compression` | gzip and brotli on text responses, `Vary: Accept-Encoding` | GZipMiddleware; Rack::Deflater, Thruster | yes (`middleware-compression`) | Middleware | S | 4 | HTML pages compress 5–10x; the route cache already expects it |
+| `conditional-get` | Dynamic `ETag` and `Last-Modified`, 304 | ConditionalGetMiddleware, `@condition`; `fresh_when`, `stale?` | yes (`middleware-conditional-get`) | Middleware | S | 4 | The hook contract was designed for it; dp-swap GETs gain most |
 | `audit` | Row history from `RowChange`; who, when, diff; admin history page | django-simple-history, django-auditlog, admin `LogEntry`; paper_trail, audited | no | Enhancer | M | 4 | Model changes already publish (G4); a sink and a table finish it |
 | `roles` | Groups, permissions, staff flag; `require_role` on a route | contrib.auth groups and permissions; rolify, Devise + Pundit roles | no | Enhancer | M | 4 | `policy` covers rows; admin and staff screens ask "which people" |
 | `auth-lockout` | Lock or slow an account after N failed logins; notify by mail | django-axes; Devise lockable, rack-attack throttle | partly: rate limit by address only | Middleware | S | 4 | Credential stuffing defence beside the existing rate limiter |
@@ -143,7 +143,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `debug-toolbar` | Dev panel: SQL queries, N+1, timings, context per request | django-debug-toolbar, django-silk; rack-mini-profiler, bullet | partly: `brocanth-model` probe | Middleware | M | 4 | 27% of Django users name it a favourite; probe already finds N+1 |
 | `storage-s3` | S3-compatible backend for `storage` | django-storages; Active Storage S3 service | no, by decision (later crate) | Enhancer | M | 4 | Most deployments have no persistent disk |
 | `attachments` | A file column on a model: attach, purge, variants by name | FileField, ImageField; `has_one_attached` | no | Enhancer | M | 4 | Joins `storage` and `model`; admin file widget needs it |
-| `sanitize` | Allow-list HTML sanitizer (ammonia) as a template filter | bleach / nh3; `sanitize` helper | no | Renderer | S | 4 | Needed before any user HTML or Markdown reaches a page |
+| `sanitize` | Allow-list HTML sanitizer (ammonia) as a template filter | bleach / nh3; `sanitize` helper | yes (`sanitize`) | Renderer | S | 4 | Needed before any user HTML or Markdown reaches a page |
 | `rich-text` | Rich text field: an editor island, sanitized storage, attachments | django-ckeditor-5, Wagtail RichText; Action Text (Trix) | no | Renderer | L | 3 | Needs `sanitize` and `attachments`; one JS island |
 | `impersonate` | Staff signs in as a user, with a banner and an audit line | django-hijack; pretender, devise_masquerade | partly: `brocanth-auth/src/impersonation.rs`, no module | Routes | S | 3 | Logic exists; needs an admin button and a banner |
 | `notifications` | In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |

@@ -27,7 +27,7 @@ brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["compression", "config"] }
 brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "i18n"] }
 brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -40,6 +40,7 @@ brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-sanitize = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["rsx"] }
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -2040,6 +2041,29 @@ macro_rules! register {
             "src/modules/middleware_rate_limit.rs",
             crate::modules::middleware_rate_limit::MODULE.hooks.off(),
         );
+
+        // -- brocanth-middleware: conditional GET -------------------------
+        //
+        // A weak ETag over the body of every GET that answers 200, and a
+        // 304 with no body when the browser sends the same tag back. A
+        // page that sets `Last-Modified` also answers If-Modified-Since.
+        // The page still renders: this saves the transfer, not the work.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::ConditionalGet>("conditional_get")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: compression -----------------------------
+        //
+        // gzip or brotli, as the browser's Accept-Encoding asks, on a
+        // buffered text body of `min_bytes` or more. Never on a stream:
+        // an SSE event must not wait for a compressor's window. The media
+        // types are an allow-list; the list is `types` under [compression] in config/<env>.toml.
+        //
+        // Behind a proxy or a CDN that compresses, turn this off: the
+        // work is done twice and the second pass finds nothing to gain.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Compression>("compression")
+            .map_err(|e| e.to_string())?;
         builder
     }};
 }
@@ -2076,7 +2100,11 @@ type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
-pub type Installed = WithMiddlewareRateLimit;
+type WithMiddlewareConditionalGet =
+    After<brocanth_middleware::ConditionalGet, WithMiddlewareRateLimit>;
+type WithMiddlewareCompression =
+    After<brocanth_middleware::Compression, WithMiddlewareConditionalGet>;
+pub type Installed = WithMiddlewareCompression;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
@@ -2086,6 +2114,10 @@ type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
 type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
+type HookedConditionalGet =
+    Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedRateLimit>;
+type HookedCompression =
+    Both<<brocanth_middleware::Compression as HookSource>::Families, HookedConditionalGet>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2093,7 +2125,7 @@ type HookedRateLimit =
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedRateLimit;
+pub type Hooks = HookedCompression;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -3107,6 +3139,69 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "conditional_get.etag",
+        help: "Set a weak ETag over the body when the page set none.",
+        flag: true,
+        file: "src/modules/middleware_conditional_get.rs",
+        flags: crate::modules::middleware_conditional_get::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "conditional_get.last_modified",
+        help: "Answer If-Modified-Since from a Last-Modified the page set.",
+        flag: true,
+        file: "src/modules/middleware_conditional_get.rs",
+        flags: crate::modules::middleware_conditional_get::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.min_bytes",
+        help: "The smallest body that is compressed, in bytes.",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.gzip",
+        help: "Offer gzip.",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.brotli",
+        help: "Offer brotli (`br`).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.gzip_level",
+        help: "The gzip level, 1 (fast) to 9 (small).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.brotli_quality",
+        help: "The brotli quality, 0 (fast) to 11 (small).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -3211,6 +3306,12 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::middleware_rate_limit::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::middleware_conditional_get::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::middleware_compression::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::gtag::MODULE.rename {
@@ -3412,6 +3513,8 @@ fn defaults() -> Vec<(&'static str, String)> {
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
+    let compression = brocanth_middleware::CompressionConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
@@ -3615,6 +3718,28 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", rate_limit.fail_open),
         ),
         (
+            "conditional_get.etag",
+            format!("{:?}", conditional_get.etag),
+        ),
+        (
+            "conditional_get.last_modified",
+            format!("{:?}", conditional_get.last_modified),
+        ),
+        (
+            "compression.min_bytes",
+            format!("{:?}", compression.min_bytes),
+        ),
+        ("compression.gzip", format!("{:?}", compression.gzip)),
+        ("compression.brotli", format!("{:?}", compression.brotli)),
+        (
+            "compression.gzip_level",
+            format!("{:?}", compression.gzip_level),
+        ),
+        (
+            "compression.brotli_quality",
+            format!("{:?}", compression.brotli_quality),
+        ),
+        (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
@@ -3754,7 +3879,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: ce4fb02c2f57ee80
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4547,6 +4672,90 @@ pub mod middleware_rate_limit {
     }
 }
 
+/// The shape of src/modules/middleware_conditional_get.rs.
+pub mod middleware_conditional_get {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[conditional_get]` that has a flag. A secret or a list has
+    /// no flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Etag,
+        LastModified,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Etag => "conditional_get.etag",
+                Key::LastModified => "conditional_get.last_modified",
+            }
+        }
+    }
+
+    /// What src/modules/middleware_conditional_get.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/middleware_compression.rs.
+pub mod middleware_compression {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[compression]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        MinBytes,
+        Gzip,
+        Brotli,
+        GzipLevel,
+        BrotliQuality,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::MinBytes => "compression.min_bytes",
+                Key::Gzip => "compression.gzip",
+                Key::Brotli => "compression.brotli",
+                Key::GzipLevel => "compression.gzip_level",
+                Key::BrotliQuality => "compression.brotli_quality",
+            }
+        }
+    }
+
+    /// What src/modules/middleware_compression.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/gtag.rs.
 pub mod gtag {
     pub use super::{Flag, Flags};
@@ -4878,6 +5087,17 @@ pub mod rsx_htmx {
     }
 }
 
+/// The shape of src/modules/sanitize.rs.
+pub mod sanitize {
+    /// What src/modules/sanitize.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/robots.rs.
 pub mod robots {
     pub use super::{Flag, Flags};
@@ -5041,7 +5261,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: cdbc162949612ca3
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5079,6 +5299,8 @@ pub mod input;
 pub mod jobs;
 pub mod jt;
 pub mod middleware;
+pub mod middleware_compression;
+pub mod middleware_conditional_get;
 pub mod middleware_csrf;
 pub mod middleware_rate_limit;
 pub mod middleware_security_headers;
@@ -5098,6 +5320,7 @@ pub mod robots;
 pub mod rsx;
 pub mod rsx_htmx;
 pub mod rsx_tailwind;
+pub mod sanitize;
 pub mod sessions;
 pub mod sitemap;
 pub mod storage;
@@ -5127,6 +5350,8 @@ pub const ALL: &[&str] = &[
     "middleware-csrf",
     "middleware-security-headers",
     "middleware-rate-limit",
+    "middleware-conditional-get",
+    "middleware-compression",
     "gtag",
     "openapi",
     "validation",
@@ -5141,6 +5366,7 @@ pub const ALL: &[&str] = &[
     "jt",
     "rsx-tailwind",
     "rsx-htmx",
+    "sanitize",
     "robots",
     "sitemap",
     "i18n",
@@ -5150,7 +5376,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: f36ef26b81298c06
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5687,6 +5913,70 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/middleware_conditional_get.rs =====
+//! `middleware-conditional-get`: a weak ETag over every page, and 304 for
+//! If-None-Match or If-Modified-Since.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [conditional_get] in the config file, an environment variable, or a flag.
+//!
+//! Always on, because the module cannot work without it: `conditional_get.check`.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::middleware_conditional_get::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [conditional_get]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Etag, Flag::As("etag")),
+    //   (Key::Etag, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/middleware_compression.rs =====
+//! `middleware-compression`: gzip and brotli per Accept-Encoding on text
+//! responses, with Vary; never a stream.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [compression] in the config file, an environment variable, or a flag.
+//!
+//! Always on, because the module cannot work without it: `compression.encode`.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::middleware_compression::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [compression]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::MinBytes, Flag::As("min-bytes")),
+    //   (Key::MinBytes, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
 ===== src/modules/gtag.rs =====
 //! `gtag`: Google Analytics 4 behind a consent banner; nothing leaves before
 //! the visitor accepts.
@@ -5961,6 +6251,20 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //! choice, this file takes its default.
 
 use crate::plugins::shape::rsx_htmx::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/sanitize.rs =====
+//! `sanitize`: an allow-list HTML sanitizer and a SafeHtml type; links
+//! html5ever.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::sanitize::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
@@ -6496,6 +6800,27 @@ paths = ["/login"]
 methods = ["POST"]
 limit = 5
 window_secs = 60
+
+[conditional_get]
+# Set a weak ETag over the body when the page set none.
+etag = true
+# Answer If-Modified-Since from a Last-Modified the page set.
+last_modified = true
+
+[compression]
+# The smallest body that is compressed, in bytes.
+min_bytes = 1024
+# Offer gzip.
+gzip = true
+# Offer brotli (`br`).
+brotli = true
+# The gzip level, 1 (fast) to 9 (small).
+gzip_level = 6
+# The brotli quality, 0 (fast) to 11 (small).
+# 4 or 5 per request; 11 is for files compressed once at build time.
+brotli_quality = 4
+# The media types that are compressed. `text/*` takes every text type.
+types = ["text/*", "application/json", "application/javascript", "application/xml", "application/rss+xml", "application/atom+xml", "application/manifest+json", "image/svg+xml"]
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -12286,6 +12611,8 @@ request.
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `middleware-rate-limit`  a fixed window per address, session or user, per group of routes; 429 with Retry-After
+- `middleware-conditional-get`  a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since
+- `middleware-compression`  gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
@@ -12300,6 +12627,7 @@ request.
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
+- `sanitize`  an allow-list HTML sanitizer and a SafeHtml type; links html5ever
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
@@ -12450,6 +12778,20 @@ the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
   socket.onmessage = (e) => console.log(e.data);
   socket.onopen = () => socket.send("subscribe posts/42");
   ```
+
+## HTML from users
+
+HTML a user wrote reaches a template only as a
+`brocanth_sanitize::SafeHtml`. Make one with a policy:
+`brocanth_sanitize::comment(&row.body)` for a comment,
+`brocanth_sanitize::rich_text(&row.body)` for editor output, or a
+`Policy` built once in a `static` for anything else. Write it with
+`{! value }`.
+
+Never write a `String` with `{! }`, and never widen a policy with
+`style`, `class`, `id`, an `on*` attribute or a `javascript:` URL.
+Store what the user wrote and clean it when the page renders, so a
+stricter policy also covers old rows.
 
 ## Translations
 
@@ -12711,6 +13053,32 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
+## Conditional GET
+
+`brocanth_middleware::ConditionalGet` is registered in
+`src/plugins/mod.rs`. It tags every `200` answer to a GET with a weak
+ETag over the body and answers `304` when the browser already has it.
+So a page must render the same bytes for the same content: no
+timestamp or random value in the markup, or every tag differs and no
+request is ever a `304`.
+
+A page that knows when its data changed sets `Last-Modified` as an
+IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). A page whose answer is
+for one user only sets `Cache-Control: private`; one that must not be
+kept sets `no-store`, and gets no tag.
+
+## Compression
+
+`brocanth_middleware::Compression` is registered in
+`src/plugins/mod.rs`. Its response hook runs after every hook that
+reads or rewrites the body, so a page never compresses its own
+output. Do not set `Content-Encoding` in a page unless the body is
+already encoded; the hook then leaves it alone.
+
+A stream is never compressed. To keep a buffered body as it is, set
+`Cache-Control: no-transform`. A hook of your own that rewrites the
+body goes in `runs_after`, so compression waits for it.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -12748,7 +13116,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 88cdc7bdb5fd8de5 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +13128,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -12930,6 +13298,22 @@ config = ["rate_limit"]
 crates = []
 adapted_to = ["config"]
 
+[modules.middleware-conditional-get]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/middleware_conditional_get.rs"]
+config = ["conditional_get"]
+crates = []
+adapted_to = ["config"]
+
+[modules.middleware-compression]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/middleware_compression.rs"]
+config = ["compression"]
+crates = ["brocanth-middleware"]
+adapted_to = ["config"]
+
 [modules.gtag]
 version = "0.1.0"
 kind = ["middleware"]
@@ -13042,6 +13426,14 @@ config = []
 crates = ["brocanth-assets"]
 adapted_to = []
 
+[modules.sanitize]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/sanitize.rs"]
+config = []
+crates = ["brocanth-sanitize"]
+adapted_to = []
+
 [modules.robots]
 version = "0.1.0"
 kind = ["routes"]
@@ -13098,4 +13490,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: 50a3f4ce33c1c7b6
