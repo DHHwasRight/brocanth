@@ -94,7 +94,8 @@ impl Page {
             return None;
         }
         let first = self.offset() + 1;
-        let last = (self.offset() + self.per_page).min(self.total);
+        // Saturating: offset and size can each exceed half of `u64`.
+        let last = self.offset().saturating_add(self.per_page).min(self.total);
         Some((first, last))
     }
 
@@ -108,10 +109,15 @@ impl Page {
         }
         let half = span / 2;
         let mut first = self.number.saturating_sub(half).max(1);
-        if first + span - 1 > total_pages {
-            first = total_pages + 1 - span;
-        }
-        (first..first + span).collect()
+        // Inclusive ends, and a checked add: `first + span` overflows when
+        // the last page is `u64::MAX`. Past the end, the window ends on the
+        // last page, which `total_pages > span` keeps above zero.
+        let last = match first.checked_add(span - 1) {
+            Some(last) if last <= total_pages => last,
+            _ => total_pages,
+        };
+        first = last - (span - 1);
+        (first..=last).collect()
     }
 
     /// `1–25 of 95 · page 1 of 4`, or `Nothing to show` for an empty table.
