@@ -42,18 +42,17 @@ one, which is why the first tranche is deliberately the dullest six.
 | `CanonicalHost` | redirects to one host, keeping the path | `RequestHook` + `Flow::Respond` | **built** |
 | `ContentTypeHandler` | 415 unless the request's media type is on a list | `RequestHook` + `Flow::Respond` | **built** |
 | `CORS` | preflight answer, and the headers on the real response | `RequestHook` + `ResponseHook` | **built** |
-| `CompressHandler` | gzip when `Accept-Encoding` says so | `ResponseHook::on_body`, plus `Streaming::wrap` for a stream | open, needs a deflate implementation |
+| `CompressHandler` | gzip when `Accept-Encoding` says so | `ResponseHook::on_body`; a stream is left alone | **built**: `Compression`, gzip and brotli (§8) |
 | `LoggingHandler` | Apache Common Log Format | `RequestHook::after_dispatch` | partly: `logging` writes a line, not CLF |
 | `CombinedLoggingHandler` | Apache Combined Log Format | same | open |
 | `CustomLoggingHandler` | the same with your own formatter | same | open |
 | `RecoveryHandler` | catches a panic, answers 500 | **core**: `catch_unwind` around dispatch | open |
 
-`CompressHandler` is the one with a real cost attached. gzip means
-`flate2`, and this workspace spends dependencies carefully, so it will
-arrive behind an off-by-default feature. The stream half is the interesting
-half: `BodyShape::Streaming` never reaches `on_body`, so a compressing hook
-has to wrap the stream rather than rewrite a buffer. `plugin_hooks.rs`
-names compression as the case that wrap exists for.
+`CompressHandler` is the one with a real cost attached: `flate2` and
+`brotli`. Both arrive behind the off-by-default `compression` feature.
+`plugin_hooks.rs` names compression as the case `Streaming::wrap` exists
+for, and the hook does not use it: a stream is never compressed. §8 says
+why.
 
 `RecoveryHandler` is not a hook at all. `brocanth-server/src/bridge.rs`
 already has a `catch_unwind`, so the edge is covered; what is missing is
@@ -353,3 +352,86 @@ CSRF reads `[csrf]` the same way: `cookie`, `field`, `header` and
   `App::begin_async`.
 - The limits are per process with `RateLimit`. A deployment with more
   than one process and a real limit wants `SharedRateLimit`.
+
+## 8. Conditional GET and compression
+
+Two response hooks for the bytes on the wire. `ConditionalGet` is in the
+default `runtime`: it needs only `sha2` and `base64`, which the crate
+already takes. `Compression` is behind the `compression` feature.
+
+```rust
+let builder = builder
+    .plugin_hooking(ConditionalGet::new(ConditionalGetConfig::default()))
+    .plugin_hooking(Compression::new(CompressionConfig::default()));
+```
+
+**Conditional GET.** For a `GET` or `HEAD` that answers `200` with a
+buffered body, the hook sets a weak `ETag` over the body when the page set
+none: `W/"…"`, 128 bits of its SHA-256 in URL-safe base64. A matching
+`If-None-Match` (weak comparison) is a `304`. Without `If-None-Match`, an
+`If-Modified-Since` at or after the page's `Last-Modified` is a `304`.
+A `304` keeps the headers and drops the body, `Content-Type`,
+`Content-Length`, `Content-Encoding` and `Content-Language`. The page still
+renders; the hook saves the transfer. `Cache-Control: no-store` gets no
+tag. Only the IMF-fixdate is read; an obsolete date is no date, so the
+page goes out in full.
+
+**Why the tag is weak.** A strong tag names exact bytes, and compression
+changes them. Rails and nginx make the same choice. The weak tag is over the
+identity body, so one tag is good for the brotli, the gzip and the plain
+copy, and a `304` is decided before anything is compressed.
+
+**Compression.** The hook reads `Accept-Encoding` with its q-values and
+`*`, and picks `br` or `gzip` (brotli on a tie). It compresses a buffered
+body of `min_bytes` or more (1024) whose media type is on `types`
+(`text/*`, JSON, JavaScript, XML, RSS, Atom, the web manifest, SVG). It
+leaves alone a body with a `Content-Encoding`, a status with no body or a
+byte range (`1xx`, `204`, `205`, `206`, `304`), `Cache-Control:
+no-transform`, `text/event-stream`, and a result that is not smaller. Every
+response it could compress gets `Vary: Accept-Encoding`, also for a client
+that asked for none. A strong `ETag` on a compressed body becomes weak.
+
+Defaults: gzip level 6, brotli quality 4. Quality 11 takes about fifty times
+longer than 4 for a few percent, which suits a file compressed once at build
+time and not a page compressed per request.
+
+**Why a stream is never compressed.** An SSE event must reach the browser
+when the handler writes it. A compressor holds bytes until its window fills;
+a flush per event keeps the latency and loses most of the ratio. A
+streamed download is usually a file that is already compressed, and a
+`101` has no body. So the hook neither wraps a stream nor announces an
+encoding for one.
+
+**Order, declared in the hooks.** Response hooks run in reverse declared
+order, and the right order on the way out is:
+
+```text
+handler -> route_cache.store -> gtag / beacon -> conditional_get.check -> compression.encode -> client
+```
+
+The route cache stores the identity body, and a hit is tagged and
+compressed again for the client that asks. `ConditionalGet` declares
+`after_if_present("compression")` and `before_if_present("route_cache")`.
+`Compression` declares `before_if_present` on `conditional_get`,
+`route_cache`, `gtag` and `beacon`, and on each id in
+`CompressionConfig::runs_after`. So the order holds in any registration
+order, and an instance that is not installed changes nothing. The cost:
+the names are instance names, so an application that renames one of those
+instances adds it to `runs_after` itself.
+
+**In a generated project.** `middleware-conditional-get` and
+`middleware-compression` are children of `middleware`, off until ticked.
+Off, because a CDN in front often does both, and compression twice costs
+CPU and gains nothing. Each reads its section, `[conditional_get]` and
+`[compression]`, with `config`.
+
+**What is open.**
+
+- A stream gets no tag and no `304`. A handler that streams a file and
+  knows its version compares `If-None-Match` itself.
+- `If-Match` and `If-Unmodified-Since` are not read. They guard a write,
+  and the write handler checks them against the row it changes.
+- The static files `rsx` serves go through a server wrap, outside the
+  hooks, so neither hook sees them. They carry `brocanth-assets`'s strong
+  content-hash `ETag` and go out uncompressed. Precompressed copies at
+  build time are the next step there, not a hook.

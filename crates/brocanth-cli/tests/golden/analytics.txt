@@ -25,6 +25,8 @@ edition = "2021"
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   security-headers      no security headers; a browser sniffs types, frames the pages and runs any inline script
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   conditional-get       no ETag and no 304; a browser downloads an unchanged page again in full
+#   compression           no compression; an HTML page goes over the wire five to ten times its gzip size
 #   gtag                  no Google tag; nothing on a page talks to Google
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
@@ -33,6 +35,7 @@ edition = "2021"
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
+#   sanitize              no sanitizer; HTML a user wrote can only be shown escaped, as text
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
 #   brocanth-i18n         one language, written into each page; nothing negotiates a locale
@@ -3189,7 +3192,7 @@ request.
 - `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3326,7 +3329,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: f9613a6fdc05dd7a -->
+<!-- brocanth-digest: 7b79844ca6615990 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

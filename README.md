@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 42 crates under `crates/` and two examples under
+A Cargo workspace of 43 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -159,12 +159,13 @@ puts the crate in a new project.
 | [`brocanth-assets`](crates/brocanth-assets/README.md) | Static files embedded at compile time: fingerprinted assets and a verbatim public directory | with `rsx-tailwind` or `rsx-htmx` |
 | [`brocanth-bundle`](crates/brocanth-bundle/README.md) | JS and CSS bundles from `build.rs` (rolldown, lightningcss) | |
 | [`brocanth-config`](crates/brocanth-config/README.md) | Layered config (TOML, JSON, YAML, environment, flags) with provenance and secret redaction | `config` |
-| [`brocanth-middleware`](crates/brocanth-middleware/README.md) | Proxy headers, method override, canonical host, content types, CORS, CSRF, security headers, rate limiting | `middleware` and its children |
+| [`brocanth-middleware`](crates/brocanth-middleware/README.md) | Proxy headers, method override, canonical host, content types, CORS, CSRF, security headers, rate limiting, conditional GET, compression | `middleware` and its children |
 | [`brocanth-gtag`](crates/brocanth-gtag/README.md) | Google Analytics 4 behind a consent banner: nothing sent before consent, privacy signals honoured, URLs scrubbed | `gtag` |
 | [`brocanth-input`](crates/brocanth-input/README.md) | A form or JSON body read into a struct, with every fault at once | `input` |
 | [`brocanth-schema`](crates/brocanth-schema/README.md) | Schemas checked by the compiler and at run time; a handler takes `Valid<T>` | `validation` |
 | [`brocanth-openapi`](crates/brocanth-openapi/README.md) | An OpenAPI 3.1 document from the route table, with a drift check | `openapi` |
 | [`brocanth-robots`](crates/brocanth-robots/README.md) | A robots.txt and a sitemap.xml from builders, checked before they are served | `robots`, `sitemap` |
+| [`brocanth-sanitize`](crates/brocanth-sanitize/README.md) | An allow-list HTML sanitizer over html5ever, and a `SafeHtml` the templates write as markup | `sanitize` |
 | [`brocanth-client`](crates/brocanth-client/README.md) | A command line that calls the application's own API, built from its routes | `client` |
 | [`brocanth-command`](crates/brocanth-command/README.md) | Project commands: define one with `#[cmd]` and the CLI finds it | `commands` |
 | [`brocanth-command-macros`](crates/brocanth-command-macros/README.md) | The `#[cmd]` attribute, re-exported by `brocanth-command` | with `commands` |

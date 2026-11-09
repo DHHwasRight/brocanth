@@ -103,6 +103,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # end (`docs/framework-gaps.md` §G6).
 brocanth-test.workspace = true
 
+# `tests/route.rs` stacks the route cache with conditional GET and
+# compression, and checks the order of the three on the way out.
+brocanth-middleware = { workspace = true, features = ["compression"] }
+flate2 = "1"
+
 [features]
 # `postgres` is the default and the only backend here. SQLite is the "smaller
 # setups, different crate" case, and this crate is shaped so that crate can

@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 44 modules. Each name links to its own page
+what to build next. There are 47 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,7 +23,7 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (16)
+### Middleware (18)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -36,6 +36,8 @@ nothing holds this page.
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |
 | [`middleware-csrf`](modules/middleware-csrf.md) | A double-submit cookie, checked on every verb that is not a read |  |  | part of `middleware`, ticked with its parent |  |
 | [`middleware-rate-limit`](modules/middleware-rate-limit.md) | A fixed window per address, session or user, per group of routes; 429 with Retry-After |  |  | part of `middleware`, off until you tick it |  |
+| [`middleware-conditional-get`](modules/middleware-conditional-get.md) | A weak ETag over every page, and 304 for If-None-Match or If-Modified-Since |  |  | part of `middleware`, off until you tick it |  |
+| [`middleware-compression`](modules/middleware-compression.md) | gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream |  |  | part of `middleware`, off until you tick it | behind a CDN that compresses, leave it off |
 | [`middleware-security-headers`](modules/middleware-security-headers.md) | HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash |  | yes | part of `middleware`, ticked with its parent |  |
 | [`observability`](modules/observability.md) | A request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below | Enhancer, Routes | yes |  |  |
 | [`observability-logs`](modules/observability-logs.md) | A JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else |  | yes | part of `observability`, ticked with its parent |  |
@@ -44,13 +46,14 @@ nothing holds this page.
 | [`sessions`](modules/sessions.md) | A cookie, and a `Session` the context hands a handler |  |  |  |  |
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
 
-### Renderer (3)
+### Renderer (4)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`jt`](modules/jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Routes |  |  | static-site safe |
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |
 | [`rsx-htmx`](modules/rsx-htmx.md) | A click swaps what changed; the server renders from the shared layout down |  |  | part of `rsx`, ticked with its parent | static-site safe |
+| [`sanitize`](modules/sanitize.md) | An allow-list HTML sanitizer and a SafeHtml type; links html5ever |  |  |  | static-site safe |
 
 ### Routes (10)
 

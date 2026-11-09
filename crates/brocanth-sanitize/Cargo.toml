@@ -1,0 +1,41 @@
+[package]
+name = "brocanth-sanitize"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "An allow-list HTML sanitizer: a policy per use, and a SafeHtml type the templates write as markup."
+
+# A crate of its own, because no other crate should carry an HTML parser.
+# `ammonia` parses with `html5ever`, the browser's own algorithm, and that
+# tree is the whole cost of this crate. A page that shows no user HTML
+# links none of it.
+[dependencies]
+ammonia = { version = "4", optional = true }
+
+# `rsx`: `SafeHtml` is an `rsx::Template`, so a component takes it as a
+# child and writes it as markup. Off without the rsx module.
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `sanitize`. Optional and off: only the CLI asks for it.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+# This crate with `rsx` on, so `cargo test -p brocanth-sanitize` runs the
+# template test rather than compiling it out.
+brocanth-sanitize = { path = ".", features = ["rsx"] }
+rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator. A cycle through dev-dependencies, as in `brocanth-robots`.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime"]
+# The sanitizer. Off only in the brocanth CLI, which links the scaffold side
+# alone.
+runtime = ["dep:ammonia"]
+# `SafeHtml` as an `rsx::Template`.
+rsx = ["runtime", "dep:rsx"]
+scaffold = ["dep:brocanth-scaffold"]

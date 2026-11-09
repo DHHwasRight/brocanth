@@ -604,3 +604,218 @@ const RATE_LIMIT_AGENTS: &str = "\n\
     the address comes from `ProxyHeaders` or from `ip_header`. Never set\n\
     `ip_header` to a header the client can send, such as\n\
     `X-Forwarded-For`, unless the edge overwrites it.\n";
+
+/// Conditional GET, as a choice on the menu that arrives unticked.
+///
+/// Off, like every child but CSRF and the headers: it hashes every page,
+/// and a project that puts a CDN in front may have the CDN do it.
+pub struct ConditionalGet;
+
+impl Module for ConditionalGet {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "middleware-conditional-get",
+            "a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .asked_in("doors", "Answer 304 when the browser already has the page")
+        .part_of_but_off("middleware")
+        .because(
+            "the hook is `brocanth_middleware::ConditionalGet`, so the crate arrives with that choice",
+        )
+        .after("middleware-rate-limit")
+        // The module is this one hook. A switch in the module file would
+        // only repeat `brocanth remove middleware-conditional-get`, and
+        // `etag` and `last_modified` already turn each half off.
+        .hook(
+            "check",
+            "tag each 200 to a GET with a weak ETag, and answer 304 when it matches",
+            Hook::required(),
+        )
+        .absent(
+            "conditional-get",
+            "no ETag and no 304; a browser downloads an unchanged page again in full",
+        )
+    }
+
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        configurable_hooking(
+            s,
+            project,
+            Hooking {
+                key: "middleware-conditional-get",
+                section: "conditional_get",
+                ty: "brocanth_middleware::ConditionalGet",
+                config_ty: "brocanth_middleware::ConditionalGetConfig",
+                prelude: CONDITIONAL_GET_PRELUDE.to_string(),
+                adjust: None,
+            },
+            vec![
+                Setting::bool(
+                    "etag",
+                    true,
+                    "Set a weak ETag over the body when the page set none.",
+                ),
+                Setting::bool(
+                    "last_modified",
+                    true,
+                    "Answer If-Modified-Since from a Last-Modified the page set.",
+                ),
+            ],
+        );
+        s.at(Slot::AgentsSections)
+            .block(CONDITIONAL_GET_AGENTS.to_string());
+    }
+}
+
+/// The comment above the registration.
+const CONDITIONAL_GET_PRELUDE: &str = r#"
+        // -- brocanth-middleware: conditional GET -------------------------
+        //
+        // A weak ETag over the body of every GET that answers 200, and a
+        // 304 with no body when the browser sends the same tag back. A
+        // page that sets `Last-Modified` also answers If-Modified-Since.
+        // The page still renders: this saves the transfer, not the work.
+"#;
+
+/// What the generated `AGENTS.md` says about tags.
+const CONDITIONAL_GET_AGENTS: &str = "\n\
+    ## Conditional GET\n\
+    \n\
+    `brocanth_middleware::ConditionalGet` is registered in\n\
+    `src/plugins/mod.rs`. It tags every `200` answer to a GET with a weak\n\
+    ETag over the body and answers `304` when the browser already has it.\n\
+    So a page must render the same bytes for the same content: no\n\
+    timestamp or random value in the markup, or every tag differs and no\n\
+    request is ever a `304`.\n\
+    \n\
+    A page that knows when its data changed sets `Last-Modified` as an\n\
+    IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). A page whose answer is\n\
+    for one user only sets `Cache-Control: private`; one that must not be\n\
+    kept sets `no-store`, and gets no tag.\n";
+
+/// Compression, as a choice on the menu that arrives unticked.
+///
+/// Off, because most deployments put a proxy or a CDN in front that
+/// compresses already, and the `compression` feature links brotli.
+pub struct Compression;
+
+impl Module for Compression {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "middleware-compression",
+            "gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream",
+        )
+        .category(Category::Middleware)
+        .krate(
+            Dep::brocanth("brocanth-middleware")
+                .feature_with("config", "config")
+                .feature("compression"),
+        )
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .asked_in("doors", "Compress pages for the browsers that ask")
+        .part_of_but_off("middleware")
+        .because(
+            "the hook is `brocanth_middleware::Compression`, so the crate arrives with that choice",
+        )
+        .after("middleware-conditional-get")
+        // The module is this one hook, so it has no switch of its own: a
+        // project behind a CDN that compresses removes the module, and one
+        // that wants only gzip sets `brotli = false`.
+        .hook(
+            "encode",
+            "compress a buffered text body with gzip or brotli, as Accept-Encoding asks",
+            Hook::required(),
+        )
+        .absent(
+            "compression",
+            "no compression; an HTML page goes over the wire five to ten times its gzip size",
+        )
+    }
+
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let types = if project.has("config") {
+            "the list is `types` under [compression] in config/<env>.toml"
+        } else {
+            "a list has no flag: `brocanth add config` gives `types` a home"
+        };
+        configurable_hooking(
+            s,
+            project,
+            Hooking {
+                key: "middleware-compression",
+                section: "compression",
+                ty: "brocanth_middleware::Compression",
+                config_ty: "brocanth_middleware::CompressionConfig",
+                prelude: COMPRESSION_PRELUDE.replace("@TYPES@", types),
+                adjust: None,
+            },
+            vec![
+                Setting::integer(
+                    "min_bytes",
+                    1024,
+                    "The smallest body that is compressed, in bytes.",
+                ),
+                Setting::bool("gzip", true, "Offer gzip."),
+                Setting::bool("brotli", true, "Offer brotli (`br`)."),
+                Setting::integer("gzip_level", 6, "The gzip level, 1 (fast) to 9 (small)."),
+                Setting::integer(
+                    "brotli_quality",
+                    4,
+                    "The brotli quality, 0 (fast) to 11 (small).",
+                )
+                .note("4 or 5 per request; 11 is for files compressed once at build time."),
+                Setting::list(
+                    "types",
+                    &[
+                        "text/*",
+                        "application/json",
+                        "application/javascript",
+                        "application/xml",
+                        "application/rss+xml",
+                        "application/atom+xml",
+                        "application/manifest+json",
+                        "image/svg+xml",
+                    ],
+                    "The media types that are compressed. `text/*` takes every text type.",
+                ),
+            ],
+        );
+        s.at(Slot::AgentsSections)
+            .block(COMPRESSION_AGENTS.to_string());
+    }
+}
+
+/// The comment above the registration. `@TYPES@` says where the list is.
+const COMPRESSION_PRELUDE: &str = r#"
+        // -- brocanth-middleware: compression -----------------------------
+        //
+        // gzip or brotli, as the browser's Accept-Encoding asks, on a
+        // buffered text body of `min_bytes` or more. Never on a stream:
+        // an SSE event must not wait for a compressor's window. The media
+        // types are an allow-list; @TYPES@.
+        //
+        // Behind a proxy or a CDN that compresses, turn this off: the
+        // work is done twice and the second pass finds nothing to gain.
+"#;
+
+/// What the generated `AGENTS.md` says about encodings.
+const COMPRESSION_AGENTS: &str = "\n\
+    ## Compression\n\
+    \n\
+    `brocanth_middleware::Compression` is registered in\n\
+    `src/plugins/mod.rs`. Its response hook runs after every hook that\n\
+    reads or rewrites the body, so a page never compresses its own\n\
+    output. Do not set `Content-Encoding` in a page unless the body is\n\
+    already encoded; the hook then leaves it alone.\n\
+    \n\
+    A stream is never compressed. To keep a buffered body as it is, set\n\
+    `Cache-Control: no-transform`. A hook of your own that rewrites the\n\
+    body goes in `runs_after`, so compression waits for it.\n";

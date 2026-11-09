@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types, CORS, CSRF, security headers and rate limiting."
+description = "The middleware every application rewrites: proxy headers, method override, canonical host, content types, CORS, CSRF, security headers, rate limiting, conditional GET and compression."
 
 # Five dependencies by default, and every one is already in the workspace
 # tree: `brocanth` and `http` in the core's own, `getrandom`, `sha2` and
@@ -46,6 +46,14 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls-ring",
 ], optional = true }
 
+# `compression`: gzip and brotli. Both pure Rust, so no C toolchain and
+# no system library. `flate2` is already in the workspace tree (through
+# `brocanth-bundle`'s resolver); `brotli` is new and is the larger of the
+# two. Off by default: most deployments sit behind a proxy or a CDN that
+# compresses already, and an application should not pay for it twice.
+flate2 = { version = "1", optional = true }
+brotli = { version = "8", default-features = false, features = ["std"], optional = true }
+
 [dev-dependencies]
 # `tests/dp.rs` drives the CSRF hook and the dp-swap hook through the real
 # pipeline, and re-renders a form with its faults the way an application
@@ -60,10 +68,13 @@ brocanth-config.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
 # This crate, with its optional features on, so `cargo test -p
-# brocanth-middleware` runs the configuration, Postgres and manifest tests
-# rather than compiling them out. The pattern `brocanth-config` uses for
-# `admin`.
-brocanth-middleware = { path = ".", features = ["config", "postgres", "scaffold"] }
+# brocanth-middleware` runs the configuration, Postgres, compression and
+# manifest tests rather than compiling them out. The pattern
+# `brocanth-config` uses for `admin`.
+brocanth-middleware = { path = ".", features = ["config", "postgres", "scaffold", "compression"] }
+# `tests/compression.rs` decodes what the hook wrote.
+flate2 = "1"
+brotli = { version = "8", default-features = false, features = ["std"] }
 
 [features]
 default = ["runtime"]
@@ -75,6 +86,8 @@ scaffold = ["dep:brocanth-scaffold"]
 config = ["runtime", "dep:serde"]
 # `rate_limit::PgStore`, the shared counter store.
 postgres = ["runtime", "dep:sqlx"]
+# `Compression`: gzip and brotli on buffered responses.
+compression = ["runtime", "dep:flate2", "dep:brotli"]
 
 [dependencies.brocanth-scaffold]
 workspace = true

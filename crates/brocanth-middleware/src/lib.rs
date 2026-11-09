@@ -31,6 +31,13 @@
 //! | [`SecurityHeaders`] | HSTS, `nosniff`, `Referrer-Policy`, framing, a CSP that lets dp-swap's inline scripts run by hash, `Permissions-Policy` |
 //! | [`RateLimit`] / [`SharedRateLimit`] | a fixed window per address, session or user, per group of routes; 429 with `Retry-After` |
 //!
+//! And two for the bytes on the wire:
+//!
+//! | Hook | Answers |
+//! |---|---|
+//! | [`ConditionalGet`] | a weak `ETag` over the body, and `304` for `If-None-Match` or `If-Modified-Since` |
+//! | [`Compression`] | gzip or brotli per `Accept-Encoding`, with `Vary`; never a stream (feature `compression`) |
+//!
 //! Under the `config` feature their configuration types deserialise, so
 //! `config.section::<SecurityHeadersConfig>("security_headers")` builds
 //! one from a brocanth-config file. Under `postgres`,
@@ -69,8 +76,7 @@
 //!
 //! # What is not here
 //!
-//! Compression, because gzip is a dependency and this crate has none yet;
-//! the three logging handlers, because `logging` already writes a line and
+//! The three logging handlers, because `logging` already writes a line and
 //! Common Log Format is a format choice on it rather than a second hook;
 //! and recovery, because catching a panic around the application's handler
 //! is a change to the core rather than a hook. `docs/middleware.md` §2 says
@@ -81,6 +87,10 @@
 
 #[cfg(feature = "runtime")]
 mod canonical_host;
+#[cfg(feature = "compression")]
+mod compression;
+#[cfg(feature = "runtime")]
+mod conditional_get;
 #[cfg(feature = "runtime")]
 mod content_types;
 #[cfg(feature = "runtime")]
@@ -103,6 +113,10 @@ pub mod scaffold;
 
 #[cfg(feature = "runtime")]
 pub use canonical_host::{CanonicalHost, CanonicalHostConfig};
+#[cfg(feature = "compression")]
+pub use compression::{Compression, CompressionConfig};
+#[cfg(feature = "runtime")]
+pub use conditional_get::{etag_for, http_date, ConditionalGet, ConditionalGetConfig};
 #[cfg(feature = "runtime")]
 pub use content_types::{ContentTypes, ContentTypesConfig};
 #[cfg(feature = "runtime")]
