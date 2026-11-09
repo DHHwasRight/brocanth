@@ -175,3 +175,50 @@ impl FlagsPlugin {
         self.flags.attach(Arc::new(MemoryStore::new()));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brocanth::plugin_app::AppBuilder;
+
+    use crate::rule::{Actor, Rule};
+
+    #[test]
+    fn the_defaults_are_the_documented_ones() {
+        let config = FlagsConfig::default();
+        assert_eq!(config.refresh_secs, 10);
+        assert!(config.migrate);
+    }
+
+    #[tokio::test]
+    async fn without_a_database_the_rules_are_kept_in_memory() {
+        let plugin = FlagsPlugin::new(FlagsConfig {
+            refresh_secs: 0,
+            ..FlagsConfig::default()
+        });
+        let flags = plugin.flags();
+        assert!(!flags.has_store());
+        let mut app = AppBuilder::new().plugin(plugin).build().expect("build");
+        assert!(flags.has_store(), "before_start attached a store");
+        // No database, so no readiness check waits on one.
+        app.readiness().check_all().await.expect("ready");
+        flags.set("beta", Rule::everyone()).await.unwrap();
+        assert!(flags.enabled_key("beta", &Actor::anonymous()));
+        // The copy on the context is the plugin's copy.
+        let served = app.context().try_get::<Flags>().expect("provided").clone();
+        assert!(served.enabled_key("beta", &Actor::anonymous()));
+        let _ = app.shutdown(brocanth::plugin_shutdown::ShutdownReason::Requested, None);
+    }
+
+    #[tokio::test]
+    async fn a_store_attached_before_start_is_kept() {
+        let plugin = FlagsPlugin::new(FlagsConfig::default());
+        let flags = plugin.flags();
+        let store = Arc::new(MemoryStore::new());
+        flags.attach(store.clone());
+        let _app = AppBuilder::new().plugin(plugin).build().expect("build");
+        flags.set("beta", Rule::everyone()).await.unwrap();
+        use crate::store::FlagStore as _;
+        assert!(store.load().await.unwrap().contains_key("beta"));
+    }
+}

@@ -914,6 +914,7 @@ dependencies = [
  "brocanth-db",
  "brocanth-flags",
  "brocanth-scaffold",
+ "brocanth-test",
  "serde",
  "tokio",
 ]

@@ -223,6 +223,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unknown_flag_is_off_for_everyone() {
+        let flags = Flags::with_store(Arc::new(MemoryStore::new()));
+        flags.set("other", Rule::everyone()).await.unwrap();
+        assert!(!flags.enabled(BETA, &Actor::anonymous()));
+        assert!(!flags.enabled_key("missing", &Actor::new("ada").in_group("staff")));
+        assert_eq!(flags.rule("missing"), None);
+        // A copy with no store at all says no, and does not panic.
+        assert!(!Flags::new().enabled(BETA, &Actor::new("ada")));
+    }
+
+    #[tokio::test]
+    async fn a_removed_rule_is_off_at_once_and_a_changed_one_changes_at_once() {
+        let flags = Flags::with_store(Arc::new(MemoryStore::new()));
+        let ada = Actor::new("ada");
+        flags
+            .set(
+                "beta",
+                Rule {
+                    actors: vec!["ada".into()],
+                    ..Rule::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(flags.enabled(BETA, &ada));
+        assert!(!flags.enabled(BETA, &Actor::new("bob")));
+        flags
+            .set(
+                "beta",
+                Rule {
+                    actors: vec!["bob".into()],
+                    ..Rule::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!flags.enabled(BETA, &ada), "the old list is gone");
+        assert!(flags.enabled(BETA, &Actor::new("bob")));
+        flags.remove("beta").await.unwrap();
+        assert!(!flags.enabled(BETA, &Actor::new("bob")));
+        assert!(flags.rules().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_percent_over_a_hundred_is_stored_as_a_hundred() {
+        let store = Arc::new(MemoryStore::new());
+        let flags = Flags::with_store(store.clone());
+        flags
+            .set(
+                "beta",
+                Rule {
+                    percent: 200,
+                    ..Rule::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(flags.rule("beta").unwrap().percent, 100);
+        assert_eq!(store.load().await.unwrap()["beta"].percent, 100);
+    }
+
+    #[tokio::test]
+    async fn a_store_that_refuses_a_write_leaves_the_copy_as_it_was() {
+        struct ReadOnly;
+        #[async_trait::async_trait]
+        impl FlagStore for ReadOnly {
+            async fn load(&self) -> Result<BTreeMap<String, Rule>, StoreError> {
+                Ok(BTreeMap::new())
+            }
+            async fn save(&self, _: &str, _: &Rule) -> Result<(), StoreError> {
+                Err(StoreError::new("read only"))
+            }
+            async fn remove(&self, _: &str) -> Result<(), StoreError> {
+                Err(StoreError::new("read only"))
+            }
+        }
+        let flags = Flags::with_store(Arc::new(ReadOnly));
+        assert!(flags.set("beta", Rule::everyone()).await.is_err());
+        assert!(!flags.enabled(BETA, &Actor::anonymous()));
+        assert!(flags.remove("beta").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_works_again_clears_the_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Flaky(AtomicBool);
+        #[async_trait::async_trait]
+        impl FlagStore for Flaky {
+            async fn load(&self) -> Result<BTreeMap<String, Rule>, StoreError> {
+                if self.0.load(Ordering::SeqCst) {
+                    Ok(BTreeMap::from([("beta".to_string(), Rule::everyone())]))
+                } else {
+                    Err(StoreError::new("down"))
+                }
+            }
+            async fn save(&self, _: &str, _: &Rule) -> Result<(), StoreError> {
+                Ok(())
+            }
+            async fn remove(&self, _: &str) -> Result<(), StoreError> {
+                Ok(())
+            }
+        }
+        let store = Arc::new(Flaky(AtomicBool::new(false)));
+        let flags = Flags::with_store(store.clone());
+        assert!(flags.refresh().await.is_err());
+        assert!(flags.last_error().is_some());
+        store.0.store(true, Ordering::SeqCst);
+        flags.refresh().await.unwrap();
+        assert_eq!(flags.last_error(), None);
+        assert!(flags.enabled(BETA, &Actor::anonymous()));
+    }
+
+    #[test]
+    fn a_second_store_is_refused_and_the_first_kept() {
+        let first = Arc::new(MemoryStore::new());
+        let flags = Flags::with_store(first);
+        assert!(!flags.attach(Arc::new(MemoryStore::new())));
+        assert!(flags.has_store());
+    }
+
+    #[tokio::test]
     async fn a_bad_key_and_a_missing_store_are_refused_with_help() {
         let flags = Flags::new();
         let e = flags.set("beta", Rule::everyone()).await.unwrap_err();

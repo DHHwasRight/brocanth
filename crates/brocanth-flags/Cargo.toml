@@ -47,6 +47,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # the panel and Postgres tests instead of compiling them out.
 brocanth-flags = { path = ".", features = ["postgres", "config", "admin", "scaffold"] }
 brocanth-scaffold = { workspace = true, features = ["testing"] }
+# The HTML reader, for the admin tab's tests.
+brocanth-test.workspace = true
 # The generator, for the module's golden. A cycle through dev-dependencies,
 # which cargo allows: the CLI takes this crate's `scaffold` side.
 brocanth-cli = { path = "../brocanth-cli" }

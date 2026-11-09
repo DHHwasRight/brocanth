@@ -244,6 +244,87 @@ mod tests {
     }
 
     #[test]
+    fn each_percentage_lands_close_to_its_share_over_many_ids() {
+        // 20 000 ids: a binomial share's standard deviation is under 0.4
+        // points, so 1.5 points either way never fails by chance.
+        for percent in [1_u8, 10, 25, 50, 75, 90, 99] {
+            let rule = Rule::percent(percent);
+            let on = (0..20_000)
+                .filter(|n| rule.allows("rollout", &Actor::new(format!("{n}"))))
+                .count();
+            let share = on as f64 / 200.0;
+            assert!(
+                (share - f64::from(percent)).abs() < 1.5,
+                "{percent}% turned on {share}%"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_in_at_ten_percent_stays_in_at_a_higher_percent() {
+        // Raising a rollout adds people. It never drops one already in.
+        for n in 0..2_000 {
+            let actor = Actor::new(format!("user-{n}"));
+            let mut was_on = false;
+            for percent in 0..=100_u8 {
+                let on = Rule::percent(percent).allows("checkout", &actor);
+                assert!(!was_on || on, "user-{n} left at {percent}%");
+                was_on = on;
+            }
+        }
+    }
+
+    #[test]
+    fn two_flags_at_ten_percent_do_not_pick_the_same_people() {
+        let rule = Rule::percent(10);
+        let ids: Vec<Actor> = (0..10_000)
+            .map(|n| Actor::new(format!("user-{n}")))
+            .collect();
+        let a: Vec<bool> = ids.iter().map(|id| rule.allows("search", id)).collect();
+        let b: Vec<bool> = ids.iter().map(|id| rule.allows("checkout", id)).collect();
+        let both = a.iter().zip(&b).filter(|(x, y)| **x && **y).count();
+        // Independent flags share about 1% of people (100 of 10 000). The
+        // same hash for both would share all 10%.
+        assert!(both < 250, "{both} people are in both rollouts");
+    }
+
+    #[test]
+    fn an_anonymous_actor_in_a_group_sees_only_on_for_everyone() {
+        let rule = Rule {
+            percent: 100,
+            actors: vec![String::new()],
+            groups: vec!["staff".into()],
+            on: false,
+        };
+        assert!(!rule.allows("x", &Actor::anonymous().in_group("staff")));
+        assert!(Rule::everyone().allows("x", &Actor::anonymous().in_group("staff")));
+    }
+
+    #[test]
+    fn a_percent_over_a_hundred_is_read_as_a_hundred() {
+        assert_eq!(Rule::percent(250).percent, 100);
+        let rule = Rule {
+            percent: 250,
+            ..Rule::default()
+        };
+        assert!(rule.allows("x", &Actor::new("anyone")));
+        assert_eq!(rule.summary(), "100%");
+    }
+
+    #[test]
+    fn a_group_or_user_match_is_exact_not_a_prefix_or_case_fold() {
+        let rule = Rule {
+            actors: vec!["ada".into()],
+            groups: vec!["staff".into()],
+            ..Rule::default()
+        };
+        assert!(!rule.allows("x", &Actor::new("Ada")));
+        assert!(!rule.allows("x", &Actor::new("ada2")));
+        assert!(!rule.allows("x", &Actor::new("bob").in_group("Staff")));
+        assert!(!rule.allows("x", &Actor::new("bob").in_group("staff-old")));
+    }
+
+    #[test]
     fn the_bucket_function_is_pinned() {
         // A change here moves people in and out of every live rollout. The
         // values are FNV-1a 64 of `key \0 id`, mod 100, checked by hand.
