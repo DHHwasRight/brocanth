@@ -20,7 +20,7 @@ brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = 
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["memory", "admin"] }  # the queue in memory, for development
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1934,9 +1934,6 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -1992,6 +1989,9 @@ macro_rules! register {
         );
         let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: security headers ------------------------
@@ -2062,8 +2062,7 @@ type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
 type WithObservability = After<crate::plugins::observability::Observe, WithI18n>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
-type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
-type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
+type WithAuth = After<crate::plugins::auth::Auth, WithCache>;
 type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
 type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
 type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
@@ -2073,7 +2072,8 @@ type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
 type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
 type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
+type WithJobs = After<crate::plugins::jobs::Jobs, WithModel>;
+type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithJobs>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
@@ -2197,6 +2197,10 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    }
+    // The queue the jobs plugin runs, as a tab.
+    if crate::modules::jobs::MODULE.integrate.admin {
+        config = config.panel(brocanth_jobs::admin::JobsPanel::installed());
     }
     config
 }
@@ -2648,42 +2652,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "jobs.url",
-        help: "The database the queue lives in.",
-        flag: false,
-        file: "src/modules/jobs.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "jobs.migrate",
-        help: "Create the three tables at startup if they are absent.",
-        flag: true,
-        file: "src/modules/jobs.rs",
-        flags: crate::modules::jobs::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "jobs.worker",
-        help: "Run a worker in this process.",
-        flag: true,
-        file: "src/modules/jobs.rs",
-        flags: crate::modules::jobs::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "jobs.concurrency",
-        help: "How many jobs the worker runs at once.",
-        flag: true,
-        file: "src/modules/jobs.rs",
-        flags: crate::modules::jobs::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "auth.url",
         help: "The Postgres database for accounts and sessions.",
         flag: false,
@@ -2970,6 +2938,24 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "jobs.worker",
+        help: "Run a worker in this process.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "jobs.concurrency",
+        help: "How many jobs the worker runs at once.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "security_headers.behind_tls",
@@ -3399,7 +3385,6 @@ fn defaults() -> Vec<(&'static str, String)> {
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
-    let jobs = crate::plugins::jobs::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
@@ -3409,6 +3394,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let robots = crate::plugins::robots::Settings::default();
     let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
+    let jobs = crate::plugins::jobs::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
@@ -3494,10 +3480,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("cache.url", format!("{:?}", cache.url)),
         ("cache.migrate", format!("{:?}", cache.migrate)),
         ("cache.sweep_every", format!("{:?}", cache.sweep_every)),
-        ("jobs.url", format!("{:?}", jobs.url)),
-        ("jobs.migrate", format!("{:?}", jobs.migrate)),
-        ("jobs.worker", format!("{:?}", jobs.worker)),
-        ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
         ("auth.url", format!("{:?}", auth.url)),
         (
             "auth.signing_key_env",
@@ -3557,6 +3539,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             "analytics.collector_path",
             format!("{:?}", analytics.collector_path),
         ),
+        ("jobs.worker", format!("{:?}", jobs.worker)),
+        ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
         (
             "security_headers.behind_tls",
             format!("{:?}", security_headers.behind_tls),
@@ -3754,7 +3738,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: 869ada165ab28d70
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4194,7 +4178,6 @@ pub mod jobs {
     /// so it has no variant here and cannot be renamed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
-        Migrate,
         Worker,
         Concurrency,
     }
@@ -4203,11 +4186,23 @@ pub mod jobs {
         /// The setting, as `config/<env>.toml` and the flag spell it.
         pub const fn path(self) -> &'static str {
             match self {
-                Key::Migrate => "jobs.migrate",
                 Key::Worker => "jobs.worker",
                 Key::Concurrency => "jobs.concurrency",
             }
         }
+    }
+
+    /// The code `jobs` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a tab at /admin/jobs: the queues, what runs, the retries
+        /// and the dead letter.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
     }
 
     /// What src/modules/jobs.rs holds.
@@ -4216,6 +4211,8 @@ pub mod jobs {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -4223,7 +4220,19 @@ pub mod jobs {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
+    }
+}
+
+/// The shape of src/modules/jobs_memory.rs.
+pub mod jobs_memory {
+    /// What src/modules/jobs_memory.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -5041,7 +5050,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 04ac969d3cd7e035
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5077,6 +5086,7 @@ pub mod gtag;
 pub mod i18n;
 pub mod input;
 pub mod jobs;
+pub mod jobs_memory;
 pub mod jt;
 pub mod middleware;
 pub mod middleware_csrf;
@@ -5118,6 +5128,7 @@ pub const ALL: &[&str] = &[
     "model",
     "cache",
     "jobs",
+    "jobs-memory",
     "auth",
     "policy",
     "storage",
@@ -5150,7 +5161,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: 758595ffd1784de2
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5438,7 +5449,7 @@ pub const MODULE: Module = Module {
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::jobs::{Flag, Flags, Key, Module};
+use crate::plugins::shape::jobs::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -5450,12 +5461,33 @@ pub const MODULE: Module = Module {
 
     // Another name for a flag, or no flag. The variable and the config key
     // keep the declared name. Examples:
-    //   (Key::Migrate, Flag::As("migrate")),
-    //   (Key::Migrate, Flag::Hidden),
+    //   (Key::Worker, Flag::As("worker")),
+    //   (Key::Worker, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // A tab at /admin/jobs: the queues, what runs, the retries and the dead
+        // letter. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
+===== src/modules/jobs_memory.rs =====
+//! `jobs-memory`: the queue in this process's memory; for development and
+//! tests, gone at restart.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::jobs_memory::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/auth.rs =====
 //! `auth`: argon2id accounts and signed sessions; no provider, so no HTTP
 //! client.
@@ -6262,23 +6294,6 @@ migrate = true
 # Expired entries are never served; the sweep only frees their space.
 sweep_every = 300
 
-[jobs]
-# The database the queue lives in.
-# A URL can carry a password, so no flag sets it.
-url = "postgres://localhost/development"
-# Create the three tables at startup if they are absent.
-# Development only: see `Queue::schema_sql` for the statements to put in a
-# migration instead.
-migrate = true
-# Run a worker in this process.
-# A busy application moves this to a separate deployment, so that a job
-# pegging a core is not pegging the core answering requests.
-worker = true
-# Which queues the worker claims from.
-queues = ["default"]
-# How many jobs the worker runs at once.
-concurrency = 5
-
 [auth]
 # The Postgres database for accounts and sessions.
 # The tables are created at startup, named brocanth_auth_*. A URL can
@@ -6438,6 +6453,16 @@ collector_path = "/_a/v"
 # The static sites allowed to send them: "https://docs.example.com". Empty, no collector.
 # A beacon from any other origin is answered 204 and not counted.
 collector_origins = []
+
+[jobs]
+# Run a worker in this process.
+# A busy application moves this to a separate deployment, so that a job
+# pegging a core is not pegging the core answering requests.
+worker = true
+# Which queues the worker claims from.
+queues = ["default"]
+# How many jobs the worker runs at once.
+concurrency = 5
 
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
@@ -9567,20 +9592,20 @@ mod tests {
 //! than one -- the only thing that must stay here is the `register` call.
 //!
 //! **Register every job type before anything enqueues it.** A worker claims
-//! by queue and not by name, so it will take a job whose name it does not
-//! know, and a name it cannot resolve is a terminal failure: the row goes
-//! straight to the dead letter rather than waiting for a worker that knows
-//! it. The payload is kept and `Queue::requeue_dead` replays it, so nothing
-//! is lost -- but the job does not run when you expected it to. During a
-//! rolling deploy that means the old workers, so ship the registration
-//! before you ship the first enqueue.
+//! only the names it has registered, so a job whose name no worker knows
+//! waits on its queue until a worker that knows it starts. During a rolling
+//! deploy that means the old workers leave it alone, so ship the
+//! registration before you ship the first enqueue.
+//!
+//! # Where the jobs live
+//!
+//! In this process's memory (`jobs-memory`), for development and tests.
+//! A restart loses every job. `brocanth remove jobs-memory` moves the queue
+//! to Postgres.
 //!
 //! The crate also ships `JobsPlugin`, and this is not that. `JobsPlugin` is
-//! handed a queue that is already open, which is what an application with a
-//! shared pool or a worker-only process wants. This one takes a URL, because
-//! a new project has a URL.
-
-use std::sync::Arc;
+//! handed a queue that is already open, which is what an application that
+//! builds its queue in `main` wants. This one builds it from the settings.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
@@ -9634,11 +9659,6 @@ fn registry() -> JobRegistry {
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// The database the queue lives in. Its own URL, not the models': a
-    /// queue and an ORM can share one database and need not.
-    pub url: String,
-    /// Create the three tables at startup if they are absent.
-    pub migrate: bool,
     /// Run a worker in this process, as well as enqueuing from it.
     pub worker: bool,
     /// Which queues that worker claims from.
@@ -9650,8 +9670,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
-            migrate: true,
             worker: true,
             queues: vec!["default".to_string()],
             concurrency: 5,
@@ -9687,11 +9705,6 @@ impl Plugin for Jobs {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.settings.url.is_empty() {
-            return Err(PluginError::new(
-                "[jobs] url is required; the queue is a table and needs a database",
-            ));
-        }
         if self.settings.worker && self.settings.queues.is_empty() {
             return Err(PluginError::new(
                 "[jobs] worker is true and queues is empty, so the worker would claim \
@@ -9702,47 +9715,20 @@ impl Plugin for Jobs {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous and opening a pool is not, so
-        // the pool opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "[jobs] needs a Tokio runtime at startup to open its pool ({e})"
-            ))
-        })?;
-        let queue = {
-            let _entered = runtime.enter();
-            Queue::connect_lazy(&self.settings.url)
-                .map_err(|e| PluginError::new(format!("[jobs] {e}")))?
-        };
+        // In this process's memory (`jobs-memory`): for development and
+        // tests only. A restart loses every job, and `brocanth check
+        // --deploy` refuses it.
+        let queue = Queue::memory();
 
-        // Ready when the jobs table answers, as `JobsPlugin` does: a lookup
-        // by primary key, so a probe costs one index read however long the
-        // queue is. With `migrate`, the first check creates the tables, and
-        // the first check is the one `serve` awaits before it listens: an
-        // unreachable database stops the start there.
+        // Ready while the queue answers, which in memory is always.
         let probe = queue.clone();
-        let migrate = self.settings.migrate;
-        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {
             let probe = probe.clone();
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if migrate {
-                    migrated
-                        .get_or_try_init(|| probe.migrate())
-                        .await
-                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
-                }
-                probe
-                    .inspect(brocanth_jobs::JobId(0))
-                    .await
-                    .map(drop)
-                    .map_err(|e| e.to_string())
-            }
+            async move { probe.ping().await.map_err(|e| e.to_string()) }
         });
 
+        // So the admin's jobs tab, which mounts before this runs, finds it.
+        queue.install();
         self.queue = Some(queue);
         Ok(())
     }
@@ -9751,8 +9737,8 @@ impl Plugin for Jobs {
         // Here and not in `before_start`: `serve` runs this after its
         // startup gate, so the tables exist, and inside the runtime, so the
         // worker has somewhere to spawn. A build that never serves -- a test,
-        // a command -- starts no worker. The worker is woken by the enqueue
-        // itself on Postgres rather than polling; see `brocanth_jobs::listen`.
+        // a command -- starts no worker. On Postgres an enqueue wakes the
+        // worker (`LISTEN/NOTIFY`) rather than a poll.
         let (Some(queue), true) = (&self.queue, self.settings.worker) else {
             return Ok(());
         };
@@ -12277,6 +12263,7 @@ request.
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
+- `jobs-memory`  the queue in this process's memory; for development and tests, gone at restart
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
@@ -12342,6 +12329,12 @@ Editing or deleting one is noticed.
 A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
+## Jobs in memory
+
+The queue lives in this process (`jobs-memory`). Jobs survive no restart,
+and two processes do not share them. It is for development and tests:
+`brocanth check --deploy` refuses it. Run `brocanth remove jobs-memory`
+before production; the queue then uses Postgres.
 
 ## Reading a body
 
@@ -12748,7 +12741,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 2f1c1ae8a15a91e0 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +12753,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "jobs-memory", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -12856,7 +12849,15 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config"]
+adapted_to = ["config", "db", "jobs-memory", "admin"]
+
+[modules.jobs-memory]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/jobs_memory.rs"]
+config = []
+crates = ["brocanth-jobs"]
+adapted_to = []
 
 [modules.auth]
 version = "0.1.0"
@@ -13098,4 +13099,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: d68217478d07970c
