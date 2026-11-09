@@ -16,10 +16,12 @@
 //!
 //! [`Postgres`]: postgres::Postgres
 //!
-//! This crate does not depend on `brocanth`. It has no routes, parses no
-//! multipart body and knows nothing about HTTP. The upload route, the download
-//! route and the policy that guards them are the application's, and they
-//! depend on this; it depends on nothing in the workspace.
+//! Without the `routes` feature this crate does not depend on `brocanth`. It
+//! has no routes, parses no multipart body and knows nothing about HTTP. The
+//! `routes` feature adds the HTTP edge as request hooks ([`routes`]): an
+//! upload route, a download route behind a file token, and thumbnails. The
+//! policy that guards an upload stays the application's, as an
+//! [`UploadGuard`](routes::UploadGuard) it writes.
 //!
 //! # Security decisions, each with its reason
 //!
@@ -114,6 +116,9 @@ pub mod postgres;
 
 #[cfg(feature = "variants")]
 pub mod variants;
+
+#[cfg(feature = "routes")]
+pub mod routes;
 
 /// Behind the `scaffold` feature, which is off: the generator is the CLI's
 /// business and not an application's. See the dependency comment in
