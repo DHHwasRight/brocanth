@@ -148,10 +148,11 @@ remove with it: `brocanth remove model db`.
 
 It keeps three things, so that a later `brocanth add` finds them again:
 
-- **A rename in `src/flags.rs`** of a flag that leaves with the module.
-  A rename of a flag that nothing sets stops the binary, so `remove`
-  turns the line into a comment that starts with `// Parked by`. `add`
-  restores the line.
+- **The module file, once it is edited.** `src/modules/<key>.rs` holds the
+  module's choices: renames, hooks, integrations. An unedited one is
+  deleted. An edited one stays, out of `src/modules/mod.rs`, so nothing
+  compiles it. `add` writes a module file only when it is missing, so it
+  finds the old choices again.
 - **Ejected admin screens.** The copies under
   `src/plugins/admin/screens/` stay, because they are your work. Nothing
   compiles them while the admin is out. `brocanth add admin` installs

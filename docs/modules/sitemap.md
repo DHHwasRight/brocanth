@@ -41,7 +41,7 @@ parameter and whose last segment has no dot. So `/users/{id}` and
 
 ## Settings
 
-Section `[sitemap]`. Environment variable: `$<APP>_SITEMAP__<KEY>`. Flag: `--sitemap.<key>`. Rename a flag in `src/flags.rs`.
+Section `[sitemap]`. Environment variable: `$<APP>_SITEMAP__<KEY>`. Flag: `--sitemap.<key>`. Rename or hide a flag in `src/modules/sitemap.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

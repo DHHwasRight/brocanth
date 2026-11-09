@@ -22,7 +22,7 @@ map.
 | [module-map.md](module-map.md) | The modules in five categories, with the dependency graph. |
 | [modules.md](modules.md) | Where a crate attaches to a generated project: `Slot`s, the `scaffold` feature, the CLI registry. |
 | [module-authoring.md](module-authoring.md) | How to write a module from zero: the contract, a walkthrough, every hook. |
-| [module-flags.md](module-flags.md) | Declared settings: the config key, the flag, the environment variable, renames in `src/flags.rs`. |
+| [module-flags.md](module-flags.md) | Declared settings: the config key, the flag, the environment variable, renames in `src/modules/`. |
 
 ## Runtime
 

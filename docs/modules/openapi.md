@@ -37,7 +37,7 @@ Slots:
 
 ## Settings
 
-Section `[openapi]`. Environment variable: `$<APP>_OPENAPI__<KEY>`. Flag: `--openapi.<key>`. Rename a flag in `src/flags.rs`.
+Section `[openapi]`. Environment variable: `$<APP>_OPENAPI__<KEY>`. Flag: `--openapi.<key>`. Rename or hide a flag in `src/modules/openapi.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

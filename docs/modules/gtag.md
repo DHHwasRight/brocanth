@@ -46,7 +46,7 @@ keeps the `banner.*` setting.
 
 ## Settings
 
-Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key is `__`). Flag: `--gtag.<key>`. Rename a flag in `src/flags.rs`.
+Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key is `__`). Flag: `--gtag.<key>`. Rename or hide a flag in `src/modules/gtag.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

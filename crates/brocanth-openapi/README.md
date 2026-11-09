@@ -57,8 +57,8 @@ title = "Blog"
 version = "1.2.0"
 ```
 
-With `config`, the binary refuses flags until you set `WITH_CONFIG = true`
-in `src/flags.rs`. The environment variables always work.
+With `config`, the binary refuses flags until you set
+`flags_with_config: true` in `src/modules/brocanth.rs`. The environment variables always work.
 `version` is the version of the contract, not of the crate: change it when
 an operation changes.
 

@@ -54,7 +54,7 @@ Slots:
 
 ## Settings
 
-Section `[beacon]`. Environment variable: `$<APP>_BEACON__<KEY>`. Flag: `--beacon.<key>`. Rename a flag in `src/flags.rs`.
+Section `[beacon]`. Environment variable: `$<APP>_BEACON__<KEY>`. Flag: `--beacon.<key>`. Rename or hide a flag in `src/modules/beacon.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

@@ -40,7 +40,7 @@ for its startup line.
 
 ## Settings
 
-Section `[logging]`. Environment variable: `$<APP>_LOGGING__<KEY>`. Flag: `--logging.<key>`. Rename a flag in `src/flags.rs`.
+Section `[logging]`. Environment variable: `$<APP>_LOGGING__<KEY>`. Flag: `--logging.<key>`. Rename or hide a flag in `src/modules/logging.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

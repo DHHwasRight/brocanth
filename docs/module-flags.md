@@ -34,8 +34,8 @@ And then decided the open questions:
 |---|---|
 | flags per module | One flag per declared setting. The name is the setting's path: `--sessions.cookie`, `--db.pool.max_size`. |
 | config registers the module and its sections | The declaration writes `[sessions]`, and `[db.pool]` for a dotted key. |
-| with config, the flags switch to false | With `config`, the binary refuses a flag and says why. `WITH_CONFIG = true` in `src/flags.rs` turns the flags on. |
-| rename | `RENAMES` in `src/flags.rs`. The project owns that file. |
+| with config, the flags switch to false | With `config`, the binary refuses a flag and says why. `flags_with_config: true` in `src/modules/brocanth.rs` turns the flags on for the project; `flags: Flags::On` in a module's file turns them on for that module. |
+| rename | `rename` in `src/modules/<key>.rs`. The project owns that file. |
 | plug into the main executable | With `commands`, the flags are global `clap` arguments. Without `commands`, `main` reads them. |
 
 ## Declaring a setting
@@ -153,31 +153,43 @@ came from, so `limit = -1` in a file works too.
 
 ## Flags off, with `config`
 
-With `config` and `WITH_CONFIG = false`, a declared flag is refused by
-name before anything starts:
+With `config`, a module's flags follow its file: `flags: Flags::Project`
+(the default) follows `flags_with_config` in `src/modules/brocanth.rs`,
+which is `false`; `Flags::On` and `Flags::Off` decide for that module
+alone. A flag that is off is refused by name before anything starts:
 
 ```text
 error: `--sessions.cookie` is off: this project reads its settings from config/<env>.toml
-help: set WITH_CONFIG = true in src/flags.rs, or set `cookie` under [sessions] in config/<env>.toml
+help: set `flags: Flags::On` in src/modules/sessions.rs, or set `cookie` under [sessions] in config/<env>.toml
 ```
+
+For `[server]` the `help:` line names `flags_with_config: true` in
+`src/modules/brocanth.rs`. Without `config`, `Flags::Project` is on, and
+`Flags::Off` leaves a module's settings with the variable only.
 
 A flag nobody declared is still `clap`'s error.
 
 ## Renaming and hiding
 
-`src/flags.rs` belongs to the project. The generator writes it when it is
-missing and never again. That is why `brocanth add` keeps the renames, and
-why a project that predates this file gets one the first time it adds a
-module with a setting.
+Each module file in `src/modules/` belongs to the project. The generator
+writes it when it is missing and never again, so `brocanth add` keeps the
+renames (`docs/module-config.md`). `src/modules/brocanth.rs` holds the
+`[server]` renames.
 
 ```rust
-pub const WITH_CONFIG: bool = false;
+// src/modules/sessions.rs
+pub const MODULE: Module = Module {
+    flags: Flags::Project,
+    rename: &[(Key::Cookie, Flag::As("cookie"))], // --cookie
+    ..Module::DEFAULT
+};
 
-pub const RENAMES: &[(&str, &str)] = &[
-    ("sessions.cookie", "cookie"), // --cookie instead of --sessions.cookie
-    ("storage.root", ""),          // no flag at all
-];
+// src/modules/storage.rs
+    rename: &[(Key::Root, Flag::Hidden)], // no flag at all
 ```
+
+`Key` is an enum with one variant per setting that has a flag, generated
+in `src/plugins/shape.rs`. A typo, a secret and a list are compile errors.
 
 A rename changes the flag only. The variable and the file key keep the
 canonical name, because they are shared with every other deployment.
@@ -187,7 +199,7 @@ rewrites. It holds the canonical names only.
 
 **Why a Rust file, and not `brocanth.toml`:** `brocanth.toml` is generated
 and records what the generator did. A rename there would take effect only
-after a regeneration. A constant in `src/flags.rs` takes effect on the next
+after a regeneration. A constant in `src/modules/` takes effect on the next
 `cargo build`, and the compiler checks its type.
 
 ### What a rename may not do
@@ -195,7 +207,6 @@ after a regeneration. A constant in `src/flags.rs` takes effect on the next
 The binary checks these at startup, before it binds a socket. Each failure
 prints an error with a `help:` line.
 
-- Rename a key that no flag sets. Such a rename would do nothing.
 - Use a character other than a lower-case letter, a digit, `.`, `_` or
   `-`, or start with `-`, `.` or `_`.
 - Take `help`, `version` or `settings`.
@@ -205,7 +216,9 @@ prints an error with a `help:` line.
   silently in a release build, so `flag_args` refuses it first.
 
 A canonical name always contains a dot, and no built-in argument does. Only
-a rename can collide.
+a rename can collide. A rename of a key that no flag sets does not
+compile: `Key` has no variant for it. The generated test
+`flag_names_are_valid` runs the startup check in `cargo test`.
 
 ### Collisions between modules
 
@@ -263,9 +276,11 @@ from the process arguments and stops at `--`.
 | File | Owner | Holds |
 |---|---|---|
 | `src/plugins/mod.rs` | generator | `SETTINGS`, `given`, `flag_args` or `read_line`, `settings_report`; with config `config()` and `refuse_off_flags`; without config one `<section>_settings` per section; `ServerSettings` and `shutdown_grace` |
-| `src/flags.rs` | project | `WITH_CONFIG`, `RENAMES` |
+| `src/modules/<key>.rs` | project | `flags`, `rename`, and the module's other choices |
+| `src/modules/brocanth.rs` | project | `flags_with_config`, the `[server]` renames |
+| `src/plugins/shape.rs` | generator | `Flags`, `Flag`, and each module's `Key` |
 | `src/commands/settings.rs` | project | the `settings` command, with `commands` |
-| `src/main.rs` | generator | `mod flags;` and the reader call |
+| `src/main.rs` | generator | `mod modules;` and the reader call |
 | `config/<env>.toml` | shared | the declared sections, with config |
 
 Every project gets these files, because the framework declares
@@ -341,11 +356,11 @@ declares its settings. So it has the same three ways in:
 - with `config`, the key in `config/<env>.toml`, as before.
 
 The settings report shows it beside the modules' settings, and
-`src/flags.rs` can rename it.
+`src/modules/brocanth.rs` can rename it.
 
 **Decision: every project declares it.** Every project serves, and every
 `serve` drains for the grace period. So every project gets the flag
-machinery, `src/flags.rs` and, with `commands`, the `settings` command,
+machinery, `src/modules/brocanth.rs` and, with `commands`, the `settings` command,
 also `--core-only`.
 
 **Reason:** one rule for every setting. A setting that has a flag in some

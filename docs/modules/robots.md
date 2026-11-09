@@ -36,7 +36,7 @@ Slots:
 
 ## Settings
 
-Section `[robots]`. Environment variable: `$<APP>_ROBOTS__<KEY>`. Flag: `--robots.<key>`. Rename a flag in `src/flags.rs`.
+Section `[robots]`. Environment variable: `$<APP>_ROBOTS__<KEY>`. Flag: `--robots.<key>`. Rename or hide a flag in `src/modules/robots.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

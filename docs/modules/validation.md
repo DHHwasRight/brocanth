@@ -35,7 +35,7 @@ Slots:
 
 ## Settings
 
-Section `[validation]`. Environment variable: `$<APP>_VALIDATION__<KEY>`. Flag: `--validation.<key>`. Rename a flag in `src/flags.rs`.
+Section `[validation]`. Environment variable: `$<APP>_VALIDATION__<KEY>`. Flag: `--validation.<key>`. Rename or hide a flag in `src/modules/validation.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

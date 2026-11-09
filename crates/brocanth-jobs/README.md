@@ -63,7 +63,7 @@ request context. It declares these settings in the `[jobs]` section:
 host can read a process's arguments. `migrate` is for development. In
 production, put the statements from `Queue::schema_sql` in a migration
 somebody reviewed. With the `config` module, the binary refuses a flag
-unless `WITH_CONFIG = true` in `src/flags.rs`. See `docs/module-flags.md`.
+unless `flags_with_config: true` in `src/modules/brocanth.rs`. See `docs/module-flags.md`.
 
 ## Examples
 

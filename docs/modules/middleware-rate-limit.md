@@ -33,7 +33,7 @@ With `config`, the registration reads `[rate_limit]` through `plugin_hooking_fro
 
 ## Settings
 
-Section `[rate_limit]`, the plugin's instance name, not the module key. Environment variable: `$<APP>_RATE_LIMIT__<KEY>` (a dot in the key is `__`). Flag: `--rate_limit.<key>`. Rename a flag in `src/flags.rs`.
+Section `[rate_limit]`, the plugin's instance name, not the module key. Environment variable: `$<APP>_RATE_LIMIT__<KEY>` (a dot in the key is `__`). Flag: `--rate_limit.<key>`. Rename or hide a flag in `src/modules/middleware_rate_limit.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

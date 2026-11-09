@@ -33,7 +33,7 @@ The registration reads `[security_headers]` through `plugin_hooking_from_config`
 
 ## Settings
 
-Section `[security_headers]`, the plugin's instance name, not the module key. Environment variable: `$<APP>_SECURITY_HEADERS__<KEY>` (a dot in the key is `__`). Flag: `--security_headers.<key>`. Rename a flag in `src/flags.rs`.
+Section `[security_headers]`, the plugin's instance name, not the module key. Environment variable: `$<APP>_SECURITY_HEADERS__<KEY>` (a dot in the key is `__`). Flag: `--security_headers.<key>`. Rename or hide a flag in `src/modules/middleware_security_headers.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

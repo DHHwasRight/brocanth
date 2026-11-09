@@ -610,7 +610,7 @@ generated projects, and all ten are clean.
 
 ## 7. Every seam, and its state
 
-### Build time — `Slot`, 18 variants
+### Build time — `Slot`, 21 variants
 
 | Slot | State |
 | --- | --- |
@@ -626,6 +626,7 @@ generated projects, and all ten are clean.
 | `PagesRenderers` | read — the renderer seam, §5 |
 | `PagesRoutes` | read — a module's page joins the table's own test, §6b |
 | `RouterMounts` | read — a module's `mount`, called from `pages::mounted` (§4.6). `resource` and `admin` are its customers |
+| `AdminPanels` | read — the body of the generated `plugins::admin_panels`, in a project with `admin`. Written with `snippet::integration`, behind the guest's `integrate.admin`. `analytics` is its first customer (`docs/module-config.md` §2.2) |
 
 A module that writes into an unread slot is recorded and discarded in
 silence. That has already happened once, with a `.gitignore` line.
@@ -651,8 +652,10 @@ silence. That has already happened once, with a `.gitignore` line.
 
 A module declares each setting once. The declaration writes the
 `[section]` block with `config`, and a flag `--<section>.<key>` on the
-binary either way. With `config` the flags are off until `src/flags.rs`
-turns them on; `src/flags.rs` also renames and hides them. Every module
+binary either way. With `config` the flags are off until
+`src/modules/brocanth.rs` turns them on for the project, or a module's own
+file turns them on for that module. The module file also renames and
+hides them (`docs/module-config.md`). Every module
 with settings is converted, the admin included. The hooking modules
 (`csrf`, `security-headers`, `rate-limit`) are not: their config is still
 a literal. See `docs/module-flags.md`.
@@ -742,11 +745,20 @@ difference. Three rules decide what it may touch:
    prints the change and writes nothing. When the developer has made the
    change by hand around their own lines, the next run finds every added
    line present and every removed line gone, and goes through.
-4. **A deleted file stays deleted.** A file the generator wrote before
+4. **A module file is written once.** `src/modules/<key>.rs` is the
+   project's from the day it lands. `add` writes it when it is missing,
+   also for a module that was already there, and never rewrites it.
+   `src/modules/mod.rs` and `src/plugins/shape.rs` are the generator's,
+   rewritten whole. A project from before `src/modules/` has a
+   `src/flags.rs`: the next `add` moves its `WITH_CONFIG` and `RENAMES`
+   into the new module files and deletes it. A line it did not write
+   stops the add, with the lines to move by hand
+   (`docs/module-config.md` §6).
+5. **A deleted file stays deleted.** A file the generator wrote before
    this add, and that is gone, was deleted by the developer: an example
    page they did not want. `add` does not write it again, and says so.
    Only a file that is new with this add is written when absent.
-5. **The shared files are edited, never rewritten.** `Cargo.toml` goes
+6. **The shared files are edited, never rewritten.** `Cargo.toml` goes
    through `toml_edit`: a dependency already there keeps its spec, and
    only a feature the new module needs is added to it. A new git
    dependency takes the `branch`, `rev` or `tag` of a dependency the
@@ -824,15 +836,15 @@ generator is the one source of what a module wrote, so `add` and
 Three kinds of state must survive a remove and a re-add. Each has its own
 rule, and the reason for it:
 
-- **Renames in `src/flags.rs` are parked.** The project refuses to start
-  with a rename of a flag that no module sets, so the rename cannot stay
-  live. Deleting it would lose a decision. So `remove` turns the line
-  into a comment,
-  `` // Parked by `brocanth remove`; `brocanth add` restores it: ("jobs.workers", "workers"), ``,
-  and `add` restores it when
-  the flag is back. A rename that shares its line with another is refused
-  with the edit to make: one rename per line. When no module has
-  settings any more, an edited `src/flags.rs` stays; nothing compiles it.
+- **An edited module file stays.** `src/modules/<key>.rs` holds the
+  module's renames, hooks, integrations and options. `remove` deletes it
+  while it is what the generator wrote, and keeps it once it is edited:
+  `kept src/modules/jobs.rs: your choices return with brocanth add jobs`.
+  `src/modules/mod.rs` loses its `pub mod` line, so nothing compiles it.
+  `add` writes a module file only when it is missing, so a re-add finds
+  the old choices. A staying module's file that names a `Key` the remove
+  takes away (`observability` without `observability-health` has no
+  `Key::LivePath`) stops the remove, with the line to delete.
 - **Ejected admin screens stay.** The copies under
   `src/plugins/admin/screens/` and `ejected.rs` are the developer's work,
   and an eject is often hours of it. `remove admin` deletes the plugin

@@ -36,7 +36,7 @@ The generated job derives `serde`, so the module declares `serde` itself. With `
 
 ## Settings
 
-Section `[jobs]`. Environment variable: `$<APP>_JOBS__<KEY>`. Flag: `--jobs.<key>`. Rename a flag in `src/flags.rs`.
+Section `[jobs]`. Environment variable: `$<APP>_JOBS__<KEY>`. Flag: `--jobs.<key>`. Rename or hide a flag in `src/modules/jobs.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

@@ -37,7 +37,7 @@ Slots:
 
 ## Settings
 
-Section `[auth]`. Environment variable: `$<APP>_AUTH__<KEY>`. Flag: `--auth.<key>`. Rename a flag in `src/flags.rs`.
+Section `[auth]`. Environment variable: `$<APP>_AUTH__<KEY>`. Flag: `--auth.<key>`. Rename or hide a flag in `src/modules/auth.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

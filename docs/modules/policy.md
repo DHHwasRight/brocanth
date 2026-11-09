@@ -35,7 +35,7 @@ Slots:
 
 ## Settings
 
-Section `[policy]`. Environment variable: `$<APP>_POLICY__<KEY>`. Flag: `--policy.<key>`. Rename a flag in `src/flags.rs`.
+Section `[policy]`. Environment variable: `$<APP>_POLICY__<KEY>`. Flag: `--policy.<key>`. Rename or hide a flag in `src/modules/policy.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

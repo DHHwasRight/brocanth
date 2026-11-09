@@ -62,7 +62,7 @@ client gets `Internal Server Error`.
 
 ## Settings
 
-Section `[db]`. Environment variable: `$<APP>_DB__<KEY>`. Flag: `--db.<key>`. Rename a flag in `src/flags.rs`.
+Section `[db]`. Environment variable: `$<APP>_DB__<KEY>`. Flag: `--db.<key>`. Rename or hide a flag in `src/modules/db.rs`.
 
 A duration is a whole number of seconds. For `idle_timeout` and
 `statement_timeout`, 0 turns it off.

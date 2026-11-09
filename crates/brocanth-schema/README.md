@@ -47,7 +47,7 @@ one setting (see `docs/module-flags.md`):
 
 With the `config` module the key is in `[validation]` in
 `config/<env>.toml`. With `config`, the flags are off until you set
-`WITH_CONFIG = true` in `src/flags.rs`.
+`flags_with_config: true` in `src/modules/brocanth.rs`.
 
 ## Examples
 

@@ -34,7 +34,7 @@ Slots:
 
 ## Settings
 
-Section `[observability]`. Environment variable: `$<APP>_OBSERVABILITY__<KEY>`. Flag: `--observability.<key>`. Rename a flag in `src/flags.rs`.
+Section `[observability]`. Environment variable: `$<APP>_OBSERVABILITY__<KEY>`. Flag: `--observability.<key>`. Rename or hide a flag in `src/modules/observability.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

@@ -71,7 +71,11 @@ What it writes:
   blog/src/pages/about.rs                 1040 bytes
   blog/src/pages/users/[id].rs            1656 bytes
   blog/src/plugins/mod.rs                26133 bytes
-  blog/src/flags.rs                       1120 bytes
+  blog/src/plugins/shape.rs               8658 bytes
+  blog/src/modules/mod.rs                 1394 bytes
+  blog/src/modules/brocanth.rs            1184 bytes
+  blog/src/modules/observability.rs       1222 bytes
+  ...                                     one file per module
   blog/config/development.toml            2519 bytes
   blog/src/commands/mod.rs                 616 bytes
   blog/src/commands/serve.rs               604 bytes
@@ -236,8 +240,8 @@ to place, and the project compiles and runs without it:
 `brocanth remove jobs` is the inverse. It generates the project without
 the module, deletes what only the module needed, and takes its
 dependencies and config sections out. It refuses an edited file with the
-edit, and a module that a remaining module needs. It keeps renames in
-`src/flags.rs`, ejected admin screens and `migrations/`, so a later
+edit, and a module that a remaining module needs. It keeps an edited
+`src/modules/<key>.rs`, ejected admin screens and `migrations/`, so a later
 `brocanth add` finds them again.
 
 ## Run it

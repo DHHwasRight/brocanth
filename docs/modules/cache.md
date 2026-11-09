@@ -34,7 +34,7 @@ Slots:
 
 ## Settings
 
-Section `[cache]`. Environment variable: `$<APP>_CACHE__<KEY>`. Flag: `--cache.<key>`. Rename a flag in `src/flags.rs`.
+Section `[cache]`. Environment variable: `$<APP>_CACHE__<KEY>`. Flag: `--cache.<key>`. Rename or hide a flag in `src/modules/cache.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

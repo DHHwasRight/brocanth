@@ -136,8 +136,9 @@ shutdown_grace_secs` has a flag and a variable in every project
 ### 3. Module system
 
 1. ~~**`brocanth remove <module>`.**~~ Done. It is `add` in reverse
-   (`docs/modules.md`, "Removing from a project"). Renames in
-   `src/flags.rs` are parked, ejected admin screens and `migrations/` stay.
+   (`docs/modules.md`, "Removing from a project"). An edited
+   `src/modules/<key>.rs` stays, with its renames and other choices, and
+   so do ejected admin screens and `migrations/`.
    Remains: a remove does not touch the database, so a table of a removed
    module stays until a migration drops it.
 2. ~~**Module versions.**~~ Done. `brocanth.toml` records each module's

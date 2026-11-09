@@ -117,7 +117,7 @@ MY_APP_RATE_LIMIT__IP_HEADER=fly-client-ip cargo run -- serve
 
 `serve` is the subcommand a project with `commands` starts the server
 with. Without `commands`, leave it out. With `config`, the flags are off
-until `WITH_CONFIG = true` in `src/flags.rs`.
+until `flags_with_config: true` in `src/modules/brocanth.rs`.
 
 A list has no flag, so `exempt` and the rate-limit rules live in the file.
 Without `config`, the example rule is code beside the registration.

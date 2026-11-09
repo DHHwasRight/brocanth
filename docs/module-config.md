@@ -1,8 +1,10 @@
 # Module configuration in the source: `src/modules/`
 
-Status: **proposal**, partly built. The core side of hook toggles (§2.3,
-§3.2) is built: `AppBuilder::hooks_off`, `hooks_off_from` and
-`Pipeline::skipped`.
+Status: **built**, except the items §8 lists. The core side of hook
+toggles (§2.3, §3.2) is `AppBuilder::hooks_off`, `hooks_off_from` and
+`Pipeline::skipped`. The generator side (§1, §2.1, §2.2, §2.4, §3.1, §3.3,
+§4, §6) is in `crates/brocanth-scaffold` and `crates/brocanth-cli`
+(`src/choices.rs`). §8 records what the build decided.
 
 ## The request
 
@@ -30,7 +32,7 @@ And then added:
 | disable a feature, such as the admin tab | `integrate`: one toggle per integration the module offers. On by default unless the module says otherwise. |
 | some other static configs | `options`: compile-time values the module declares, such as the admin's mount point. |
 | hooks on and off | `hooks`: one toggle per hook the module registers. A hook the module cannot work without has no toggle. |
-| `mod.rs` shows the integrated modules | `src/modules/mod.rs`: one `pub mod` line per module with choices, and `ALL`, every module in `brocanth.toml`. |
+| `mod.rs` shows the integrated modules | `src/modules/mod.rs`: one `pub mod` line per module, and `ALL`, every module in `brocanth.toml`. |
 
 ## 1. The generated layout
 
@@ -55,7 +57,8 @@ seconds. A function would hide the list behind calls. The registration
 chain already exists in `src/plugins/mod.rs`, so a second registry adds
 nothing.
 
-**Decision: a file only for a module that has a choice.** A module has a
+**Superseded by §7, decision 2: every module gets a file.** The proposal
+was a file only for a module that has a choice. A module has a
 choice when it declares a setting with a flag, a hook toggle, an
 integration toggle or an option. `observability-logs` has none, so it has
 no file. `ALL` still names it. **Reason:** the `everything` golden has 39
@@ -836,3 +839,63 @@ hook that is off and an integration that is off.
 4. **A hook that is off, and a hard `after` that needs it: refuse at
    startup with a `help:` line.** Nothing is turned off silently.
 5. **Every field is written out, with its comment, then `..DEFAULT`.**
+
+## 8. What the build decided
+
+The generator side is built. These are the choices the build made where
+the proposal was silent, each with its reason.
+
+**The code.** `crates/brocanth-cli/src/choices.rs` writes the four files.
+`brocanth-scaffold` has `Manifest::hook`, `integration` and `option`,
+`Hook`, `Opt`, `Slot::AdminPanels`, `snippet::module_ref`,
+`snippet::integration` and `snippet::hooks_off`. The four example modules
+declare their choices: `analytics` (hooks `count` and `collect`,
+integration `admin`), `sessions` (flags and renames only), `admin`
+(option `mount_at`), `middleware-rate-limit` (hook `headers`, and `count`
+required). Every other module has its file with `..Module::DEFAULT`.
+
+| Question | Decision | Reason |
+|---|---|---|
+| Which fields does `Module` have? | `flags` and `rename` only with a setting that has a flag; `hooks` only with a hook that is not required; `integrate` only with an integration; one field per option | A field that can do nothing is noise in the file a person reads to learn the choices. |
+| Which file holds a `Key`? | The file of the module that declares the setting (`Scaffold::settings`, by owner) | One owner per setting, and `Scaffold::setting` already refuses two. |
+| `Key` names | the key in UpperCamel: `retention_days` is `RetentionDays`; two sections of one module with one key take the section in front | The setting's own name, readable in the file. |
+| `Flag` and `Key` unused in a file with `rename: &[]` | `#[allow(unused_imports)]` on the one `use` line, with a comment | The examples in the comment need them, and the first rename must compile without a new import. |
+| A choice the project does not read (an integration whose host is absent) | `#![allow(dead_code)]` in `src/modules/mod.rs` and `src/plugins/shape.rs` | §4: a field exists whether its host does or not, so rustc would call it dead in half the projects. |
+| Who writes `.hooks_off_from(..)` | the CLI, after the registration of a module with a hook that is not required, with the instance `Scaffold::hooking_instance` recorded | The manifest holds the toggles and a snippet does not see it. `configurable_hooking` records the instance; a module that registers another way records it itself, or `create` refuses with a `help:` line. |
+| `hooks_off` or `hooks_off_from` | `hooks_off_from(instance, "src/modules/<key>.rs", MODULE.hooks.off())` | The `help:` line of a hard order on an off hook then names the file (§2.3). |
+| `plugins::admin_panels` | written in every project with `admin`; it returns `config` unchanged when no module adds a tab | The admin's file calls it once, whatever else the project has. |
+| The flag reader | each `Setting` carries `file` and `flags` (from its module file); `renames()` reads each file's `rename` | A refusal and a collision name the module file in `help:`. A rename of an unknown key no longer needs a startup check: it does not compile. |
+| The generated test | `flag_names_are_valid`, at the end of `src/plugins/mod.rs` | §3.3 asks for it; clippy wants a test module after every item. |
+| An old `src/flags.rs`, at `add` | moved, then deleted; a parked rename whose module is in the project moves too | §6. A parked rename is a decision that `remove` kept. |
+| A rename in an old `src/flags.rs` that no module of the project declares | the command refuses and names the lines | Its module is absent, so there is no file for it. Deleting the line would lose a decision; the person chooses. |
+| An old `src/flags.rs`, at `remove` | moved too; a leaving module's renames go into its file, which stays | `remove` regenerates the project as `add` does, and the renames must survive. |
+| The admin file from before `admin_panels` | rewritten when it is one of the two forms the generator wrote; else the new line is printed and `add` goes on | §6. `brocanth-admin` exports both strings, so the CLI does not copy them. |
+| `brocanth check` | `check/module-files`: a module without its file, and an old `src/flags.rs` | The values are the project's own check (§3.3); only presence is the CLI's. |
+
+**Proven** by the goldens (every shape gains `src/modules/` and
+`src/plugins/shape.rs`, and loses `src/flags.rs`), by the golden shapes
+built with clippy and their own tests (`analytics`, `flags`,
+`flags-commands`, `core-only`), and by two ignored tests that run
+generated binaries:
+`declared_flags_reach_the_plugin_with_and_without_a_config_file` (a rename
+in `src/modules/sessions.rs`, `flags_with_config` in `brocanth.rs`, and
+`Flags::On` in one module beside the project rule off) and
+`hook_settings_reach_a_request_from_the_file_and_from_the_flags`
+(`headers: false` in `middleware_rate_limit.rs`: a response carries no
+`RateLimit-*` header, and the limit still answers 429).
+
+**Not built:**
+
+- `add` does not print a field that a newer module adds (§4): it needs
+  the old manifest, which the CLI does not keep. The file takes the
+  default, as §4 says.
+- The settings report does not say that a hook is off (§2.3), and no
+  warning for a plugin left with no hook. `Pipeline::skipped()` has what
+  both need.
+- The test that holds a crate's hook names to its `Manifest::hook` list
+  (§3.1). It needs a core helper that lists a plugin's hook ids.
+- The integration-off case runs only at compile time: the analytics tab
+  needs a database to serve.
+- The other modules' toggles (`gtag`, `i18n`, `robots`' `integrate.admin`)
+  are the next wave: `docs/module-authoring.md` §3.9 says how to declare
+  them.

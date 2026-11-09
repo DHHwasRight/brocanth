@@ -93,10 +93,11 @@ guide. A summary:
   problem that names both. The CLI then writes nothing.
 - **Slots** are a closed list: `AppUses`, `AppPlugins`, `AppSetup`,
   `AppContext`, `PluginsMod`, `PluginsInstalled`, `PluginsHooks`,
-  `PluginsLayers`, `PagesRenderers`, `RouterMounts`, `PagesRoutes`,
-  `PagesItems`, `CommandsMod`, `ConfigSections`, `GitIgnore`,
-  `MiseTasks`, `NodeDependencies`, `AgentsSections`. A new seam is a
-  change to this crate.
+  `PluginsLayers`, `AdminPanels`, `ServerWrap`, `MainMods`,
+  `PagesRenderers`, `RouterMounts`, `PagesRoutes`, `PagesItems`,
+  `CommandsMod`, `ConfigSections`, `GitIgnore`, `MiseTasks`,
+  `NodeDependencies`, `AgentsSections`. A new seam is a change to this
+  crate.
 - **Snippets** write lines that must agree, from one call:
   `snippet::plugin` (registration and provider list), `snippet::hooking`
   (plus the hook record), `snippet::configurable` (plus the declared
@@ -112,6 +113,14 @@ guide. A summary:
   setting gives a generated project a flag `--<section>.<key>`, a
   variable `$<APP>_<SECTION>__<KEY>`, and with `config` a key under
   `[<section>]`. See [docs/module-flags.md](../../docs/module-flags.md).
+- **Choices** a project makes in its `src/modules/<key>.rs`:
+  `Manifest::hook(name, what, Hook::on() | Hook::off() | Hook::required())`,
+  `Manifest::integration(host, what, default)` and
+  `Manifest::option(Opt::text | bool | integer | unsigned)`. Read them in
+  generated code with `snippet::module_ref`, and guard an integration with
+  `snippet::integration`. A hooking plugin with a toggle records its
+  instance (`Scaffold::hooking_instance`; `configurable_hooking` does it).
+  See [docs/module-config.md](../../docs/module-config.md).
 
 ## Examples
 

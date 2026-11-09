@@ -215,8 +215,12 @@ cargo run -- --admin.site_url=/
 
 - Precedence, lowest first: `Settings::default()`, the config files, the
   environment, a flag.
-- With `config`, the binary refuses a flag until `WITH_CONFIG = true` in
-  `src/flags.rs`. That file also renames flags.
+- With `config`, the binary refuses a flag until `flags_with_config: true`
+  in `src/modules/brocanth.rs`, or `flags: Flags::On` in
+  `src/modules/admin.rs`. `rename` in `src/modules/admin.rs` renames a flag.
+- `mount_at` in `src/modules/admin.rs` is where the backoffice answers,
+  `/admin` by default. A tab of another module, such as analytics, is in
+  the generated `plugins::admin_panels`.
 - All keys except `title` are optional. An empty value, such as
   `--admin.site_url=`, means none, whatever a lower layer set.
 - `my-app settings` shows which layer set each value.

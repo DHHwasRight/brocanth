@@ -36,7 +36,7 @@ Slots:
 
 ## Settings
 
-Section `[sessions]`. Environment variable: `$<APP>_SESSIONS__<KEY>`. Flag: `--sessions.<key>`. Rename a flag in `src/flags.rs`.
+Section `[sessions]`. Environment variable: `$<APP>_SESSIONS__<KEY>`. Flag: `--sessions.<key>`. Rename or hide a flag in `src/modules/sessions.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

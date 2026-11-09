@@ -967,7 +967,7 @@ only, no flag). Modifiers:
 - `.commented()`: the key is written commented out in the file.
 
 Two modules that declare the same key fail `create` and name both. The
-flag layer, the renames in `src/flags.rs` and the precedence are in
+flag layer, the renames in `src/modules/` and the precedence are in
 `docs/module-flags.md`.
 
 A settings struct that `plugin_from_config` reads must derive
@@ -1037,6 +1037,97 @@ file under `src/plugins/<key>/`, which needs no line here.
   in `after_config` or later.
 - `ModelEvent` / `ModelHook`: hooks on ORM events, through
   `HookRegistrar::model`.
+
+### 3.9 Every category: the module file, `src/modules/<key>.rs`
+
+Every chosen module gets a file in `src/modules/`. The project owns it:
+`create` and `add` write it when it is missing, and nothing rewrites it.
+It holds the choices a project makes about the module at compile time
+(`docs/module-config.md`). The generator writes its type into
+`src/plugins/shape.rs` from three manifest calls and the declared
+settings. A module that declares nothing gets the file too, with
+`..Module::DEFAULT` alone.
+
+#### How to declare
+
+Declare in the manifest, not in `contribute`. The fields of a module file
+must not depend on the other modules: `remove admin` must not break
+`analytics.rs`, which the project owns.
+
+```rust
+Manifest::new("analytics", "...")
+    // A hook the plugin registers, by the name it passes to the
+    // registrar, without the instance. `Hook::on()` and `Hook::off()` are
+    // a `bool` in the module file; `Hook::required()` has no field.
+    .hook("count", "count each page this server answers", Hook::on())
+    .hook("collect", "accept beacons from collector_origins", Hook::on())
+    // Code this module writes into another one, which a project may turn
+    // off. It implies `adapts_to("admin", ..)`.
+    .integration("admin", "a tab at /admin/analytics with the page-view numbers", true)
+
+Manifest::new("admin", "...")
+    // A compile-time value: `Opt::text`, `Opt::bool`, `Opt::integer`,
+    // `Opt::unsigned`, each with a key, a default and one line of help.
+    .option(Opt::text("mount_at", "/admin", "Where the backoffice answers."))
+```
+
+| Call | In the module file | What reads it |
+|---|---|---|
+| a setting with a flag (`snippet::configurable`, `configurable_hooking`) | `flags`, `rename` with a `Key` variant | the generated flag reader in `src/plugins/mod.rs` |
+| `hook(name, what, Hook::on())` or `Hook::off()` | `hooks.<name>: bool` (`-` becomes `_`) | the generated `.hooks_off_from(..)` after the registration |
+| `hook(name, what, Hook::required())` | no field; the header names it | nothing: it always runs |
+| `integration(host, what, default)` | `integrate.<host>: bool` | your code, behind `snippet::integration` |
+| `option(Opt::..)` | `<key>: <type>` | your code, through `snippet::module_ref` |
+
+**Hooks.** The generator writes
+`.hooks_off_from(instance, "src/modules/<key>.rs", MODULE.hooks.off())`
+right after the registration of a module with at least one hook that is
+not required. It needs the plugin's instance name.
+`snippet::configurable_hooking` records it. A module that registers its
+hooking plugin with `snippet::hooking` calls
+`s.hooking_instance("<instance>")` in `contribute`, or `create` refuses
+with a `help:` line. Declare every hook the plugin registers, the
+required ones too: the module file's header lists those. A name in
+`hook` must be the name in `install_hooks`, or the build of the project
+fails with `<instance> has no hook "<name>"`.
+
+**Integrations.** Write the code only when the host is in the project,
+and through `snippet::integration`, which puts it behind the guard:
+
+```rust
+if project.has("admin") {
+    integration(s, "analytics", "admin", Slot::AdminPanels, ADMIN_TAB);
+}
+```
+
+`ADMIN_TAB` is written at column 0. Comment lines at its start go above
+the guard. The rest goes inside
+`if crate::modules::analytics::MODULE.integrate.admin { .. }`.
+`Slot::AdminPanels` is the body of the generated `plugins::admin_panels`,
+with `config` (a `brocanth_admin::AdminConfig`) in scope. The admin's own
+file calls that function once. A structural adaptation, such as the CSRF
+token on admin forms, is not an integration: without it the host breaks.
+It stays `adapts_to`, with no toggle.
+
+**Options.** Read the value where the code used a literal:
+
+```rust
+s.at(Slot::RouterMounts).line(format!(
+    "    crate::plugins::admin::mount(routes, {})?;",
+    module_ref("admin", "mount_at")
+));
+```
+
+`module_ref(key, path)` is `crate::modules::<ident>::MODULE.<path>`. It
+writes a keyword key raw (`r#static`), so never spell that path by hand.
+An option is the same in every environment. A value that two deployments
+of one image may want different is a setting.
+
+**Names.** A hook, a host and an option key become Rust field names, so
+use lower case, digits, `_` and `-`. An option must not be called `flags`,
+`rename`, `hooks` or `integrate`. A rename of a hook or an option is a
+break for every project that set it: its file names a field that no
+longer exists. Add a field freely: `..DEFAULT` gives it to an old file.
 
 ## 4. Rules and tests
 
@@ -1217,6 +1308,9 @@ without a change to the CLI.
 7. A `PagesRoutes` line for each route the module adds.
 8. An `AgentsSections` block for each rule an agent must follow.
 9. `outside_runtime()` when the module does not run in the server.
+9a. `hook` for each hook the plugin registers, `integration` for code
+    written into another module that a project may do without, `option`
+    for a compile-time value (§3.9).
 10. No stage waits for async work: a lazy pool and a readiness check.
 11. Two lines in the CLI, the goldens blessed and read, a generated
     project built. Outside this repository: `brocanth_scaffold::testing`

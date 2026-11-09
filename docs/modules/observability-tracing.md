@@ -28,7 +28,7 @@ The parent writes all the code. This child turns on a cargo feature and adds key
 
 The parent declares these keys in `[observability]` when this child is on.
 
-Section `[observability]`. Environment variable: `$<APP>_OBSERVABILITY__<KEY>`. Flag: `--observability.<key>`. Rename a flag in `src/flags.rs`.
+Section `[observability]`. Environment variable: `$<APP>_OBSERVABILITY__<KEY>`. Flag: `--observability.<key>`. Rename or hide a flag in `src/modules/observability_tracing.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

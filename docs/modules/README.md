@@ -44,8 +44,10 @@ A declared setting reaches a generated project three ways:
 - a flag `--<section>.<key>=VALUE`. A secret and a list have no flag.
 
 Precedence, lowest first: the plugin's default, the config files, the
-environment, a flag. With `config`, flags are off until `WITH_CONFIG = true`
-in `src/flags.rs`. `RENAMES` in the same file renames or hides a flag. See
+environment, a flag. With `config`, flags are off until
+`flags_with_config: true` in `src/modules/brocanth.rs`, or `flags: Flags::On`
+in the module's own file. `rename` in `src/modules/<key>.rs` renames or hides
+a flag. See
 [`../module-flags.md`](../module-flags.md).
 
 ## The modules

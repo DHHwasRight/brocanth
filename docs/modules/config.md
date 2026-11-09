@@ -23,7 +23,7 @@ The wizard calls it: *Settings in config/<env>.toml, layered per environment*.
 
 No file and no slot of its own.
 
-`create.rs` writes the config files, not this module: its `contribute` is empty. With `config`, every module setting below has a key in `config/<env>.toml`, and the flags are off until `WITH_CONFIG = true` in `src/flags.rs`.
+`create.rs` writes the config files, not this module: its `contribute` is empty. With `config`, every module setting below has a key in `config/<env>.toml`, and the flags are off until `flags_with_config: true` in `src/modules/brocanth.rs`.
 
 ## Settings
 

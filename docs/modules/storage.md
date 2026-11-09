@@ -36,7 +36,7 @@ Slots:
 
 ## Settings
 
-Section `[storage]`. Environment variable: `$<APP>_STORAGE__<KEY>`. Flag: `--storage.<key>`. Rename a flag in `src/flags.rs`.
+Section `[storage]`. Environment variable: `$<APP>_STORAGE__<KEY>`. Flag: `--storage.<key>`. Rename or hide a flag in `src/modules/storage.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

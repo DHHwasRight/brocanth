@@ -35,7 +35,7 @@ Slots:
 
 ## Settings
 
-Section `[realtime]`. Environment variable: `$<APP>_REALTIME__<KEY>`. Flag: `--realtime.<key>`. Rename a flag in `src/flags.rs`.
+Section `[realtime]`. Environment variable: `$<APP>_REALTIME__<KEY>`. Flag: `--realtime.<key>`. Rename or hide a flag in `src/modules/realtime.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
