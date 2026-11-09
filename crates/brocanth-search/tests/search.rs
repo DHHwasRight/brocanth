@@ -70,6 +70,33 @@ fn a_long_term_is_cut_and_not_refused() {
 }
 
 #[test]
+fn a_control_character_is_sent_as_a_space() {
+    let query = documents::index()
+        .query(&condition(Pred::Always), "a\0b\u{7}c\nd", 0, 20)
+        .unwrap();
+    assert_eq!(
+        query.select.binds.last(),
+        Some(&Value::Text("a b c d".into()))
+    );
+}
+
+#[test]
+fn a_page_size_past_bigint_is_written_as_the_largest_bigint() {
+    let query = documents::index()
+        .query(&condition(Pred::Always), "x", u64::MAX, u64::MAX)
+        .unwrap();
+    let max = i64::MAX;
+    assert!(
+        query
+            .select
+            .sql
+            .ends_with(&format!("LIMIT {max} OFFSET {max}")),
+        "{}",
+        query.select.sql
+    );
+}
+
+#[test]
 fn a_sqlite_condition_and_an_empty_index_say_what_to_do() {
     let sqlite = Pred::<DocumentColumn>::Always
         .condition::<Document>(Dialect::Sqlite)
@@ -277,5 +304,209 @@ async fn the_rule_narrows_the_hits_and_the_total() {
         .await
         .unwrap();
     assert!(empty.items.is_empty(), "an empty term finds nothing");
+    scoped.drop_schema().await;
+}
+
+async fn search(scoped: &Scoped, rule: Pred<DocumentColumn>, term: &str) -> Vec<String> {
+    documents::index()
+        .search::<Hit>(&scoped.db, &condition(rule), term, 1, 50)
+        .await
+        .unwrap_or_else(|error| panic!("{term:?}: {error}"))
+        .items
+        .into_iter()
+        .map(|hit| hit.key)
+        .collect()
+}
+
+#[tokio::test]
+async fn punctuation_and_operator_noise_find_nothing_and_do_not_fail() {
+    let Some(scoped) = scoped().await else { return };
+    fill(&scoped.db).await;
+    for term in [
+        "!!!",
+        "&",
+        "|",
+        "!",
+        "()",
+        ":*",
+        "'",
+        "\"",
+        "\"\"",
+        "-",
+        "--",
+        "or",
+        "&&&|||!!!",
+        "%",
+        "\\",
+        "<->",
+        "'; DROP TABLE search_documents; --",
+    ] {
+        assert!(
+            search(&scoped, Pred::Always, term).await.is_empty(),
+            "{term:?}"
+        );
+    }
+    // The table is still there.
+    assert_eq!(search(&scoped, Pred::Always, "tomatoes").await, ["3"]);
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn websearch_syntax_reads_phrases_negation_and_or() {
+    let Some(scoped) = scoped().await else { return };
+    fill(&scoped.db).await;
+    let mut keys = search(&scoped, Pred::Always, "postgres -pasta").await;
+    keys.sort();
+    assert_eq!(keys, ["1", "about"]);
+    assert_eq!(search(&scoped, Pred::Always, "\"boil water\"").await, ["2"]);
+    let mut keys = search(&scoped, Pred::Always, "tomatoes or ranking").await;
+    keys.sort();
+    assert_eq!(keys, ["1", "3"]);
+    // An unclosed quote is still a search.
+    assert_eq!(search(&scoped, Pred::Always, "\"basil").await, ["3"]);
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_unicode_term_finds_its_row() {
+    let Some(scoped) = scoped().await else { return };
+    fill(&scoped.db).await;
+    for (key, title, body) in [
+        ("cafe", "Le café", "crème brûlée à la française"),
+        ("jp", "日本語", "東京 タワー"),
+        ("emoji", "Party", "🎉 celebration 🎉"),
+    ] {
+        documents::upsert(&scoped.db, "post", key, title, body, "/x")
+            .await
+            .unwrap();
+    }
+    assert_eq!(search(&scoped, Pred::Always, "café").await, ["cafe"]);
+    assert_eq!(search(&scoped, Pred::Always, "brûlée").await, ["cafe"]);
+    assert_eq!(search(&scoped, Pred::Always, "CRÈME").await, ["cafe"]);
+    assert_eq!(search(&scoped, Pred::Always, "日本語").await, ["jp"]);
+    assert_eq!(
+        search(&scoped, Pred::Always, "celebration 🎉").await,
+        ["emoji"]
+    );
+    assert!(search(&scoped, Pred::Always, "🎉🎉🎉").await.is_empty());
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_control_character_in_the_term_is_not_a_database_error() {
+    let Some(scoped) = scoped().await else { return };
+    fill(&scoped.db).await;
+    // `?q=%00tomatoes` decodes to a NUL byte, which Postgres refuses in a
+    // text value.
+    assert_eq!(search(&scoped, Pred::Always, "toma\0toes").await.len(), 0);
+    assert_eq!(search(&scoped, Pred::Always, "\0tomatoes").await, ["3"]);
+    assert_eq!(
+        search(&scoped, Pred::Always, "tomatoes\u{7}\t\n").await,
+        ["3"]
+    );
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_very_long_term_is_cut_and_still_searched() {
+    let Some(scoped) = scoped().await else { return };
+    fill(&scoped.db).await;
+    // Every word must match, so a pasted page finds nothing, but it is
+    // still a search and not a database error.
+    let long = format!("tomatoes {}", "ü日🎉 ".repeat(10_000));
+    assert!(search(&scoped, Pred::Always, &long).await.is_empty());
+    let words = format!("tomatoes {}", "basil ".repeat(5_000));
+    assert_eq!(search(&scoped, Pred::Always, &words).await, ["3"]);
+    let one_word = "a".repeat(100_000);
+    assert!(search(&scoped, Pred::Always, &one_word).await.is_empty());
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_title_outranks_a_body_and_ties_go_by_id() {
+    let Some(scoped) = scoped().await else { return };
+    for (key, title, body) in [
+        ("body-once", "Notes", "one mention of zebra here"),
+        ("title", "Zebra", "nothing else"),
+        ("body-twice", "More notes", "zebra and zebra again"),
+        ("tie-a", "Zebra", "nothing else"),
+    ] {
+        documents::upsert(&scoped.db, "post", key, title, body, "/x")
+            .await
+            .unwrap();
+    }
+    let hits = documents::index()
+        .search::<Hit>(&scoped.db, &condition(Pred::Always), "zebra", 1, 20)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = hits.items.iter().map(|h| h.key.as_str()).collect();
+    assert_eq!(keys, ["title", "tie-a", "body-twice", "body-once"]);
+    assert!(hits
+        .items
+        .windows(2)
+        .all(|pair| pair[0].search_rank >= pair[1].search_rank));
+    assert!(hits.items[0].id < hits.items[1].id, "equal ranks by id");
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn the_rule_limits_every_page_and_the_total() {
+    let Some(scoped) = scoped().await else { return };
+    for n in 1..=25 {
+        let kind = if n % 5 == 0 { "secret" } else { "post" };
+        documents::upsert(
+            &scoped.db,
+            kind,
+            &n.to_string(),
+            &format!("Report {n}"),
+            "quarterly report",
+            "/x",
+        )
+        .await
+        .unwrap();
+    }
+    let rule = Pred::is_not(DocumentColumn::Kind, "secret");
+    let index = documents::index();
+    let mut seen = Vec::new();
+    for number in 1..=3 {
+        let hits = index
+            .search::<Hit>(&scoped.db, &condition(rule.clone()), "report", number, 8)
+            .await
+            .unwrap();
+        assert_eq!(hits.page.total(), 20, "the count reads the rule");
+        assert_eq!(hits.page.total_pages(), 3);
+        assert!(hits.items.iter().all(|h| h.kind == "post"));
+        seen.extend(hits.items.into_iter().map(|h| h.id));
+    }
+    let mut unique = seen.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), 20, "every allowed row once, none twice");
+    assert_eq!(seen.len(), 20);
+
+    // Past the end is the last page; page zero is the first.
+    let past = index
+        .search::<Hit>(&scoped.db, &condition(rule.clone()), "report", 999, 8)
+        .await
+        .unwrap();
+    assert_eq!(past.page.number(), 3);
+    assert_eq!(past.items.len(), 4);
+    let zero = index
+        .search::<Hit>(&scoped.db, &condition(rule.clone()), "report", 0, 8)
+        .await
+        .unwrap();
+    assert_eq!(zero.page.number(), 1);
+    assert_eq!(zero.items.len(), 8);
+    // A page size of zero is one, and a huge one is still a statement.
+    let one = index
+        .search::<Hit>(&scoped.db, &condition(rule.clone()), "report", 1, 0)
+        .await
+        .unwrap();
+    assert_eq!(one.items.len(), 1);
+    let huge = index
+        .search::<Hit>(&scoped.db, &condition(rule), "report", 1, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(huge.items.len(), 20);
     scoped.drop_schema().await;
 }
