@@ -387,16 +387,9 @@ pub struct RowView {
     pub cells: Vec<Cell>,
 }
 
-/// One page link.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PageLink {
-    /// The page number.
-    pub number: usize,
-    /// Where it goes.
-    pub href: String,
-    /// Whether it is the page being shown.
-    pub current: bool,
-}
+/// One page link: `brocanth-pagination`'s, so the admin and every other
+/// list draw the same thing.
+pub use brocanth_pagination::PageLink;
 
 /// The list screen's context.
 #[derive(Clone, Debug, PartialEq)]

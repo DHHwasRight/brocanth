@@ -41,6 +41,9 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # tem
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-pagination = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["policy"] }  # pages, cursors and the links between them
+brocanth-filters = { git = "https://github.com/DHHwasRight/brocanth.git" }  # filters compiled into the policy's WHERE
+brocanth-search = { git = "https://github.com/DHHwasRight/brocanth.git" }  # full-text search in Postgres, and the site index
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge", "websocket"] }
@@ -1591,6 +1594,27 @@ pub fn refused(faults: &zod::Faults) -> Error {
     Error::new(422, lines.join("\n"))
 }
 
+/// The page a list was asked for, and the links it answers with.
+///
+/// `allow(dead_code)`: it is here for the first list, and a new project has
+/// none.
+#[allow(dead_code)]
+impl Ctx {
+    /// `page`, `per_page` and `after` from the query string. A value that is
+    /// not a number, or a cursor that does not parse, is a 400 with a `help:`
+    /// line, not page one.
+    pub fn page_params(&self) -> Result<brocanth_pagination::Params, Error> {
+        brocanth_pagination::Params::parse(&self.query).map_err(|e| Error::new(400, e.to_string()))
+    }
+
+    /// The links of the list at this path. Each keeps every key of the query
+    /// string but `page` and `after`, so a filter set on page one is still
+    /// set on page three.
+    pub fn links(&self) -> brocanth_pagination::Links {
+        brocanth_pagination::Links::new(&self.path, &self.query)
+    }
+}
+
 /// The database, on every request the application dispatches.
 ///
 /// `allow(dead_code)`: it is here for the first page that queries, and a
@@ -1648,6 +1672,34 @@ impl Ctx {
     }
 }
 
+/// The filters a list was asked for.
+///
+/// `allow(dead_code)`: it is here for the first list, and a new project has
+/// none.
+#[allow(dead_code)]
+impl Ctx {
+    /// Reads the query string through `declared`. A lookup the list does not
+    /// allow, a value that is not its kind, or an unknown sort is a 400 with
+    /// a `help:` line.
+    ///
+    /// ```ignore
+    /// let filters = Filters::new()
+    ///     .choice("status", PostColumn::Status, &["draft", "published"])
+    ///     .int("author", PostColumn::AuthorId)
+    ///     .sort("created_at", PostColumn::CreatedAt);
+    /// let applied = ctx.filters(&filters)?;
+    /// let condition = applied.condition::<Post>(policy.list(&who), Dialect::Postgres)?;
+    /// ```
+    pub fn filters<C: brocanth_policy::Column>(
+        &self,
+        declared: &brocanth_filters::Filters<C>,
+    ) -> Result<brocanth_filters::Applied<C>, Error> {
+        declared
+            .parse(&self.query)
+            .map_err(|e| Error::new(400, e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1673,6 +1725,7 @@ mod tests {
                 "/realtime/events",
                 "/realtime/socket",
                 "/robots.txt",
+                "/search",
                 "/sitemap.xml",
                 "/status",
                 "/users/{id}"
@@ -4954,6 +5007,42 @@ pub mod sitemap {
     }
 }
 
+/// The shape of src/modules/pagination.rs.
+pub mod pagination {
+    /// What src/modules/pagination.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/filters.rs.
+pub mod filters {
+    /// What src/modules/filters.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/search.rs.
+pub mod search {
+    /// What src/modules/search.rs holds.
+    pub struct Module {
+        /// Results per page on /search.
+        pub per_page: u64,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { per_page: 20 };
+    }
+}
+
 /// The shape of src/modules/i18n.rs.
 pub mod i18n {
     pub use super::{Flag, Flags};
@@ -5041,7 +5130,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 543b46b79ad679fe
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5073,6 +5162,7 @@ pub mod config;
 pub mod db;
 pub mod docker;
 pub mod docker_kubernetes;
+pub mod filters;
 pub mod gtag;
 pub mod i18n;
 pub mod input;
@@ -5089,6 +5179,7 @@ pub mod observability_logs;
 pub mod observability_metrics;
 pub mod observability_tracing;
 pub mod openapi;
+pub mod pagination;
 pub mod policy;
 pub mod realtime;
 pub mod realtime_sse;
@@ -5098,6 +5189,7 @@ pub mod robots;
 pub mod rsx;
 pub mod rsx_htmx;
 pub mod rsx_tailwind;
+pub mod search;
 pub mod sessions;
 pub mod sitemap;
 pub mod storage;
@@ -5143,6 +5235,9 @@ pub const ALL: &[&str] = &[
     "rsx-htmx",
     "robots",
     "sitemap",
+    "pagination",
+    "filters",
+    "search",
     "i18n",
     "docker",
     "docker-kubernetes",
@@ -5150,7 +5245,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: af153f44a12a0356
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -6024,6 +6119,52 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/pagination.rs =====
+//! `pagination`: offset and keyset pages, with links that keep the query; no
+//! dependency.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::pagination::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/filters.rs =====
+//! `filters`: typed filters and a sort from the query string, ANDed with the
+//! policy's rule in the WHERE.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::filters::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/search.rs =====
+//! `search`: Postgres full-text and trigram search: a site index, its
+//! migration, a page at /search.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+use crate::plugins::shape::search::Module;
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // Results per page on /search.
+    per_page: 20,
+
+    ..Module::DEFAULT
+};
 ===== src/modules/i18n.rs =====
 //! `i18n`: translations checked at build time; a locale per request from the
 //! query, a cookie or Accept-Language.
@@ -6839,6 +6980,59 @@ accept = "Accepter"
 refuse = "Refuser"
 manage = "Gérer les cookies"
 policy = "Politique de confidentialité"
+===== migrations/m20260101_000000_search_documents.rs =====
+//! The site index of the `search` module: one row per thing a visitor can
+//! find. `brocanth_search::documents::upsert` writes a row; /search reads
+//! them.
+//!
+//! Written by `brocanth create`, not by `migrate make`: the generated
+//! `tsvector` column and the GIN indexes are not in a model. Run
+//! `migrate sync` once, so migrations/mod.rs lists this file.
+
+use brocanth_model::sea_orm_migration::prelude::*;
+
+pub struct Migration;
+
+impl MigrationName for Migration {
+    fn name(&self) -> &str {
+        "m20260101_000000_search_documents"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.get_connection().execute_unprepared(UP).await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.get_connection().execute_unprepared(DOWN).await?;
+        Ok(())
+    }
+}
+
+const UP: &str = r#"CREATE TABLE "search_documents" (
+    "id" bigserial PRIMARY KEY,
+    "kind" text NOT NULL,
+    "key" text NOT NULL,
+    "title" text NOT NULL,
+    "body" text NOT NULL DEFAULT '',
+    "url" text NOT NULL,
+    UNIQUE ("kind", "key")
+);
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+ALTER TABLE "search_documents" ADD COLUMN "search" tsvector GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce("title", '')), 'A') ||
+    setweight(to_tsvector('english', coalesce("body", '')), 'C')
+) STORED;
+CREATE INDEX "search_documents_search_idx" ON "search_documents" USING gin ("search");
+CREATE INDEX "search_documents_title_trgm_idx" ON "search_documents" USING gin ("title" gin_trgm_ops);
+
+"#;
+
+const DOWN: &str = r#"DROP TABLE "search_documents";
+"#;
 ===== migrations/mod.rs =====
 //! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
 //! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
@@ -7793,6 +7987,72 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         ],
     ))
 }
+===== src/pages/parts/pager.jt =====
+// The links of a page, as JSON. Not a page: the route table reads `.rs`
+// files only, so this file adds no route.
+//
+//     "items": [ for p in &posts { Post(p) } ],
+//     "pages": PageLinks(&pager),
+
+/// An offset page: where it is, and the links on either side.
+pub fn PageLinks(pager: &brocanth_pagination::Pager) -> Json {
+    "page": pager.page.number(),
+    "per_page": pager.page.per_page(),
+    "total": pager.page.total(),
+    "total_pages": pager.page.total_pages(),
+    "previous"?: pager.previous.as_deref(),
+    "next"?: pager.next.as_deref(),
+}
+
+/// A keyset page: the first page, and the next.
+pub fn KeysetLinks(pager: &brocanth_pagination::KeysetPager) -> Json {
+    "first"?: pager.first.as_deref(),
+    "next"?: pager.next.as_deref(),
+}
+===== src/pages/parts/pager.rsx =====
+// Two pagers, for any list. Not a page: the route table reads `.rs` files
+// only, so this file adds no route.
+//
+//     let pager = brocanth_pagination::Pager::new(page, &ctx.links());
+//     <PageNav pager={&pager} />
+//
+// A link is an ordinary `<a href>`, so the pager works with no script.
+
+/// An offset pager: the summary, previous, the numbered pages, next. Nothing
+/// when there is one page.
+pub fn PageNav(pager: &brocanth_pagination::Pager) -> Element {
+    if pager.is_needed() {
+        <nav aria-label="Pages">
+            <span>{pager.summary()}</span>
+            if let Some(href) = &pager.previous {
+                <a href={href} rel="prev">Previous</a>
+            }
+            for link in &pager.pages {
+                if link.current {
+                    <span aria-current="page">{link.number}</span>
+                } else {
+                    <a href={&link.href}>{link.number}</a>
+                }
+            }
+            if let Some(href) = &pager.next {
+                <a href={href} rel="next">Next</a>
+            }
+        </nav>
+    }
+}
+
+/// A keyset pager: back to the first page, and on to the next. A keyset page
+/// has no numbers and no previous link.
+pub fn KeysetNav(pager: &brocanth_pagination::KeysetPager) -> Element {
+    <nav aria-label="Pages">
+        if let Some(href) = &pager.first {
+            <a href={href} rel="first">First</a>
+        }
+        if let Some(href) = &pager.next {
+            <a href={href} rel="next">Next</a>
+        }
+    </nav>
+}
 ===== src/pages/realtime/events.rs =====
 //! `GET /realtime/events?topics=posts/*,posts/42` -- the broker's frames, as
 //! server-sent events.
@@ -8252,6 +8512,76 @@ mod tests {
         );
         let body = response.body.bytes().expect("a whole body");
         assert_eq!(std::str::from_utf8(body).expect("utf-8"), GENERATED);
+    }
+}
+===== src/pages/search.rs =====
+//! `/search` -- the site search, over `search_documents`.
+//!
+//! `?q=words&page=2`. The term is read by Postgres' `websearch_to_tsquery`:
+//! words, `"a phrase"`, `-not`, `or`. A typo in a title still matches, by
+//! trigram. The markup is in `search.rsx` beside this file.
+
+use brocanth_search::documents::{self, Document, DocumentColumn, Hit};
+use brocanth_search::pagination::{query, Pager};
+use brocanth_search::policy::{Dialect, Pred};
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse};
+
+/// Results per page: `per_page` in `src/modules/search.rs`.
+const PER_PAGE: u64 = crate::modules::search::MODULE.per_page;
+
+/// GET. An empty `q` shows the form alone.
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let term = query::param(&ctx.query, "q").unwrap_or_default();
+    let params = ctx.page_params()?;
+    // The rule. Every row of the site index is public: index only what any
+    // visitor may read. To hide rows, write the rule here. It goes into the
+    // `WHERE` of the page and of the count, so a hidden row is never ranked.
+    let rule = Pred::<DocumentColumn>::Always;
+    let condition = rule.condition::<Document>(Dialect::Postgres)?;
+    let hits = documents::index()
+        .search::<Hit>(ctx.db(), &condition, &term, params.page, PER_PAGE)
+        .await?;
+    let pager = Pager::new(hits.page, &ctx.links());
+    html!(
+        ctx,
+        views::search::Search {
+            term: &term,
+            hits: &hits.items,
+            pager: &pager,
+        }
+    )
+}
+===== src/pages/search.rsx =====
+// The site search. Every value is escaped on the way out: the term came
+// from the request and the rows from whoever wrote the index.
+
+use brocanth_search::documents::Hit;
+use brocanth_search::pagination::Pager;
+
+use crate::pages::views::parts::pager::PageNav;
+
+pub fn Search(term: &str, hits: &[Hit], pager: &Pager) -> Element {
+    <h1>Search</h1>
+    <form method="get" action="/search" role="search">
+        <input type="search" name="q" value={term} aria-label="Search" />
+        <button type="submit">Search</button>
+    </form>
+    if !term.trim().is_empty() {
+        if hits.is_empty() {
+            <p>Nothing matches “{term}”.</p>
+        } else {
+            <p>{pager.summary()}</p>
+            <ol>
+                for hit in hits {
+                    <li>
+                        <a href={&hit.url}>{&hit.title}</a>
+                        <p>{hit.excerpt(200)}</p>
+                    </li>
+                }
+            </ol>
+            <PageNav pager={pager} />
+        }
     }
 }
 ===== src/pages/sitemap.xml.rs =====
@@ -12302,6 +12632,9 @@ request.
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
+- `pagination`  offset and keyset pages, with links that keep the query; no dependency
+- `filters`  typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE
+- `search`  Postgres full-text and trigram search: a site index, its migration, a page at /search
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
@@ -12450,6 +12783,23 @@ the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
   socket.onmessage = (e) => console.log(e.data);
   socket.onopen = () => socket.send("subscribe posts/42");
   ```
+
+## Pagination
+
+A list reads its page with `ctx.page_params()?` and builds a
+`brocanth_pagination::Page` from the count. Draw it with `<PageNav pager={&pager} />` from
+`src/pages/parts/pager.rsx`. The links come
+from `ctx.links()`, which keeps the filters and the sort.
+
+- Put the rule, the filters and the search in the `WHERE` of the
+  count and of the page. Never drop rows after the page is read: page
+  two then overlaps page one, and the total is wrong.
+- Order by a unique key last. Without it, two pages can share a row.
+- A long list or a feed uses a keyset page (`after=<cursor>`), not an
+  offset: it reads one index seek, not every row before it.
+- Build the keyset `WHERE` with `brocanth_pagination::Keyset`:
+  `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so
+  a forged cursor only moves the window inside the rule.
 
 ## Translations
 
@@ -12699,6 +13049,23 @@ A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
 `html!` resolves that into a `match` over the chain. A handler never reads the
 header and never changes for it.
 
+## Search
+
+`/search` ranks the rows of `search_documents`, the site index.
+`migrations/m20260101_000000_search_documents.rs` creates the table. Run `migrate sync`
+once so `migrations/mod.rs` lists it, then `migrate up`.
+
+- Write a row with `brocanth_search::documents::upsert(ctx.db(), kind,
+  key, title, body, url)` when a thing changes, in the same
+  transaction or job, and `documents::remove` when it goes.
+- Every row is public. Index only what any visitor may read, or put
+  the rule in `src/pages/search.rs`: it goes into the `WHERE`, so a
+  hidden row is never ranked, counted or shown.
+- Never filter hits after the page is read. The total and the pages
+  then disagree.
+- To search one table instead, declare a `brocanth_search::Index`
+  over its entity and write `index.migration()` into a migration.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -12710,6 +13077,25 @@ A request whose key cannot be found is not counted. Behind a proxy,
 the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
+
+## Filters
+
+A list declares its filters once with `brocanth_filters::Filters`,
+over the entity's column enum, and reads them with
+`ctx.filters(&declared)?`.
+
+- Compile with `applied.condition::<E>(policy.list(&who), dialect)`.
+  It ANDs the filters with the rule, so a filter narrows what the
+  rule admits and never widens it.
+- Give the count and the page the same condition. Never filter rows
+  after a paginated load: the total is then wrong and pages overlap.
+- Order with `applied.order_by::<E>(key)`: the primary key comes last,
+  so two pages never share a row.
+- Do not parse a filter from the query string by hand. A name that is
+  not declared names no column, and that is the guarantee.
+
+- Write page links with `ctx.links()`: each keeps the filters and
+  the sort.
 
 ## Tasks
 
@@ -12748,7 +13134,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 6af46cb234bbe4b9 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +13146,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "pagination", "filters", "search", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -13013,7 +13399,7 @@ adapted_to = ["input"]
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
-files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
+files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/parts/pager.rsx", "src/pages/search.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx"]
@@ -13021,7 +13407,7 @@ adapted_to = ["rsx-tailwind", "rsx-htmx"]
 [modules.jt]
 version = "0.1.0"
 kind = ["renderer", "routes"]
-files = ["src/modules/jt.rs", "src/pages/status.jt", "src/pages/status.rs"]
+files = ["src/modules/jt.rs", "src/pages/parts/pager.jt", "src/pages/status.jt", "src/pages/status.rs"]
 config = []
 crates = ["jt"]
 adapted_to = []
@@ -13057,6 +13443,30 @@ files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/site
 config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "admin", "jt", "realtime-sse"]
+
+[modules.pagination]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/pagination.rs", "src/pages/parts/pager.jt", "src/pages/parts/pager.rsx"]
+config = []
+crates = ["brocanth-pagination"]
+adapted_to = ["rsx", "jt", "policy"]
+
+[modules.filters]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/filters.rs"]
+config = []
+crates = ["brocanth-filters"]
+adapted_to = ["pagination"]
+
+[modules.search]
+version = "0.1.0"
+kind = ["routes"]
+files = ["src/modules/search.rs", "migrations/m20260101_000000_search_documents.rs", "src/pages/search.rs", "src/pages/search.rsx"]
+config = []
+crates = ["brocanth-search"]
+adapted_to = ["model", "rsx"]
 
 [modules.i18n]
 version = "0.1.0"
@@ -13098,4 +13508,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: d0e9e4af1b91f8c6

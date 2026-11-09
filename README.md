@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 42 crates under `crates/` and two examples under
+A Cargo workspace of 45 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -178,6 +178,9 @@ puts the crate in a new project.
 | [`brocanth-auth`](crates/brocanth-auth/README.md) | argon2id accounts, server-side sessions, OAuth 2.0 and OIDC with PKCE | `auth` |
 | [`brocanth-policy`](crates/brocanth-policy/README.md) | Typed predicates: SQL for a list, evaluation for one row | `policy` |
 | [`brocanth-policy-macros`](crates/brocanth-policy-macros/README.md) | The `policy!` macro, re-exported by `brocanth-policy` behind `macro` | |
+| [`brocanth-pagination`](crates/brocanth-pagination/README.md) | One paginator: offset pages with a total, keyset pages with a cursor, links that keep the query | `pagination` |
+| [`brocanth-filters`](crates/brocanth-filters/README.md) | Typed list filters and a sort from the query string, compiled into a policy `Pred` | `filters` |
+| [`brocanth-search`](crates/brocanth-search/README.md) | Postgres full-text and trigram search: a site index, ranked hits inside the rule | `search` |
 | [`brocanth-jobs`](crates/brocanth-jobs/README.md) | Background jobs: retries with backoff, dead letter, scheduling, a worker pool | `jobs` |
 | [`brocanth-queue`](crates/brocanth-queue/README.md) | The job contract: two lanes, a lease, a `Backend` trait, the outbox | |
 | [`brocanth-queue-postgres`](crates/brocanth-queue-postgres/README.md) | The Postgres backend: `FOR UPDATE SKIP LOCKED`, outbox relay, partitioned archive | |

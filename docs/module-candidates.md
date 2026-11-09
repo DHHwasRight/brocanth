@@ -30,11 +30,11 @@ then what the module unblocks. Both scans put `mail` first.
 | 10 | `superuser` | Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |
 | 11 | `webhooks-in` | Incoming webhooks: signature check, replay window, idempotency key | Stripe/svix receivers, PocketHost | S |
 | 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown | bleach/nh3, Rails sanitize | S |
-| 13 | `pagination` | One public paginator, offset and keyset; admin and `resource` each have a private one | pagy, kaminari, Django Paginator | S |
+| 13 | `pagination` | One public paginator, offset and keyset. **Built** (`brocanth-pagination`); admin and `resource` page with it. | pagy, kaminari, Django Paginator | S |
 | 14 | `auth-lockout` | Locks an account after failed logins | django-axes, Devise lockable | S |
 | 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed | next-intl, i18n_patterns | S |
-| 16 | `search` | Postgres full-text and trigram search, with a migration and a search page | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
-| 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE` | django-filter, ransack | M |
+| 16 | `search` | Postgres full-text and trigram search, with a migration and a search page. **Built** (`brocanth-search`). | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
+| 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE`. **Built** (`brocanth-filters`). | django-filter, ransack | M |
 | 18 | `webhooks-out` | Signed outgoing webhooks with retries, over row changes, `jobs` and the outbox | svix, PocketHost webhooks | M |
 | 19 | `audit` | Change history over `RowChange`, with an admin history page | paper_trail, django-simple-history | M |
 | 20 | `roles` | Groups and permissions for staff and admin access | django.contrib.auth groups, pundit roles | M |
@@ -135,9 +135,9 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `audit` | Row history from `RowChange`; who, when, diff; admin history page | django-simple-history, django-auditlog, admin `LogEntry`; paper_trail, audited | no | Enhancer | M | 4 | Model changes already publish (G4); a sink and a table finish it |
 | `roles` | Groups, permissions, staff flag; `require_role` on a route | contrib.auth groups and permissions; rolify, Devise + Pundit roles | no | Enhancer | M | 4 | `policy` covers rows; admin and staff screens ask "which people" |
 | `auth-lockout` | Lock or slow an account after N failed logins; notify by mail | django-axes; Devise lockable, rack-attack throttle | partly: rate limit by address only | Middleware | S | 4 | Credential stuffing defence beside the existing rate limiter |
-| `search` | Postgres full-text (`tsvector`, ranking) and trigram on a model | contrib.postgres.search, django-watson; pg_search, searchkick | no | Enhancer | M | 4 | Every list screen needs a search box; Postgres is already the base |
-| `filters` | Typed list filters and sort from the query string, compiled to `WHERE` | django-filter, admin `list_filter`; ransack | no | Enhancer | M | 4 | django-filter is a top-5 Django package; must go through `policy` |
-| `pagination` | One general paginator: offset and keyset, page links in rsx | Paginator; pagy, kaminari | partly: admin and resource each have one | Renderer | S | 4 | Two private paginators exist; one public one serves every list |
+| `search` | Postgres full-text (`tsvector`, ranking) and trigram on a model | contrib.postgres.search, django-watson; pg_search, searchkick | yes (`search`) | Routes | M | 4 | Done: a site index, its migration and /search |
+| `filters` | Typed list filters and sort from the query string, compiled to `WHERE` | django-filter, admin `list_filter`; ransack | yes (`filters`) | Renderer | M | 4 | Done: a `Pred` ANDed with the policy's rule |
+| `pagination` | One general paginator: offset and keyset, page links in rsx | Paginator; pagy, kaminari | yes (`pagination`) | Renderer | S | 4 | Done: admin and resource use it |
 | `flags` | Feature flags per user, group, percentage; admin panel | django-waffle, django-flags; Flipper | no | Enhancer | M | 4 | Safe rollout without a deploy; cache and admin are ready |
 | `errors` | Error reporting to Sentry or a log, with context; HTML 404/500 pages; dev error page | Django technical 500, `ADMINS` mail, sentry-sdk; `Rails.error`, exceptions_app, better_errors | partly: `ErrorHook` seam only | Enhancer | M | 4 | No HTML error page and no reporter today |
 | `debug-toolbar` | Dev panel: SQL queries, N+1, timings, context per request | django-debug-toolbar, django-silk; rack-mini-profiler, bullet | partly: `brocanth-model` probe | Middleware | M | 4 | 27% of Django users name it a favourite; probe already finds N+1 |
@@ -185,10 +185,10 @@ Rank = value first, then effort, then what it unblocks.
 4. **`compression`** (S, 4). gzip and brotli on HTML. Highest return per line in the HTTP layer.
 5. **`conditional-get`** (S, 4). Dynamic `ETag` and 304. dp-swap GETs gain the most.
 6. **`sanitize`** (S, 4). Safe user HTML. Unblocks `rich-text`, comments, Markdown.
-7. **`pagination`** (S, 4). One public paginator, keyset and offset, with rsx links.
+7. ~~**`pagination`**~~ (S, 4). Built.
 8. **`auth-lockout`** (S, 4). django-axes / Devise lockable beside the rate limiter.
-9. **`filters`** (M, 4). django-filter and ransack, typed and compiled into the `policy` `WHERE`.
-10. **`search`** (M, 4). Postgres full-text and trigram. No new service.
+9. ~~**`filters`**~~ (M, 4). Built.
+10. ~~**`search`**~~ (M, 4). Built.
 11. **`audit`** (M, 4). paper_trail / simple-history on top of `RowChange`, plus the admin history page.
 12. **`roles`** (M, 4). Groups and permissions for staff and admin access.
 13. **`errors`** (M, 4). HTML 404/500, a dev error page, a reporter with context.
@@ -275,7 +275,7 @@ HTML-first Rust app.
 | `markdown` | `.md` pages in `src/pages/` with frontmatter and a layout, through `Slot::PagesRenderers` | `@next/mdx` (N50), Contentlayer | no | Renderer | M | 4 | Docs and blogs are what a server-rendered framework does best |
 | `content` | Typed content collections: `content/posts/*.md`, frontmatter checked at build, list and detail pages | Contentlayer (abandoned), Astro content collections, next-mdx-remote | no | Enhancer | M | 4 | Contentlayer is dead and the need stays; compile-time checks fit brocanth |
 | `feed` | RSS / Atom / JSON Feed from a content collection or a query | blog starters, next-sitemap peers | no | Routes | S | 3 | Small; pairs with `content` and `sitemap` |
-| `search` | Postgres full-text search: `tsvector` column, migration, ranked query, a search page; Meilisearch adapter later | algoliasearch, meilisearch; PB FTS plugin, discussion #2199 | no (admin has a list filter only) | Enhancer | M | 4 | Every content or admin app needs search; Postgres is already there |
+| `search` | Postgres full-text search: `tsvector` column, migration, ranked query, a search page; Meilisearch adapter later | algoliasearch, meilisearch; PB FTS plugin, discussion #2199 | yes (`search`; no Meilisearch adapter yet) | Routes | M | 4 | Done: Postgres FTS, a site index and /search |
 | `flags` | Feature flags in Postgres: boolean and percentage rollouts, per user or org, admin panel, `ctx.flag()` | flags / `@vercel/flags`, Edge Config, LaunchDarkly, Unleash | no | Enhancer | M | 4 | Safe deploys; server-side flags fit HTML-first, no client SDK |
 | `webhooks-out` | Signed outbound webhooks from `RowChange`: endpoints table, HMAC (Standard Webhooks), retries via jobs, delivery log | svix; PB webhooks plugin, PocketHost webhooks | no (queue outbox in `brocanth-queue-postgres` is the base) | Enhancer | M | 4 | Integrations ask for it first; events + jobs + outbox already exist |
 | `webhooks-in` | A route type for inbound webhooks: signature check (Stripe, GitHub, Standard Webhooks), replay window, idempotency key, CSRF exempt | Next route handlers for Stripe/Clerk webhooks | partly: `middleware-csrf` has an exempt list only | Middleware | S | 4 | Every payment or SaaS integration needs it; easy to get wrong |
@@ -329,8 +329,8 @@ Ranked by value per effort, then by what each unblocks. "Partly" counts as
 8. **`i18n-routing`** (S, 4). Locale path prefixes and hreflang. next-intl
    has 9.6M downloads a week. The current locale from a query or cookie is
    not indexable.
-9. **`search`** (M, 4). Postgres FTS with a migration and a search page. It
-   needs no new infrastructure.
+9. ~~**`search`**~~ (M, 4). Built: Postgres FTS with a migration and a
+   search page.
 10. **`webhooks-out`** (M, 4). Signed, retried deliveries from `RowChange`
     through jobs and the outbox. svix has 9.7M downloads a week, and
     PocketHost shipped webhooks as a headline feature.

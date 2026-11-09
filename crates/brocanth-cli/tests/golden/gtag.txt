@@ -36,6 +36,9 @@ edition = "2021"
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
+#   brocanth-pagination   no paginator; each list counts its own offset and writes its own links
+#   brocanth-filters      no typed filters; a list that filters parses its own query string
+#   brocanth-search       no search; a visitor finds a page by its link or not at all
 #   brocanth-i18n         one language, written into each page; nothing negotiates a locale
 #   serde                 nothing here is deserialised
 [dependencies]
@@ -2701,7 +2704,7 @@ request.
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2801,7 +2804,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: a4a5f6aeb888665e -->
+<!-- brocanth-digest: 0e053a1aac0d5695 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

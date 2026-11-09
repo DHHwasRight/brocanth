@@ -661,6 +661,7 @@ dependencies = [
  "async-trait",
  "brocanth",
  "brocanth-middleware",
+ "brocanth-pagination",
  "brocanth-policy",
  "brocanth-scaffold",
  "brocanth-test",
@@ -788,6 +789,7 @@ dependencies = [
  "brocanth-client",
  "brocanth-config",
  "brocanth-db",
+ "brocanth-filters",
  "brocanth-gtag",
  "brocanth-i18n",
  "brocanth-input",
@@ -795,12 +797,14 @@ dependencies = [
  "brocanth-middleware",
  "brocanth-observe",
  "brocanth-openapi",
+ "brocanth-pagination",
  "brocanth-policy",
  "brocanth-realtime",
  "brocanth-resource",
  "brocanth-robots",
  "brocanth-scaffold",
  "brocanth-schema",
+ "brocanth-search",
  "brocanth-storage",
  "cargo_metadata",
  "clap",
@@ -881,6 +885,18 @@ name = "brocanth-events"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "brocanth-filters"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-pagination",
+ "brocanth-policy",
+ "brocanth-scaffold",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1077,6 +1093,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-pagination"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-pagination",
+ "brocanth-policy",
+ "brocanth-scaffold",
+]
+
+[[package]]
 name = "brocanth-policy"
 version = "0.1.0"
 dependencies = [
@@ -1169,6 +1195,7 @@ version = "0.1.0"
 dependencies = [
  "brocanth",
  "brocanth-events",
+ "brocanth-pagination",
  "brocanth-policy",
  "brocanth-scaffold",
  "http",
@@ -1219,6 +1246,20 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "brocanth-search"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-pagination",
+ "brocanth-policy",
+ "brocanth-scaffold",
+ "brocanth-search",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

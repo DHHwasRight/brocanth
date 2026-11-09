@@ -47,6 +47,11 @@ brocanth-gtag = { path = "../brocanth-gtag", version = "0.1.0", default-features
 brocanth-i18n = { path = "../brocanth-i18n", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-openapi = { path = "../brocanth-openapi", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }
+# Lists: one paginator.
+brocanth-pagination = { workspace = true, default-features = false, features = ["scaffold"] }
+# Lists: typed filters in the WHERE, and site search in Postgres.
+brocanth-filters = { workspace = true, default-features = false, features = ["scaffold"] }
+brocanth-search = { workspace = true, default-features = false, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }
 # `default-features = false` keeps `regex`, the `Validate` proc macro and a
 # second copy of the core out of the CLI. What a generated project gets is

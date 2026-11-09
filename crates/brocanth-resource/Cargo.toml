@@ -6,7 +6,7 @@ rust-version.workspace = true
 readme = "README.md"
 description = "Typed CRUD routes derived from an entity and its policy. A build with no policy registered does not compile."
 
-# Three dependencies, and the two that matter are the seams this crate joins.
+# Four dependencies, and the two that matter are the seams this crate joins.
 #
 # * `brocanth-policy` is the argument of PLAN.md §9, as a value: a predicate
 #   with two interpretations, a witness that carries its condition, and a field
@@ -18,6 +18,8 @@ description = "Typed CRUD routes derived from an entity and its policy. A build 
 #   is not brocanth can drive them. With `plugin` off, the core is not in the
 #   tree and `routes` is not compiled — PLAN.md §8.2: a feature that is off
 #   means the code is absent.
+# * `brocanth-pagination` is the page arithmetic the admin shares. It has no
+#   dependency.
 #
 # Not here, and the refusals are the design: no `sea-orm`, no `sqlx`, no
 # driver, no pool, no async runtime, no `serde`. The rows belong to the
@@ -31,6 +33,7 @@ brocanth = { workspace = true, optional = true }
 http = { version = "1", optional = true }
 brocanth-events = { workspace = true }
 brocanth-policy = { workspace = true }
+brocanth-pagination = { workspace = true, features = ["runtime"] }
 thiserror = "2"
 
 # trybuild compiles the cases under tests/ui and compares the compiler's own

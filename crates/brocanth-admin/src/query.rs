@@ -59,9 +59,9 @@ pub struct ListQuery {
     /// Requested page, counting from one. Clamped when [`Page`] is built.
     ///
     /// [`Page`]: crate::paging::Page
-    pub page: usize,
+    pub page: u64,
     /// Rows per page, or `None` to take the model's configured default.
-    pub per_page: Option<usize>,
+    pub per_page: Option<u64>,
     /// The search term, already trimmed. Empty means no search.
     pub search: String,
     /// The sort, when one was asked for.
@@ -78,13 +78,13 @@ impl ListQuery {
     }
 
     /// Asks for a page.
-    pub fn page(mut self, page: usize) -> Self {
+    pub fn page(mut self, page: u64) -> Self {
         self.page = page;
         self
     }
 
     /// Asks for a page size.
-    pub fn per_page(mut self, per_page: usize) -> Self {
+    pub fn per_page(mut self, per_page: u64) -> Self {
         self.per_page = Some(per_page);
         self
     }
@@ -163,7 +163,7 @@ impl ListQuery {
     ///
     /// Used to build the pagination and column-header links, so a sort
     /// survives a page change and a search survives both.
-    pub fn to_query_string(&self, page: usize) -> String {
+    pub fn to_query_string(&self, page: u64) -> String {
         let mut parts = vec![format!("page={page}")];
         if let Some(per_page) = self.per_page {
             parts.push(format!("per_page={per_page}"));
