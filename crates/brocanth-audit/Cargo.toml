@@ -1,0 +1,76 @@
+[package]
+name = "brocanth-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Change history for brocanth: who changed which row, when, and what changed. A ChangeSink for the model layer, a journal for the admin, rows in your own Postgres."
+readme = "README.md"
+
+# Its own crate, because the crates it joins must not depend on each other:
+# `brocanth-events` is std-only by rule, `brocanth-model` must not know who
+# reads its changes (PLAN.md §10), and `brocanth-admin` keeps no table. This
+# crate reads both seams and owns the one table.
+#
+# Everything the application runs is behind `runtime`, on by default. The
+# CLI takes this crate with `default-features = false, features =
+# ["scaffold"]`, so the generator links no core, no tokio and no driver.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+brocanth-events = { workspace = true, optional = true }
+# `RowWritten`: the model hook this crate installs, so a write the model
+# layer publishes through `HookSink` reaches the history.
+brocanth-model = { workspace = true, features = ["plugin"], optional = true }
+
+# The store is a trait object behind an `Arc`, so its methods are boxed
+# futures. The same crate `brocanth-cache` and `brocanth-admin` use.
+async-trait = { version = "0.1", optional = true }
+
+# The writer and the daily purge: one task on the runtime a server has.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "time",
+    "sync",
+], optional = true }
+
+# `postgres`: `PgStore`, one table in the database the `db` module opened.
+brocanth-db = { workspace = true, optional = true }
+
+# `config`: `AuditConfig` reads from an `[audit]` section.
+serde = { version = "1", features = ["derive"], optional = true }
+
+# `admin`: the History tab, the per-record link and the journal that hears
+# every admin write. Off, so a worker links no admin.
+brocanth-admin = { workspace = true, optional = true }
+
+# `scaffold`: the module `brocanth create` offers as `audit`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# This crate, with every feature on, so `cargo test -p brocanth-audit` runs
+# the panel and Postgres tests instead of compiling them out.
+brocanth-audit = { path = ".", features = ["postgres", "config", "admin", "scaffold"] }
+brocanth-test.workspace = true
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+# The generator, for the module's golden. A cycle through dev-dependencies,
+# which cargo allows: the CLI takes this crate's `scaffold` side.
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime", "postgres"]
+# The entries, the trail, the sink, the plugin and the memory store: what
+# an application links.
+runtime = [
+    "dep:brocanth",
+    "dep:brocanth-events",
+    "dep:brocanth-model",
+    "dep:async-trait",
+    "dep:tokio",
+]
+postgres = ["runtime", "dep:brocanth-db"]
+config = ["runtime", "dep:serde"]
+admin = ["runtime", "dep:brocanth-admin"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
