@@ -790,23 +790,19 @@ leaves every golden. The ignored test
 `src/modules/sessions.rs` in place of `src/flags.rs`, and gains a case for a
 hook that is off and an integration that is off.
 
-## 7. Open questions for Max
+## 7. Decisions (Max, 2026-11-09)
 
-1. **The framework's own file.** `src/modules/brocanth.rs` holds the
-   project flag rule and the `[server]` renames. It is not a module, but it
-   has the same shape. Alternative: keep a short `src/flags.rs` for these.
-   *Recommendation:* `src/modules/brocanth.rs`. One place, and the owner
-   name `brocanth` is the one the CLI already gives `[server]`.
-2. **A file for every module, or only for a module with a choice.**
-   *Recommendation:* only with a choice. `ALL` still lists every module.
-   The `everything` project then has about 15 files and not 39.
-3. **Who holds an integration toggle: the guest (`analytics.rs`) or the
-   host (`admin.rs`).** *Recommendation:* the guest. It moves the analytics
-   panel line out of the admin module, into a new `Slot::AdminPanels`.
-4. **A hook that is off, and a hard `after` that needs it.** Refuse at
-   startup, or turn the dependent hook off too. *Recommendation:* refuse
-   with a `help:` line. A silent second change is a choice nobody made.
-5. **Write every field out, or write only `..DEFAULT`.** *Recommendation:*
-   every field, with its comment, then `..DEFAULT`. The file is the place
-   to read the choices. The cost is one `#[allow(clippy::needless_update)]`
-   and a compile error in the rare case that a module drops a toggle.
+1. **The framework's own file is `src/modules/brocanth.rs`.** It holds the
+   project flag rule and the `[server]` renames. `src/flags.rs` goes away.
+2. **Every module gets a file**, also a module with no choice yet. Reason:
+   Max asked that an added module "goes to `src/modules/<name>.rs`"; one
+   rule for every module is easier to read than a rule with exceptions, and
+   a module that gains a choice later already has its file. A module with
+   no choice gets a file with `..Module::DEFAULT` and a comment. This
+   replaces the "only with a choice" proposal in §1.
+3. **The guest holds an integration toggle** (`analytics.rs` holds
+   `integrate.admin`). The analytics panel line moves to
+   `Slot::AdminPanels`.
+4. **A hook that is off, and a hard `after` that needs it: refuse at
+   startup with a `help:` line.** Nothing is turned off silently.
+5. **Every field is written out, with its comment, then `..DEFAULT`.**
