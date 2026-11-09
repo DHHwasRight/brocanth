@@ -1909,10 +1909,9 @@ macro_rules! register {
         // locales/*.toml, in the request's locale. The
         // `banner.*` settings are the fallback.
         let builder = builder
-            .plugin_hooking_from_config_with::<brocanth_gtag::Gtag>(
-                "gtag",
-                |config| config.translate(crate::modules::gtag::MODULE.integrate.i18n),
-            )
+            .plugin_hooking_from_config_with::<brocanth_gtag::Gtag>("gtag", |config| {
+                config.translate(crate::modules::gtag::MODULE.integrate.i18n)
+            })
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
@@ -3812,7 +3811,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 3df08b231181abcd
+// brocanth-digest: a2af79d09c0f16cd
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
