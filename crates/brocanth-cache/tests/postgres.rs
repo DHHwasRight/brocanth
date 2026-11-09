@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use brocanth_cache::{sweep, Cache, CacheError, CacheExt, FetchError, FetchPolicy, Namespace};
+use brocanth_cache::{
+    sweep, Cache, CacheError, CacheExt, FetchError, FetchPolicy, Namespace, PgCache,
+};
 use common::{cache, cache_with_manual_clock, clean_up, namespace, MINUTE};
 
 // ---------------------------------------------------------------------------
@@ -127,6 +129,57 @@ async fn an_expired_value_is_not_returned() {
     let swept = sweep(&cache, 1000, 10).await.unwrap();
     assert!(swept >= 1, "the sweep should have taken the dead row");
     assert_eq!(cache.get(&key).await.unwrap(), None);
+
+    clean_up(&cache, &ns).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_plugin_sweep_removes_expired_rows_without_being_asked() {
+    use brocanth::plugin_api::Plugin;
+    use brocanth::plugin_app::AppBuilder;
+    use brocanth::plugin_shutdown::ShutdownReason;
+    use brocanth_cache::{CacheConfig, CachePlugin};
+
+    // The real clock and a short TTL, not the manual clock: the tests share
+    // the table, and a sweep at a moved clock would delete rows that other
+    // tests still read. At the real clock it deletes only rows that every
+    // read already treats as gone.
+    let Some(cache) = cache("the_plugin_sweep_removes_expired_rows").await else {
+        return;
+    };
+    let ns = namespace("scheduled-sweep");
+    let key = ns.key("short-lived").unwrap();
+    cache
+        .set(&key, b"soon gone", Duration::from_millis(100))
+        .await
+        .unwrap();
+
+    let rows = |cache: PgCache, ns: String| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM brocanth_cache WHERE namespace = $1")
+            .bind(ns)
+            .fetch_one(cache.pool())
+            .await
+            .unwrap()
+    };
+    assert_eq!(rows(cache.clone(), ns.as_str().to_string()).await, 1);
+
+    let config = CacheConfig::new(Arc::new(cache.clone())).sweep_every(Duration::from_millis(50));
+    let mut app = AppBuilder::new()
+        .plugin(CachePlugin::new(config))
+        .build()
+        .unwrap();
+    app.start().unwrap();
+
+    let mut left = 1;
+    for _ in 0..100 {
+        left = rows(cache.clone(), ns.as_str().to_string()).await;
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = app.shutdown(ShutdownReason::Requested, None);
+    assert_eq!(left, 0, "the scheduled sweep left the expired row");
 
     clean_up(&cache, &ns).await;
 }

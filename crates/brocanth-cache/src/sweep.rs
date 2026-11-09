@@ -18,62 +18,42 @@
 //! `shared_buffers`, and `shared_buffers` is what the rest of your database is
 //! using. Run it, but do not think of it as the thing that makes the TTL true.
 //!
-//! # This crate ships no loop, and that is on purpose
+//! # Who drives it: the plugin, by default
 //!
-//! There is a [`sweep`] function here and nothing that calls it. No thread, no
-//! timer, no `tokio::spawn`. Three reasons, in order of weight:
+//! An earlier version of this crate shipped [`sweep`] and nothing that
+//! called it, and left the schedule to `brocanth-jobs`. Nothing wired it, so
+//! every application with a cache kept every expired row for ever. The
+//! schedule is now [`Sweeper`]: one task per process, started by
+//! [`CachePlugin`](crate::CachePlugin) at `start` and stopped at `shutdown`.
+//! The generated `cache` plugin starts the same task. The reasons, in order:
 //!
-//! 1. **`brocanth-jobs` already has the loop.** It ships a cron, a worker and
-//!    a maintenance loop with a schedule table and misfire handling, and an
-//!    application that runs the queue already pays for all of it. Starting a
-//!    second periodic task in the same process, with its own interval and its
-//!    own failure mode, is how a system ends up with two schedulers that
-//!    disagree about whether something ran.
-//! 2. **PLAN §8.2: a feature that is off must mean the code is absent.** An
-//!    always-on sweeper means a timer and a spawned task in every application
-//!    that caches anything — including one whose entries all live sixty
-//!    seconds and whose table never grows past a few thousand rows, which does
-//!    not need a sweeper at all.
-//! 3. **The arrow would point the wrong way.** Depending on `brocanth-jobs`
-//!    from here would make every caching application link a queue. A cache is
-//!    the more primitive of the two, and an application that caches and does
-//!    not have background work is ordinary.
+//! 1. **It must work in every application that caches.** A cache does not
+//!    need a queue, and most applications that cache have none. A schedule
+//!    that exists only with `brocanth-jobs` is a schedule that most
+//!    applications do not have.
+//! 2. **The arrow stays the right way.** The task is a Tokio timer, which the
+//!    crate already links for `fetch`. It depends on nothing else.
+//! 3. **It is cheap enough to run everywhere.** A sweep is a sequential scan
+//!    (`expires_at` has no index, on purpose: see
+//!    [`PgCache::schema_sql`](crate::PgCache::schema_sql)), every few minutes,
+//!    off the request path. Its cost follows the size of a cache that the
+//!    sweep keeps bounded.
 //!
-//! So: this crate owns the *operation*, and whatever you already run owns the
-//! *schedule*. The operation is on the trait
+//! Every instance of an application runs its own task, and the deletes do
+//! not mind: two sweeps at once remove each row once. Each wait is the
+//! interval with a random quarter either way, so instances that started
+//! together do not sweep together.
+//!
+//! An application that schedules the sweep another way — a recurring job, or
+//! `pg_cron` below — turns the task off with
+//! [`CacheConfig::sweep_every`](crate::CacheConfig::sweep_every)`(Duration::ZERO)`.
+//!
+//! The operation is on the trait
 //! ([`Cache::purge_expired`](crate::Cache::purge_expired)) rather than on the
 //! Postgres type, so a later SQLite backend gets the same arrangement for
 //! free.
 //!
-//! # Driving it
-//!
-//! **With `brocanth-jobs`, which is the recommended way.** A recurring job,
-//! registered once in `main`:
-//!
-//! ```ignore
-//! use std::sync::Arc;
-//! use brocanth_cache::{sweep, Cache};
-//! use brocanth_jobs::{Job, JobContext};
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Serialize, Deserialize)]
-//! struct SweepCache;
-//!
-//! impl Job for SweepCache {
-//!     const NAME: &'static str = "sweep_cache";
-//!     const QUEUE: &'static str = "maintenance";
-//!     type Error = brocanth_cache::CacheError;
-//!
-//!     async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
-//!         let cache: Arc<dyn Cache> = cx.get();  // however the app holds it
-//!         sweep(&*cache, 10_000, 50).await?;
-//!         Ok(())
-//!     }
-//! }
-//!
-//! // in main, beside the other schedules:
-//! queue.recurring("sweep_cache", "*/5 * * * *", SweepCache).await?;
-//! ```
+//! # Other ways to drive it
 //!
 //! **With `pg_cron`, if the deployment already has it.** One line of SQL and
 //! no application involvement at all:
@@ -86,11 +66,7 @@
 //!                    LIMIT 10000)$$);
 //! ```
 //!
-//! **With nothing at all**, if the cache is small and the TTLs are short. The
-//! table reaches a steady size because `set` reuses the row it overwrites, and
-//! autovacuum reclaims what the overwrites leave. Watch
-//! [`PgCache::stats`](crate::PgCache::stats) and start sweeping when `expired`
-//! stops being a small fraction of `entries`.
+//! **By hand**, from a job or a command: call [`sweep`].
 //!
 //! # What this does not do: `VACUUM`
 //!
@@ -103,8 +79,23 @@
 //! autovacuum thresholds low, so the database's own autovacuum keeps up with a
 //! table that churns far faster than a normal one.
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::cache::Cache;
-use crate::error::Result;
+use crate::error::{CacheError, Result};
+
+/// How often [`Sweeper`] sweeps when nothing says otherwise: five minutes.
+pub const DEFAULT_SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Rows one `DELETE` of a scheduled sweep removes at most.
+pub const SWEEP_BATCH: u64 = 10_000;
+
+/// Batches one scheduled sweep runs at most, so one sweep cannot run until
+/// the next is due.
+pub const SWEEP_MAX_BATCHES: u32 = 50;
 
 /// Deletes expired entries in batches until there are none left, or until
 /// `max_batches` have run. Answers how many entries went.
@@ -131,4 +122,101 @@ pub async fn sweep(cache: &dyn Cache, batch: u64, max_batches: u32) -> Result<u6
         }
     }
     Ok(total)
+}
+
+/// What [`Sweeper`] calls when a sweep fails.
+pub type SweepErrorFn = Arc<dyn Fn(&CacheError) + Send + Sync>;
+
+/// The periodic sweep: a task that calls [`sweep`] about every `every`.
+///
+/// Dropping it stops the task, and so does [`Sweeper::stop`]. A sweep that
+/// is in flight when it stops is cancelled; the rows it deleted stay deleted.
+#[derive(Debug)]
+pub struct Sweeper {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Sweeper {
+    /// Starts the task on `runtime`.
+    ///
+    /// Each wait is `every` with up to a quarter added or taken away, at
+    /// random, so several instances do not sweep at the same moment. The
+    /// first sweep comes after the first wait, not at once: the table can
+    /// still be missing while the readiness check creates it. A failed sweep
+    /// goes to `on_error` and the next one runs on time.
+    ///
+    /// A zero `every` counts as one millisecond. To have no sweep, do not
+    /// call this.
+    pub fn spawn(
+        runtime: &tokio::runtime::Handle,
+        cache: Arc<dyn Cache>,
+        every: Duration,
+        on_error: SweepErrorFn,
+    ) -> Self {
+        let every = every.max(Duration::from_millis(1));
+        let task = runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(jittered(every)).await;
+                if let Err(e) = sweep(&*cache, SWEEP_BATCH, SWEEP_MAX_BATCHES).await {
+                    on_error(&e);
+                }
+            }
+        });
+        Self { task }
+    }
+
+    /// Stops the task.
+    pub fn stop(self) {
+        drop(self);
+    }
+
+    /// Whether the task still runs. False after [`Sweeper::stop`] only once
+    /// the runtime has seen the cancellation.
+    pub fn is_running(&self) -> bool {
+        !self.task.is_finished()
+    }
+}
+
+impl Drop for Sweeper {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// `every`, plus or minus up to a quarter of it, at random.
+///
+/// The randomness is the standard library's hash seed, so the crate needs no
+/// random-number dependency for one number per sweep.
+fn jittered(every: Duration) -> Duration {
+    let quarter = every / 4;
+    let span = u64::try_from(quarter.as_nanos().saturating_mul(2)).unwrap_or(u64::MAX);
+    if span == 0 {
+        return every;
+    }
+    let draw = RandomState::new().build_hasher().finish() % span;
+    every - quarter + Duration::from_nanos(draw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wait_stays_within_a_quarter_of_the_interval() {
+        let every = Duration::from_secs(300);
+        let waits: Vec<Duration> = (0..200).map(|_| jittered(every)).collect();
+        for wait in &waits {
+            assert!(*wait >= Duration::from_secs(225) && *wait <= Duration::from_secs(375));
+        }
+        let first = waits[0];
+        assert!(
+            waits.iter().any(|w| *w != first),
+            "two hundred waits were all the same, so there is no jitter"
+        );
+    }
+
+    #[test]
+    fn a_tiny_interval_has_no_room_to_move_and_is_kept() {
+        assert_eq!(jittered(Duration::from_nanos(1)), Duration::from_nanos(1));
+    }
 }

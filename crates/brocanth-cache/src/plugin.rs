@@ -14,10 +14,14 @@
 //! is no `plugin_from_config` path for the same reason `brocanth-jobs` has
 //! none: nothing in a TOML file can become a pool.
 //!
-//! **Plugins do not autowire.** This one offers no middleware, mounts nothing,
-//! starts nothing and runs no background task. The only thing it can be asked
-//! to do beyond publishing the handle is create the table, and that is off by
-//! default.
+//! **Plugins do not autowire.** This one offers no middleware and mounts
+//! nothing. It runs one background task, the sweep ([`Sweeper`]), from
+//! `start` to `shutdown`, because without it nothing deletes expired rows:
+//! see [`crate::sweep`] for why the plugin owns it.
+//! [`CacheConfig::sweep_every`] sets the interval, and `Duration::ZERO` turns
+//! it off. Creating the table is off by default.
+//!
+//! [`Sweeper`]: crate::sweep::Sweeper
 //!
 //! ```no_run
 //! # use std::sync::Arc;
@@ -44,11 +48,14 @@
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::cache::Cache;
+use crate::sweep::{SweepErrorFn, Sweeper, DEFAULT_SWEEP_EVERY};
 
 /// The cache, as it appears in the per-request context and in [`Services`].
 ///
@@ -96,15 +103,41 @@ impl ContextItem for CacheHandle {}
 pub struct CacheConfig {
     cache: Arc<dyn Cache>,
     migrate: bool,
+    sweep_every: Duration,
+    on_sweep_error: SweepErrorFn,
 }
 
 impl CacheConfig {
-    /// A plugin that publishes this cache and does nothing else.
+    /// A plugin that publishes this cache and sweeps it every
+    /// [`DEFAULT_SWEEP_EVERY`].
     pub fn new(cache: Arc<dyn Cache>) -> Self {
         Self {
             cache,
             migrate: false,
+            sweep_every: DEFAULT_SWEEP_EVERY,
+            on_sweep_error: Arc::new(|_| {}),
         }
+    }
+
+    /// How often the plugin deletes expired entries, about: each wait moves
+    /// by up to a quarter, at random. `Duration::ZERO` starts no sweep, for
+    /// an application that schedules [`sweep`](crate::sweep()) itself.
+    #[must_use]
+    pub fn sweep_every(mut self, every: Duration) -> Self {
+        self.sweep_every = every;
+        self
+    }
+
+    /// What to do with a sweep that failed. By default nothing: a failed
+    /// sweep leaves expired rows, which no read returns, and the next sweep
+    /// tries again. Give it the application's logger.
+    #[must_use]
+    pub fn on_sweep_error(
+        mut self,
+        f: impl Fn(&crate::CacheError) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_sweep_error = Arc::new(f);
+        self
     }
 
     /// Create the cache's table if it is absent, in the readiness check, the
@@ -132,6 +165,9 @@ impl CacheConfig {
 pub struct CachePlugin {
     cache: Arc<dyn Cache>,
     migrate: bool,
+    sweep_every: Duration,
+    on_sweep_error: SweepErrorFn,
+    sweeper: Option<Sweeper>,
 }
 
 impl CachePlugin {
@@ -160,6 +196,9 @@ impl Plugin for CachePlugin {
         Self {
             cache: config.cache,
             migrate: config.migrate,
+            sweep_every: config.sweep_every,
+            on_sweep_error: config.on_sweep_error,
+            sweeper: None,
         }
     }
 
@@ -191,6 +230,31 @@ impl Plugin for CachePlugin {
                 cache.get(&key).await.map(drop).map_err(|e| e.to_string())
             }
         });
+        Ok(())
+    }
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.sweep_every.is_zero() {
+            return Ok(());
+        }
+        // No runtime: a test or a tool that starts the application without
+        // serving it. Nothing sweeps, which costs disk and never correctness.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Ok(());
+        };
+        self.sweeper = Some(Sweeper::spawn(
+            &runtime,
+            Arc::clone(&self.cache),
+            self.sweep_every,
+            Arc::clone(&self.on_sweep_error),
+        ));
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.stop();
+        }
         Ok(())
     }
 

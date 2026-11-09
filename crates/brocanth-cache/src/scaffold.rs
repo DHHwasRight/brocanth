@@ -70,6 +70,15 @@ impl Module for Cache {
                     "Development only: see `PgCache::schema_sql` for the statements to put in a\n\
                      migration instead.",
                 ),
+                Setting::integer(
+                    "sweep_every",
+                    300,
+                    "Seconds between two sweeps of expired entries; 0 turns the sweep off.",
+                )
+                .note(
+                    "Each wait moves by up to a quarter, so instances do not sweep together.\n\
+                     Expired entries are never served; the sweep only frees their space.",
+                ),
             ],
         );
         if !project.has("config") {
@@ -110,7 +119,8 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};
-use brocanth_cache::{{CacheHandle, PgCache}};
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_cache::{{CacheHandle, PgCache, Sweeper}};
 
 /// What this plugin is built from.
 ///
@@ -123,6 +133,8 @@ pub struct Settings {{
     pub url: String,
     /// Create the unlogged cache table at startup if it is absent.
     pub migrate: bool,
+    /// Seconds between two sweeps of expired entries; 0 turns the sweep off.
+    pub sweep_every: u64,
 }}
 
 impl Default for Settings {{
@@ -130,6 +142,7 @@ impl Default for Settings {{
         Self {{
             url: "postgres://localhost/development".to_string(),
             migrate: true,
+            sweep_every: 300,
         }}
     }}
 }}
@@ -137,9 +150,12 @@ impl Default for Settings {{
 pub struct Cache {{
     url: String,
     migrate: bool,
+    sweep_every: u64,
     /// Open at `before_start` and not before, so the field is an `Option` for
     /// exactly the length of the build.
     handle: Option<CacheHandle>,
+    /// The sweep, from `start` to `shutdown`.
+    sweeper: Option<Sweeper>,
 }}
 
 impl Plugin for Cache {{
@@ -151,7 +167,9 @@ impl Plugin for Cache {{
         Self {{
             url: config.url,
             migrate: config.migrate,
+            sweep_every: config.sweep_every,
             handle: None,
+            sweeper: None,
         }}
     }}
 
@@ -213,6 +231,35 @@ impl Plugin for Cache {{
             }}
         }});
         self.handle = Some(CacheHandle::new(cache));
+        Ok(())
+    }}
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        // Nothing else deletes expired rows. Every read checks expiry
+        // already, so this only keeps the table small. Each instance runs
+        // it, and the deletes do not mind.
+        let Some(handle) = self.handle.as_ref().filter(|_| self.sweep_every > 0) else {{
+            return Ok(());
+        }};
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {{
+            PluginError::new(format!("[cache] needs a Tokio runtime to sweep ({{e}})"))
+        }})?;
+        let on_error = |e: &brocanth_cache::CacheError| {{
+            crate::plugins::say!(warn, "[cache] sweep: {{e}}"; error = %e);
+        }};
+        self.sweeper = Some(Sweeper::spawn(
+            &runtime,
+            Arc::clone(handle.inner()),
+            std::time::Duration::from_secs(self.sweep_every),
+            Arc::new(on_error),
+        ));
+        Ok(())
+    }}
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {{
+        if let Some(sweeper) = self.sweeper.take() {{
+            sweeper.stop();
+        }}
         Ok(())
     }}
 

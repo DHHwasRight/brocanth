@@ -2,7 +2,8 @@
 
 `brocanth-cache` stores bytes under a key in an unlogged Postgres table. The
 crate documentation argues that choice. This page covers the three layers
-above the key/value store: tags, the route cache and the fragment cache.
+above the key/value store (tags, the route cache and the fragment cache),
+and the sweep that deletes expired rows.
 They close gap G8 in `docs/framework-gaps.md` (A15, D19).
 
 ## 1. Tags
@@ -116,7 +117,44 @@ goes through `Writing`, and the sink hears it only when the transaction
 commits. A write that does not go through these methods publishes
 nothing: call `publish` yourself or invalidate the tags directly.
 
-## 5. Not done
+## 5. The sweep
+
+Every read checks `expires_at`, so an expired entry is a miss whether its
+row is there or not. The sweep only frees the space. Without it, the
+`UNLOGGED` table keeps every expired row until its key is written again.
+
+`CachePlugin` and the generated `cache` plugin run the sweep themselves.
+`brocanth_cache::Sweeper` is one Tokio task per process. It starts at
+`start` and stops at `shutdown` (dropping it stops it too). Each run calls
+`sweep(cache, 10_000, 50)`.
+
+| | `CachePlugin` | Generated plugin |
+|---|---|---|
+| Interval | `CacheConfig::sweep_every(Duration)`, default 5 minutes | `[cache] sweep_every`, seconds, default `300` |
+| Off | `Duration::ZERO` | `0` |
+| A failed sweep | `CacheConfig::on_sweep_error(f)`, default: nothing | a `warn` line through `say!` |
+
+* **Jitter.** Each wait is the interval with up to a quarter added or
+  taken away, at random. Instances that start in the same deploy do not
+  sweep at the same moment.
+* **Several instances.** Each one sweeps. Two deletes at once remove each
+  row once, so no lock or leader is needed.
+* **First run.** After the first wait, not at `start`: with `migrate`, the
+  readiness check can still be creating the table.
+* **Cost.** `expires_at` has no index, on purpose (`PgCache::schema_sql`
+  says why), so a sweep is a sequential scan. It runs every few minutes,
+  off the request path.
+
+**Why the plugin and not a `jobs` cron.** An earlier version left the
+schedule to `brocanth-jobs` and wired nothing, so no project deleted an
+expired row. A cron job would work only in projects that also have `jobs`,
+and most projects that cache have no queue. The plugin's task works in
+every project with `cache`, links nothing new (the crate already links
+Tokio's timer for `fetch`), and is cheap when there is nothing to delete.
+A project that schedules the sweep another way (a recurring job,
+`pg_cron`) sets the interval to zero.
+
+## 6. Not done
 
 * No in-memory backend. `brocanth-cache` is Postgres only on purpose
   (`tests/common/mod.rs`). The route-cache hook tests use a fake, as the

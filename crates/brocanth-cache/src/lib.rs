@@ -146,8 +146,8 @@
 //!   is a sequential scan on purpose.
 //! * [`fetch`] — **the stampede**: why a lease rather than an advisory lock,
 //!   and the specific way advisory locks fail here.
-//! * [`sweep`] — why a TTL must not depend on a sweeper, and why the thing that
-//!   schedules the sweep belongs in `brocanth-jobs` rather than here.
+//! * [`sweep`] — why a TTL must not depend on a sweeper, and why the plugin
+//!   runs the sweep itself rather than leave it to `brocanth-jobs`.
 //! * [`key`] — why a namespace is a column rather than a prefix, and the
 //!   version trick that invalidates a whole class of entries without deleting a
 //!   row.
@@ -229,7 +229,7 @@ pub use key::{Key, Namespace, MAX_KEY_BYTES, MAX_NAMESPACE_BYTES};
 #[cfg(feature = "runtime")]
 pub use plugin::{CacheConfig, CacheHandle, CachePlugin};
 #[cfg(feature = "runtime")]
-pub use sweep::sweep;
+pub use sweep::{sweep, Sweeper, DEFAULT_SWEEP_EVERY};
 #[cfg(feature = "runtime")]
 pub use tag::{Tag, MAX_TAG_BYTES};
 
