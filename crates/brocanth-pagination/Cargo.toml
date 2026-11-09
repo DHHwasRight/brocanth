@@ -1,0 +1,38 @@
+[package]
+name = "brocanth-pagination"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "One paginator for every list: offset pages with a total, keyset pages with a cursor, and links that keep the rest of the query string."
+readme = "README.md"
+
+# No dependency by default. A page is arithmetic and a link is a string, and
+# `brocanth-admin` and `brocanth-resource` both take this crate, so it must
+# not bring either of them anything.
+[dependencies]
+# `policy`: a keyset page as a `Pred`, so the cursor goes into the `WHERE`
+# beside the policy's condition. Small and pure: `thiserror` only.
+brocanth-policy = { workspace = true, optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `pagination`. Off: only the CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator and checked with `brocanth_scaffold::testing`. A cycle through
+# dev-dependencies, which cargo allows, as `brocanth-robots` does.
+[dev-dependencies]
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-pagination = { path = ".", features = ["policy"] }
+
+[features]
+default = ["runtime"]
+# The paginator. It has no dependency, so the feature only keeps the CLI,
+# which turns it off, from compiling code it never calls.
+runtime = []
+policy = ["runtime", "dep:brocanth-policy"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
