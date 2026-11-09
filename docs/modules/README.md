@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 44. For all
+One page per module that `brocanth create` offers. There are 47. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -71,6 +71,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`cache`](cache.md) | a cache on an unlogged Postgres table, not Redis; without it no cache at all | Enhancer |  |
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
+| [`auth-oauth`](auth-oauth.md) | sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Routes, Enhancer | auth |
+| [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
+| [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |
 | [`input`](input.md) | a form or a JSON body, read into a struct, with every fault at once | Enhancer, Renderer |  |

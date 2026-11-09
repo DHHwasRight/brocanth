@@ -21,7 +21,7 @@ brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
+brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["reqwest-client", "policy", "postgres", "admin"] }  # the provider requests: a token exchange and a profile read
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1416,6 +1416,7 @@ fn mounted(
 ) -> Result<(), ::brocanth::routing::BuildError> {
     crate::plugins::resource::mount(routes, "/api")?;
     crate::plugins::admin::mount(routes, crate::modules::admin::MODULE.mount_at)?;
+    crate::plugins::auth_oauth::mount(routes, crate::modules::auth_oauth::MODULE.mount_at)?;
     Ok(())
 }
 
@@ -1668,6 +1669,7 @@ mod tests {
                 "/about",
                 "/admin",
                 "/admin/{*rest}",
+                "/oauth/{*rest}",
                 "/openapi.json",
                 "/openapi.yaml",
                 "/realtime/events",
@@ -1787,6 +1789,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
 pub mod admin;
 pub mod auth;
+pub mod auth_oauth;
 pub mod cache;
 pub mod db;
 pub mod i18n;
@@ -1800,11 +1803,13 @@ pub mod realtime_sse;
 pub mod realtime_websocket;
 pub mod resource;
 pub mod robots;
+pub mod roles;
 pub mod sessions;
 pub mod shape;
 pub mod sitemap;
 pub mod static_files;
 pub mod storage;
+pub mod superuser;
 pub mod validation;
 
 use brocanth::plugin_context::{After, Base};
@@ -1993,6 +1998,12 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::model::Model>("model")
             .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::auth_oauth::AuthOauth>("auth_oauth")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
+            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -2073,7 +2084,9 @@ type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
 type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
 type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
+type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithModel>;
+type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
+type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithSuperuser>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
@@ -2197,6 +2210,15 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    }
+    // Superusers pass every check; a role holder passes what its roles grant.
+    if crate::modules::superuser::MODULE.integrate.admin {
+        config = config.with_policy(brocanth_auth::admin::StaffPolicy);
+    }
+    // Roles: a superuser defines them and gives them to accounts.
+    if crate::modules::roles::MODULE.integrate.admin {
+        let roles = brocanth_auth::admin::RolesPanel::late(crate::plugins::superuser::store());
+        config = config.panel(roles);
     }
     config
 }
@@ -2972,6 +2994,123 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "auth_oauth.base_url",
+        help: "The scheme and host the providers send the browser back to.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.after_sign_in",
+        help: "Where a person goes after a sign-in or a link.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.sign_in_page",
+        help: "Your password sign-in page, for a person who must sign in before a link. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.github_client_id",
+        help: "The client id of the GitHub OAuth app. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.github_client_secret",
+        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.google_client_id",
+        help: "The client id of the Google OAuth client. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.google_client_secret",
+        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.microsoft_client_id",
+        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.microsoft_client_secret",
+        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.gitlab_client_id",
+        help: "The application id of the GitLab application. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.gitlab_client_secret",
+        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "superuser.email",
+        help: "The address of the superuser the server makes at start. Empty means none.",
+        flag: true,
+        file: "src/modules/superuser.rs",
+        flags: crate::modules::superuser::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "superuser.password_env",
+        help: "The name of the variable that holds that superuser's password.",
+        flag: true,
+        file: "src/modules/superuser.rs",
+        flags: crate::modules::superuser::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "security_headers.behind_tls",
         help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
         flag: true,
@@ -3198,6 +3337,12 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::auth::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::auth_oauth::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::superuser::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::policy::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -3409,6 +3554,8 @@ fn defaults() -> Vec<(&'static str, String)> {
     let robots = crate::plugins::robots::Settings::default();
     let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
+    let auth_oauth = crate::plugins::auth_oauth::Settings::default();
+    let superuser = crate::plugins::superuser::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
@@ -3556,6 +3703,52 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "analytics.collector_path",
             format!("{:?}", analytics.collector_path),
+        ),
+        ("auth_oauth.base_url", format!("{:?}", auth_oauth.base_url)),
+        (
+            "auth_oauth.after_sign_in",
+            format!("{:?}", auth_oauth.after_sign_in),
+        ),
+        (
+            "auth_oauth.sign_in_page",
+            format!("{:?}", auth_oauth.sign_in_page),
+        ),
+        (
+            "auth_oauth.github_client_id",
+            format!("{:?}", auth_oauth.github_client_id),
+        ),
+        (
+            "auth_oauth.github_client_secret",
+            format!("{:?}", auth_oauth.github_client_secret),
+        ),
+        (
+            "auth_oauth.google_client_id",
+            format!("{:?}", auth_oauth.google_client_id),
+        ),
+        (
+            "auth_oauth.google_client_secret",
+            format!("{:?}", auth_oauth.google_client_secret),
+        ),
+        (
+            "auth_oauth.microsoft_client_id",
+            format!("{:?}", auth_oauth.microsoft_client_id),
+        ),
+        (
+            "auth_oauth.microsoft_client_secret",
+            format!("{:?}", auth_oauth.microsoft_client_secret),
+        ),
+        (
+            "auth_oauth.gitlab_client_id",
+            format!("{:?}", auth_oauth.gitlab_client_id),
+        ),
+        (
+            "auth_oauth.gitlab_client_secret",
+            format!("{:?}", auth_oauth.gitlab_client_secret),
+        ),
+        ("superuser.email", format!("{:?}", superuser.email)),
+        (
+            "superuser.password_env",
+            format!("{:?}", superuser.password_env),
         ),
         (
             "security_headers.behind_tls",
@@ -3754,7 +3947,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: 978f5054e1b49ea2
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4268,6 +4461,143 @@ pub mod auth {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/auth_oauth.rs.
+pub mod auth_oauth {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[auth_oauth]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        BaseUrl,
+        AfterSignIn,
+        SignInPage,
+        GithubClientId,
+        GoogleClientId,
+        MicrosoftClientId,
+        GitlabClientId,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::BaseUrl => "auth_oauth.base_url",
+                Key::AfterSignIn => "auth_oauth.after_sign_in",
+                Key::SignInPage => "auth_oauth.sign_in_page",
+                Key::GithubClientId => "auth_oauth.github_client_id",
+                Key::GoogleClientId => "auth_oauth.google_client_id",
+                Key::MicrosoftClientId => "auth_oauth.microsoft_client_id",
+                Key::GitlabClientId => "auth_oauth.gitlab_client_id",
+            }
+        }
+    }
+
+    /// What src/modules/auth_oauth.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Where the sign-in routes answer. The redirect URI at each provider is
+        /// <base_url><mount_at>/<provider>/callback.
+        pub mount_at: &'static str,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            mount_at: "/oauth",
+        };
+    }
+}
+
+/// The shape of src/modules/superuser.rs.
+pub mod superuser {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[superuser]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Email,
+        PasswordEnv,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Email => "superuser.email",
+                Key::PasswordEnv => "superuser.password_env",
+            }
+        }
+    }
+
+    /// The code `superuser` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: the admin's policy is StaffPolicy: a superuser passes
+        /// every check, a role holder what its roles grant.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/superuser.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/roles.rs.
+pub mod roles {
+    /// The code `roles` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a Roles tab where a superuser defines roles and gives them
+        /// to accounts.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/roles.rs holds.
+    pub struct Module {
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -5041,7 +5371,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 0ed9f9b2275bb6df
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5064,6 +5394,7 @@ pub mod admin;
 pub mod admin_model;
 pub mod analytics;
 pub mod auth;
+pub mod auth_oauth;
 pub mod cache;
 pub mod ci;
 pub mod ci_github;
@@ -5095,12 +5426,14 @@ pub mod realtime_sse;
 pub mod realtime_websocket;
 pub mod resource;
 pub mod robots;
+pub mod roles;
 pub mod rsx;
 pub mod rsx_htmx;
 pub mod rsx_tailwind;
 pub mod sessions;
 pub mod sitemap;
 pub mod storage;
+pub mod superuser;
 pub mod validation;
 
 /// Every module in `brocanth.toml`, in registration order: the list of
@@ -5119,6 +5452,9 @@ pub const ALL: &[&str] = &[
     "cache",
     "jobs",
     "auth",
+    "auth-oauth",
+    "superuser",
+    "roles",
     "policy",
     "storage",
     "input",
@@ -5150,7 +5486,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: 4451162c6fc7743a
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5483,6 +5819,100 @@ pub const MODULE: Module = Module {
     //   (Key::SigningKeyEnv, Flag::As("signing-key-env")),
     //   (Key::SigningKeyEnv, Flag::Hidden),
     rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/auth_oauth.rs =====
+//! `auth-oauth`: sign-in with GitHub, Google, Microsoft or GitLab at /oauth;
+//! links an HTTP client.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [auth_oauth]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::auth_oauth::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [auth_oauth]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::BaseUrl, Flag::As("base-url")),
+    //   (Key::BaseUrl, Flag::Hidden),
+    rename: &[],
+
+    // Where the sign-in routes answer. The redirect URI at each provider is
+    // <base_url><mount_at>/<provider>/callback.
+    mount_at: "/oauth",
+
+    ..Module::DEFAULT
+};
+===== src/modules/superuser.rs =====
+//! `superuser`: operator accounts that pass every admin check, and a
+//! createsuperuser command.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [superuser]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::superuser::{Flag, Flags, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [superuser]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Email, Flag::As("email")),
+    //   (Key::Email, Flag::Hidden),
+    rename: &[],
+
+    integrate: Integrate {
+        // The admin's policy is StaffPolicy: a superuser passes every check, a
+        // role holder what its roles grant. Without the `admin` module this does
+        // nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/roles.rs =====
+//! `roles`: roles that grant permissions, stored with the accounts, for staff
+//! and the admin.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+use crate::plugins::shape::roles::{Integrate, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    integrate: Integrate {
+        // A Roles tab where a superuser defines roles and gives them to
+        // accounts. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -6439,6 +6869,44 @@ collector_path = "/_a/v"
 # A beacon from any other origin is answered 204 and not counted.
 collector_origins = []
 
+[auth_oauth]
+# The providers to offer, by id: github, google, microsoft, gitlab.
+# Each one needs its client id and secret below. The server refuses to
+# start when one is missing, so a button never answers an error.
+providers = ["github"]
+# The scheme and host the providers send the browser back to.
+# Register <base_url>/oauth/<provider>/callback at each provider's console.
+base_url = "http://localhost:3000"
+# Where a person goes after a sign-in or a link.
+after_sign_in = "/"
+# Your password sign-in page, for a person who must sign in before a link. Empty means none.
+# sign_in_page = ""
+# The client id of the GitHub OAuth app. Empty means none.
+# github_client_id = ""
+# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
+# github_client_secret = ""
+# The client id of the Google OAuth client. Empty means none.
+# google_client_id = ""
+# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
+# google_client_secret = ""
+# The application (client) id of the Microsoft Entra app. Empty means none.
+# microsoft_client_id = ""
+# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
+# microsoft_client_secret = ""
+# The application id of the GitLab application. Empty means none.
+# gitlab_client_id = ""
+# The secret of the GitLab application. No flag: it is a secret. Empty means none.
+# gitlab_client_secret = ""
+
+[superuser]
+# The address of the superuser the server makes at start. Empty means none.
+# Idempotent: an account that exists is promoted and keeps its password.
+# With accounts in memory this is the only way to have a superuser.
+# email = ""
+# The name of the variable that holds that superuser's password.
+# Not the password. It is read only to create the account.
+password_env = "MY_BLOG_SUPERUSER_PASSWORD"
+
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
 # False in development: HSTS from localhost pins the name in the browser.
@@ -6512,6 +6980,7 @@ window_secs = 60
 pub mod admin;
 pub mod api;
 pub mod check;
+pub mod createsuperuser;
 pub mod css;
 pub mod dbshell;
 pub mod migrate;
@@ -6519,7 +6988,7 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 51e3d64c0736bf5e
+// brocanth-digest: 17b67403988f0268
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -7158,6 +7627,76 @@ impl Command for Check {
         }
         Ok(())
     }
+}
+===== src/commands/createsuperuser.rs =====
+//! `createsuperuser` -- an operator account that passes every check of the
+//! admin.
+//!
+//! Opens the accounts at `[auth] url` and makes the account with the
+//! address a superuser. It creates the account first when there is none,
+//! with the password in the variable that `[superuser] password_env` names.
+//! An account that exists keeps its password. Run it twice and nothing
+//! changes.
+//!
+//! Ordinary project code, like `serve`: rename it or delete it, and delete
+//! its line in `src/commands/mod.rs`.
+
+use std::sync::Arc;
+
+use brocanth_auth::{
+    ensure_superuser, Accounts, Passwords, PgStore, SuperuserOutcome, SystemClock,
+};
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Make the account with this address a superuser, creating it if needed
+#[cmd]
+#[derive(clap::Args)]
+pub struct Createsuperuser {
+    /// The account's address
+    #[arg(long, value_name = "ADDRESS")]
+    email: String,
+}
+
+impl Command for Createsuperuser {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        std::env::set_current_dir(ctx.root())?;
+        let (auth, superuser) = settings()?;
+        let name = superuser.password_env;
+        let password = std::env::var(&name).unwrap_or_default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let outcome = runtime.block_on(async {
+            let store = Arc::new(PgStore::connect(&auth.url).await?);
+            store.migrate().await?;
+            let accounts = Accounts::new(
+                Arc::clone(&store),
+                Arc::new(SystemClock),
+                Arc::new(Passwords::recommended()?),
+            )?;
+            anyhow::Ok(ensure_superuser(&accounts, store.as_ref(), &self.email, &password).await)
+        })?;
+        match outcome {
+            Ok(SuperuserOutcome::Created(_)) => println!("created superuser {}", self.email),
+            Ok(SuperuserOutcome::Promoted(_)) => println!("{} is now a superuser", self.email),
+            Ok(SuperuserOutcome::Unchanged(_)) => println!("{} is a superuser already", self.email),
+            // A new account with no password: say where it goes.
+            Err(e) if password.is_empty() => anyhow::bail!(
+                "{e}\nhelp: a new account needs a password; export {name}=<a long passphrase>"
+            ),
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+}
+
+/// `[auth]` and `[superuser]`, through the loader the server uses.
+fn settings() -> anyhow::Result<(
+    crate::plugins::auth::Settings,
+    crate::plugins::superuser::Settings,
+)> {
+    let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
+    Ok((loaded.section("auth")?, loaded.section("superuser")?))
 }
 ===== src/commands/css.rs =====
 //! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
@@ -8583,7 +9122,8 @@ fn screen(admin: Arc<OverOrm>) -> Handler {
                 _ => "GET",
             };
             let form = submission(ctx);
-            let who = principal(ctx);
+            let staff = crate::plugins::superuser::staff(ctx).await?;
+            let who = principal(staff.as_ref());
             // `?` on the admin's own failure: a data source that failed, or
             // a template that did not render. A refusal is not one: it is a
             // page.
@@ -8614,17 +9154,17 @@ fn stamped(ctx: &Ctx, html: String) -> String {
     }
 }
 
-/// Who is asking, as the admin's policy sees it.
+/// Who is asking, as the admin's policy sees it: the signed-in member of
+/// staff, or anonymous.
 ///
-/// Anonymous until this reads your user off the request. When a plugin
-/// publishes one, this is one line:
-///
-/// ```ignore
-/// ctx.provided::<CurrentUser, _>()
-///     .map_or_else(Principal::anonymous, |user| Principal::new(user))
-/// ```
-fn principal(_ctx: &Ctx) -> Principal<'_> {
-    Principal::anonymous()
+/// `StaffPolicy` reads it, behind `integrate.admin` in
+/// `src/modules/superuser.rs`. A policy of your own can read it too:
+/// `principal.downcast::<brocanth_auth::Staff>()`.
+fn principal(staff: Option<&brocanth_auth::Staff>) -> Principal<'_> {
+    match staff {
+        Some(staff) => Principal::new(staff),
+        None => Principal::anonymous(),
+    }
 }
 
 /// The form a POST sent. Anything that is not urlencoded is an empty form,
@@ -9012,6 +9552,11 @@ impl Plugin for Auth {
             })
             .map_err(|e| PluginError::new(format!("[auth] {e}")))?,
         );
+        // In the services too, for a plugin that reads the accounts at
+        // startup, such as `superuser`.
+        if let Some(services) = &self.services {
+            lc.services_mut().insert(services.clone());
+        }
         Ok(())
     }
 
@@ -9049,6 +9594,292 @@ impl Plugin for Auth {
         if let Some(services) = &self.services {
             cx.insert(services.clone());
         }
+    }
+}
+===== src/plugins/auth_oauth/mod.rs =====
+//! Sign-in with a provider: GitHub, Google, Microsoft or GitLab.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! The routes, under `mount_at` in `src/modules/auth_oauth.rs`:
+//!
+//! | Route | Does |
+//! |---|---|
+//! | `GET /oauth/<provider>` | a page with one button, "Continue with GitHub" |
+//! | `POST /oauth/<provider>` | a signed flow cookie, then a redirect to the provider |
+//! | `GET /oauth/<provider>/callback` | the provider's answer: a session, or a page that asks |
+//! | `GET`, `POST /oauth/<provider>/link` | connects the provider to the signed-in account |
+//!
+//! A sign-in page of yours links each provider with a form that posts to
+//! `/oauth/<provider>`. A plain link to the same path shows the button page.
+//!
+//! # Linking
+//!
+//! A provider joins an existing account only by a POST from a session that
+//! is signed in as that account. The callback never links by itself: "the
+//! provider says alice@example.com" is not Alice's consent. A person whose
+//! address already has an account signs in with the password first, then
+//! confirms at `/oauth/<provider>/link`.
+//!
+//! # Another provider
+//!
+//! `brocanth_auth::providers::catalog` has Discord, Slack and Facebook too.
+//! Add a field pair to `Settings` and a line to `Settings::configured`.
+//! Apple needs a client secret that you sign with a private key, and its
+//! callback is a cross-site POST: add its callback path to the CSRF
+//! exemptions first.
+
+use std::sync::{Arc, OnceLock};
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::routing::{BuildError, RouterBuilder, Verb};
+use brocanth_auth::http_client::ReqwestClient;
+use brocanth_auth::oauth::web::{OauthAnswer, OauthRequest, OauthRoutes};
+use brocanth_auth::oauth::ClientConfig;
+use brocanth_auth::plugin::ConfiguredProvider;
+use brocanth_auth::providers::{catalog, Provider};
+use brocanth_auth::SystemClock;
+
+use crate::pages::{Ctx, Error, Handler, Response};
+use crate::plugins::auth::Services;
+
+/// Your registration at each provider: `[auth_oauth]` in the config file,
+/// or `$<APP>_AUTH_OAUTH__<KEY>`.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[auth_oauth]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The providers to offer, by id.
+    pub providers: Vec<String>,
+    /// The scheme and host the providers send the browser back to.
+    pub base_url: String,
+    /// Where a person goes after a sign-in or a link.
+    pub after_sign_in: String,
+    /// Your password sign-in page, for a person who must sign in before a
+    /// link. The flow adds `?next=<the link page>`.
+    pub sign_in_page: Option<String>,
+    /// The client id of the GitHub OAuth app.
+    pub github_client_id: Option<String>,
+    /// The client secret of the GitHub OAuth app. No flag: it is a secret.
+    pub github_client_secret: Option<String>,
+    /// The client id of the Google OAuth client.
+    pub google_client_id: Option<String>,
+    /// The client secret of the Google OAuth client. No flag: it is a secret.
+    pub google_client_secret: Option<String>,
+    /// The application (client) id of the Microsoft Entra app.
+    pub microsoft_client_id: Option<String>,
+    /// The client secret of the Microsoft Entra app. No flag: it is a secret.
+    pub microsoft_client_secret: Option<String>,
+    /// The application id of the GitLab application.
+    pub gitlab_client_id: Option<String>,
+    /// The secret of the GitLab application. No flag: it is a secret.
+    pub gitlab_client_secret: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            providers: vec!["github".to_string()],
+            base_url: "http://localhost:3000".to_string(),
+            after_sign_in: "/".to_string(),
+            sign_in_page: None,
+            github_client_id: None,
+            github_client_secret: None,
+            google_client_id: None,
+            google_client_secret: None,
+            microsoft_client_id: None,
+            microsoft_client_secret: None,
+            gitlab_client_id: None,
+            gitlab_client_secret: None,
+        }
+    }
+}
+
+impl Settings {
+    /// Each provider in `providers`, with its registration. An error names
+    /// the first one that has no id or no secret.
+    fn configured(&self, prefix: &str) -> Result<Vec<ConfiguredProvider>, String> {
+        let known: [(Provider, &Option<String>, &Option<String>); 4] = [
+            (
+                catalog::GITHUB,
+                &self.github_client_id,
+                &self.github_client_secret,
+            ),
+            (
+                catalog::GOOGLE,
+                &self.google_client_id,
+                &self.google_client_secret,
+            ),
+            (
+                catalog::MICROSOFT,
+                &self.microsoft_client_id,
+                &self.microsoft_client_secret,
+            ),
+            (
+                catalog::GITLAB,
+                &self.gitlab_client_id,
+                &self.gitlab_client_secret,
+            ),
+        ];
+        let mut out = Vec::new();
+        for id in &self.providers {
+            let Some((provider, client_id, secret)) = known
+                .iter()
+                .find(|(provider, _, _)| provider.id == id.as_str())
+            else {
+                return Err(format!(
+                    "[auth_oauth] providers names `{id}`, which this file does not configure\n\
+                     help: use github, google, microsoft or gitlab, or add the provider to \
+                     `Settings` in src/plugins/auth_oauth/mod.rs"
+                ));
+            };
+            let (Some(client_id), Some(secret)) = (client_id, secret) else {
+                return Err(format!(
+                    "[auth_oauth] `{id}` has no client id or no client secret\n\
+                     help: set {id}_client_id and {id}_client_secret under [auth_oauth], or \
+                     the variables $<APP>_AUTH_OAUTH__{upper}_CLIENT_ID and \
+                     $<APP>_AUTH_OAUTH__{upper}_CLIENT_SECRET",
+                    upper = id.to_uppercase()
+                ));
+            };
+            out.push(ConfiguredProvider {
+                provider: provider.clone(),
+                client: ClientConfig::new(
+                    client_id.clone(),
+                    secret.clone(),
+                    OauthRoutes::<ReqwestClient, SystemClock>::callback_url(
+                        &self.base_url,
+                        prefix,
+                        id,
+                    ),
+                ),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// The settings this run chose, kept for [`mount`].
+///
+/// `mount` runs when the route table is built, after the plugins are, and
+/// takes no argument it could carry them in. A test that builds the table
+/// without the application gets the defaults, and so no provider.
+static CHOSEN: OnceLock<Settings> = OnceLock::new();
+
+/// Holds the settings and checks them at startup. It puts nothing on the
+/// context: the routes read the auth plugin's services.
+pub struct AuthOauth;
+
+impl Plugin for AuthOauth {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "auth_oauth";
+
+    fn new(config: Settings) -> Self {
+        // The first application built in this process decides.
+        let _ = CHOSEN.set(config);
+        Self
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let Some(settings) = CHOSEN.get() else {
+            return Ok(());
+        };
+        // A provider without a secret is a button that answers an error. In
+        // this project's own tests no secret is set, so nothing is checked.
+        if cfg!(test) {
+            return Ok(());
+        }
+        settings
+            .configured(crate::modules::auth_oauth::MODULE.mount_at)
+            .map(drop)
+            .map_err(PluginError::new)
+    }
+}
+
+type Routes = OauthRoutes<ReqwestClient, SystemClock>;
+
+/// Every route of the flow, under `prefix`.
+///
+/// Two routes: everything under the prefix, for GET and for POST. The flow
+/// reads the provider and the step from the path.
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let defaults = Settings::default();
+    let settings = CHOSEN.get().unwrap_or(&defaults);
+    // `configure` refuses a provider without its registration, so this
+    // drops one only when the application is not the one being started.
+    let providers = settings.configured(prefix).unwrap_or_default();
+    // Fails only when the TLS backend cannot start, which no request could
+    // recover from.
+    let http = ReqwestClient::with_default_timeout().expect("auth_oauth: an HTTP client");
+    let mut flow = Routes::new(Arc::new(http), Arc::new(SystemClock), providers)
+        .at(prefix)
+        .after_sign_in(&settings.after_sign_in);
+    if let Some(page) = &settings.sign_in_page {
+        flow = flow.sign_in_page(page);
+    }
+    let flow = Arc::new(flow);
+    let pattern = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+    routes.route(&pattern, Verb::Get, step(Arc::clone(&flow)))?;
+    routes.route(&pattern, Verb::Post, step(flow))?;
+    Ok(())
+}
+
+/// One handler for every step. The flow reads the path and decides.
+fn step(flow: Arc<Routes>) -> Handler {
+    Box::new(move |ctx: &mut Ctx| {
+        let flow = Arc::clone(&flow);
+        Box::pin(async move {
+            let ctx = &*ctx;
+            let Some(auth) = ctx.provided::<Services, _>() else {
+                return Err(Error::new(
+                    503,
+                    "auth_oauth: the auth services are not on this request\n\
+                     help: register the auth plugin in src/plugins/mod.rs",
+                ));
+            };
+            let request = OauthRequest {
+                post: ctx.verb == Verb::Post,
+                path: &ctx.path,
+                query: &ctx.query,
+                body: ctx.body_text().unwrap_or(""),
+                cookies: ctx.header("cookie").unwrap_or(""),
+            };
+            let answer = flow
+                .answer(auth, request)
+                .await
+                .map_err(|e| Error::internal(format!("auth_oauth: {e}")))?;
+            let (response, cookies) = match answer {
+                OauthAnswer::Redirect { location, cookies } => (
+                    Response::empty(303).with_header("location", location),
+                    cookies,
+                ),
+                OauthAnswer::Page {
+                    status,
+                    page,
+                    cookies,
+                } => (Response::new(status, stamped(ctx, page.html())), cookies),
+            };
+            Ok(cookies.iter().fold(response, |response, cookie| {
+                response.with_header("set-cookie", cookie.as_str())
+            }))
+        })
+    })
+}
+
+/// The page with the CSRF token in every form that posts.
+///
+/// The flow renders its own forms and does not know the token. Without a
+/// token on the request, a test that built the context by hand, the page
+/// goes out unchanged.
+fn stamped(ctx: &Ctx, html: String) -> String {
+    match ctx.hooked::<brocanth_middleware::CsrfToken>() {
+        Some(token) => token.stamp_forms(&html),
+        None => html,
     }
 }
 ===== src/plugins/cache/mod.rs =====
@@ -11553,6 +12384,55 @@ mod tests {
         assert!(error.contains("help:"), "{error}");
     }
 }
+===== src/plugins/roles/mod.rs =====
+//! Roles: named sets of permissions, given to accounts.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! A permission is a string. The admin asks for `<model>.view`, `.add`,
+//! `.change` and `.delete` for a model, and `<panel>.view` and `.act` for a
+//! tab. A page of yours may ask for any other. A superuser holds every
+//! permission. Only a superuser changes roles, in the admin's Roles tab.
+//!
+//! Who may see a page is a role question:
+//!
+//! ```ignore
+//! let staff = crate::plugins::roles::require(ctx, "report.view").await?;
+//! ```
+//!
+//! Which rows is a row question, and it goes into the query through
+//! `brocanth-policy`. `Staff::gate` turns a permission into a predicate, so
+//! both travel in one `condition()`:
+//!
+//! ```ignore
+//! fn update(&self, who: &Visitor) -> EntityPred<Post> {
+//!     // Editors change every post; everybody else changes their own.
+//!     who.staff.gate("post.change").or(Pred::eq(PostColumn::AuthorId, who.id))
+//! }
+//! ```
+
+use brocanth_auth::Staff;
+
+use crate::pages::{Ctx, Error};
+
+/// The signed-in member of staff, when it holds `permission`.
+///
+/// # Errors
+/// 401 when nobody on the staff is signed in, 403 when the account lacks
+/// the permission.
+#[allow(dead_code)] // for your pages
+pub async fn require(ctx: &Ctx, permission: &str) -> Result<Staff, Error> {
+    let Some(staff) = crate::plugins::superuser::staff(ctx).await? else {
+        return Err(Error::new(401, "sign in with a staff account"));
+    };
+    if !staff.allows(permission) {
+        return Err(Error::new(
+            403,
+            format!("this needs the permission {permission}"),
+        ));
+    }
+    Ok(staff)
+}
 ===== src/plugins/sessions/mod.rs =====
 //! Cookie sessions, and the one value they put on the context.
 
@@ -12072,6 +12952,167 @@ impl Plugin for Files {
         }
     }
 }
+===== src/plugins/superuser/mod.rs =====
+//! Superusers: operator accounts that pass every check of the admin.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! A superuser is a flag on an account. An operator sets it, never a form a
+//! visitor can reach:
+//!
+//! * at start, from `[superuser] email` and the password in the variable
+//!   that `password_env` names, when `email` is set;
+//! * with `createsuperuser --email <address>`, when the accounts are in
+//!   Postgres.
+//!
+//! Both are idempotent. An account that exists is promoted and keeps its
+//! password, so a second run does not reset a password somebody changed.
+//!
+//! [`staff`] reads the signed-in member of staff off a request: a
+//! superuser, or an account that holds a role. The admin uses it as its
+//! principal. A page of yours can too:
+//!
+//! ```ignore
+//! let Some(staff) = crate::plugins::superuser::staff(ctx).await? else {
+//!     return Err(Error::new(403, "staff only"));
+//! };
+//! ```
+
+use std::sync::{Arc, LazyLock, OnceLock};
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth_auth::{ensure_superuser, Staff, SuperuserOutcome};
+
+use crate::pages::{Ctx, Error};
+use crate::plugins::auth::{Services, Store};
+
+/// The superuser the server makes at start: `[superuser]` in the config
+/// file, or `$<APP>_SUPERUSER__<KEY>`.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[superuser]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The superuser's address. `None` makes no superuser at start.
+    pub email: Option<String>,
+    /// The *name* of the variable that holds its password, not the
+    /// password.
+    pub password_env: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            email: None,
+            password_env: "MY_BLOG_SUPERUSER_PASSWORD".to_string(),
+        }
+    }
+}
+
+/// The accounts store, once the auth plugin has built it. The admin's
+/// roles tab reads it: the admin is built with the route table, before any
+/// plugin starts.
+static STORE: LazyLock<Arc<OnceLock<Arc<Store>>>> = LazyLock::new(Default::default);
+
+/// The cell [`STORE`] fills at startup.
+#[allow(dead_code)] // read by the roles tab, with `roles`
+pub fn store() -> Arc<OnceLock<Arc<Store>>> {
+    Arc::clone(&STORE)
+}
+
+/// The signed-in member of staff, or `None`: no session, a pre-login one,
+/// or an account that is neither a superuser nor holds a role.
+///
+/// # Errors
+/// A store that fails is a 500. A missing or forged cookie is `None`.
+#[allow(dead_code)] // read by the admin, with `admin`
+pub async fn staff(ctx: &Ctx) -> Result<Option<Staff>, Error> {
+    let (Some(auth), Some(cookies)) = (ctx.provided::<Services, _>(), ctx.header("cookie")) else {
+        return Ok(None);
+    };
+    Staff::from_cookie_header(auth, cookies)
+        .await
+        .map_err(|e| Error::internal(format!("superuser: {e}")))
+}
+
+pub struct Superuser {
+    settings: Settings,
+    /// Read in `configure`, used once in `start`.
+    password: Option<String>,
+}
+
+impl Plugin for Superuser {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "superuser";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            password: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.settings.email.is_none() {
+            return Ok(());
+        }
+        let name = &self.settings.password_env;
+        match std::env::var(name) {
+            Ok(password) if !password.is_empty() => self.password = Some(password),
+            // This project's own tests build the application with no secret
+            // in the environment, and make no superuser.
+            _ if cfg!(test) => {}
+            _ => {
+                return Err(PluginError::new(format!(
+                    "[superuser] email is set and ${name} is not\n\
+                     help: export {name}=<a long passphrase>, or unset [superuser] email"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let services = lc.require_service::<Services>()?;
+        let _ = STORE.set(Arc::clone(services.store()));
+        Ok(())
+    }
+
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let (Some(email), Some(password)) = (self.settings.email.clone(), self.password.take())
+        else {
+            return Ok(());
+        };
+        let services = lc.require_service::<Services>()?.clone();
+        // `start` runs after the startup gate, so the auth tables exist.
+        tokio::spawn(async move {
+            let outcome = ensure_superuser(
+                services.accounts(),
+                services.store().as_ref(),
+                &email,
+                &password,
+            )
+            .await;
+            match outcome {
+                Ok(SuperuserOutcome::Created(_)) => {
+                    crate::plugins::say!(info, "superuser: created {email}"; %email);
+                }
+                Ok(SuperuserOutcome::Promoted(_)) => {
+                    crate::plugins::say!(info, "superuser: promoted {email}"; %email);
+                }
+                Ok(SuperuserOutcome::Unchanged(_)) => {}
+                Err(e) => {
+                    crate::plugins::say!(warn, "superuser: {email}: {e}"; %email, error = %e);
+                }
+            }
+        });
+        Ok(())
+    }
+}
 ===== src/plugins/validation/mod.rs =====
 //! Request validation, as this application registers it.
 //!
@@ -12278,6 +13319,9 @@ request.
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
+- `auth-oauth`  sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client
+- `superuser`  operator accounts that pass every admin check, and a createsuperuser command
+- `roles`  roles that grant permissions, stored with the accounts, for staff and the admin
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 - `input`  a form or a JSON body, read into a struct, with every fault at once
@@ -12582,6 +13626,28 @@ or an account number is not. Do not add a column to
 With the admin, the numbers are at `/admin/analytics`, behind the
 admin's policy like every tab.
 
+## Provider sign-in
+
+`src/plugins/auth_oauth/mod.rs` mounts the OAuth flow at `/oauth`. A
+sign-in button is a form that posts to `/oauth/<provider>`, never a
+link that starts the flow: a GET that starts a sign-in can be fired by
+any page on the web.
+
+Never link a provider to an account because the addresses match. The
+flow links only on a POST from a session that is signed in as that
+account, so a provider that reports somebody else's address cannot
+take the account over.
+
+A client secret goes in `$<APP>_AUTH_OAUTH__<PROVIDER>_CLIENT_SECRET`,
+never in a committed config file.
+
+## Superusers
+
+`src/plugins/superuser/mod.rs` reads the signed-in member of staff with
+`staff(ctx)`. A superuser passes every check of the admin. Never set the
+superuser flag from a form or a page: an operator sets it, with
+`[superuser] email` at start or the `createsuperuser` command.
+
 ## Security headers
 
 `brocanth_middleware::SecurityHeaders` is registered in
@@ -12699,6 +13765,13 @@ A request carrying `DP-Partial: n` drops the outermost `n` layouts, and
 `html!` resolves that into a `match` over the chain. A handler never reads the
 header and never changes for it.
 
+## Roles
+
+Check a permission with `crate::plugins::roles::require(ctx, "<name>")`.
+A role answers which people; it does not answer which rows. Put a row
+rule in a `brocanth_policy::Policy`, and combine it with a permission
+through `Staff::gate`. Never filter rows after a paginated load.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -12748,7 +13821,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 789d460e94a7383a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +13833,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "auth-oauth", "superuser", "roles", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -12866,6 +13939,30 @@ config = ["auth"]
 crates = ["brocanth-auth"]
 adapted_to = ["config", "jobs", "cache"]
 
+[modules.auth-oauth]
+version = "0.1.0"
+kind = ["routes", "enhancer"]
+files = ["src/modules/auth_oauth.rs", "src/plugins/auth_oauth/"]
+config = ["auth_oauth"]
+crates = ["brocanth-auth"]
+adapted_to = ["config", "middleware-csrf"]
+
+[modules.superuser]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/superuser.rs", "src/commands/createsuperuser.rs", "src/plugins/superuser/"]
+config = ["superuser"]
+crates = ["brocanth-auth"]
+adapted_to = ["config", "commands", "jobs", "cache", "admin"]
+
+[modules.roles]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/roles.rs", "src/plugins/roles/"]
+config = []
+crates = ["brocanth-auth"]
+adapted_to = ["admin"]
+
 [modules.policy]
 version = "0.1.0"
 kind = ["middleware"]
@@ -12968,7 +14065,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/admin.rs", "src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "middleware-csrf", "admin-model", "commands"]
+adapted_to = ["config", "middleware-csrf", "superuser", "admin-model", "commands"]
 
 [modules.admin-model]
 version = "0.1.0"
@@ -13098,4 +14195,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: 149a39ec8892c7b0

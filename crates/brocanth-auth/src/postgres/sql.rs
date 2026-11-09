@@ -18,7 +18,9 @@
 //! account that does not exist, on purpose: see [`crate::otp`]. The traits
 //! also have no "delete an account", so a cascade would have nothing to
 //! follow. The tables therefore accept any account id, as
-//! [`MemoryStore`](crate::memory::MemoryStore) does.
+//! [`MemoryStore`](crate::memory::MemoryStore) does. One key exists, from a
+//! role assignment to its role, because deleting a role must delete its
+//! assignments: see `brocanth_auth_account_roles`.
 //!
 //! # Ordering is `COLLATE "C"`
 //!
@@ -150,6 +152,25 @@ pub(crate) const SCHEMA: &[&str] = &[
         last_seen_at BIGINT NOT NULL,
         PRIMARY KEY (account, fingerprint)
     )"#,
+    // -- staff ---------------------------------------------------------------
+    r#"CREATE TABLE IF NOT EXISTS brocanth_auth_superusers (
+        account TEXT PRIMARY KEY
+    )"#,
+    r#"CREATE TABLE IF NOT EXISTS brocanth_auth_roles (
+        name        TEXT   PRIMARY KEY,
+        permissions TEXT[] NOT NULL DEFAULT '{}'
+    )"#,
+    // The one foreign key in the schema, and the reason is the trait's
+    // promise: deleting a role removes its assignments. The cascade does it
+    // in the same statement, and an assignment that races the delete waits
+    // on the role row's key lock instead of writing an orphan.
+    r#"CREATE TABLE IF NOT EXISTS brocanth_auth_account_roles (
+        account TEXT NOT NULL,
+        role    TEXT NOT NULL REFERENCES brocanth_auth_roles (name) ON DELETE CASCADE,
+        PRIMARY KEY (account, role)
+    )"#,
+    r#"CREATE INDEX IF NOT EXISTS brocanth_auth_account_roles_role
+        ON brocanth_auth_account_roles (role)"#,
 ];
 
 /// The name of the unique index on the email, for telling
@@ -371,6 +392,51 @@ pub(crate) const COUNT_SIGN_IN_LOCATIONS: &str =
 
 pub(crate) const PURGE_SIGN_IN_LOCATIONS: &str =
     "DELETE FROM brocanth_auth_sign_in_locations WHERE last_seen_at < $1";
+
+// ---------------------------------------------------------------------------
+// staff
+// ---------------------------------------------------------------------------
+
+pub(crate) const GRANT_SUPERUSER: &str =
+    "INSERT INTO brocanth_auth_superusers (account) VALUES ($1) ON CONFLICT DO NOTHING";
+
+pub(crate) const REVOKE_SUPERUSER: &str = "DELETE FROM brocanth_auth_superusers WHERE account = $1";
+
+pub(crate) const IS_SUPERUSER: &str = "SELECT 1 FROM brocanth_auth_superusers WHERE account = $1";
+
+pub(crate) const SUPERUSERS: &str =
+    r#"SELECT account FROM brocanth_auth_superusers ORDER BY account COLLATE "C""#;
+
+pub(crate) const PUT_ROLE: &str = "INSERT INTO brocanth_auth_roles (name, permissions) \
+     VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions";
+
+/// The cascade deletes the assignments in the same statement.
+pub(crate) const DELETE_ROLE: &str = "DELETE FROM brocanth_auth_roles WHERE name = $1";
+
+pub(crate) const ROLES: &str =
+    r#"SELECT name, permissions FROM brocanth_auth_roles ORDER BY name COLLATE "C""#;
+
+/// Inserts the assignment only when the role exists, and answers how many
+/// roles had that name: zero or one. The insert takes a key lock on the role
+/// row, so a concurrent delete waits for it and then cascades.
+pub(crate) const ASSIGN_ROLE: &str =
+    "WITH r AS (SELECT name FROM brocanth_auth_roles WHERE name = $2), \
+     added AS (INSERT INTO brocanth_auth_account_roles (account, role) \
+               SELECT $1, name FROM r ON CONFLICT DO NOTHING) \
+     SELECT count(*) FROM r";
+
+pub(crate) const UNASSIGN_ROLE: &str =
+    "DELETE FROM brocanth_auth_account_roles WHERE account = $1 AND role = $2";
+
+pub(crate) const ROLES_OF: &str = r#"SELECT role FROM brocanth_auth_account_roles
+     WHERE account = $1 ORDER BY role COLLATE "C""#;
+
+pub(crate) const MEMBERS: &str = r#"SELECT account FROM brocanth_auth_account_roles
+     WHERE role = $1 ORDER BY account COLLATE "C""#;
+
+pub(crate) const PERMISSIONS_OF: &str = "SELECT DISTINCT p FROM brocanth_auth_account_roles a \
+     JOIN brocanth_auth_roles r ON r.name = a.role, unnest(r.permissions) AS p \
+     WHERE a.account = $1";
 
 // ---------------------------------------------------------------------------
 // sweeping

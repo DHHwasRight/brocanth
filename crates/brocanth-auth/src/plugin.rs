@@ -102,6 +102,8 @@ pub struct AuthConfig<S: AuthStore, H: HttpClient, C: Clock> {
 }
 
 struct Inner<S: AuthStore, H: HttpClient, C: Clock> {
+    store: Arc<S>,
+    clock: Arc<C>,
     accounts: Accounts<S, C>,
     sessions: Sessions<S, C>,
     linking: Linking<S, C>,
@@ -153,6 +155,8 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Auth<S, H, C> {
         let linking = Linking::new(config.store.clone(), config.clock.clone());
         let oauth = OauthClient::new(config.http.clone(), config.clock.clone());
         Ok(Self(Arc::new(Inner {
+            store: config.store,
+            clock: config.clock,
             accounts,
             sessions,
             linking,
@@ -189,6 +193,19 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Auth<S, H, C> {
     /// Every configured provider, for rendering the sign-in buttons.
     pub fn providers(&self) -> &[ConfiguredProvider] {
         &self.0.providers
+    }
+
+    /// The store the services share.
+    ///
+    /// For the stores that are not on `Auth`: build `Mfa`, `Otp` or read a
+    /// [`StaffStore`](crate::storage::StaffStore) over the same rows.
+    pub fn store(&self) -> &Arc<S> {
+        &self.0.store
+    }
+
+    /// The clock the services share.
+    pub fn clock(&self) -> &Arc<C> {
+        &self.0.clock
     }
 
     fn provider_ids(&self) -> Vec<&str> {

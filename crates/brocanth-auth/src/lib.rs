@@ -196,6 +196,8 @@ pub mod scaffold;
 #[cfg(feature = "runtime")]
 pub mod session;
 #[cfg(feature = "runtime")]
+pub mod staff;
+#[cfg(feature = "runtime")]
 pub mod storage;
 #[cfg(feature = "runtime")]
 pub mod tokens;
@@ -246,9 +248,12 @@ pub use recovery::{RecoveryCode, RecoveryCodes};
 #[cfg(feature = "runtime")]
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
 #[cfg(feature = "runtime")]
+pub use staff::{ensure_superuser, Staff, SuperuserOutcome};
+#[cfg(feature = "runtime")]
 pub use storage::{
     AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 #[cfg(feature = "runtime")]
 pub use tokens::{IssuedToken, TokenPurpose, Tokens};

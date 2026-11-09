@@ -94,11 +94,15 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_cache::scaffold::Cache,
     // The queue, from the crate that is the queue.
     &brocanth_jobs::scaffold::Jobs,
-    // Accounts, from the crate that is the accounts. The local path only:
-    // there is one `AuthStore` in the workspace and it is a `HashMap`, and
-    // a provider cannot be a second choice until a crate can appear in two
-    // modules' dependency lists.
+    // Accounts, from the crate that is the accounts. The local path; the
+    // providers are a child, which turns on the HTTP client feature of the
+    // same crate (dependencies merge by name).
     &brocanth_auth::scaffold::Auth,
+    &brocanth_auth::scaffold::AuthOauth,
+    // The people who operate the application: superusers, who pass every
+    // admin check, and roles that grant permissions.
+    &brocanth_auth::scaffold::Superuser,
+    &brocanth_auth::scaffold::Roles,
     // The rule algebra. `after("model")` and not `needs`: a condition
     // inverts into a broadcast key as well as a `WHERE`, so requiring an
     // ORM would refuse a project that broadcasts and stores nothing.

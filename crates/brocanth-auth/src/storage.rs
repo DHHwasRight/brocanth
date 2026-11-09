@@ -21,6 +21,8 @@
 //! * [`SignInLocationStore`] — the networks an account has signed in from.
 //! * [`AccountDirectory`] — listing accounts and their sessions, for an
 //!   operator looking at a backoffice.
+//! * [`StaffStore`] — superusers, roles and the permissions a role grants,
+//!   for the people who operate the application.
 //!
 //! §8 of the plan says a capability that was not asked for must be *absent*,
 //! not merely switched off, and a trait is where that rule lands for storage: a
@@ -80,6 +82,8 @@
 //!
 //! [`Accounts`]: crate::accounts::Accounts
 //! [`MemoryStore`]: crate::memory::MemoryStore
+
+use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
@@ -546,6 +550,85 @@ pub trait SignInLocationStore: AuthStore {
     /// Forgets networks unused since `unseen_since`, and answers how many rows
     /// went.
     async fn purge_sign_in_locations(&self, unseen_since: UnixTime) -> Result<u64, StoreError>;
+}
+
+/// A named set of permissions, for staff.
+///
+/// A permission is an opaque string the application chooses. The backoffice
+/// reads `<model>.view`, `<model>.add`, `<model>.change` and
+/// `<model>.delete` for a model, and `<panel>.view` and `<panel>.act` for a
+/// panel: see [`crate::staff`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Role {
+    /// The role's name. Unique, and the key an assignment refers to.
+    pub name: String,
+    /// What the role grants. A set, so the order and repeats do not matter.
+    pub permissions: BTreeSet<String>,
+}
+
+impl Role {
+    /// A role with these permissions.
+    pub fn new<I, P>(name: impl Into<String>, permissions: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<String>,
+    {
+        Self {
+            name: name.into(),
+            permissions: permissions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Superusers, roles and role assignments, for the people who operate the
+/// application.
+///
+/// Separate from [`AuthStore`] for the reason the module documentation gives:
+/// an application with no staff implements nothing. Django keeps the same
+/// three things in `contrib.auth`: `is_superuser`, groups and permissions.
+///
+/// # What an implementation must guarantee
+///
+/// * **Every list is sorted**, by name or by account id, so a screen shows
+///   the same order on every load.
+/// * **Deleting a role removes its assignments.** An old assignment must not
+///   grant anything when a role with the same name is created later.
+/// * **Assignment and its removal are idempotent.**
+#[async_trait]
+pub trait StaffStore: AuthStore {
+    /// Makes an account a superuser, or not.
+    async fn set_superuser(&self, account: &AccountId, superuser: bool) -> Result<(), StoreError>;
+
+    /// Whether the account is a superuser.
+    async fn is_superuser(&self, account: &AccountId) -> Result<bool, StoreError>;
+
+    /// Every superuser, by account id.
+    async fn superusers(&self) -> Result<Vec<AccountId>, StoreError>;
+
+    /// Creates a role, or replaces the permissions of the role with that name.
+    async fn put_role(&self, role: &Role) -> Result<(), StoreError>;
+
+    /// Deletes a role and every assignment to it. Answers whether it existed.
+    async fn delete_role(&self, name: &str) -> Result<bool, StoreError>;
+
+    /// Every role, by name.
+    async fn roles(&self) -> Result<Vec<Role>, StoreError>;
+
+    /// Gives an account a role. Answers `false`, and changes nothing, when no
+    /// role has that name.
+    async fn assign_role(&self, account: &AccountId, role: &str) -> Result<bool, StoreError>;
+
+    /// Takes a role from an account. Nothing happens when it did not have it.
+    async fn unassign_role(&self, account: &AccountId, role: &str) -> Result<(), StoreError>;
+
+    /// The names of the account's roles, sorted.
+    async fn roles_of(&self, account: &AccountId) -> Result<Vec<String>, StoreError>;
+
+    /// The accounts that have a role, by account id.
+    async fn members(&self, role: &str) -> Result<Vec<AccountId>, StoreError>;
+
+    /// Every permission the account's roles grant.
+    async fn permissions_of(&self, account: &AccountId) -> Result<BTreeSet<String>, StoreError>;
 }
 
 impl From<StoreError> for crate::error::AuthError {

@@ -83,6 +83,12 @@
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
+mod oauth;
+mod staff;
+
+pub use oauth::AuthOauth;
+pub use staff::{Roles, Superuser};
+
 /// Accounts, as a choice on the `brocanth create` menu.
 ///
 /// A unit struct, because a module is asked once per run and everything it
@@ -267,7 +273,7 @@ pub type Store = PgStore;",
         }",
     ),
     (
-        "    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        "    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {",
         "    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.url.is_empty() {
@@ -667,7 +673,7 @@ impl Plugin for Auth {{
         }}
     }}
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         if self.settings.cookie_name.is_empty() {{
             return Err(PluginError::new("[auth] cookie_name must not be empty"));
         }}
@@ -741,6 +747,11 @@ impl Plugin for Auth {{
             }})
             .map_err(|e| PluginError::new(format!("[auth] {{e}}")))?,
         );
+        // In the services too, for a plugin that reads the accounts at
+        // startup, such as `superuser`.
+        if let Some(services) = &self.services {{
+            lc.services_mut().insert(services.clone());
+        }}
         Ok(())
     }}
 

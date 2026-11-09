@@ -6,7 +6,7 @@
 //! specification of the trait's two hard requirements — the email is unique,
 //! and [`MemoryStore::consume_token`] deletes and returns under one lock.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -17,7 +17,8 @@ use crate::otp::OtpChallengeId;
 use crate::session::SessionId;
 use crate::storage::{
     AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -31,6 +32,10 @@ struct State {
     recovery: HashMap<AccountId, HashSet<[u8; 32]>>,
     otp: HashMap<OtpChallengeId, OtpChallengeRecord>,
     locations: HashMap<(AccountId, [u8; 32]), UnixTime>,
+    // Ordered, because the trait promises sorted lists.
+    superusers: BTreeSet<AccountId>,
+    roles: BTreeMap<String, BTreeSet<String>>,
+    assignments: BTreeSet<(AccountId, String)>,
 }
 
 /// An [`AuthStore`] in a `Mutex<HashMap>`.
@@ -548,5 +553,125 @@ impl SignInLocationStore for MemoryStore {
         let before = state.locations.len();
         state.locations.retain(|_, seen| *seen >= unseen_since);
         Ok((before - state.locations.len()) as u64)
+    }
+}
+
+#[async_trait]
+impl StaffStore for MemoryStore {
+    async fn set_superuser(&self, account: &AccountId, superuser: bool) -> Result<(), StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        if superuser {
+            state.superusers.insert(account.clone());
+        } else {
+            state.superusers.remove(account);
+        }
+        Ok(())
+    }
+
+    async fn is_superuser(&self, account: &AccountId) -> Result<bool, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .superusers
+            .contains(account))
+    }
+
+    async fn superusers(&self) -> Result<Vec<AccountId>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .superusers
+            .iter()
+            .cloned()
+            .collect())
+    }
+
+    async fn put_role(&self, role: &Role) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .roles
+            .insert(role.name.clone(), role.permissions.clone());
+        Ok(())
+    }
+
+    async fn delete_role(&self, name: &str) -> Result<bool, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        // One lock for both, so no reader sees the assignments of a role that
+        // is already gone.
+        state.assignments.retain(|(_, role)| role != name);
+        Ok(state.roles.remove(name).is_some())
+    }
+
+    async fn roles(&self) -> Result<Vec<Role>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .roles
+            .iter()
+            .map(|(name, permissions)| Role {
+                name: name.clone(),
+                permissions: permissions.clone(),
+            })
+            .collect())
+    }
+
+    async fn assign_role(&self, account: &AccountId, role: &str) -> Result<bool, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        if !state.roles.contains_key(role) {
+            return Ok(false);
+        }
+        state
+            .assignments
+            .insert((account.clone(), role.to_string()));
+        Ok(true)
+    }
+
+    async fn unassign_role(&self, account: &AccountId, role: &str) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .assignments
+            .remove(&(account.clone(), role.to_string()));
+        Ok(())
+    }
+
+    async fn roles_of(&self, account: &AccountId) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .assignments
+            .iter()
+            .filter(|(who, _)| who == account)
+            .map(|(_, role)| role.clone())
+            .collect())
+    }
+
+    async fn members(&self, role: &str) -> Result<Vec<AccountId>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .assignments
+            .iter()
+            .filter(|(_, held)| held == role)
+            .map(|(who, _)| who.clone())
+            .collect())
+    }
+
+    async fn permissions_of(&self, account: &AccountId) -> Result<BTreeSet<String>, StoreError> {
+        let state = self.state.lock().expect("memory store lock");
+        Ok(state
+            .assignments
+            .iter()
+            .filter(|(who, _)| who == account)
+            .filter_map(|(_, role)| state.roles.get(role))
+            .flatten()
+            .cloned()
+            .collect())
     }
 }

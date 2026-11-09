@@ -24,6 +24,7 @@
 //! brocanth_auth::mfa_store_conformance!(fresh);
 //! brocanth_auth::otp_store_conformance!(fresh);
 //! brocanth_auth::sign_in_location_store_conformance!(fresh);
+//! brocanth_auth::staff_store_conformance!(fresh);
 //! ```
 //!
 //! Each macro writes a module of `#[tokio::test]` functions, one per case, so
@@ -59,7 +60,8 @@ use crate::otp::OtpChallengeId;
 use crate::session::{Privilege, SessionId};
 use crate::storage::{
     AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -242,6 +244,23 @@ macro_rules! sign_in_location_store_conformance {
                 a_network_is_new_once,
                 purging_forgets_unused_networks,
                 concurrent_first_sign_ins_report_new_once,
+            ]
+        );
+    };
+}
+
+/// Every [`StaffStore`] case, as tests.
+#[macro_export]
+macro_rules! staff_store_conformance {
+    ($fresh:ident) => {
+        $crate::__auth_conformance_cases!(
+            $fresh,
+            staff_store,
+            [
+                a_superuser_is_granted_and_revoked,
+                a_role_grants_its_permissions,
+                an_unknown_role_is_not_assigned,
+                deleting_a_role_removes_its_assignments,
             ]
         );
     };
@@ -1214,5 +1233,119 @@ pub mod sign_in_location_store {
             "each sign-in saw a different previous one: {results:?}"
         );
         assert_eq!(store.count_sign_in_locations(&ada).await.unwrap(), 1);
+    }
+}
+
+/// The [`StaffStore`] cases.
+pub mod staff_store {
+    use super::*;
+
+    fn sorted(mut ids: Vec<AccountId>) -> Vec<AccountId> {
+        ids.sort();
+        ids
+    }
+
+    /// Granting twice is one grant; revoking takes it away; the list is
+    /// sorted.
+    pub async fn a_superuser_is_granted_and_revoked<S: StaffStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let eve = account(&*store, None).await;
+        assert!(!store.is_superuser(&ada).await.unwrap());
+        store.set_superuser(&ada, true).await.unwrap();
+        store.set_superuser(&ada, true).await.unwrap();
+        store.set_superuser(&eve, true).await.unwrap();
+        assert!(store.is_superuser(&ada).await.unwrap());
+        assert_eq!(
+            store.superusers().await.unwrap(),
+            sorted(vec![ada.clone(), eve.clone()])
+        );
+        store.set_superuser(&ada, false).await.unwrap();
+        store.set_superuser(&ada, false).await.unwrap();
+        assert!(!store.is_superuser(&ada).await.unwrap());
+        assert_eq!(store.superusers().await.unwrap(), vec![eve]);
+    }
+
+    /// An account holds the union of its roles' permissions, and replacing a
+    /// role's permissions changes what every member holds.
+    pub async fn a_role_grants_its_permissions<S: StaffStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let eve = account(&*store, None).await;
+        store
+            .put_role(&Role::new("editor", ["post.view", "post.change"]))
+            .await
+            .unwrap();
+        store
+            .put_role(&Role::new("auditor", ["post.view", "log.view"]))
+            .await
+            .unwrap();
+        assert!(store.assign_role(&ada, "editor").await.unwrap());
+        assert!(store.assign_role(&ada, "auditor").await.unwrap());
+        assert!(store.assign_role(&ada, "auditor").await.unwrap());
+        assert!(store.assign_role(&eve, "editor").await.unwrap());
+
+        let names: Vec<String> = store
+            .roles()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["auditor", "editor"]);
+        assert_eq!(store.roles_of(&ada).await.unwrap(), ["auditor", "editor"]);
+        assert_eq!(
+            store.members("editor").await.unwrap(),
+            sorted(vec![ada.clone(), eve.clone()])
+        );
+        let held: Vec<String> = store
+            .permissions_of(&ada)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(held, ["log.view", "post.change", "post.view"]);
+
+        store
+            .put_role(&Role::new("editor", ["post.view"]))
+            .await
+            .unwrap();
+        let held: Vec<String> = store
+            .permissions_of(&eve)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(held, ["post.view"], "the new permissions replace the old");
+
+        store.unassign_role(&ada, "auditor").await.unwrap();
+        store.unassign_role(&ada, "auditor").await.unwrap();
+        assert_eq!(store.roles_of(&ada).await.unwrap(), ["editor"]);
+    }
+
+    /// A role nobody created is not assigned, and the answer says so.
+    pub async fn an_unknown_role_is_not_assigned<S: StaffStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        assert!(!store.assign_role(&ada, "ghost").await.unwrap());
+        assert!(store.roles_of(&ada).await.unwrap().is_empty());
+        assert!(store.permissions_of(&ada).await.unwrap().is_empty());
+    }
+
+    /// A deleted role takes its assignments with it: a role created later
+    /// under the same name grants nothing to the old members.
+    pub async fn deleting_a_role_removes_its_assignments<S: StaffStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        store
+            .put_role(&Role::new("editor", ["post.change"]))
+            .await
+            .unwrap();
+        assert!(store.assign_role(&ada, "editor").await.unwrap());
+        assert!(store.delete_role("editor").await.unwrap());
+        assert!(!store.delete_role("editor").await.unwrap());
+        assert!(store.roles_of(&ada).await.unwrap().is_empty());
+        store
+            .put_role(&Role::new("editor", ["post.change"]))
+            .await
+            .unwrap();
+        assert!(store.permissions_of(&ada).await.unwrap().is_empty());
+        assert!(store.members("editor").await.unwrap().is_empty());
     }
 }

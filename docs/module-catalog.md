@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 44 modules. Each name links to its own page
+what to build next. There are 47 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -52,12 +52,13 @@ nothing holds this page.
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |
 | [`rsx-htmx`](modules/rsx-htmx.md) | A click swaps what changed; the server renders from the shared layout down |  |  | part of `rsx`, ticked with its parent | static-site safe |
 
-### Routes (10)
+### Routes (11)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`admin`](modules/admin.md) | A Django-shaped backoffice at /admin, locked until you say who may in | Enhancer |  |  |  |
 | [`admin-model`](modules/admin-model.md) | The admin's rows over SeaORM, one line per entity |  |  | part of `admin`, off until you tick it; needs `model`: it reads rows through the ORM, and without `model` there is none |  |
+| [`auth-oauth`](modules/auth-oauth.md) | Sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Enhancer |  | part of `auth`, off until you tick it |  |
 | [`observability-health`](modules/observability-health.md) | /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM |  | yes | part of `observability`, ticked with its parent |  |
 | [`observability-metrics`](modules/observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues |  | yes | part of `observability`, ticked with its parent |  |
 | [`openapi`](modules/openapi.md) | An OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Enhancer |  |  |  |
@@ -67,7 +68,7 @@ nothing holds this page.
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
-### Enhancer (10)
+### Enhancer (12)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -80,7 +81,9 @@ nothing holds this page.
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
+| [`roles`](modules/roles.md) | Roles that grant permissions, stored with the accounts, for staff and the admin |  |  | needs `superuser`: only a superuser gives a role, and `superuser` reads the signed-in member of staff |  |
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
+| [`superuser`](modules/superuser.md) | Operator accounts that pass every admin check, and a createsuperuser command |  |  | needs `auth`: a superuser is an account with a flag, and `auth` holds the accounts |  |
 
 ### External (6)
 
