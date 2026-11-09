@@ -103,6 +103,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # end (`docs/framework-gaps.md` §G6).
 brocanth-test.workspace = true
 
+# The contract as a suite. `tests/conformance.rs` runs it on `MemoryCache`
+# always and on `PgCache` when a database is set. A dev-dependency cycle,
+# which cargo allows: the suite links this crate's library, not its tests.
+brocanth-cache-conformance = { path = "../brocanth-cache-conformance" }
+
 [features]
 # `postgres` is the default and the only backend here. SQLite is the "smaller
 # setups, different crate" case, and this crate is shaped so that crate can

@@ -1,0 +1,24 @@
+[package]
+name = "brocanth-cache-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+readme = "README.md"
+description = "The brocanth-cache contract as an executable suite. Every Cache backend runs it, so a second backend behaves like the first."
+
+# A crate of its own, and not a module in `brocanth-cache`, for the reason
+# `brocanth-queue-conformance` is one: it is test code. Each backend crate
+# takes it as a dev-dependency, and no application links it.
+[dependencies]
+# The trait, the key types and `CacheExt`, and no driver: the suite must
+# not know which backend it runs against.
+brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, features = ["runtime"] }
+# `fetch` waits, and the stampede case spawns its callers.
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[lints.rust]
+missing_docs = "warn"

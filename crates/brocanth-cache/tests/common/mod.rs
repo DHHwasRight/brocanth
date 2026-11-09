@@ -2,11 +2,9 @@
 //! **a test that did not run must say so.**
 //!
 //! `brocanth-jobs` can run its whole suite on SQLite, on a laptop, with no
-//! server. This crate cannot: it is Postgres only on purpose, there is no
-//! in-memory backend, and there will not be one — an in-memory cache is a
-//! second implementation, and a second implementation is a thing that behaves
-//! differently from the one you deploy, which is the failure mode the whole
-//! workspace is built to avoid.
+//! server. This crate cannot: its SQL is Postgres only. `MemoryCache` exists
+//! for tests and development, and it passes the conformance suite, but it
+//! runs none of the SQL these tests are about, so it does not replace them.
 //!
 //! So there are three ways this could have gone, and here is the one chosen and
 //! why the other two were not.
@@ -19,8 +17,8 @@
 //! a missing tool. It also makes `cargo test` download an image the first time,
 //! which is a surprise nobody consents to.
 //!
-//! **A mock, or an in-memory `Cache` for the tests to run against.** Rejected
-//! outright. It would test the trait against an implementation nobody deploys
+//! **A mock, or `MemoryCache`, for these tests to run against.** Rejected
+//! for this file. It would test the trait against an implementation nobody deploys
 //! and prove nothing about the SQL, which is where every interesting decision
 //! in this crate lives — the `ON CONFLICT … WHERE` that makes the lease atomic,
 //! the `WITH ORDINALITY` join, `ctid`, `UNLOGGED`. A green suite that never
@@ -90,8 +88,8 @@ pub fn announce() {
                  ============================================================\n\
                  brocanth-cache: NO DATABASE. EVERY POSTGRES TEST IS SKIPPED.\n\
                  ============================================================\n\
-                 This crate is Postgres only and has no in-memory backend, so\n\
-                 the tests below prove nothing until you point them at a\n\
+                 These tests are about the Postgres SQL, and MemoryCache runs\n\
+                 none of it, so they prove nothing until you point them at a\n\
                  server:\n\n\
                  \x20 BROCANTH_CACHE_TEST_POSTGRES=postgres://localhost/brocanth_cache_test \\\n\
                  \x20   cargo test -p brocanth-cache\n\n\

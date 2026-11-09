@@ -156,9 +156,12 @@ A project that schedules the sweep another way (a recurring job,
 
 ## 6. Not done
 
-* No in-memory backend. `brocanth-cache` is Postgres only on purpose
-  (`tests/common/mod.rs`). The route-cache hook tests use a fake, as the
-  panel tests do; the tag SQL is tested against Postgres.
+* The in-memory backend, `MemoryCache`, is for tests and development only
+  (decision 1 in `docs/audit/backends-jobs-cache.md`). It passes the
+  conformance suite, and `brocanth check --deploy` refuses the
+  `cache-memory` module in production. The tag SQL is still tested
+  against Postgres.
 * No stale-while-revalidate, no CDN purge, no `HEAD` from a stored `GET`.
-* No scaffold change: the `cache` module of `brocanth create` writes the
-  plugin, and an application adds `RouteCache` by hand.
+* No scaffold change for the route cache: the `cache` module of
+  `brocanth create` writes the plugin, and an application adds
+  `RouteCache` by hand.
