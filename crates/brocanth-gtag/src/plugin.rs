@@ -53,6 +53,7 @@ impl HookSource for Gtag {
                 Record {
                     path: PathBuf::from(path),
                     banner: self.config.banner.clone(),
+                    translate: self.config.translate,
                 },
             );
         }
@@ -75,13 +76,19 @@ impl HookSource for Gtag {
 struct Record {
     path: PathBuf,
     banner: crate::Banner,
+    /// `GtagConfig::translate`: the banner follows the locale.
+    #[cfg_attr(not(feature = "i18n"), allow(dead_code))]
+    translate: bool,
 }
 
 impl Record {
     /// The version of the banner this request's locale shows.
     fn version(&self, state: &RequestState) -> String {
         #[cfg(feature = "i18n")]
-        if let Some(current) = state.get::<brocanth_i18n::Current>() {
+        if let Some(current) = state
+            .get::<brocanth_i18n::Current>()
+            .filter(|_| self.translate)
+        {
             return self.banner.translated(|key| current.text(key)).version();
         }
         let _ = state;
@@ -155,7 +162,10 @@ impl Insert {
     /// chose one, the settings' text otherwise.
     #[cfg(feature = "i18n")]
     fn markup_for(&self, state: &RequestState) -> std::sync::Arc<str> {
-        let Some(current) = state.get::<brocanth_i18n::Current>() else {
+        let current = state
+            .get::<brocanth_i18n::Current>()
+            .filter(|_| self.config.translate);
+        let Some(current) = current else {
             return self.markup.as_str().into();
         };
         let tag = current.tag();

@@ -37,7 +37,7 @@ brocanth-test.workspace = true
 brocanth-middleware.workspace = true
 # This crate with `config` on, so `cargo test -p brocanth-gtag` runs
 # the configuration test rather than compiling it out.
-brocanth-gtag = { path = ".", features = ["config", "i18n"] }
+brocanth-gtag = { path = ".", features = ["config", "i18n", "scaffold"] }
 # `tests/i18n.rs` negotiates a locale with the real hook.
 brocanth-i18n = { path = "../brocanth-i18n", features = ["plugin"] }
 brocanth-config.workspace = true
