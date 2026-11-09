@@ -13,6 +13,12 @@
 //! timestamp has no window, and only the idempotency key stops a replay.
 //! That is a property of the sender's scheme, not a choice made here.
 //!
+//! The idempotency key comes only from signed bytes: the `webhook-id` of
+//! Standard Webhooks, or the body. A delivery header the MAC does not cover,
+//! such as GitHub's `x-github-delivery`, is not a key. Whoever replays a
+//! captured delivery can change it, and a new key would run the handler
+//! again.
+//!
 //! The outgoing side signs with [`Scheme::Standard`] through
 //! [`sign_standard`], so a receiver built on any Standard Webhooks library
 //! verifies it.
@@ -51,6 +57,7 @@ pub enum Scheme {
         key: Vec<u8>,
     },
     /// One header holding the hex MAC of the body, after a fixed prefix.
+    /// The idempotency key is the body's: the MAC covers nothing else.
     Hmac {
         /// The header, lower case: `x-hub-signature-256`.
         header: String,
@@ -58,9 +65,6 @@ pub enum Scheme {
         prefix: String,
         /// The shared secret, used as it is.
         key: Vec<u8>,
-        /// A header that names the delivery, for the idempotency key:
-        /// `x-github-delivery`. `None` falls back to the body.
-        id_header: Option<String>,
     },
 }
 
@@ -100,14 +104,16 @@ impl Scheme {
         })
     }
 
-    /// GitHub: `x-hub-signature-256: sha256=<hex>`, and `x-github-delivery`
-    /// as the idempotency key.
+    /// GitHub: `x-hub-signature-256: sha256=<hex>`.
+    ///
+    /// `x-github-delivery` is not the idempotency key: the signature does not
+    /// cover it. A redelivery from GitHub sends the same body, so the body's
+    /// key drops it.
     ///
     /// # Errors
     /// The secret is empty.
     pub fn github(secret: &str) -> Result<Self, SecretError> {
         Self::hmac_sha256("x-hub-signature-256", "sha256=", secret)
-            .map(|scheme| scheme.with_id_header("x-github-delivery"))
     }
 
     /// Any sender that puts `<prefix><hex HMAC-SHA256 of the body>` in one
@@ -123,18 +129,7 @@ impl Scheme {
             header: header.to_ascii_lowercase(),
             prefix: prefix.to_string(),
             key: secret.as_bytes().to_vec(),
-            id_header: None,
         })
-    }
-
-    /// The header that names a delivery, for [`Scheme::Hmac`]. Ignored by
-    /// the other schemes, which carry their own id.
-    #[must_use]
-    pub fn with_id_header(mut self, name: &str) -> Self {
-        if let Scheme::Hmac { id_header, .. } = &mut self {
-            *id_header = Some(name.to_ascii_lowercase());
-        }
-        self
     }
 
     /// Checks one delivery.
@@ -215,7 +210,6 @@ impl Scheme {
                 header: name,
                 prefix,
                 key,
-                id_header,
             } => {
                 let value = header(name).ok_or(Refused::MissingNamed(name.clone()))?;
                 let hex = value
@@ -227,8 +221,9 @@ impl Scheme {
                 if !bool::from(given.ct_eq(&expected)) {
                     return Err(Refused::BadSignature);
                 }
+                // No id: a header the MAC does not cover is not a key.
                 Ok(Verified {
-                    id: id_header.as_deref().and_then(header).map(str::to_string),
+                    id: None,
                     timestamp: None,
                 })
             }
@@ -239,7 +234,7 @@ impl Scheme {
 /// What a valid signature told us.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verified {
-    /// The delivery's id, when the scheme carries one in a header.
+    /// The delivery's id, when the scheme signs one in a header.
     pub id: Option<String>,
     /// When the sender signed it, when the scheme says.
     pub timestamp: Option<i64>,
@@ -512,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn github_reads_the_prefix_and_the_delivery_header() {
+    fn github_reads_the_prefix_and_takes_no_id_from_an_unsigned_header() {
         let scheme = Scheme::github("s3cret").unwrap();
         let body = b"{\"zen\":\"hi\"}";
         let headers = [
@@ -520,7 +515,7 @@ mod tests {
             ("x-github-delivery", "d-1".to_string()),
         ];
         let verified = scheme.verify(pairs(&headers), body, NOW, 300).unwrap();
-        assert_eq!(verified.id.as_deref(), Some("d-1"));
+        assert_eq!(verified.id, None, "the delivery header is not signed");
         let bare = [("x-hub-signature-256", sign_hmac("s3cret", "", body))];
         assert_eq!(
             scheme.verify(pairs(&bare), body, NOW, 300),

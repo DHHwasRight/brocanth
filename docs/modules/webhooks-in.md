@@ -40,6 +40,9 @@ Schemes: `Scheme::standard` (Standard Webhooks, svix, and what
 `webhooks-out` sends), `Scheme::stripe`, `Scheme::github` and
 `Scheme::hmac_sha256` (one header with a hex MAC of the body). A scheme with
 no timestamp has no replay window; only the idempotency key stops a replay.
+That key comes from signed bytes only, so with `Scheme::github` and
+`Scheme::hmac_sha256` it is the body's: GitHub's `x-github-delivery` header
+is not signed, and a replay could change it.
 
 **Why a hook before the CSRF check, not an exempt path:** an exempt path
 lets every POST through, signed or not. The hook answers only for its own
