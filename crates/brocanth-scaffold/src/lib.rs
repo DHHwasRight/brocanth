@@ -241,6 +241,23 @@ pub struct Manifest {
     /// lives there writes at the CLI's version by construction. A module
     /// from another repository sets it, with its own crate's version.
     pub version: Option<&'static str>,
+    /// The hooks this module's plugin registers, each with one line on what
+    /// it does and whether a project may turn it off. Set with
+    /// [`Manifest::hook`].
+    ///
+    /// The generated `src/modules/<key>.rs` holds one `bool` per hook that
+    /// is not [`Hook::required`]. See `docs/module-config.md`, section 2.3.
+    pub hooks: Vec<(&'static str, &'static str, Hook)>,
+    /// The code this module writes into another module, which a project
+    /// may turn off: the host, what the code does, and whether it is on by
+    /// default. Set with [`Manifest::integration`].
+    ///
+    /// The toggle is in the guest's file: `analytics.rs` holds
+    /// `integrate.admin`. See `docs/module-config.md`, section 2.2.
+    pub integrations: Vec<(&'static str, &'static str, bool)>,
+    /// Compile-time values a project may change in its module file, such
+    /// as the admin's mount point. Set with [`Manifest::option`].
+    pub options: Vec<Opt>,
 }
 
 impl Manifest {
@@ -266,7 +283,45 @@ impl Manifest {
             adapts_to: Vec::new(),
             recommends: Vec::new(),
             version: None,
+            hooks: Vec::new(),
+            integrations: Vec::new(),
+            options: Vec::new(),
         }
+    }
+
+    /// A hook the plugin registers. `name` is the name the plugin passes to
+    /// its `HookRegistrar`, without the instance: `count`, not
+    /// `analytics.count`. `what` is one line for the module file.
+    ///
+    /// A hook that is not [`Hook::required`] becomes a `bool` in the
+    /// module file, and the generated registration passes the hooks that
+    /// are off to `AppBuilder::hooks_off`.
+    pub fn hook(mut self, name: &'static str, what: &'static str, hook: Hook) -> Self {
+        self.hooks.push((name, what, hook));
+        self
+    }
+
+    /// Code this module writes into `host`, which a project may turn off.
+    /// `what` says what the project gets, for the module file; `on` is the
+    /// default.
+    ///
+    /// It implies [`adapts_to`](Manifest::adapts_to), because the code
+    /// exists only when `host` does.
+    pub fn integration(mut self, host: &'static str, what: &'static str, on: bool) -> Self {
+        self.integrations.push((host, what, on));
+        self.adapts_to.push((host, what));
+        self
+    }
+
+    /// A compile-time value the module file holds.
+    pub fn option(mut self, option: Opt) -> Self {
+        self.options.push(option);
+        self
+    }
+
+    /// The hooks a module file may turn off, in declaration order.
+    pub fn hook_toggles(&self) -> impl Iterator<Item = &(&'static str, &'static str, Hook)> {
+        self.hooks.iter().filter(|(_, _, hook)| !hook.required)
     }
 
     /// The version of the code that writes this module. Pass
@@ -474,6 +529,138 @@ impl Category {
 impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+/// Whether a project may turn a hook off, and whether it is on by default.
+///
+/// See [`Manifest::hook`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hook {
+    /// The module cannot work without it, so the module file has no field
+    /// for it.
+    pub required: bool,
+    /// On unless the module file says otherwise. Always true for a
+    /// required hook.
+    pub on: bool,
+}
+
+impl Hook {
+    /// On by default; the module file can turn it off.
+    pub fn on() -> Self {
+        Self {
+            required: false,
+            on: true,
+        }
+    }
+
+    /// Off by default, for behaviour a project must ask for.
+    pub fn off() -> Self {
+        Self {
+            required: false,
+            on: false,
+        }
+    }
+
+    /// Always on. The module file has no field, so no file can turn it
+    /// off, and the file's header names it.
+    pub fn required() -> Self {
+        Self {
+            required: true,
+            on: true,
+        }
+    }
+}
+
+/// A compile-time value a module file holds. See [`Manifest::option`].
+///
+/// The test for an option and not a [`Setting`]: two deployments of one
+/// image never want different values, and the value changes which routes
+/// exist or which code runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opt {
+    /// The field name in the module file: lower case, digits and `_`.
+    pub key: &'static str,
+    /// The Rust type of the field.
+    pub kind: OptKind,
+    /// The default, as a Rust literal.
+    pub default: String,
+    /// One line for the module file, above the field.
+    pub help: &'static str,
+}
+
+/// The type of an [`Opt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptKind {
+    /// `&'static str`.
+    Text,
+    /// `bool`.
+    Bool,
+    /// `i64`.
+    Integer,
+    /// `u64`.
+    Unsigned,
+}
+
+impl OptKind {
+    /// The type as the generated `shape.rs` spells it.
+    pub fn rust_type(self) -> &'static str {
+        match self {
+            OptKind::Text => "&'static str",
+            OptKind::Bool => "bool",
+            OptKind::Integer => "i64",
+            OptKind::Unsigned => "u64",
+        }
+    }
+}
+
+impl Opt {
+    /// A string: `&'static str`.
+    pub fn text(key: &'static str, default: &str, help: &'static str) -> Self {
+        Self::new(key, OptKind::Text, format!("{default:?}"), help)
+    }
+
+    /// A boolean.
+    pub fn bool(key: &'static str, default: bool, help: &'static str) -> Self {
+        Self::new(key, OptKind::Bool, default.to_string(), help)
+    }
+
+    /// A signed whole number: `i64`.
+    pub fn integer(key: &'static str, default: i64, help: &'static str) -> Self {
+        Self::new(key, OptKind::Integer, default.to_string(), help)
+    }
+
+    /// An unsigned whole number: `u64`.
+    pub fn unsigned(key: &'static str, default: u64, help: &'static str) -> Self {
+        Self::new(key, OptKind::Unsigned, default.to_string(), help)
+    }
+
+    fn new(key: &'static str, kind: OptKind, default: String, help: &'static str) -> Self {
+        Self {
+            key,
+            kind,
+            default,
+            help,
+        }
+    }
+}
+
+/// The Rust name of a module key in generated code: `-` becomes `_`, and a
+/// keyword is written raw. `middleware-csrf` is `middleware_csrf`, and
+/// `static` is `r#static`, whose file is still `static.rs`.
+pub fn module_ident(key: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "do",
+        "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl", "in", "let",
+        "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return",
+        "static", "struct", "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use",
+        "virtual", "where", "while", "yield",
+    ];
+    let ident = key.replace('-', "_");
+    if KEYWORDS.contains(&ident.as_str()) {
+        format!("r#{ident}")
+    } else {
+        ident
     }
 }
 
@@ -806,6 +993,20 @@ pub enum Slot {
     /// decision and stays in `src/app.rs`; *finding* the function for a
     /// mounted name is mechanism, and mechanism the generator owns.
     PluginsLayers,
+    /// The body of the generated `plugins::admin_panels`, in
+    /// `src/plugins/mod.rs`: code that adds a tab to the admin, with
+    /// `config` (a `brocanth_admin::AdminConfig`) in scope.
+    ///
+    /// Write it with [`snippet::integration`], which guards it with the
+    /// guest's module file: `if crate::modules::analytics::MODULE
+    /// .integrate.admin { .. }`. The generator writes the function only in
+    /// a project with `admin`, so write here only when
+    /// `project.has("admin")`.
+    ///
+    /// The admin's own file calls the function once. The tab used to be a
+    /// line in that file, written by the admin module, which had to know
+    /// every module that adds one.
+    AdminPanels,
     /// One server wrap per line: the path of a type, from `crate::plugins`,
     /// that implements the generated `plugins::ServerWrap` trait.
     /// `observability::serving::Serving`.
@@ -913,7 +1114,7 @@ pub enum Slot {
 
 impl Slot {
     /// Every slot, in declaration order.
-    pub const ALL: [Slot; 20] = [
+    pub const ALL: [Slot; 21] = [
         Slot::AppUses,
         Slot::AppPlugins,
         Slot::AppSetup,
@@ -922,6 +1123,7 @@ impl Slot {
         Slot::PluginsInstalled,
         Slot::PluginsHooks,
         Slot::PluginsLayers,
+        Slot::AdminPanels,
         Slot::ServerWrap,
         Slot::MainMods,
         Slot::PagesRenderers,
@@ -955,6 +1157,9 @@ impl Slot {
             Slot::AppSetup | Slot::AppContext | Slot::PluginsHooks | Slot::PluginsLayers => {
                 &[Middleware]
             }
+            // A tab is a view of what a middleware counts, or of what an
+            // enhancer's plugin holds.
+            Slot::AdminPanels => &[Middleware, Enhancer],
             // A middleware wraps every request; a renderer serves the static
             // files its pages link to, before the router.
             Slot::ServerWrap => &[Middleware, Renderer],
@@ -978,6 +1183,7 @@ impl fmt::Display for Slot {
             Slot::PluginsInstalled => "src/plugins/mod.rs (the provider list)",
             Slot::PluginsHooks => "src/plugins/mod.rs (the hook record)",
             Slot::PluginsLayers => "src/plugins/mod.rs (layer)",
+            Slot::AdminPanels => "src/plugins/mod.rs (admin_panels)",
             Slot::ServerWrap => "src/plugins/mod.rs (the server wraps)",
             Slot::MainMods => "src/main.rs (the crate-root modules)",
             Slot::PagesRenderers => "src/pages/mod.rs (the renderers)",
@@ -1228,6 +1434,7 @@ pub struct Scaffold {
     bins: Vec<(String, Binary)>,
     settings: Vec<(String, String, Setting)>,
     settings_types: BTreeMap<String, String>,
+    instances: BTreeMap<String, String>,
     problems: Vec<String>,
     writing: String,
 }
@@ -1358,6 +1565,24 @@ impl Scaffold {
             .get(section)
             .cloned()
             .unwrap_or_else(|| format!("crate::plugins::{section}::Settings"))
+    }
+
+    /// Record the instance name of the hooking plugin this module
+    /// registers: `rate_limit` for `middleware-rate-limit`.
+    ///
+    /// [`snippet::configurable_hooking`] calls it. The CLI reads it to
+    /// write `.hooks_off(instance, ..)` after the registration of a module
+    /// that declares a hook a project may turn off ([`Manifest::hook`]).
+    /// A module that registers its hooking plugin some other way calls it
+    /// itself.
+    pub fn hooking_instance(&mut self, instance: &str) {
+        self.instances
+            .insert(self.writing.clone(), instance.to_string());
+    }
+
+    /// The hooking plugin instance a module recorded, if any.
+    pub fn instance_of(&self, key: &str) -> Option<&str> {
+        self.instances.get(key).map(String::as_str)
     }
 
     /// Every declared setting: the module that declared it, its section,
@@ -1830,6 +2055,7 @@ pub mod snippet {
         s.at(Slot::PluginsInstalled).line(format!("{key} {ty}"));
         s.at(Slot::PluginsHooks).line(ty);
         s.settings_type(section, config_ty);
+        s.hooking_instance(section);
         for setting in settings {
             s.setting(section, setting);
         }
@@ -2011,6 +2237,99 @@ pub mod snippet {
                 "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
                  \x20           crate::plugins::{key}::Settings::default(),\n\
                  \x20       ));\n"
+            )
+        }
+    }
+
+    /// A value from a module file, as generated code reads it:
+    /// `module_ref("admin", "mount_at")` is
+    /// `crate::modules::admin::MODULE.mount_at`.
+    ///
+    /// A snippet never spells that path by hand: the module's Rust name is
+    /// [`module_ident`](super::module_ident), which writes a keyword raw.
+    pub fn module_ref(key: &str, path: &str) -> String {
+        format!(
+            "crate::modules::{}::MODULE.{path}",
+            super::module_ident(key)
+        )
+    }
+
+    /// Writes `code` into `slot`, inside the guard of the guest's module
+    /// file: `if crate::modules::<guest>::MODULE.integrate.<host> { .. }`.
+    ///
+    /// For an integration the guest declares with
+    /// [`Manifest::integration`](super::Manifest::integration). Write it
+    /// only when the host is in the project: the code names the host's
+    /// crate. Comment lines at the start of `code` go above the guard. The
+    /// rest is the guard's body. Write `code` at column 0; this function
+    /// indents it for a function body.
+    ///
+    /// ```
+    /// # use brocanth_scaffold::{snippet, Scaffold, Slot};
+    /// let mut s = Scaffold::new();
+    /// snippet::integration(&mut s, "analytics", "admin", Slot::AdminPanels, "// A tab.\nconfig = tab(config);");
+    /// assert_eq!(
+    ///     s.slot(Slot::AdminPanels).collect::<String>(),
+    ///     "    // A tab.\n    if crate::modules::analytics::MODULE.integrate.admin {\n        config = tab(config);\n    }\n",
+    /// );
+    /// ```
+    pub fn integration(s: &mut Scaffold, guest: &str, host: &str, slot: Slot, code: &str) {
+        let mut out = String::new();
+        let mut body = String::new();
+        for line in code.lines() {
+            if body.is_empty() && line.trim_start().starts_with("//") {
+                out.push_str(&format!("    {line}\n"));
+            } else if line.is_empty() {
+                body.push('\n');
+            } else {
+                body.push_str(&format!("        {line}\n"));
+            }
+        }
+        let guard = module_ref(guest, &format!("integrate.{}", host.replace('-', "_")));
+        out.push_str(&format!("    if {guard} {{\n{body}    }}\n"));
+        s.at(slot).block(out);
+    }
+
+    /// The statement that turns off the hooks a module file turned off,
+    /// for the registration chain in `register!`.
+    ///
+    /// ```
+    /// assert_eq!(
+    ///     brocanth_scaffold::snippet::hooks_off("middleware-rate-limit", "rate_limit"),
+    ///     "        let builder = builder.hooks_off_from(\n\
+    ///      \x20           \"rate_limit\",\n\
+    ///      \x20           \"src/modules/middleware_rate_limit.rs\",\n\
+    ///      \x20           crate::modules::middleware_rate_limit::MODULE.hooks.off(),\n\
+    ///      \x20       );\n",
+    /// );
+    /// ```
+    ///
+    /// The CLI writes it right after the registration of a module that
+    /// declares a hook a project may turn off, with the instance the module
+    /// recorded through
+    /// [`Scaffold::hooking_instance`](super::Scaffold::hooking_instance).
+    /// The core drops each hook in the list when the plugin installs, so
+    /// an off hook costs nothing per request. `hooks_off_from` and not
+    /// `hooks_off`: the core does not know which file holds the choice, and
+    /// the `help:` line of a hard order on an off hook names it.
+    pub fn hooks_off(key: &str, instance: &str) -> String {
+        let file = format!("src/modules/{}.rs", key.replace('-', "_"));
+        let list = module_ref(key, "hooks.off()");
+        let call = format!("builder.hooks_off_from({instance:?}, {file:?}, {list});");
+        // rustfmt's three shapes for `let builder = <call>;`: on the `let`
+        // line when it fits in 100 columns, else alone on the next line,
+        // else with one argument per line.
+        if 8 + "let builder = ".len() + call.len() <= 100 {
+            format!("        let builder = {call}\n")
+        } else if 12 + call.len() <= 100 {
+            format!("        let builder =\n            {call}\n")
+        } else {
+            format!(
+                "        let builder = builder.hooks_off_from(\n\
+                 \x20           {instance:?},\n\
+                 \x20           {file:?},\n\
+                 \x20           {list},\n\
+                 \x20       );\n"
             )
         }
     }
