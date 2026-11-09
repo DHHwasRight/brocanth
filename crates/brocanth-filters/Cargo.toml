@@ -1,0 +1,40 @@
+[package]
+name = "brocanth-filters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Typed list filters and a sort from the query string, compiled into a brocanth-policy predicate, so they go into the WHERE beside the rule."
+readme = "README.md"
+
+# Two small, pure dependencies, both behind `runtime`. A filter is a
+# `Pred` over the entity's own column enum, so it ANDs with the policy's
+# rule and compiles once; the sort is a keyset order from the paginator.
+[dependencies]
+brocanth-policy = { workspace = true, optional = true }
+brocanth-pagination = { workspace = true, optional = true, default-features = false, features = [
+    "policy",
+] }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `filters`. Off: only the CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+# The claim under test is that a filter narrows the rows in the database,
+# not in Rust, so the tests run the compiled condition on a real engine.
+# The version `brocanth-policy` and `brocanth-resource` already resolve.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite-bundled",
+] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[features]
+default = ["runtime"]
+runtime = ["dep:brocanth-policy", "dep:brocanth-pagination"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
