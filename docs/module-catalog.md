@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 44 modules. Each name links to its own page
+what to build next. There are 46 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,7 +23,7 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (16)
+### Middleware (17)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -31,6 +31,7 @@ nothing holds this page.
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
 | [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
+| [`i18n-routing`](modules/i18n-routing.md) | A locale segment in the path (/fr/about), a redirect from a path without one | Renderer |  | part of `i18n`, off until you tick it | with `meta`: hreflang alternates and a canonical URL with the segment |
 | [`gtag`](modules/gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts |  |  |  | static-site safe |
 | [`logging`](modules/logging.md) | A line per request; the core assumes no log layer |  |  |  |  |
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |

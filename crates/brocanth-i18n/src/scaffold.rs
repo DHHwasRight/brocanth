@@ -46,6 +46,10 @@ impl Module for I18n {
             "jt",
             "AGENTS.md says how a `.jt` template writes a translation",
         )
+        .adapts_to(
+            "i18n-routing",
+            "the hook reads the locale from the path's first segment and redirects a GET without one",
+        )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
         .outside_runtime()
@@ -87,6 +91,20 @@ impl Module for I18n {
         } else {
             "with `--i18n.default=fr` and the flags `--help` lists"
         };
+        let routing = project.has("i18n-routing");
+        let mut settings = settings();
+        if routing {
+            settings.push(
+                Setting::list(
+                    "unprefixed",
+                    &["/admin", "/api"],
+                    "Path prefixes that keep no locale segment and are never redirected.",
+                )
+                .note(
+                    "A path whose last segment has a `.` (/robots.txt) is never redirected either.",
+                ),
+            );
+        }
         configurable_hooking(
             s,
             project,
@@ -96,40 +114,12 @@ impl Module for I18n {
                 ty: "crate::plugins::i18n::I18n",
                 config_ty: "brocanth_i18n::NegotiatorConfig",
                 prelude: PRELUDE.replace("@TURN@", turn),
-                adjust: None,
+                // Structural: the module turns paths on, and removing the
+                // module turns them off. Not a setting, so a file cannot
+                // leave a project with links that point nowhere.
+                adjust: routing.then(|| ".with_paths(true)".to_string()),
             },
-            vec![
-                Setting::text(
-                    "query",
-                    "locale",
-                    "The query parameter that names a locale: `?locale=fr`.",
-                )
-                .optional(),
-                Setting::text(
-                    "cookie",
-                    "locale",
-                    "The cookie that names a locale.",
-                )
-                .optional(),
-                Setting::text(
-                    "default",
-                    "",
-                    "The locale for a request that asks for none offered. None: `en`, the catalog's default.",
-                )
-                .note("A static export sends no Accept-Language, so this is the language of every exported page.")
-                .optional(),
-                Setting::list(
-                    "available",
-                    &[],
-                    "The locales a request may get, by tag. Empty: every file in locales/.",
-                )
-                .note("A catalog left out still compiles, so a translation in progress ships unseen."),
-                Setting::bool(
-                    "remember",
-                    true,
-                    "A `?locale=` choice sets the cookie, so the next page keeps it.",
-                ),
-            ],
+            settings,
         );
 
         let mut agents = AGENTS.to_string();
@@ -144,6 +134,140 @@ impl Module for I18n {
         }
         s.at(Slot::AgentsSections).block(agents);
     }
+}
+
+/// One URL per locale: `/fr/about`, and a redirect from `/about`.
+///
+/// A child of `i18n`, because it changes how that module's hook reads the
+/// locale and needs nothing else. The hook does the work
+/// ([`NegotiatorConfig::paths`](crate::NegotiatorConfig::paths)); this
+/// module turns it on, gives a page `ctx.href`, and says the rule in
+/// `AGENTS.md`. With `meta`, every page lists its alternates with
+/// `hreflang`.
+pub struct I18nRouting;
+
+impl Module for I18nRouting {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "i18n-routing",
+            "a locale segment in the path (/fr/about), a redirect from a path without one",
+        )
+        .category(Category::Middleware)
+        .category(Category::Renderer)
+        .part_of_but_off("i18n")
+        .because("the path names one of the locales the `i18n` catalogs define")
+        .asked_in("pages", "One URL per language: /fr/about")
+        .absent(
+            "i18n-routing",
+            "the locale comes from the query, a cookie or Accept-Language; a search engine indexes one language",
+        )
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.at(Slot::PagesItems).block(ROUTING_ITEMS.to_string());
+        s.at(Slot::AgentsSections).block(ROUTING_AGENTS.to_string());
+    }
+}
+
+const ROUTING_ITEMS: &str = r#"/// A path of this site in the locale of this page: `/about` is
+/// `/fr/about` on a French page. Written by the `i18n-routing` module.
+///
+/// A link without the segment still works, through a redirect, so this
+/// saves a round trip and keeps a crawler on one URL per page.
+#[allow(dead_code)]
+impl Ctx {
+    pub fn href(&self, path: &str) -> String {
+        self.hooked::<brocanth_i18n::PathLocale>()
+            .map_or_else(|| path.to_string(), |locale| locale.href(path))
+    }
+}
+
+#[cfg(test)]
+mod locale_paths {
+    use brocanth::routing::{Params, Verb};
+    use brocanth_server::Request;
+
+    use super::Ctx;
+
+    async fn get(request: Request) -> brocanth_server::Response {
+        let app = crate::app::build().expect("the application builds");
+        crate::app::handle(&app, request).await
+    }
+
+    #[tokio::test]
+    async fn a_path_without_a_locale_is_sent_to_the_one_the_browser_asks_for() {
+        let request = Request::new(Verb::Get, "/about").with_header("accept-language", "fr");
+        let response = get(request).await;
+        assert_eq!(response.status, 307);
+        assert_eq!(response.header("location"), Some("/fr/about"));
+    }
+
+    #[tokio::test]
+    async fn a_path_with_a_locale_answers_in_it() {
+        let response = get(Request::new(Verb::Get, "/fr/about")).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-language"), Some("fr"));
+    }
+
+    #[test]
+    fn a_link_keeps_the_locale_of_the_page() {
+        let mut ctx = Ctx::new(Verb::Get, "/about", Params::empty());
+        assert_eq!(ctx.href("/users/7"), "/users/7");
+        ctx.hook_insert(brocanth_i18n::PathLocale::new("fr", &["en", "fr"]));
+        assert_eq!(ctx.href("/users/7"), "/fr/users/7");
+    }
+}
+"#;
+
+const ROUTING_AGENTS: &str = "\n\
+    ## One URL per locale\n\
+    \n\
+    Every page answers under a locale segment: `/fr/about`, `/en/about`.\n\
+    The `i18n` hook takes the segment off, so `src/pages/about.rs` still\n\
+    answers `/about` and `ctx.path` is `/about`. A GET to `/about` gets a\n\
+    307 to the locale the visitor asks for. Do not add a page under\n\
+    `src/pages/fr/`: the segment is not a directory.\n\
+    \n\
+    Write a link with `ctx.href(\"/about\")`, which keeps the page's\n\
+    locale. A language switcher links to `/fr/about`, and the hook\n\
+    remembers the choice in the cookie. A path under an `unprefixed`\n\
+    prefix of `[i18n]` (`/admin`, `/api`) and a file such as\n\
+    `/robots.txt` keep no segment.\n";
+
+/// The `[i18n]` settings every project with the module has.
+fn settings() -> Vec<Setting> {
+    vec![
+        Setting::text(
+            "query",
+            "locale",
+            "The query parameter that names a locale: `?locale=fr`.",
+        )
+        .optional(),
+        Setting::text(
+            "cookie",
+            "locale",
+            "The cookie that names a locale.",
+        )
+        .optional(),
+        Setting::text(
+            "default",
+            "",
+            "The locale for a request that asks for none offered. None: `en`, the catalog's default.",
+        )
+        .note("A static export sends no Accept-Language, so this is the language of every exported page.")
+        .optional(),
+        Setting::list(
+            "available",
+            &[],
+            "The locales a request may get, by tag. Empty: every file in locales/.",
+        )
+        .note("A catalog left out still compiles, so a translation in progress ships unseen."),
+        Setting::bool(
+            "remember",
+            true,
+            "A `?locale=` choice sets the cookie, so the next page keeps it.",
+        ),
+    ]
 }
 
 const BUILD_RS: &str = r#"//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,

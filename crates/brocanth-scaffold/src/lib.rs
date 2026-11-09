@@ -2007,6 +2007,30 @@ pub mod snippet {
                      \x20           .plugin_hooking_from_config::<{ty}>({section:?})\n\
                      \x20           .map_err(|e| e.to_string())?;\n"
                 ),
+                // rustfmt keeps the section and the closure on the call's
+                // line when that line fits in 100 columns: the closure
+                // overflows as a block. Else one argument per line.
+                Some(adjust)
+                    if format!(
+                        "            .plugin_hooking_from_config_with::<{ty}>({section:?}, |config| {{"
+                    )
+                    .len()
+                        <= 100 =>
+                {
+                    let one = format!("                config{adjust}\n");
+                    let body = if one.trim_end().len() <= 100 {
+                        one
+                    } else {
+                        format!("                config\n{}", broken_chain(adjust, 20, ""))
+                    };
+                    format!(
+                        "        let builder = builder\n\
+                         \x20           .plugin_hooking_from_config_with::<{ty}>({section:?}, |config| {{\n\
+                         {body}\
+                         \x20           }})\n\
+                         \x20           .map_err(|e| e.to_string())?;\n"
+                    )
+                }
                 Some(adjust) => {
                     let one = format!("                |config| config{adjust},\n");
                     let closure = if one.trim_end().len() <= 100 {

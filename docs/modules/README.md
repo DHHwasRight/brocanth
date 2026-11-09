@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 44. For all
+One page per module that `brocanth create` offers. There are 46. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -97,6 +97,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`static`](static.md) | `export` writes every GET page and every asset to dist/; no server, so no runtime modules | External, Enhancer |  |
 | [`robots`](robots.md) | a robots.txt from your settings, served at /robots.txt; closed outside production | Routes |  |
 | [`sitemap`](sitemap.md) | a sitemap.xml of every page with no parameter, served at /sitemap.xml | Routes |  |
+| [`i18n-routing`](i18n-routing.md) | a locale segment in the path (/fr/about), a redirect from a path without one | Middleware, Renderer | i18n |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |

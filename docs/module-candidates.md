@@ -32,7 +32,7 @@ then what the module unblocks. Both scans put `mail` first.
 | 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown | bleach/nh3, Rails sanitize | S |
 | 13 | `pagination` | One public paginator, offset and keyset; admin and `resource` each have a private one | pagy, kaminari, Django Paginator | S |
 | 14 | `auth-lockout` | Locks an account after failed logins | django-axes, Devise lockable | S |
-| 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed | next-intl, i18n_patterns | S |
+| 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed. **Built:** in `brocanth-i18n`, `docs/modules/i18n-routing.md`. | next-intl, i18n_patterns | S |
 | 16 | `search` | Postgres full-text and trigram search, with a migration and a search page | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
 | 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE` | django-filter, ransack | M |
 | 18 | `webhooks-out` | Signed outgoing webhooks with retries, over row changes, `jobs` and the outbox | svix, PocketHost webhooks | M |

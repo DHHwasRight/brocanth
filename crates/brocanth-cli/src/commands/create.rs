@@ -5265,6 +5265,12 @@ mod tests {
             ("i18n", vec!["rsx", "gtag", "i18n"]),
             // With a config file and jt: the `[i18n]` section.
             ("i18n-config", vec!["config", "jt", "i18n"]),
+            // One URL per locale, with a config file: `.with_paths(true)`
+            // after the file, the `unprefixed` list, and `ctx.href`.
+            (
+                "i18n-routing",
+                vec!["config", "rsx", "i18n", "i18n-routing"],
+            ),
             // A plugin that builds everything it provides in `configure`,
             // and the one module whose settings carry a string the plugin
             // has to translate. No config file either, so the literal

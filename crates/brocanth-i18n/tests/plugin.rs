@@ -11,7 +11,8 @@ use brocanth::plugin_app::{App, AppBuilder};
 use brocanth::plugin_context::{After, Base, Context, Has};
 use brocanth::plugin_hooks::{Both, HookSource, NoHooks, Request, RequestState, Response};
 use brocanth_i18n::{
-    Asked, Current, I18n, I18nHook, Negotiated, Negotiator, NegotiatorConfig, Source,
+    Asked, Current, I18n, I18nHook, Locales, Negotiated, Negotiator, NegotiatorConfig, PathLocale,
+    Source,
 };
 use i18n::{t, Locale};
 
@@ -184,4 +185,88 @@ fn a_hook_that_cannot_name_the_locale_type_reads_current() {
         assert_eq!(current.text("missing"), None);
         Ok(http::Response::new(Vec::new().into()))
     });
+}
+
+fn routed() -> App<Base, Hooks> {
+    AppBuilder::new()
+        .plugin_hooking(I18nHook::<Locale>::new(
+            NegotiatorConfig::default().with_paths(true),
+        ))
+        .build()
+        .expect("an application")
+}
+
+/// Runs one request; the handler answers with the path it was given and
+/// the locale the hook chose.
+fn run_routed(app: &App<Base, Hooks>, mut request: Request) -> Response {
+    let mut state = RequestState::new();
+    app.run(&mut request, &mut state, |request, state| {
+        let negotiated = state.get::<Negotiated<Locale>>().copied().expect("ran");
+        let href = state
+            .get::<PathLocale>()
+            .map_or_else(|| "-".to_string(), |p| p.href("/x"));
+        let answer = format!(
+            "{} {} {:?} {href}",
+            request.uri(),
+            negotiated.locale.tag(),
+            negotiated.source
+        );
+        Ok(http::Response::new(answer.into()))
+    })
+}
+
+#[test]
+fn a_locale_segment_names_the_locale_and_comes_off_the_path() {
+    let app = routed();
+    let r = run_routed(&app, get("/fr/cart?page=2", &[("accept-language", "en")]));
+    assert_eq!(r.headers()["content-language"], "fr");
+    assert_eq!(body(r), "/cart?page=2 fr Path /fr/x");
+    let r = run_routed(&app, get("/fr-CA", &[]));
+    assert_eq!(body(r), "/ fr-CA Path /fr-CA/x");
+}
+
+#[test]
+fn a_get_with_no_segment_is_sent_to_the_negotiated_locale() {
+    let app = routed();
+    let r = run_routed(&app, get("/cart?page=2", &[("accept-language", "fr")]));
+    assert_eq!(r.status(), 307);
+    assert_eq!(r.headers()["location"], "/fr/cart?page=2");
+    let r = run_routed(&app, get("/", &[]));
+    assert_eq!(r.headers()["location"], "/en");
+}
+
+#[test]
+fn a_file_a_kept_prefix_and_a_post_are_not_redirected() {
+    let app = routed();
+    for uri in ["/robots.txt", "/admin", "/admin/users", "/api/posts"] {
+        let r = run_routed(&app, get(uri, &[]));
+        assert_eq!(r.status(), 200, "{uri}");
+        assert!(body(r).ends_with("Default -"), "{uri}");
+    }
+    let mut post = get("/cart", &[("cookie", "locale=fr")]);
+    *post.method_mut() = http::Method::POST;
+    let r = run_routed(&app, post);
+    assert_eq!(body(r), "/cart fr Cookie -");
+    // `/administration` is not under `/admin`.
+    assert_eq!(run_routed(&app, get("/administration", &[])).status(), 307);
+}
+
+#[test]
+fn a_locale_from_the_path_is_remembered_once() {
+    let app = routed();
+    let r = run_routed(&app, get("/fr/cart", &[("cookie", "locale=en")]));
+    let cookie = r.headers()["set-cookie"].to_str().expect("ascii");
+    assert!(cookie.starts_with("locale=fr;"), "{cookie}");
+    let r = run_routed(&app, get("/fr/cart", &[("cookie", "locale=fr")]));
+    assert!(r.headers().get("set-cookie").is_none());
+}
+
+#[test]
+fn a_kept_prefix_that_is_not_a_path_stops_the_application() {
+    let config = NegotiatorConfig {
+        unprefixed: vec!["admin".into()],
+        ..NegotiatorConfig::default()
+    };
+    let why = config.check().expect_err("refused");
+    assert!(why.contains("help:") && why.contains("\"/admin\""), "{why}");
 }

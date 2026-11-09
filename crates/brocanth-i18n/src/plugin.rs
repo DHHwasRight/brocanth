@@ -26,9 +26,12 @@ use brocanth::plugin_hooks::{
     RequestState, ResponseHead, ResponseHook,
 };
 use brocanth::plugin_order::Order;
-use http::header::{HeaderValue, CONTENT_LANGUAGE, COOKIE, SET_COOKIE, VARY};
+use http::header::{HeaderValue, CONTENT_LANGUAGE, COOKIE, LOCATION, SET_COOKIE, VARY};
+use http::Method;
 
-use crate::negotiate::{Current, Locales, Negotiated, Negotiator, NegotiatorConfig, Source};
+use crate::negotiate::{
+    prefixed, Current, Locales, Negotiated, Negotiator, NegotiatorConfig, Source,
+};
 
 impl<L: Locales> ContextItem for Negotiator<L> {}
 
@@ -117,9 +120,9 @@ impl<L: Locales> HookSource for I18nHook<L> {
             },
         );
         let config = self.negotiator.config();
-        // Only a choice the query made is written: a cookie the request
-        // already carried needs no answer, and `Accept-Language` is not a
-        // choice the visitor made on this site.
+        // Only a choice the query or the path made is written: a cookie the
+        // request already carried needs no answer, and `Accept-Language` is
+        // not a choice the visitor made on this site.
         let remember = match (&config.query, &config.cookie) {
             (Some(_), Some(cookie)) if config.remember => Some(cookie.clone()),
             _ => None,
@@ -147,16 +150,78 @@ impl<L: Locales> RequestHook for Negotiate<L> {
         request: &mut Request,
         state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
+        if self.negotiator.config().paths {
+            return self.locale_from_path(request, state);
+        }
         let negotiated = self.negotiator.negotiate_request(request);
-        // Both places: the state for the response hook below and for a
-        // page (`ctx.hooked`), the extensions for a handler that is given
-        // the request. `Current` beside it, for a hook in a crate that
-        // cannot name `L`.
-        request.extensions_mut().insert(negotiated);
-        state.insert(negotiated);
-        state.insert(Current::of(negotiated));
+        record(request, state, negotiated);
         Ok(Flow::Continue)
     }
+}
+
+impl<L: Locales> Negotiate<L> {
+    /// With `paths`: the locale segment decides, and comes off the path. A
+    /// GET with no segment is sent to the negotiated locale's, with a 307,
+    /// because which locale it gets depends on who asks.
+    fn locale_from_path(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> Result<Flow, PluginError> {
+        let path = request.uri().path().to_string();
+        if let Some((locale, rest)) = self.negotiator.split_path(&path) {
+            let mut target = rest.to_string();
+            if let Some(query) = request.uri().query() {
+                target.push('?');
+                target.push_str(query);
+            }
+            *request.uri_mut() = target.parse().map_err(|_| {
+                PluginError::new(format!(
+                    "i18n: `{target}`, the path without its locale, is not a URI"
+                ))
+            })?;
+            record(
+                request,
+                state,
+                Negotiated {
+                    locale,
+                    source: Source::Path,
+                },
+            );
+            state.insert(self.negotiator.path_locale(locale));
+            return Ok(Flow::Continue);
+        }
+        let negotiated = self.negotiator.negotiate_request(request);
+        record(request, state, negotiated);
+        let read = matches!(*request.method(), Method::GET | Method::HEAD);
+        if !(read && self.negotiator.redirects(&path)) {
+            // A form posts where it was told to: with no segment, the
+            // query, the cookie or the browser chooses, as without `paths`.
+            return Ok(Flow::Continue);
+        }
+        let mut location = prefixed(negotiated.locale.tag(), &path);
+        if let Some(query) = request.uri().query() {
+            location.push('?');
+            location.push_str(query);
+        }
+        let response = http::Response::builder()
+            .status(307)
+            .header(LOCATION, location)
+            .body(Vec::new().into())
+            .map_err(|e| PluginError::new(format!("i18n: the redirect is not a response: {e}")))?;
+        Ok(Flow::respond(response))
+    }
+}
+
+/// Puts the locale where the pages and the other hooks read it.
+///
+/// Both places: the state for the response hook below and for a page
+/// (`ctx.hooked`), the extensions for a handler that is given the request.
+/// `Current` beside it, for a hook in a crate that cannot name `L`.
+fn record<L: Locales>(request: &mut Request, state: &mut RequestState, negotiated: Negotiated<L>) {
+    request.extensions_mut().insert(negotiated);
+    state.insert(negotiated);
+    state.insert(Current::of(negotiated));
 }
 
 struct Stamp<L> {
@@ -169,7 +234,7 @@ struct Stamp<L> {
 impl<L: Locales> ResponseHook for Stamp<L> {
     fn on_headers(
         &self,
-        _request: &Request,
+        request: &Request,
         head: &mut ResponseHead,
         _body: BodyShape<'_>,
         state: &mut RequestState,
@@ -195,7 +260,26 @@ impl<L: Locales> ResponseHook for Stamp<L> {
         if self.vary_cookie {
             vary(head, "cookie");
         }
-        if let (Some(name), Source::Query) = (&self.remember, negotiated.source) {
+        let chosen = match negotiated.source {
+            Source::Query => true,
+            // A path names the locale on every page, so write the cookie
+            // only when it says something else: a visitor who follows a
+            // link to `/fr/` is sent there again from `/`.
+            Source::Path => self.remember.as_deref().is_some_and(|name| {
+                !request
+                    .headers()
+                    .get_all(COOKIE)
+                    .iter()
+                    .filter_map(text)
+                    .flat_map(|header| header.split(';'))
+                    .filter_map(|pair| pair.trim().split_once('='))
+                    .any(|(key, value)| {
+                        key.trim() == name && value.trim() == negotiated.locale.tag()
+                    })
+            }),
+            _ => false,
+        };
+        if let (Some(name), true) = (&self.remember, chosen) {
             // A year, the whole site, and no script access: a language
             // switcher is a link, and the server reads the answer.
             let cookie = format!(

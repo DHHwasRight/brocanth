@@ -1591,6 +1591,55 @@ pub fn refused(faults: &zod::Faults) -> Error {
     Error::new(422, lines.join("\n"))
 }
 
+/// A path of this site in the locale of this page: `/about` is
+/// `/fr/about` on a French page. Written by the `i18n-routing` module.
+///
+/// A link without the segment still works, through a redirect, so this
+/// saves a round trip and keeps a crawler on one URL per page.
+#[allow(dead_code)]
+impl Ctx {
+    pub fn href(&self, path: &str) -> String {
+        self.hooked::<brocanth_i18n::PathLocale>()
+            .map_or_else(|| path.to_string(), |locale| locale.href(path))
+    }
+}
+
+#[cfg(test)]
+mod locale_paths {
+    use brocanth::routing::{Params, Verb};
+    use brocanth_server::Request;
+
+    use super::Ctx;
+
+    async fn get(request: Request) -> brocanth_server::Response {
+        let app = crate::app::build().expect("the application builds");
+        crate::app::handle(&app, request).await
+    }
+
+    #[tokio::test]
+    async fn a_path_without_a_locale_is_sent_to_the_one_the_browser_asks_for() {
+        let request = Request::new(Verb::Get, "/about").with_header("accept-language", "fr");
+        let response = get(request).await;
+        assert_eq!(response.status, 307);
+        assert_eq!(response.header("location"), Some("/fr/about"));
+    }
+
+    #[tokio::test]
+    async fn a_path_with_a_locale_answers_in_it() {
+        let response = get(Request::new(Verb::Get, "/fr/about")).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-language"), Some("fr"));
+    }
+
+    #[test]
+    fn a_link_keeps_the_locale_of_the_page() {
+        let mut ctx = Ctx::new(Verb::Get, "/about", Params::empty());
+        assert_eq!(ctx.href("/users/7"), "/users/7");
+        ctx.hook_insert(brocanth_i18n::PathLocale::new("fr", &["en", "fr"]));
+        assert_eq!(ctx.href("/users/7"), "/fr/users/7");
+    }
+}
+
 /// The database, on every request the application dispatches.
 ///
 /// `allow(dead_code)`: it is here for the first page that queries, and a
@@ -1922,7 +1971,9 @@ macro_rules! register {
         // Content-Language and Vary on the way out. The default locale and
         // the offered ones are settings, under [i18n] in config/<env>.toml.
         let builder = builder
-            .plugin_hooking_from_config::<crate::plugins::i18n::I18n>("i18n")
+            .plugin_hooking_from_config_with::<crate::plugins::i18n::I18n>("i18n", |config| {
+                config.with_paths(true)
+            })
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
@@ -3754,7 +3805,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: 0a51f475406d280e
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4997,6 +5048,17 @@ pub mod i18n {
     }
 }
 
+/// The shape of src/modules/i18n_routing.rs.
+pub mod i18n_routing {
+    /// What src/modules/i18n_routing.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/docker.rs.
 pub mod docker {
     /// What src/modules/docker.rs holds.
@@ -5041,7 +5103,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 1dda103511d87f83
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5075,6 +5137,7 @@ pub mod docker;
 pub mod docker_kubernetes;
 pub mod gtag;
 pub mod i18n;
+pub mod i18n_routing;
 pub mod input;
 pub mod jobs;
 pub mod jt;
@@ -5144,13 +5207,14 @@ pub const ALL: &[&str] = &[
     "robots",
     "sitemap",
     "i18n",
+    "i18n-routing",
     "docker",
     "docker-kubernetes",
     "ci",
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: d3217a5756158e48
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -6054,6 +6118,20 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/i18n_routing.rs =====
+//! `i18n-routing`: a locale segment in the path (/fr/about), a redirect from a
+//! path without one.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::i18n_routing::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/docker.rs =====
 //! `docker`: a cargo-chef Dockerfile: slim Debian, a user that is not root, a
 //! HEALTHCHECK on /up.
@@ -6200,6 +6278,9 @@ title = "My Blog admin"
 available = []
 # A `?locale=` choice sets the cookie, so the next page keeps it.
 remember = true
+# Path prefixes that keep no locale segment and are never redirected.
+# A path whose last segment has a `.` (/robots.txt) is never redirected either.
+unprefixed = ["/admin", "/api"]
 
 [observability]
 # json or text. Empty: json in production, text elsewhere.
@@ -12303,6 +12384,7 @@ request.
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
+- `i18n-routing`  a locale segment in the path (/fr/about), a redirect from a path without one
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -12481,6 +12563,20 @@ translation as a JSON string.
 The consent banner's text is the `[gtag.banner]` table of each catalog.
 The `banner.*` settings of `gtag` are the fallback for a key no catalog
 has. Change the wording in the catalogs.
+
+## One URL per locale
+
+Every page answers under a locale segment: `/fr/about`, `/en/about`.
+The `i18n` hook takes the segment off, so `src/pages/about.rs` still
+answers `/about` and `ctx.path` is `/about`. A GET to `/about` gets a
+307 to the locale the visitor asks for. Do not add a page under
+`src/pages/fr/`: the segment is not a directory.
+
+Write a link with `ctx.href("/about")`, which keeps the page's
+locale. A language switcher links to `/fr/about`, and the hook
+remembers the choice in the cookie. A path under an `unprefixed`
+prefix of `[i18n]` (`/admin`, `/api`) and a file such as
+`/robots.txt` keep no segment.
 
 ## The database
 
@@ -12748,7 +12844,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 26b934d0377259f7 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +12856,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "i18n-routing", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -13064,7 +13160,15 @@ kind = ["middleware"]
 files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
-adapted_to = ["config", "gtag", "rsx", "jt"]
+adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing"]
+
+[modules.i18n-routing]
+version = "0.1.0"
+kind = ["middleware", "renderer"]
+files = ["src/modules/i18n_routing.rs"]
+config = []
+crates = []
+adapted_to = []
 
 [modules.docker]
 version = "0.1.0"
@@ -13098,4 +13202,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: 7cac79923e4b85b6
