@@ -80,6 +80,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`middleware-csrf`](middleware-csrf.md) | a double-submit cookie, checked on every verb that is not a read | Middleware | middleware |
 | [`middleware-security-headers`](middleware-security-headers.md) | HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash | Middleware | middleware |
 | [`middleware-rate-limit`](middleware-rate-limit.md) | a fixed window per address, session or user, per group of routes; 429 with Retry-After | Middleware | middleware |
+| [`flash`](flash.md) | one-shot messages across a redirect, in a signed cookie, drawn into the layout | Middleware |  |
 | [`i18n`](i18n.md) | translations checked at build time; a locale per request from the query, a cookie or Accept-Language | Middleware |  |
 | [`gtag`](gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts | Middleware |  |
 | [`openapi`](openapi.md) | an OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Routes, Enhancer |  |

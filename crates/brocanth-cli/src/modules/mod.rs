@@ -123,6 +123,9 @@ pub const ALL: &[&dyn Module] = &[
     // asked for, because its rules are a fact about one application.
     &brocanth_middleware::scaffold::SecurityHeaders,
     &brocanth_middleware::scaffold::RateLimit,
+    // Messages across a redirect. A hook pair in the same crate, and a
+    // choice of its own: it is about forms, not about the network.
+    &brocanth_middleware::scaffold::Flash,
     // Google Analytics behind a consent banner. A response hook, so it
     // reaches every HTML page whatever renders it, and the static export.
     &brocanth_gtag::scaffold::Gtag,

@@ -27,6 +27,7 @@ edition = "2021"
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   flash                 no flash; a page a form redirects to cannot say what the form did
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
@@ -2702,7 +2703,7 @@ request.
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `mail`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `jobs`, `mail`, `auth`, `policy`, `storage`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `flash`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2802,7 +2803,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 28a7314c28e72e75 -->
+<!-- brocanth-digest: 989f12363f600587 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

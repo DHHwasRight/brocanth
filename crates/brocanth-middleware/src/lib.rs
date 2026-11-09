@@ -90,6 +90,8 @@ mod csrf;
 #[cfg(feature = "runtime")]
 pub mod dp;
 #[cfg(feature = "runtime")]
+mod flash;
+#[cfg(feature = "runtime")]
 mod method_override;
 #[cfg(feature = "runtime")]
 mod proxy_headers;
@@ -111,6 +113,10 @@ pub use cors::{Cors, CorsConfig, Origins};
 pub use csrf::{Csrf, CsrfConfig, CsrfToken};
 #[cfg(feature = "runtime")]
 pub use dp::{Directive, DpRequest, DpSwap, Oob};
+#[cfg(feature = "runtime")]
+pub use flash::{
+    default_render, Flash, FlashConfig, FlashMessage, FlashPlugin, Level, Render, FLASH_MARKER,
+};
 #[cfg(feature = "runtime")]
 pub use method_override::{MethodOverride, MethodOverrideConfig};
 #[cfg(feature = "runtime")]

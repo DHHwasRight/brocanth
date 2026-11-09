@@ -585,3 +585,100 @@ const RATE_LIMIT_AGENTS: &str = "\n\
     the address comes from `ProxyHeaders` or from `ip_header`. Never set\n\
     `ip_header` to a header the client can send, such as\n\
     `X-Forwarded-For`, unless the edge overwrites it.\n";
+
+/// Messages that survive one redirect, as a choice on the menu.
+///
+/// A choice of its own and not a part of `middleware`: a project with
+/// forms wants it whatever it decided about proxies and CORS, and
+/// `auth-screens` needs it. It brings this crate by itself.
+pub struct Flash;
+
+impl Module for Flash {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "flash",
+            "one-shot messages across a redirect, in a signed cookie, drawn into the layout",
+        )
+        .category(Category::Middleware)
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        .asked_in("doors", "Show \"Saved\" on the page a form redirects to")
+        .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
+        .after("middleware-rate-limit")
+        .hook(
+            "read",
+            "read the messages the last response left in the cookie",
+            Hook::required(),
+        )
+        .hook(
+            "write",
+            "draw the messages into `<div id=\"flash\">` and set or clear the cookie",
+            Hook::required(),
+        )
+        .absent(
+            "flash",
+            "no flash; a page a form redirects to cannot say what the form did",
+        )
+    }
+
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        configurable_hooking(
+            s,
+            project,
+            Hooking {
+                key: "flash",
+                section: "flash",
+                ty: "brocanth_middleware::FlashPlugin",
+                config_ty: "brocanth_middleware::FlashConfig",
+                prelude: FLASH_PRELUDE.to_string(),
+                adjust: None,
+            },
+            vec![
+                Setting::text("cookie", "flash", "The cookie this hook owns."),
+                Setting::text(
+                    "key_env",
+                    "FLASH_KEY",
+                    "The environment variable that holds the signing key.",
+                )
+                .note(
+                    "The name, not the key. Unset: a random key per process, so a message\n\
+                     can be lost when the next request reaches another instance.",
+                ),
+                Setting::bool("secure", true, "Send the cookie over HTTPS only."),
+            ],
+        );
+        s.at(Slot::AgentsSections).block(FLASH_AGENTS.to_string());
+    }
+}
+
+/// The comment above the registration.
+const FLASH_PRELUDE: &str = r#"
+        // -- brocanth-middleware: flash -----------------------------------
+        //
+        // Messages for the next page, in a signed cookie. A page writes
+        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
+        // the next HTML page shows the messages inside the layout's
+        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
+        // configuration below.
+"#;
+
+/// What the generated `AGENTS.md` says about the flash.
+const FLASH_AGENTS: &str = "\n\
+    ## Flash\n\
+    \n\
+    `brocanth_middleware::FlashPlugin` is registered in\n\
+    `src/plugins/mod.rs`. After a form POST, write a message and redirect:\n\
+    \n\
+    ```rust\n\
+    if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {\n\
+    \x20   flash.success(\"Saved.\");\n\
+    }\n\
+    Ok(Response::empty(303).with_header(\"location\", \"/\"))\n\
+    ```\n\
+    \n\
+    The next HTML page shows it inside `<div id=\"flash\">`, which the root\n\
+    layout carries. Keep that element in the layout. A page that draws a\n\
+    form again without a redirect uses `flash.now(level, text)`. The text\n\
+    is plain: the hook escapes it. Never put HTML or a secret in a message.\n";

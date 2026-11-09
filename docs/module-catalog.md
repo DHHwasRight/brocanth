@@ -23,7 +23,7 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (16)
+### Middleware (17)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -36,6 +36,7 @@ nothing holds this page.
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |
 | [`middleware-csrf`](modules/middleware-csrf.md) | A double-submit cookie, checked on every verb that is not a read |  |  | part of `middleware`, ticked with its parent |  |
 | [`middleware-rate-limit`](modules/middleware-rate-limit.md) | A fixed window per address, session or user, per group of routes; 429 with Retry-After |  |  | part of `middleware`, off until you tick it |  |
+| [`flash`](modules/flash.md) | One-shot messages across a redirect, in a signed cookie, drawn into the layout |  |  |  | with `rsx`: the root layout carries `<div id="flash">` |
 | [`middleware-security-headers`](modules/middleware-security-headers.md) | HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash |  | yes | part of `middleware`, ticked with its parent |  |
 | [`observability`](modules/observability.md) | A request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below | Enhancer, Routes | yes |  |  |
 | [`observability-logs`](modules/observability-logs.md) | A JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else |  | yes | part of `observability`, ticked with its parent |  |

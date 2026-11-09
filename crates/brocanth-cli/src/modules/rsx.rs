@@ -24,6 +24,10 @@ impl Module for Rsx {
         .category(Category::Renderer)
         .adapts_to("rsx-tailwind", "the layout links the stylesheet")
         .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
+        .adapts_to(
+            "flash",
+            "the layout carries `<div id=\"flash\">`, where the messages go",
+        )
         // Static files are a server wrap; `observability` sees them first,
         // so it logs and counts them as before.
         .after("observability")
@@ -570,7 +574,15 @@ fn layout_rsx(p: &Project) -> String {
     } else {
         "<main>"
     };
+    // The element the flash hook draws its messages into. Outside `<main>`,
+    // so a partial swap of the page leaves it alone.
+    let flash = if p.has("flash") {
+        "            <div id=\"flash\" role=\"status\"></div>\n"
+    } else {
+        ""
+    };
     LAYOUT_RSX
+        .replace("@FLASH@\n", flash)
         .replace("@HEAD@\n", &head)
         .replace("@BODY_CLASS@", body_class)
         .replace("@MAIN@", main_open)
@@ -608,6 +620,7 @@ pub fn Layout(@PARAMS@children: Element) -> Element {
         </head>
         <body@BODY_CLASS@>
             <header><a href="/">{TITLE}</a></header>
+@FLASH@
             @MAIN@{children}</main>
         </body>
     </html>

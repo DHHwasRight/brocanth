@@ -2046,6 +2046,17 @@ macro_rules! register {
             "src/modules/middleware_rate_limit.rs",
             crate::modules::middleware_rate_limit::MODULE.hooks.off(),
         );
+
+        // -- brocanth-middleware: flash -----------------------------------
+        //
+        // Messages for the next page, in a signed cookie. A page writes
+        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
+        // the next HTML page shows the messages inside the layout's
+        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
+        // configuration below.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
+            .map_err(|e| e.to_string())?;
         builder
     }};
 }
@@ -2083,7 +2094,8 @@ type WithMail = After<crate::plugins::mail::MailPlugin, WithModel>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithMail>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
-pub type Installed = WithMiddlewareRateLimit;
+type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareRateLimit>;
+pub type Installed = WithFlash;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
@@ -2093,6 +2105,8 @@ type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
 type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
+type HookedFlashPlugin =
+    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedRateLimit>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2100,7 +2114,7 @@ type HookedRateLimit =
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedRateLimit;
+pub type Hooks = HookedFlashPlugin;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -3204,6 +3218,33 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "flash.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.key_env",
+        help: "The environment variable that holds the signing key.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -3311,6 +3352,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::middleware_rate_limit::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::flash::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::gtag::MODULE.rename {
@@ -3513,6 +3557,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let flash = brocanth_middleware::FlashConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
@@ -3725,6 +3770,9 @@ fn defaults() -> Vec<(&'static str, String)> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
+        ("flash.cookie", format!("{:?}", flash.cookie)),
+        ("flash.key_env", format!("{:?}", flash.key_env)),
+        ("flash.secure", format!("{:?}", flash.secure)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -3865,7 +3913,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 8c8c28f784993f89
+// brocanth-digest: b1e01abab7a204f8
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4711,6 +4759,47 @@ pub mod middleware_rate_limit {
     }
 }
 
+/// The shape of src/modules/flash.rs.
+pub mod flash {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[flash]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Cookie,
+        KeyEnv,
+        Secure,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Cookie => "flash.cookie",
+                Key::KeyEnv => "flash.key_env",
+                Key::Secure => "flash.secure",
+            }
+        }
+    }
+
+    /// What src/modules/flash.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/gtag.rs.
 pub mod gtag {
     pub use super::{Flag, Flags};
@@ -5205,7 +5294,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 88c051dbfe3266ba
+// brocanth-digest: e742a833136977bf
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5237,6 +5326,7 @@ pub mod config;
 pub mod db;
 pub mod docker;
 pub mod docker_kubernetes;
+pub mod flash;
 pub mod gtag;
 pub mod i18n;
 pub mod input;
@@ -5293,6 +5383,7 @@ pub const ALL: &[&str] = &[
     "middleware-csrf",
     "middleware-security-headers",
     "middleware-rate-limit",
+    "flash",
     "gtag",
     "openapi",
     "validation",
@@ -5316,7 +5407,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: aa080ad11ecd5be4
+// brocanth-digest: fb1291ffe0760bfa
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5879,6 +5970,38 @@ pub const MODULE: Module = Module {
         headers: true,
         ..Hooks::DEFAULT
     },
+
+    ..Module::DEFAULT
+};
+===== src/modules/flash.rs =====
+//! `flash`: one-shot messages across a redirect, in a signed cookie, drawn into
+//! the layout.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [flash] in
+//! the config file, an environment variable, or a flag.
+//!
+//! Always on, because the module cannot work without them: `flash.read`, `flash.write`.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::flash::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [flash]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Cookie, Flag::As("cookie")),
+    //   (Key::Cookie, Flag::Hidden),
+    rename: &[],
 
     ..Module::DEFAULT
 };
@@ -6717,6 +6840,16 @@ paths = ["/login"]
 methods = ["POST"]
 limit = 5
 window_secs = 60
+
+[flash]
+# The cookie this hook owns.
+cookie = "flash"
+# The environment variable that holds the signing key.
+# The name, not the key. Unset: a random key per process, so a message
+# can be lost when the next request reaches another instance.
+key_env = "FLASH_KEY"
+# Send the cookie over HTTPS only.
+secure = true
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -7935,6 +8068,7 @@ pub fn Layout(layout: &str, children: Element) -> Element {
         </head>
         <body class="min-h-screen bg-white text-slate-900">
             <header><a href="/">{TITLE}</a></header>
+            <div id="flash" role="status"></div>
             <main dp-layout={layout} id="outlet">{children}</main>
         </body>
     </html>
@@ -12851,6 +12985,7 @@ request.
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `middleware-rate-limit`  a fixed window per address, session or user, per group of routes; 429 with Retry-After
+- `flash`  one-shot messages across a redirect, in a signed cookie, drawn into the layout
 - `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
@@ -13290,6 +13425,23 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
+## Flash
+
+`brocanth_middleware::FlashPlugin` is registered in
+`src/plugins/mod.rs`. After a form POST, write a message and redirect:
+
+```rust
+if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {
+    flash.success("Saved.");
+}
+Ok(Response::empty(303).with_header("location", "/"))
+```
+
+The next HTML page shows it inside `<div id="flash">`, which the root
+layout carries. Keep that element in the layout. A page that draws a
+form again without a redirect uses `flash.now(level, text)`. The text
+is plain: the hook escapes it. Never put HTML or a secret in a message.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -13327,7 +13479,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: d168717af6b976fb -->
+<!-- brocanth-digest: 5a9e8d3f362d3637 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -13339,7 +13491,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "mail", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "mail", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -13517,6 +13669,14 @@ config = ["rate_limit"]
 crates = []
 adapted_to = ["config"]
 
+[modules.flash]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/flash.rs"]
+config = ["flash"]
+crates = ["brocanth-middleware"]
+adapted_to = ["config"]
+
 [modules.gtag]
 version = "0.1.0"
 kind = ["middleware"]
@@ -13603,7 +13763,7 @@ kind = ["renderer"]
 files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
-adapted_to = ["rsx-tailwind", "rsx-htmx"]
+adapted_to = ["rsx-tailwind", "rsx-htmx", "flash"]
 
 [modules.jt]
 version = "0.1.0"
@@ -13685,4 +13845,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 00eb43fd55c1c29a
+# brocanth-digest: d7f1c2a7eba69746
