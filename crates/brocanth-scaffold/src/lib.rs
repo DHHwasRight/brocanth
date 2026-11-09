@@ -2007,6 +2007,34 @@ pub mod snippet {
                      \x20           .plugin_hooking_from_config::<{ty}>({section:?})\n\
                      \x20           .map_err(|e| e.to_string())?;\n"
                 ),
+                // rustfmt puts the closure on the call's line when that
+                // line fits: flat when the body fits too, else as a block.
+                Some(adjust)
+                    if format!(
+                        "            .plugin_hooking_from_config_with::<{ty}>({section:?}, |config| {{"
+                    )
+                    .len()
+                        <= 100 =>
+                {
+                    let call = format!("            .plugin_hooking_from_config_with::<{ty}>(");
+                    let flat = format!("{call}{section:?}, |config| config{adjust})");
+                    let call = if flat.len() <= 100 {
+                        format!("{flat}\n")
+                    } else {
+                        let one = format!("                config{adjust}\n");
+                        let body = if one.trim_end().len() <= 100 {
+                            one
+                        } else {
+                            format!("                config\n{}", broken_chain(adjust, 20, ""))
+                        };
+                        format!("{call}{section:?}, |config| {{\n{body}            }})\n")
+                    };
+                    format!(
+                        "        let builder = builder\n\
+                         {call}\
+                         \x20           .map_err(|e| e.to_string())?;\n"
+                    )
+                }
                 Some(adjust) => {
                     let one = format!("                |config| config{adjust},\n");
                     let closure = if one.trim_end().len() <= 100 {

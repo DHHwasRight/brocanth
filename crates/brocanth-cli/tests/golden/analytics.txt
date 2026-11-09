@@ -1475,9 +1475,31 @@ macro_rules! announce {
         let db: &brocanth_db::Db = cx.extract();
         let connections = db.pool().size();
         crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
+        crate::plugins::warn_hookless($app.pipeline());
     }};
 }
 pub(crate) use announce;
+
+/// A plugin whose module file turns every hook off: registered, and
+/// doing nothing per request. Said once at startup; `brocanth remove`
+/// takes the module out.
+pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {
+    let all_off = |instance: &str, names: &[&str]| {
+        names.iter().all(|name| {
+            pipeline
+                .skipped()
+                .iter()
+                .any(|&(i, n)| i == instance && n == *name)
+        })
+    };
+    // Every hook of `analytics` is off in src/modules/analytics.rs.
+    if all_off("analytics", &["count", "collect"]) {
+        crate::plugins::say!(
+            warn,
+            "warning: analytics installs no hook; help: brocanth remove analytics"
+        );
+    }
+}
 
 /// A line about the application itself: startup, the listener, the stop.
 ///
@@ -2060,7 +2082,23 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
+    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
     Ok(layers.to_string())
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::analytics::MODULE.hooks.off() {
+        notes.push((
+            "analytics.enabled",
+            format!("hook analytics.{name} is off in src/modules/analytics.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -2146,7 +2184,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e97239e3ef2b6836
+// brocanth-digest: 52a36c64c3540840
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

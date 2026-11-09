@@ -1909,7 +1909,9 @@ macro_rules! register {
         // locales/*.toml, in the request's locale. The
         // `banner.*` settings are the fallback.
         let builder = builder
-            .plugin_hooking_from_config::<brocanth_gtag::Gtag>("gtag")
+            .plugin_hooking_from_config_with::<brocanth_gtag::Gtag>("gtag", |config| {
+                config.translate(crate::modules::gtag::MODULE.integrate.i18n)
+            })
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
@@ -1924,6 +1926,11 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<crate::plugins::i18n::I18n>("i18n")
             .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "i18n",
+            "src/modules/i18n.rs",
+            crate::modules::i18n::MODULE.hooks.off(),
+        );
         let builder = builder
             .plugin_from_config::<crate::plugins::observability::Observe>("observability")
             .map_err(|e| e.to_string())?;
@@ -2137,9 +2144,31 @@ macro_rules! announce {
         let rules: &crate::plugins::policy::Rules = cx.extract();
         let dialect = &rules.dialect;
         crate::plugins::say!(info, "policy: compiling for {dialect:?}"; ?dialect);
+        crate::plugins::warn_hookless($app.pipeline());
     }};
 }
 pub(crate) use announce;
+
+/// A plugin whose module file turns every hook off: registered, and
+/// doing nothing per request. Said once at startup; `brocanth remove`
+/// takes the module out.
+pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {
+    let all_off = |instance: &str, names: &[&str]| {
+        names.iter().all(|name| {
+            pipeline
+                .skipped()
+                .iter()
+                .any(|&(i, n)| i == instance && n == *name)
+        })
+    };
+    // Every hook of `analytics` is off in src/modules/analytics.rs.
+    if all_off("analytics", &["count", "collect"]) {
+        crate::plugins::say!(
+            warn,
+            "warning: analytics installs no hook; help: brocanth remove analytics"
+        );
+    }
+}
 
 /// A line about the application itself: startup, the listener, the stop.
 ///
@@ -3629,7 +3658,35 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
+    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
     Ok(layers.to_string())
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::analytics::MODULE.hooks.off() {
+        notes.push((
+            "analytics.enabled",
+            format!("hook analytics.{name} is off in src/modules/analytics.rs"),
+        ));
+    }
+    for name in crate::modules::middleware_rate_limit::MODULE.hooks.off() {
+        notes.push((
+            "rate_limit.ip_header",
+            format!("hook rate_limit.{name} is off in src/modules/middleware_rate_limit.rs"),
+        ));
+    }
+    for name in crate::modules::i18n::MODULE.hooks.off() {
+        notes.push((
+            "i18n.query",
+            format!("hook i18n.{name} is off in src/modules/i18n.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -3754,7 +3811,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: a2af79d09c0f16cd
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4593,12 +4650,27 @@ pub mod gtag {
         }
     }
 
+    /// The code `gtag` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `i18n`: the banner's words come from the catalogs, in the request's
+        /// locale.
+        pub i18n: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { i18n: true };
+    }
+
     /// What src/modules/gtag.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -4606,6 +4678,7 @@ pub mod gtag {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -4900,12 +4973,27 @@ pub mod robots {
         }
     }
 
+    /// The code `robots` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: the admin is disallowed in robots.txt, at the path
+        /// src/modules/admin.rs mounts it.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
     /// What src/modules/robots.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -4913,6 +5001,7 @@ pub mod robots {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -4980,12 +5069,38 @@ pub mod i18n {
         }
     }
 
+    /// The hooks of `i18n` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `i18n.content-language`: send Content-Language and Vary, and keep a
+        /// locale the query chose in the cookie.
+        pub content_language: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            content_language: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.content_language {
+                off.push("content-language");
+            }
+            off
+        }
+    }
+
     /// What src/modules/i18n.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
     }
 
     impl Module {
@@ -4993,6 +5108,7 @@ pub mod i18n {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            hooks: Hooks::DEFAULT,
         };
     }
 }
@@ -5041,7 +5157,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 6ea3580c9d4c16cd
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5597,6 +5713,11 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! A value that differs per deployment is a setting, not a choice: [csrf] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns these hooks off, because the module needs them:
+//! - `csrf.check`: refuse an unsafe request that does not send the token
+//!   back.
+//! - `csrf.mint`: set the token cookie on a response.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
@@ -5627,6 +5748,9 @@ pub const MODULE: Module = Module {
 //!
 //! A value that differs per deployment is a setting, not a choice:
 //! [security_headers] in the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `security_headers.set`: send the policy headers on each response.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
@@ -5658,7 +5782,9 @@ pub const MODULE: Module = Module {
 //! A value that differs per deployment is a setting, not a choice: [rate_limit]
 //! in the config file, an environment variable, or a flag.
 //!
-//! Always on, because the module cannot work without it: `rate_limit.count`.
+//! No field turns this hook off, because the module needs it:
+//! - `rate_limit.count`: count each request against its rule, and answer 429
+//!   past the limit.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
@@ -5696,10 +5822,15 @@ pub const MODULE: Module = Module {
 //!
 //! A value that differs per deployment is a setting, not a choice: [gtag] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns these hooks off, because the module needs them:
+//! - `gtag.consent-log`: record each consent choice, while `consent_log`
+//!   names a file.
+//! - `gtag.insert`: put the banner and the tag into each HTML page.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::gtag::{Flag, Flags, Key, Module};
+use crate::plugins::shape::gtag::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -5714,6 +5845,13 @@ pub const MODULE: Module = Module {
     //   (Key::Enabled, Flag::As("enabled")),
     //   (Key::Enabled, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // The banner's words come from the catalogs, in the request's locale.
+        // Without the `i18n` module this does nothing.
+        i18n: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -5976,7 +6114,7 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::robots::{Flag, Flags, Key, Module};
+use crate::plugins::shape::robots::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -5991,6 +6129,14 @@ pub const MODULE: Module = Module {
     //   (Key::Index, Flag::As("index")),
     //   (Key::Index, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // The admin is disallowed in robots.txt, at the path
+        // src/modules/admin.rs mounts it. Without the `admin` module this does
+        // nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -6033,10 +6179,13 @@ pub const MODULE: Module = Module {
 //!
 //! A value that differs per deployment is a setting, not a choice: [i18n] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `i18n.negotiate`: choose the request's locale before the page runs.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::i18n::{Flag, Flags, Key, Module};
+use crate::plugins::shape::i18n::{Flag, Flags, Hooks, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -6051,6 +6200,13 @@ pub const MODULE: Module = Module {
     //   (Key::Query, Flag::As("query")),
     //   (Key::Query, Flag::Hidden),
     rename: &[],
+
+    hooks: Hooks {
+        // `i18n.content-language`: send Content-Language and Vary, and keep a
+        // locale the query chose in the cookie.
+        content_language: true,
+        ..Hooks::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -6379,7 +6535,7 @@ overflow = "drop-oldest"
 # false on staging, or a search engine lists staging beside production.
 index = false
 # Paths no crawler may read, each from the root: "/admin".
-disallow = ["/admin"]
+disallow = []
 # Paths a crawler may read under a disallowed one: "/admin/help".
 allow = []
 # Where the sitemap is, as a full URL. Empty means none.
@@ -11421,7 +11577,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             index: true,
-            disallow: vec!["/admin".to_string()],
+            disallow: Vec::new(),
             allow: Vec::new(),
             sitemap: None,
             groups: Vec::new(),
@@ -11440,6 +11596,11 @@ impl Robots {
             return Ok(Text::closed());
         }
         let mut text = Text::new();
+        // The admin, where src/modules/admin.rs mounts it. Turn it off with
+        // `integrate.admin` in src/modules/robots.rs.
+        if crate::modules::robots::MODULE.integrate.admin {
+            text = text.disallow(crate::modules::admin::MODULE.mount_at);
+        }
         for path in &self.settings.disallow {
             text = text.disallow(path.as_str());
         }

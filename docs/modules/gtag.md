@@ -19,6 +19,16 @@ The wizard calls it: *Count visits with Google Analytics, after consent*.
 | Crates | `brocanth-gtag` |
 | Without it | no Google tag; nothing on a page talks to Google |
 
+With [`i18n`](i18n.md), the banner's words come from the catalogs, in the
+request's locale. `integrate.i18n: false` in `src/modules/gtag.rs` keeps the
+`banner.*` settings in every locale.
+
+Hooks: `gtag.insert` and `gtag.consent-log`. Neither has a field in
+`src/modules/gtag.rs`. `consent-log` exists only while the `consent_log`
+setting names a file. **Reason:** the banner's script reports a choice
+exactly when that setting is set, so a hook turned off under a set path
+would leave the script reporting to nothing.
+
 ## What it writes
 
 Slots:

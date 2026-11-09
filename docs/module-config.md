@@ -474,8 +474,10 @@ or `error(..)` call in a plugin's `install_hooks`. Its id is
 | `middleware-csrf` | `csrf.check`, `csrf.mint` | none: both required |
 | `middleware-rate-limit` | `rate_limit.count`, `rate_limit.headers` | `headers`, on; `count` required |
 | `middleware-security-headers` | `security_headers.set` | none: required |
-| `gtag` | `gtag.consent-log`, `gtag.insert` | `consent_log`, on; `insert` required |
-| `i18n` (when it is a module) | `i18n.negotiate`, `i18n.content-language` | `content_language`, on; `negotiate` required |
+| `gtag` | `gtag.consent-log`, `gtag.insert` | none: both required (§8, wave 2) |
+| `i18n` | `i18n.negotiate`, `i18n.content-language` | `content_language`, on; `negotiate` required |
+| `beacon` | `beacon.insert` | none: required |
+| `logging` | `logging.line` | none: required |
 
 **A hook is on by default.** A module may declare a hook off by default
 (`Hook::off()`), for behaviour that a project must ask for.
@@ -566,7 +568,7 @@ every environment, and a change needs a rebuild in any case.
 
 `robots` disallows `/admin` when the admin is present. That is not an
 option: it is an integration, `integrate.admin` in `robots.rs`, on by
-default.
+default. Built: the rule reads `admin`'s `mount_at`.
 
 The generated code reads an option at the place that used a literal:
 
@@ -632,6 +634,15 @@ has a test under its `scaffold` feature: it installs the plugin into a test
 registrar and compares the names with `Manifest::hook`. A crate that adds a
 hook and forgets the manifest fails its own test.
 
+Built: `brocanth::plugin_hooks::hook_names(&plugin)` installs a plugin
+into a registrar that keeps nothing and returns the names. The tests are
+`tests/manifest_hooks.rs` in `brocanth-middleware` (csrf, security
+headers, rate limit), `brocanth-analytics` (analytics, beacon) and
+`brocanth-gtag`, and one test in `brocanth-i18n/tests/plugin.rs`. Each
+crate's own dev-dependency turns `scaffold` on, so `cargo test -p <crate>`
+runs it. `logging` has no such test: its plugin is code the CLI writes
+into the project, so no crate can install it.
+
 ### 3.2 In the core (`brocanth`)
 
 - `AppBuilder::hooks_off(instance, impl IntoIterator<Item = &'static str>)`.
@@ -664,9 +675,18 @@ hook and forgets the manifest fails its own test.
   also covers an `after("rate_limit")` when every hook of `rate_limit` in
   that chain is off.
 - `after_if_present` and `before_if_present` on an off hook do nothing.
-- Not built: the warning for a plugin that installs no hook (§2.3). The
-  core does not know the module key for its `help:` line. The generated
-  code can read `Pipeline::skipped()` and print it.
+- `HookSource::HOOKS`: every name a plugin may install, whatever its
+  configuration. Empty by default. **Reason:** `analytics` installs
+  `count` only while `enabled` is true, and `enabled` is false in
+  development. Without the list, `count: false` stopped the development
+  server with `analytics has no hook "count"`. With it, a declared name
+  that this configuration did not install is off and absent, and
+  `skipped()` lists it. A name outside the list still stops the build.
+  `analytics` declares it; a plugin whose hooks do not depend on the
+  configuration does not need it.
+- The warning for a plugin that installs no hook (§2.3) is generated code,
+  not core: the core does not know the module key for its `help:` line.
+  See §8, wave 2.
 
 ### 3.3 Where each mistake is found
 
@@ -889,13 +909,47 @@ in `src/modules/sessions.rs`, `flags_with_config` in `brocanth.rs`, and
 - `add` does not print a field that a newer module adds (§4): it needs
   the old manifest, which the CLI does not keep. The file takes the
   default, as §4 says.
-- The settings report does not say that a hook is off (§2.3), and no
-  warning for a plugin left with no hook. `Pipeline::skipped()` has what
-  both need.
-- The test that holds a crate's hook names to its `Manifest::hook` list
-  (§3.1). It needs a core helper that lists a plugin's hook ids.
 - The integration-off case runs only at compile time: the analytics tab
   needs a database to serve.
-- The other modules' toggles (`gtag`, `i18n`, `robots`' `integrate.admin`)
-  are the next wave: `docs/module-authoring.md` §3.9 says how to declare
-  them.
+
+### Wave 2: every other module
+
+Each module of `modules::ALL` that was on `main` was checked. The ones
+below declare a choice. Every other one keeps its `..Module::DEFAULT`
+file, because it registers no hook, writes nothing into another module
+that a project can do without, and has no compile-time value.
+
+| Module | Declares |
+|---|---|
+| `middleware-csrf` | hooks `check`, `mint`, both required |
+| `middleware-security-headers` | hook `set`, required |
+| `gtag` | hooks `consent-log`, `insert`, both required; integration `i18n`, on |
+| `i18n` | hook `negotiate`, required; hook `content-language`, on |
+| `beacon` | hook `insert`, required |
+| `logging` | hook `line`, required |
+| `robots` | integration `admin`, on |
+
+The spec leftovers are built too:
+
+- **The settings report marks an off hook.** The generated
+  `hooks_off_notes()` gives, for each name in `MODULE.hooks.off()`, the
+  setting to mark and the note. `brocanth_config::Layers::note` prints it
+  after the merged line, and the report without a config file does the
+  same: `analytics.enabled = true  1 defaults  (hook analytics.count is off in src/modules/analytics.rs)`.
+- **A startup warning for a plugin left with no hook.** The generated
+  `plugins::warn_hookless(pipeline)` runs in `announce!` and reads
+  `Pipeline::skipped()`:
+  `warning: analytics installs no hook; help: brocanth remove analytics`.
+- **The hook-list test** of §3.1, with `hook_names`.
+
+| Question | Decision | Reason |
+|---|---|---|
+| The `middleware` parent | no `hook` | Its five plugins are commented lines a person copies to `src/app.rs`. A toggle would reach none of them, and five instances do not fit one `hooks` field. |
+| `gtag.consent-log` | required, not a toggle (§2.3 proposed one) | The `consent_log` setting decides it, and the banner's script reports a choice exactly when that setting names a file. Off under a set path, the script would report to nothing. |
+| A required hook that a setting decides | declared `Hook::required()`; the file header lists every required hook with its `what` | The header said "always on", which `consent-log` and `beacon.insert` are not. The `what` says when it installs. |
+| `gtag` + `i18n` | an integration, `integrate.i18n` | Without it the banner keeps its `banner.*` words: the project works. The generated registration passes `.translate(MODULE.integrate.i18n)`; `GtagConfig::translate` is not a setting, so the file refuses it. |
+| `robots` + `admin` | an integration; the rule is code in `src/plugins/robots/mod.rs` that reads `admin`'s `mount_at`, not a `disallow` entry | A toggle can only guard code. The code also follows a moved admin. `Disallow: /admin` tells every reader where the backoffice is, so a project may want it off. |
+| `sitemap` + `admin`, `jt`, `realtime-sse` | stay `adapts_to` | Each excluded path is not a page a visitor reads. Listing it in a sitemap helps no one, so there is nothing to choose. |
+| `cache`, `jobs`, `auth` admin panels | not declared | No module writes them into a project on `main`. |
+| Which setting the report marks | the module's `enabled`, else its first setting | One line per module a reader looks at first. A module with no setting has nothing to mark. |
+| Where the warning runs | `announce!`, which `src/app.rs` already calls after `build()` | No change to the project's own `src/app.rs`. |

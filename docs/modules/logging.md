@@ -18,6 +18,8 @@ The wizard calls it: *A line per request*.
 | Outside the runtime | no |
 | Crates | none |
 
+Hooks: `logging.line`, required: it is the module.
+
 ## What it writes
 
 Files:

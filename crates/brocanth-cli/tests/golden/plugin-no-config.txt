@@ -2025,6 +2025,9 @@ pub const MODULE: Module = Module {
 //!
 //! A value that differs per deployment is a setting, not a choice: [logging] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `logging.line`: write one line per response on stderr.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]

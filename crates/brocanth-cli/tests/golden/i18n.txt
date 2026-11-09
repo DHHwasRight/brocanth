@@ -1505,7 +1505,8 @@ macro_rules! register {
         // `banner.*` settings are the fallback.
         let builder =
             builder.plugin_hooking(<brocanth_gtag::Gtag as brocanth::plugin_api::Plugin>::new(
-                crate::plugins::gtag_settings(&given)?,
+                crate::plugins::gtag_settings(&given)?
+                    .translate(crate::modules::gtag::MODULE.integrate.i18n),
             ));
 
         // -- brocanth-i18n: a locale per request --------------------------
@@ -1518,6 +1519,11 @@ macro_rules! register {
             <crate::plugins::i18n::I18n as brocanth::plugin_api::Plugin>::new(
                 crate::plugins::i18n_settings(&given)?,
             ),
+        );
+        let builder = builder.hooks_off_from(
+            "i18n",
+            "src/modules/i18n.rs",
+            crate::modules::i18n::MODULE.hooks.off(),
         );
         builder
     }};
@@ -2171,6 +2177,7 @@ pub fn settings_report() -> Result<String, String> {
         }
     }
     out.push_str("\nmerged\n");
+    let notes = hooks_off_notes();
     for (path, value) in merged(&given)? {
         let layer = match given.iter().rev().find(|g| g.setting.path == path) {
             Some(g) if g.from.starts_with('$') => "2 environment",
@@ -2178,12 +2185,27 @@ pub fn settings_report() -> Result<String, String> {
             None => "1 defaults",
         };
         let value = shown(path, value);
-        out.push_str(&format!(
-            "  {path:<w$}  = {value}  {layer}\n",
-            w = width + 6
-        ));
+        let mut line = format!("  {path:<w$}  = {value}  {layer}", w = width + 6);
+        for (_, note) in notes.iter().filter(|(noted, _)| *noted == path) {
+            line.push_str(&format!("  ({note})"));
+        }
+        out.push_str(&line);
+        out.push('\n');
     }
     Ok(out)
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::i18n::MODULE.hooks.off() {
+        notes.push((
+            "i18n.query",
+            format!("hook i18n.{name} is off in src/modules/i18n.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -2251,7 +2273,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d9311ba26bcb8832
+// brocanth-digest: 3b8e9db0d310aad6
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2391,12 +2413,27 @@ pub mod gtag {
         }
     }
 
+    /// The code `gtag` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `i18n`: the banner's words come from the catalogs, in the request's
+        /// locale.
+        pub i18n: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { i18n: true };
+    }
+
     /// What src/modules/gtag.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -2404,6 +2441,7 @@ pub mod gtag {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -2434,12 +2472,38 @@ pub mod i18n {
         }
     }
 
+    /// The hooks of `i18n` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `i18n.content-language`: send Content-Language and Vary, and keep a
+        /// locale the query chose in the cookie.
+        pub content_language: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            content_language: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.content_language {
+                off.push("content-language");
+            }
+            off
+        }
+    }
+
     /// What src/modules/i18n.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
     }
 
     impl Module {
@@ -2447,11 +2511,12 @@ pub mod i18n {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            hooks: Hooks::DEFAULT,
         };
     }
 }
 
-// brocanth-digest: 3b30f2dc37f066ff
+// brocanth-digest: d24dbda5a16b4056
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2530,10 +2595,15 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! A value that differs per deployment is a setting, not a choice: [gtag] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns these hooks off, because the module needs them:
+//! - `gtag.consent-log`: record each consent choice, while `consent_log`
+//!   names a file.
+//! - `gtag.insert`: put the banner and the tag into each HTML page.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::gtag::{Flag, Flags, Key, Module};
+use crate::plugins::shape::gtag::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2549,6 +2619,13 @@ pub const MODULE: Module = Module {
     //   (Key::Enabled, Flag::Hidden),
     rename: &[],
 
+    integrate: Integrate {
+        // The banner's words come from the catalogs, in the request's locale.
+        // Without the `i18n` module this does nothing.
+        i18n: true,
+        ..Integrate::DEFAULT
+    },
+
     ..Module::DEFAULT
 };
 ===== src/modules/i18n.rs =====
@@ -2560,10 +2637,13 @@ pub const MODULE: Module = Module {
 //!
 //! A value that differs per deployment is a setting, not a choice: [i18n] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `i18n.negotiate`: choose the request's locale before the page runs.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::i18n::{Flag, Flags, Key, Module};
+use crate::plugins::shape::i18n::{Flag, Flags, Hooks, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2578,6 +2658,13 @@ pub const MODULE: Module = Module {
     //   (Key::Query, Flag::As("query")),
     //   (Key::Query, Flag::Hidden),
     rename: &[],
+
+    hooks: Hooks {
+        // `i18n.content-language`: send Content-Language and Vary, and keep a
+        // locale the query chose in the cookie.
+        content_language: true,
+        ..Hooks::DEFAULT
+    },
 
     ..Module::DEFAULT
 };

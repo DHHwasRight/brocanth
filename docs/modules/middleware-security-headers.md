@@ -19,6 +19,9 @@ The wizard calls it: *Send the headers a browser reads as policy*.
 | Crates | none |
 | Without it | no security headers; a browser sniffs types, frames the pages and runs any inline script |
 
+Hooks: `security_headers.set`, required, so
+`src/modules/middleware_security_headers.rs` has no `hooks` field.
+
 ## What it writes
 
 Slots:

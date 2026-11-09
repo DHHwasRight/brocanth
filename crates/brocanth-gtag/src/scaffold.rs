@@ -9,8 +9,8 @@
 //! It is off until a deployment turns it on (`enabled`), so the generated
 //! project sends nothing to Google from a developer's machine.
 
-use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
+use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Google Analytics 4 behind a consent banner.
 pub struct Gtag;
@@ -26,9 +26,24 @@ impl Module for Gtag {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
+        .integration(
             "i18n",
             "the banner's words come from the catalogs, in the request's locale",
+            true,
+        )
+        // `consent-log` is no toggle: the `consent_log` setting decides it,
+        // and the banner's script reports a choice exactly when that
+        // setting names a file. A hook turned off under a set path would
+        // leave the script reporting to nothing.
+        .hook(
+            "consent-log",
+            "record each consent choice, while `consent_log` names a file",
+            Hook::required(),
+        )
+        .hook(
+            "insert",
+            "put the banner and the tag into each HTML page",
+            Hook::required(),
         )
         // The hook runs for the static export too, so a static site may
         // take it: the consent lives in the visitor's browser.
@@ -69,7 +84,11 @@ impl Module for Gtag {
                 prelude: PRELUDE
                     .replace("@TURN_ON@", turn_on)
                     .replace("@WORDS@", words),
-                adjust: None,
+                // The catalogs' words, behind `integrate.i18n`. The
+                // feature stays on; the field decides at build time.
+                adjust: project.has("i18n").then(|| {
+                    format!(".translate({})", module_ref("gtag", "integrate.i18n"))
+                }),
             },
             vec![
                 Setting::bool(

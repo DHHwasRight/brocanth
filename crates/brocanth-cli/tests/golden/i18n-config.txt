@@ -1406,6 +1406,11 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<crate::plugins::i18n::I18n>("i18n")
             .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "i18n",
+            "src/modules/i18n.rs",
+            crate::modules::i18n::MODULE.hooks.off(),
+        );
         builder
     }};
 }
@@ -1809,7 +1814,23 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
+    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
     Ok(layers.to_string())
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::i18n::MODULE.hooks.off() {
+        notes.push((
+            "i18n.query",
+            format!("hook i18n.{name} is off in src/modules/i18n.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -1895,7 +1916,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 83e65d83d7edeca3
+// brocanth-digest: c0a639eef408702f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2026,12 +2047,38 @@ pub mod i18n {
         }
     }
 
+    /// The hooks of `i18n` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `i18n.content-language`: send Content-Language and Vary, and keep a
+        /// locale the query chose in the cookie.
+        pub content_language: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            content_language: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.content_language {
+                off.push("content-language");
+            }
+            off
+        }
+    }
+
     /// What src/modules/i18n.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
     }
 
     impl Module {
@@ -2039,11 +2086,12 @@ pub mod i18n {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            hooks: Hooks::DEFAULT,
         };
     }
 }
 
-// brocanth-digest: b46afc0bd6174700
+// brocanth-digest: 4f9e8b675d760981
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2135,10 +2183,13 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! A value that differs per deployment is a setting, not a choice: [i18n] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `i18n.negotiate`: choose the request's locale before the page runs.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::i18n::{Flag, Flags, Key, Module};
+use crate::plugins::shape::i18n::{Flag, Flags, Hooks, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2153,6 +2204,13 @@ pub const MODULE: Module = Module {
     //   (Key::Query, Flag::As("query")),
     //   (Key::Query, Flag::Hidden),
     rename: &[],
+
+    hooks: Hooks {
+        // `i18n.content-language`: send Content-Language and Vary, and keep a
+        // locale the query chose in the cookie.
+        content_language: true,
+        ..Hooks::DEFAULT
+    },
 
     ..Module::DEFAULT
 };

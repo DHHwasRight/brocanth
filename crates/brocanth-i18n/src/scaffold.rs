@@ -18,7 +18,7 @@
 //! export sends no `Accept-Language` and a file cannot vary by request.
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Translations checked at build time, and a locale per request.
 pub struct I18n;
@@ -61,6 +61,16 @@ impl Module for I18n {
                 .feature("build")
                 .for_build()
                 .note("build.rs compiles locales/; no CLDR data in the build script"),
+        )
+        .hook(
+            "negotiate",
+            "choose the request's locale before the page runs",
+            Hook::required(),
+        )
+        .hook(
+            "content-language",
+            "send Content-Language and Vary, and keep a locale the query chose in the cookie",
+            Hook::on(),
         )
         .absent(
             "brocanth-i18n",

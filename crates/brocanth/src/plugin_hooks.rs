@@ -878,7 +878,46 @@ pub trait HookSource: Plugin {
     /// OnResponse>`, and so on.
     type Families: HookFamilies;
 
+    /// Every name [`install_hooks`](HookSource::install_hooks) may pass to
+    /// the registrar, whatever the configuration. Empty by default.
+    ///
+    /// Declare it when a hook depends on the configuration: `analytics`
+    /// installs `count` only while `enabled` is true. Then
+    /// [`AppBuilder::hooks_off`](crate::plugin_app::AppBuilder::hooks_off)
+    /// accepts a name in this list that the configuration did not
+    /// install, and [`Pipeline::skipped`] lists it. Without the list, a
+    /// name that this install did not register stops the build, because
+    /// it is a typo as far as the core can tell.
+    const HOOKS: &'static [&'static str] = &[];
+
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError>;
+}
+
+/// The names `plugin` registers, in registration order, without the
+/// instance: `["count", "headers"]`.
+///
+/// It installs the hooks into a registrar that keeps nothing, so a test
+/// can hold a crate's hook names to the list its scaffold manifest
+/// declares (`Manifest::hook`). A hook that depends on the configuration
+/// is in the list only when `plugin` was built with a configuration that
+/// installs it.
+pub fn hook_names<P: HookSource>(plugin: &P) -> Result<Vec<String>, PluginError> {
+    let mut request = Vec::new();
+    let mut response = Vec::new();
+    let mut error = Vec::new();
+    let mut model = ModelHooks::new();
+    let mut seen = Vec::new();
+    let mut skipped = Vec::new();
+    let mut registrar =
+        HookRegistrar::new(P::NAME, &mut request, &mut response, &mut error, &mut model)
+            .with_toggles(Toggles {
+                instance: P::NAME,
+                off: &[],
+                seen: &mut seen,
+                skipped: &mut skipped,
+            });
+    plugin.install_hooks(&mut registrar)?;
+    Ok(seen)
 }
 
 // ---------------------------------------------------------------------------

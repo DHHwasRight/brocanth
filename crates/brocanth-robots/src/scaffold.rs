@@ -16,7 +16,7 @@
 //!
 //! [`Robots::render`]: crate::Robots::render
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 pub use crate::scaffold_sitemap::Sitemap;
@@ -36,7 +36,13 @@ impl Module for Robots {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to("admin", "/admin is disallowed")
+        // A choice and not a fact: `Disallow: /admin` also tells every
+        // reader of robots.txt where the backoffice is.
+        .integration(
+            "admin",
+            "the admin is disallowed in robots.txt, at the path src/modules/admin.rs mounts it",
+            true,
+        )
         .adapts_to(
             "sitemap",
             "the Sitemap: line names /sitemap.xml at the sitemap's base URL, unless `sitemap` is set",
@@ -91,13 +97,30 @@ fn index_in_file(project: &Project) -> bool {
     project.has("static")
 }
 
-/// The paths every crawler is kept out of, before anybody edits the list.
+/// The paths a fresh project keeps every crawler out of: the admin's,
+/// through `integrate.admin`, and not through the `disallow` setting.
 fn disallowed(project: &Project) -> Vec<&'static str> {
     if project.has("admin") {
         vec!["/admin"]
     } else {
         Vec::new()
     }
+}
+
+/// The admin's path, behind `integrate.admin` in src/modules/robots.rs.
+fn admin_rule(project: &Project) -> String {
+    if !project.has("admin") {
+        return String::new();
+    }
+    format!(
+        "        // The admin, where src/modules/admin.rs mounts it. Turn it off with\n\
+         \x20       // `integrate.admin` in src/modules/robots.rs.\n\
+         \x20       if {} {{\n\
+         \x20           text = text.disallow({});\n\
+         \x20       }}\n",
+        module_ref("robots", "integrate.admin"),
+        module_ref("admin", "mount_at"),
+    )
 }
 
 /// The `[robots]` section.
@@ -119,7 +142,7 @@ fn settings(project: &Project) -> Vec<Setting> {
         }),
         Setting::list(
             "disallow",
-            &disallowed(project),
+            &[],
             "Paths no crawler may read, each from the root: \"/admin\".",
         ),
         Setting::list(
@@ -274,11 +297,7 @@ fn plugin_rs(project: &Project) -> String {
     } else {
         RENDER_AT_CONFIGURE
     };
-    let disallow = disallowed(project)
-        .iter()
-        .map(|path| format!("{path:?}.to_string()"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let admin = admin_rule(project);
     format!(
         r##"//! The robots.txt, as this application answers it.
 //!
@@ -341,7 +360,7 @@ impl Default for Settings {{
     fn default() -> Self {{
         Self {{
             index: true,
-            disallow: vec![{disallow}],
+            disallow: Vec::new(),
             allow: Vec::new(),
             sitemap: None,
             groups: Vec::new(),
@@ -360,7 +379,7 @@ impl Robots {{
             return Ok(Text::closed());
         }}
         let mut text = Text::new();
-        for path in &self.settings.disallow {{
+{admin}        for path in &self.settings.disallow {{
             text = text.disallow(path.as_str());
         }}
         for path in &self.settings.allow {{

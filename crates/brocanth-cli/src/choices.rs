@@ -70,7 +70,7 @@ impl Shape {
 
     /// The hook's id, as the core names it: `analytics.count`, or the bare
     /// name when the module recorded no instance.
-    fn hook_id(&self, name: &str) -> String {
+    pub fn hook_id(&self, name: &str) -> String {
         match &self.instance {
             Some(instance) => format!("{instance}.{name}"),
             None => name.to_string(),
@@ -562,18 +562,28 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
             out.push_str(&format!("//! {line}\n"));
         }
     }
-    let required: Vec<String> = shape
+    let required: Vec<&(String, String, Hook)> = shape
         .hooks
         .iter()
         .filter(|(_, _, hook)| hook.required)
-        .map(|(name, _, _)| format!("`{}`", shape.hook_id(name)))
         .collect();
     if !required.is_empty() {
         out.push_str(&format!(
-            "//!\n//! Always on, because the module cannot work without {}: {}.\n",
+            "//!\n//! No field turns {} off, because the module needs {}:\n",
+            if required.len() == 1 {
+                "this hook"
+            } else {
+                "these hooks"
+            },
             if required.len() == 1 { "it" } else { "them" },
-            required.join(", ")
         ));
+        for (name, what, _) in required {
+            let text = format!("`{}`: {what}.", shape.hook_id(name));
+            for (i, line) in wrap(&text, 72).iter().enumerate() {
+                let lead = if i == 0 { "- " } else { "  " };
+                out.push_str(&format!("//! {lead}{line}\n"));
+            }
+        }
     }
     if nothing {
         out.push_str(

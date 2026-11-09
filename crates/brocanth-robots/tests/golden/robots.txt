@@ -2083,12 +2083,27 @@ pub mod robots {
         }
     }
 
+    /// The code `robots` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: the admin is disallowed in robots.txt, at the path
+        /// src/modules/admin.rs mounts it.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
     /// What src/modules/robots.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -2096,11 +2111,12 @@ pub mod robots {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
 
-// brocanth-digest: 6b1f8c4e3ec32a6f
+// brocanth-digest: 043e710357d7ee89
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2216,7 +2232,7 @@ pub const MODULE: Module = Module {
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::robots::{Flag, Flags, Key, Module};
+use crate::plugins::shape::robots::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2231,6 +2247,14 @@ pub const MODULE: Module = Module {
     //   (Key::Index, Flag::As("index")),
     //   (Key::Index, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // The admin is disallowed in robots.txt, at the path
+        // src/modules/admin.rs mounts it. Without the `admin` module this does
+        // nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -2273,7 +2297,7 @@ title = "My Blog admin"
 # false on staging, or a search engine lists staging beside production.
 index = false
 # Paths no crawler may read, each from the root: "/admin".
-disallow = ["/admin"]
+disallow = []
 # Paths a crawler may read under a disallowed one: "/admin/help".
 allow = []
 # Where the sitemap is, as a full URL. Empty means none.
@@ -2606,7 +2630,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             index: true,
-            disallow: vec!["/admin".to_string()],
+            disallow: Vec::new(),
             allow: Vec::new(),
             sitemap: None,
             groups: Vec::new(),
@@ -2625,6 +2649,11 @@ impl Robots {
             return Ok(Text::closed());
         }
         let mut text = Text::new();
+        // The admin, where src/modules/admin.rs mounts it. Turn it off with
+        // `integrate.admin` in src/modules/robots.rs.
+        if crate::modules::robots::MODULE.integrate.admin {
+            text = text.disallow(crate::modules::admin::MODULE.mount_at);
+        }
         for path in &self.settings.disallow {
             text = text.disallow(path.as_str());
         }

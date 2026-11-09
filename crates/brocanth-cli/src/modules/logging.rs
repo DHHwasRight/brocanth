@@ -1,7 +1,7 @@
 //! `logging` -- a line per request.
 
 use brocanth_scaffold::snippet::{configurable_hooking, settings_derive, Hooking};
-use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// A request logger, written out into the project rather than linked.
 ///
@@ -34,6 +34,11 @@ impl Module for Logging {
         .asked_in(
             "foundations",
             "A text line per response, for development",
+        )
+        .hook(
+            "line",
+            "write one line per response on stderr",
+            Hook::required(),
         )
     }
 

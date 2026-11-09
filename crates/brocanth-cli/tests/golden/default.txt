@@ -2697,6 +2697,9 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! A value that differs per deployment is a setting, not a choice:
 //! [security_headers] in the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `security_headers.set`: send the policy headers on each response.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]

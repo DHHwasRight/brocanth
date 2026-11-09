@@ -63,6 +63,10 @@ pub struct Middleware;
 
 impl Module for Middleware {
     fn manifest(&self) -> Manifest {
+        // No `hook`: the five plugins are commented lines that a person
+        // copies to `src/app.rs`, not a registration this module writes.
+        // A toggle in src/modules/middleware.rs would reach none of them,
+        // and five instances do not fit one `hooks` field.
         Manifest::new(
             "middleware",
             "proxy headers, method override, canonical host, content types, CORS",
@@ -192,6 +196,16 @@ impl Module for Csrf {
         .part_of("middleware")
         .because("the hook is `brocanth_middleware::Csrf`, so the crate arrives with that choice")
         .after("middleware")
+        .hook(
+            "check",
+            "refuse an unsafe request that does not send the token back",
+            Hook::required(),
+        )
+        .hook(
+            "mint",
+            "set the token cookie on a response",
+            Hook::required(),
+        )
         .absent(
             "csrf",
             "no CSRF check; any page on any site can post a form here and the browser \
@@ -312,6 +326,11 @@ impl Module for SecurityHeaders {
             "the hook is `brocanth_middleware::SecurityHeaders`, so the crate arrives with that choice",
         )
         .after("middleware-csrf")
+        .hook(
+            "set",
+            "send the policy headers on each response",
+            Hook::required(),
+        )
         .absent(
             "security-headers",
             "no security headers; a browser sniffs types, frames the pages and runs any inline script",

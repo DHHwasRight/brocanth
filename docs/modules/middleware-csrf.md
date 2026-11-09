@@ -19,6 +19,9 @@ The wizard calls it: *Refuse a form post this application did not hand out*.
 | Crates | none |
 | Without it | no CSRF check; any page on any site can post a form here and the browser sends the cookies with it |
 
+Hooks: `csrf.check` and `csrf.mint`. Both are required, so
+`src/modules/middleware_csrf.rs` has no `hooks` field. Its header names them.
+
 ## What it writes
 
 Slots:

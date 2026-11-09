@@ -335,3 +335,87 @@ fn a_hard_after_on_an_instance_with_a_hook_left_on_still_resolves() {
         vec!["rate_limit.count", "rate_limit.consent-log", "audit.trail"]
     );
 }
+
+/// Instance `analytics`, whose `collect` hook exists only when its config
+/// says so. It declares both names in `HookSource::HOOKS`.
+struct Counter(Rec, bool);
+
+impl Plugin for Counter {
+    type Config = (Rec, bool);
+    type Provides = NoContext;
+    const NAME: &'static str = "analytics";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new((rec, collect): (Rec, bool)) -> Self {
+        Self(rec, collect)
+    }
+}
+
+impl HookSource for Counter {
+    type Families = OnRequest;
+    const HOOKS: &'static [&'static str] = &["count", "collect"];
+
+    fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        r.request(
+            "count",
+            Order::new(),
+            Step {
+                rec: self.0.clone(),
+                id: "analytics.count",
+            },
+        );
+        if self.1 {
+            r.request(
+                "collect",
+                Order::new(),
+                Step {
+                    rec: self.0.clone(),
+                    id: "analytics.collect",
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_declared_hook_the_config_did_not_install_may_be_off() {
+    let rec = Rec::default();
+    let app = AppBuilder::new()
+        .plugin_hooking(Counter::new((rec.clone(), false)))
+        .hooks_off("analytics", ["collect"])
+        .build()
+        .unwrap();
+
+    // Off and absent: the report still says the file turned it off.
+    assert_eq!(app.pipeline().skipped(), &[("analytics", "collect")]);
+    run(&app);
+    assert_eq!(rec.take(), vec!["analytics.count"]);
+}
+
+#[test]
+fn a_name_outside_the_declared_list_still_stops_the_build() {
+    let err = AppBuilder::new()
+        .plugin_hooking(Counter::new((Rec::default(), false)))
+        .hooks_off("analytics", ["colect"])
+        .build()
+        .unwrap_err();
+
+    let text = err.to_string();
+    assert!(
+        text.starts_with("analytics has no hook \"colect\"\n"),
+        "{text}"
+    );
+    assert!(text.contains("help: did you mean \"collect\"?"), "{text}");
+    // The declared names, not only the ones this config installed.
+    assert!(text.contains("count, collect"), "{text}");
+}
+
+#[test]
+fn hook_names_lists_what_a_plugin_registers_in_order() {
+    let names = brocanth::plugin_hooks::hook_names(&RateLimit::new(Rec::default())).unwrap();
+    assert_eq!(names, ["count", "headers", "consent-log"]);
+
+    let names = brocanth::plugin_hooks::hook_names(&Counter::new((Rec::default(), false))).unwrap();
+    assert_eq!(names, ["count"]);
+}

@@ -202,6 +202,14 @@ pub struct GtagConfig {
     pub consent_log: Option<String>,
     /// What the banner says.
     pub banner: Banner,
+    /// With the `i18n` feature, the banner's words come from the request's
+    /// locale. False keeps the `banner` text in every locale.
+    ///
+    /// Not a setting: it is the same in every deployment, so a project
+    /// sets it in `src/modules/gtag.rs` (`integrate.i18n`), and the file
+    /// refuses it.
+    #[cfg_attr(feature = "config", serde(skip))]
+    pub translate: bool,
 }
 
 impl Default for GtagConfig {
@@ -226,6 +234,7 @@ impl Default for GtagConfig {
             cookie_domain: None,
             consent_log: None,
             banner: Banner::default(),
+            translate: true,
         }
     }
 }
@@ -236,6 +245,14 @@ impl GtagConfig {
     pub fn measuring(mut self, id: impl Into<String>) -> Self {
         self.enabled = true;
         self.measurement_id = id.into();
+        self
+    }
+
+    /// Whether the banner follows the request's locale, with the `i18n`
+    /// feature. See [`GtagConfig::translate`](GtagConfig#structfield.translate).
+    #[must_use]
+    pub fn translate(mut self, on: bool) -> Self {
+        self.translate = on;
         self
     }
 

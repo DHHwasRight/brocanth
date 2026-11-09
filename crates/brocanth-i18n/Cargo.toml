@@ -59,7 +59,7 @@ serde_spanned = { version = "1.1", default-features = false, optional = true }
 [dev-dependencies]
 # Every feature, so `cargo test -p brocanth-i18n` runs every test rather than
 # skipping the ones behind a feature without saying so.
-brocanth-i18n = { path = ".", features = ["dates", "plugin", "build", "config"] }
+brocanth-i18n = { path = ".", features = ["dates", "plugin", "build", "config", "scaffold"] }
 brocanth-test.workspace = true
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0" }
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }
