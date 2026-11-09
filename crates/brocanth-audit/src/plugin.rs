@@ -240,6 +240,92 @@ mod tests {
     use brocanth_model::plugin::HookSink;
 
     #[test]
+    fn the_defaults_are_the_documented_ones() {
+        let config = AuditConfig::default();
+        assert_eq!(config.retention_days, 365);
+        assert_eq!(config.flush_secs, 5);
+        assert!(config.migrate);
+        let plugin = AuditPlugin::new(AuditConfig {
+            retention_days: 7,
+            ..AuditConfig::default()
+        });
+        assert_eq!(
+            plugin.trail().retention_days(),
+            7,
+            "the setting reaches the trail"
+        );
+    }
+
+    #[test]
+    fn the_record_hook_turned_off_records_nothing() {
+        let plugin = AuditPlugin::new(AuditConfig::default());
+        let trail = plugin.trail();
+        let app = AppBuilder::new()
+            .plugin_hooking(plugin)
+            .hooks_off("audit", ["record"])
+            .build()
+            .expect("build");
+        let sink = HookSink::new(app.model_dispatch());
+        sink.publish(&RowChange::created("post", 3_i64));
+        assert_eq!(trail.pending(), 0);
+        // The trail itself still works: the tab and the journal need it.
+        trail.by("ada").publish(&RowChange::created("post", 3_i64));
+        assert_eq!(trail.pending(), 1);
+    }
+
+    #[test]
+    fn a_misspelt_hook_name_stops_the_build() {
+        let built = AppBuilder::new()
+            .plugin_hooking(AuditPlugin::new(AuditConfig::default()))
+            .hooks_off("audit", ["recrod"])
+            .build();
+        assert!(built.is_err());
+    }
+
+    #[tokio::test]
+    async fn without_a_database_the_history_is_kept_in_memory() {
+        let plugin = AuditPlugin::new(AuditConfig::default());
+        let trail = plugin.trail();
+        let mut app = AppBuilder::new()
+            .plugin_hooking(plugin)
+            .build()
+            .expect("build");
+        assert!(trail.has_store());
+        app.readiness().check_all().await.expect("ready");
+        trail.by("ada").publish(&RowChange::created("post", 1_i64));
+        let found = trail
+            .history("post", "1")
+            .await
+            .expect("the memory store answers");
+        assert_eq!(found[0].actor.as_deref(), Some("ada"));
+        let served = app.context().try_get::<Trail>().expect("provided").clone();
+        assert_eq!(served.pending(), 0, "the context holds the same trail");
+        let _ = app.shutdown(brocanth::plugin_shutdown::ShutdownReason::Requested, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_shutdown_writes_what_is_still_queued() {
+        let plugin = AuditPlugin::new(AuditConfig {
+            flush_secs: 3_600,
+            ..AuditConfig::default()
+        });
+        let trail = plugin.trail();
+        let store = Arc::new(MemoryStore::new());
+        trail.attach(store.clone());
+        let mut app = AppBuilder::new()
+            .plugin_hooking(plugin)
+            .build()
+            .expect("build");
+        // Let the worker's first tick pass, then queue.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trail.by("ada").publish(&RowChange::created("post", 1_i64));
+        assert_eq!(trail.pending(), 1);
+        let _ = app.shutdown(brocanth::plugin_shutdown::ShutdownReason::Requested, None);
+        assert_eq!(trail.pending(), 0);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
     fn a_change_published_through_the_hooks_reaches_the_trail() {
         let plugin = AuditPlugin::new(AuditConfig::default());
         let trail = plugin.trail();

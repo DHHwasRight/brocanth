@@ -380,6 +380,162 @@ mod tests {
         assert!(e.to_string().contains("help:"), "{e}");
     }
 
+    #[tokio::test]
+    async fn create_update_and_delete_each_carry_their_kind_and_actor() {
+        let trail = Trail::with_store(Arc::new(MemoryStore::new()), 0);
+        let fields = ["title", "body"];
+        trail.by("ada").publish(&RowChange::created("post", 7_i64));
+        trail
+            .sink(Some("bob".to_string()))
+            .publish(&RowChange::updated("post", 7_i64, fields.as_slice()));
+        trail.sink(None).publish(&RowChange::deleted("post", 7_i64));
+        let history = trail.history("post", "7").await.unwrap();
+        let seen: Vec<(Kind, Option<&str>)> = history
+            .iter()
+            .map(|e| (e.kind, e.actor.as_deref()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (Kind::Deleted, None),
+                (Kind::Updated, Some("bob")),
+                (Kind::Created, Some("ada")),
+            ]
+        );
+        assert!(history.iter().all(|e| e.source == "app"));
+        let names: Vec<&str> = history[1].fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["title", "body"]);
+        assert!(
+            history[1]
+                .fields
+                .iter()
+                .all(|f| f.before.is_none() && f.after.is_none()),
+            "a model change names its columns and carries no values"
+        );
+    }
+
+    #[test]
+    fn a_sink_with_no_trail_records_nothing_and_wants_nothing() {
+        let sink = By::nothing();
+        assert!(!sink.wants("post"));
+        sink.publish(&RowChange::created("post", 1_i64));
+        let trail = Trail::new(0);
+        assert!(trail.by("ada").wants("post"));
+    }
+
+    #[tokio::test]
+    async fn the_purge_keeps_an_entry_exactly_at_the_retention_and_drops_one_past_it() {
+        let at = Arc::new(AtomicI64::new(0));
+        let trail = Trail::with_clock(1, clock(&at));
+        trail.attach(Arc::new(MemoryStore::new()));
+        trail.publish(&RowChange::created("post", 1_i64));
+        trail.flush().await.unwrap();
+        at.store(86_400, Ordering::SeqCst);
+        assert_eq!(trail.purge().await.unwrap(), 0, "one day old is kept");
+        at.store(86_401, Ordering::SeqCst);
+        assert_eq!(trail.purge().await.unwrap(), 1, "a second more is not");
+    }
+
+    #[tokio::test]
+    async fn a_failed_purge_is_recorded_for_the_panel() {
+        struct NoPurge;
+        #[async_trait]
+        impl AuditStore for NoPurge {
+            async fn append(&self, _: &[Entry]) -> Result<(), StoreError> {
+                Ok(())
+            }
+            async fn find(&self, _: &Query) -> Result<Vec<Entry>, StoreError> {
+                Ok(Vec::new())
+            }
+            async fn purge(&self, _: i64) -> Result<u64, StoreError> {
+                Err(StoreError::new("locked"))
+            }
+        }
+        let trail = Trail::with_store(Arc::new(NoPurge), 30);
+        assert!(trail.purge().await.is_err());
+        assert_eq!(trail.last_error().as_deref(), Some("locked"));
+        // A purge with no store says what to do.
+        let e = Trail::new(30).purge().await.unwrap_err();
+        assert!(e.to_string().contains("help:"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn an_entry_keeps_its_own_time_and_one_without_gets_the_clock() {
+        let at = Arc::new(AtomicI64::new(5_000));
+        let trail = Trail::with_clock(0, clock(&at));
+        trail.attach(Arc::new(MemoryStore::new()));
+        let mut entry = Entry::from_change(&RowChange::created("post", 1_i64), None, 0);
+        trail.record(entry.clone());
+        entry.at = 42;
+        trail.record(entry);
+        let entries = trail.find(&Query::recent()).await.unwrap();
+        assert_eq!(entries[0].at, 42);
+        assert_eq!(entries[1].at, 5_000);
+    }
+
+    #[tokio::test]
+    async fn a_failed_flush_on_a_full_queue_keeps_the_oldest_and_counts_the_rest() {
+        struct Down;
+        #[async_trait]
+        impl AuditStore for Down {
+            async fn append(&self, _: &[Entry]) -> Result<(), StoreError> {
+                Err(StoreError::new("down"))
+            }
+            async fn find(&self, _: &Query) -> Result<Vec<Entry>, StoreError> {
+                Ok(Vec::new())
+            }
+            async fn purge(&self, _: i64) -> Result<u64, StoreError> {
+                Ok(0)
+            }
+        }
+        let trail = Trail::with_store(Arc::new(Down), 0);
+        for n in 0..(MAX_PENDING as i64) {
+            trail.publish(&RowChange::created("post", n));
+        }
+        assert!(trail.flush().await.is_err());
+        assert_eq!(trail.pending(), MAX_PENDING);
+        assert_eq!(trail.dropped(), 0);
+        trail.publish(&RowChange::created("post", -1_i64));
+        assert_eq!(trail.dropped(), 1, "past the cap, a new entry is dropped");
+    }
+
+    #[tokio::test]
+    async fn a_read_flushes_and_pages_back_by_id() {
+        let trail = Trail::with_store(Arc::new(MemoryStore::new()), 0);
+        for n in 0..5_i64 {
+            trail.publish(&RowChange::created("post", n));
+        }
+        trail.publish(&RowChange::created("user", 1_i64));
+        let first = trail
+            .find(&Query {
+                table: Some("post".into()),
+                limit: 2,
+                ..Query::default()
+            })
+            .await
+            .unwrap();
+        let rows: Vec<&str> = first.iter().map(|e| e.row.as_str()).collect();
+        assert_eq!(rows, ["4", "3"]);
+        let next = trail
+            .find(
+                &Query {
+                    table: Some("post".into()),
+                    ..Query::default()
+                }
+                .before(first[1].id),
+            )
+            .await
+            .unwrap();
+        let rows: Vec<&str> = next.iter().map(|e| e.row.as_str()).collect();
+        assert_eq!(rows, ["2", "1", "0"]);
+        // A row with no table is ignored rather than matched across tables.
+        let row_only = Query {
+            row: Some("1".into()),
+            ..Query::default()
+        };
+        assert_eq!(trail.find(&row_only).await.unwrap().len(), 6);
+    }
+
     #[test]
     fn a_full_queue_drops_and_counts() {
         let trail = Trail::new(0);
