@@ -2065,8 +2065,16 @@ mod tests {
         request.query = "locale=fr".to_string();
         let response = get(request).await;
         assert_eq!(response.header("content-language"), Some("fr"));
-        let cookie = response.header("set-cookie").unwrap_or_default();
-        assert!(cookie.starts_with("locale=fr;"), "{cookie}");
+        // Another module (csrf) may set a cookie of its own first.
+        let cookies: Vec<&str> = response
+            .headers()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value)
+            .collect();
+        assert!(
+            cookies.iter().any(|c| c.starts_with("locale=fr;")),
+            "{cookies:?}"
+        );
     }
 
     #[test]
