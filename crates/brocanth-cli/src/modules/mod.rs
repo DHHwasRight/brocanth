@@ -169,6 +169,9 @@ pub const ALL: &[&dyn Module] = &[
     // One URL per locale, from the same crate: the `i18n` hook reads the
     // path's first segment. Off with its parent: a site may want one URL.
     &brocanth_i18n::scaffold::I18nRouting,
+    // A title, a description and share tags for each page. The root
+    // layout writes them, so `rsx` adapts to it.
+    &brocanth_meta::scaffold::PageMeta,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

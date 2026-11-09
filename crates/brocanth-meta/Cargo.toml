@@ -1,0 +1,34 @@
+[package]
+name = "brocanth-meta"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Per-page title, description, canonical URL, Open Graph and Twitter tags, and hreflang alternates."
+
+# One dependency with `runtime` (on by default): the core, for the context
+# item. The tags are string building; no template engine.
+#
+# The CLI depends on this crate with `default-features = false, features =
+# ["scaffold"]`, so writing a project does not link the runtime.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+
+[dependencies.brocanth-scaffold]
+workspace = true
+optional = true
+
+[features]
+default = ["runtime"]
+# `Site` is a context item, so a page reads it with `ctx.provided`.
+runtime = ["dep:brocanth"]
+# The `meta` module `brocanth create` and `brocanth add` offer.
+scaffold = ["dep:brocanth-scaffold"]
+
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows.
+[dev-dependencies]
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-i18n = { workspace = true, features = ["scaffold"] }

@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 42 crates under `crates/` and two examples under
+A Cargo workspace of 43 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -165,6 +165,7 @@ puts the crate in a new project.
 | [`brocanth-schema`](crates/brocanth-schema/README.md) | Schemas checked by the compiler and at run time; a handler takes `Valid<T>` | `validation` |
 | [`brocanth-openapi`](crates/brocanth-openapi/README.md) | An OpenAPI 3.1 document from the route table, with a drift check | `openapi` |
 | [`brocanth-robots`](crates/brocanth-robots/README.md) | A robots.txt and a sitemap.xml from builders, checked before they are served | `robots`, `sitemap` |
+| [`brocanth-meta`](crates/brocanth-meta/README.md) | A title, a description, a canonical URL, share tags and hreflang for each page | `meta` |
 | [`brocanth-client`](crates/brocanth-client/README.md) | A command line that calls the application's own API, built from its routes | `client` |
 | [`brocanth-command`](crates/brocanth-command/README.md) | Project commands: define one with `#[cmd]` and the CLI finds it | `commands` |
 | [`brocanth-command-macros`](crates/brocanth-command-macros/README.md) | The `#[cmd]` attribute, re-exported by `brocanth-command` | with `commands` |

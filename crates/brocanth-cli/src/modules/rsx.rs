@@ -24,6 +24,10 @@ impl Module for Rsx {
         .category(Category::Renderer)
         .adapts_to("rsx-tailwind", "the layout links the stylesheet")
         .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
+        .adapts_to(
+            "meta",
+            "the root layout declares `meta: &Head` and writes the page's title, language and tags",
+        )
         // Static files are a server wrap; `observability` sees them first,
         // so it logs and counts them as before.
         .after("observability")
@@ -570,7 +574,12 @@ fn layout_rsx(p: &Project) -> String {
     } else {
         "<main>"
     };
-    LAYOUT_RSX
+    let layout = if p.has("meta") {
+        LAYOUT_META_RSX
+    } else {
+        LAYOUT_RSX
+    };
+    layout
         .replace("@HEAD@\n", &head)
         .replace("@BODY_CLASS@", body_class)
         .replace("@MAIN@", main_open)
@@ -604,6 +613,41 @@ pub fn Layout(@PARAMS@children: Element) -> Element {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>{TITLE}</title>
+@HEAD@
+        </head>
+        <body@BODY_CLASS@>
+            <header><a href="/">{TITLE}</a></header>
+            @MAIN@{children}</main>
+        </body>
+    </html>
+}
+"#;
+
+/// The root layout with the `meta` module: the page's head, not one title.
+const LAYOUT_META_RSX: &str = r#"// The document every page in this directory, and every directory below it,
+// is rendered inside. A page never names it: which layout wraps a page is a
+// property of where the page is, which is the rule the Crystal page_router
+// uses for layout.cr.
+//
+// `meta` is the page's head, which `html!` fills with `ctx.head()`: the
+// title, the description and the share tags the page set with
+// `ctx.meta()`, and the `[meta]` settings for what it left out. `{! meta }`
+// writes the tags unescaped because they are markup; every value inside
+// them is escaped already. Only the layout that writes `<head>` asks for
+// `meta`.
+
+use brocanth_meta::Head;
+
+use crate::pages::TITLE;
+
+pub fn Layout(@PARAMS@meta: &Head, children: Element) -> Element {
+    <!DOCTYPE html>
+    <html lang={meta.lang_tag()}>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{meta.title()}</title>
+            {! meta }
 @HEAD@
         </head>
         <body@BODY_CLASS@>

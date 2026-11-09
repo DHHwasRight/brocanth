@@ -792,6 +792,7 @@ dependencies = [
  "brocanth-i18n",
  "brocanth-input",
  "brocanth-jobs",
+ "brocanth-meta",
  "brocanth-middleware",
  "brocanth-observe",
  "brocanth-openapi",
@@ -966,6 +967,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "brocanth-meta"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-cli",
+ "brocanth-i18n",
+ "brocanth-scaffold",
 ]
 
 [[package]]
