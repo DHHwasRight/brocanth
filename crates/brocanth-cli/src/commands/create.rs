@@ -4044,7 +4044,14 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
             out.push_str(&deeper(line));
         }
     }
+    let hookless = warn_hookless_fn(a, built);
+    if hookless.is_some() {
+        out.push_str("        crate::plugins::warn_hookless($app.pipeline());\n");
+    }
     out.push_str("    }};\n}\npub(crate) use announce;\n\n");
+    if let Some(hookless) = hookless {
+        out.push_str(&hookless);
+    }
 
     // -- say ----------------------------------------------------------
     //
@@ -4553,8 +4560,11 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     }));
     out.push_str("}\n");
 
+    let notes = hooks_off_notes_fn(a, built);
     if config {
-        out.push_str(CONFIG_REPORT);
+        out.push_str(
+            &CONFIG_REPORT.replace("@NOTES@", if notes.is_some() { CONFIG_NOTES } else { "" }),
+        );
     } else {
         out.push_str(PARSED);
         if optional {
@@ -4581,10 +4591,162 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
             list.matches("]\n").count().min(1),
         ));
         out.push_str("}\n");
-        out.push_str(PLAIN_REPORT);
+        let (head, line) = if notes.is_some() {
+            (PLAIN_NOTES, PLAIN_LINE_NOTED)
+        } else {
+            ("", PLAIN_LINE)
+        };
+        out.push_str(
+            &PLAIN_REPORT
+                .replace("@NOTES@", head)
+                .replace("@LINE@", line),
+        );
+    }
+    if let Some(notes) = notes {
+        out.push_str(&notes);
     }
     out
 }
+
+/// Each module whose file may turn a hook off, and whose plugin has an
+/// instance: the ones a `hooks_off_from` line follows.
+fn toggling(a: &Answers, built: &Built) -> Vec<crate::choices::Shape> {
+    crate::choices::shapes(a, built)
+        .into_iter()
+        .filter(|shape| shape.instance.is_some() && shape.toggles().next().is_some())
+        .collect()
+}
+
+/// `src/modules/<key>.rs`, as a `help:` line names it.
+fn module_file(key: &str) -> String {
+    format!("src/modules/{}.rs", key.replace('-', "_"))
+}
+
+/// `hooks_off_notes`: for each hook a module file turns off, the setting
+/// the settings report marks and the note beside it. The setting is the
+/// module's `enabled` when it declares one, else its first; a module with
+/// no setting has nothing to mark. `None` when no module has a hook toggle.
+fn hooks_off_notes_fn(a: &Answers, built: &Built) -> Option<String> {
+    let mut body = String::new();
+    for shape in toggling(a, built) {
+        let owned: Vec<String> = built
+            .settings()
+            .filter(|(by, _, setting)| *by == shape.key && setting.kind != Kind::List)
+            .map(|(_, section, setting)| format!("{section}.{}", setting.key))
+            .collect();
+        let Some(path) = owned
+            .iter()
+            .find(|path| path.ends_with(".enabled"))
+            .or(owned.first())
+        else {
+            continue;
+        };
+        let instance = shape.instance.as_deref().unwrap_or(&shape.key);
+        body.push_str(&format!(
+            "    for name in {} {{\n\
+             \x20       notes.push((\n\
+             \x20           {path:?},\n\
+             \x20           format!(\"hook {instance}.{{name}} is off in {}\"),\n\
+             \x20       ));\n\
+             \x20   }}\n",
+            brocanth_scaffold::snippet::module_ref(&shape.key, "hooks.off()"),
+            module_file(&shape.key),
+        ));
+    }
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n/// Each hook src/modules/ turns off, as the setting the settings report\n\
+         /// marks and the note beside it.\n\
+         fn hooks_off_notes() -> Vec<(&'static str, String)> {{\n\
+         \x20   let mut notes = Vec::new();\n\
+         {body}\
+         \x20   notes\n\
+         }}\n"
+    ))
+}
+
+/// `warn_hookless`: a startup warning for each plugin whose module file
+/// turns every hook off, read from `Pipeline::skipped`. Only a module with
+/// no required hook can reach that state. `None` when no module can.
+fn warn_hookless_fn(a: &Answers, built: &Built) -> Option<String> {
+    let mut body = String::new();
+    for shape in toggling(a, built) {
+        if shape.hooks.iter().any(|(_, _, hook)| hook.required) {
+            continue;
+        }
+        let instance = shape.instance.as_deref().unwrap_or(&shape.key);
+        let names: Vec<String> = shape
+            .hooks
+            .iter()
+            .map(|(name, _, _)| format!("{name:?}"))
+            .collect();
+        let message = format!(
+            "\"warning: {instance} installs no hook; help: brocanth remove {}\"",
+            shape.key
+        );
+        let say = format!("crate::plugins::say!(warn, {message});");
+        let say = if 8 + say.len() <= 100 {
+            format!("        {say}\n")
+        } else {
+            format!("        crate::plugins::say!(\n            warn,\n            {message}\n        );\n")
+        };
+        body.push_str(&format!(
+            "    // Every hook of `{instance}` is off in {}.\n\
+             \x20   if all_off({instance:?}, &[{}]) {{\n\
+             {say}\
+             \x20   }}\n",
+            module_file(&shape.key),
+            names.join(", "),
+        ));
+    }
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "/// A plugin whose module file turns every hook off: registered, and\n\
+         /// doing nothing per request. Said once at startup; `brocanth remove`\n\
+         /// takes the module out.\n\
+         pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {{\n\
+         \x20   let all_off = |instance: &str, names: &[&str]| {{\n\
+         \x20       names.iter().all(|name| {{\n\
+         \x20           pipeline\n\
+         \x20               .skipped()\n\
+         \x20               .iter()\n\
+         \x20               .any(|&(i, n)| i == instance && n == *name)\n\
+         \x20       }})\n\
+         \x20   }};\n\
+         {body}\
+         }}\n\n"
+    ))
+}
+
+/// The settings report with notes: each hook a module file turns off.
+const CONFIG_NOTES: &str = "    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
+";
+
+/// The plain report: the notes, read once before the merged lines.
+const PLAIN_NOTES: &str = "    let notes = hooks_off_notes();
+";
+
+/// One merged line of the plain report.
+const PLAIN_LINE: &str = r#"        out.push_str(&format!(
+            "  {path:<w$}  = {value}  {layer}\n",
+            w = width + 6
+        ));
+"#;
+
+/// One merged line of the plain report, with the notes on its setting.
+const PLAIN_LINE_NOTED: &str = r#"        let mut line = format!("  {path:<w$}  = {value}  {layer}", w = width + 6);
+        for (_, note) in notes.iter().filter(|(noted, _)| *noted == path) {
+            line.push_str(&format!("  ({note})"));
+        }
+        out.push_str(&line);
+        out.push('\n');
+"#;
 
 /// The startup check of the renames, in `cargo test`, so CI finds a bad
 /// name in src/modules/ before a deploy does.
@@ -5063,7 +5225,7 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
-    Ok(layers.to_string())
+@NOTES@    Ok(layers.to_string())
 }
 "#;
 
@@ -5134,18 +5296,14 @@ pub fn settings_report() -> Result<String, String> {
         }
     }
     out.push_str("\nmerged\n");
-    for (path, value) in merged(&given)? {
+@NOTES@    for (path, value) in merged(&given)? {
         let layer = match given.iter().rev().find(|g| g.setting.path == path) {
             Some(g) if g.from.starts_with('$') => "2 environment",
             Some(_) => "3 flags",
             None => "1 defaults",
         };
         let value = shown(path, value);
-        out.push_str(&format!(
-            "  {path:<w$}  = {value}  {layer}\n",
-            w = width + 6
-        ));
-    }
+@LINE@    }
     Ok(out)
 }
 "#;

@@ -2372,12 +2372,27 @@ pub mod gtag {
         }
     }
 
+    /// The code `gtag` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `i18n`: the banner's words come from the catalogs, in the request's
+        /// locale.
+        pub i18n: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { i18n: true };
+    }
+
     /// What src/modules/gtag.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -2385,11 +2400,12 @@ pub mod gtag {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
 
-// brocanth-digest: 73832cab5580a9ee
+// brocanth-digest: 80499a1b9afd5bea
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2579,10 +2595,15 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! A value that differs per deployment is a setting, not a choice: [gtag] in
 //! the config file, an environment variable, or a flag.
+//!
+//! No field turns these hooks off, because the module needs them:
+//! - `gtag.consent-log`: record each consent choice, while `consent_log`
+//!   names a file.
+//! - `gtag.insert`: put the banner and the tag into each HTML page.
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::gtag::{Flag, Flags, Key, Module};
+use crate::plugins::shape::gtag::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2597,6 +2618,13 @@ pub const MODULE: Module = Module {
     //   (Key::Enabled, Flag::As("enabled")),
     //   (Key::Enabled, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // The banner's words come from the catalogs, in the request's locale.
+        // Without the `i18n` module this does nothing.
+        i18n: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };

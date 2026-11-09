@@ -1091,6 +1091,21 @@ required ones too: the module file's header lists those. A name in
 `hook` must be the name in `install_hooks`, or the build of the project
 fails with `<instance> has no hook "<name>"`.
 
+A hook that installs only under some configuration (`analytics.count`
+while `enabled` is true) needs `const HOOKS: &[&str]` on the
+`HookSource`: every name `install_hooks` may register. Without it, a file
+that turns that hook off stops a server whose configuration did not
+install it. A required hook that a setting decides is still
+`Hook::required()`; say when it installs in its `what`, which the file's
+header prints.
+
+Hold the list to the code with a test under the `scaffold` feature:
+`brocanth::plugin_hooks::hook_names(&plugin)` returns the names the
+plugin registers. Configure the plugin so that every hook installs, and
+compare with `manifest().hooks`. `brocanth-middleware/tests/manifest_hooks.rs`
+is the example. Add `scaffold` to the crate's own dev-dependency, so
+`cargo test -p <crate>` runs it.
+
 **Integrations.** Write the code only when the host is in the project,
 and through `snippet::integration`, which puts it behind the guard:
 
