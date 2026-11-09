@@ -185,3 +185,20 @@ fn a_hook_that_cannot_name_the_locale_type_reads_current() {
         Ok(http::Response::new(Vec::new().into()))
     });
 }
+
+/// The scaffold manifest names exactly the hooks `I18nHook` registers: a
+/// project's module file has a field for each one it may turn off, and the
+/// generated `hooks_off_from` passes those names to the core.
+#[cfg(feature = "scaffold")]
+#[test]
+fn the_manifest_declares_every_hook_the_plugin_registers() {
+    use brocanth_scaffold::Module;
+
+    let plugin = I18nHook::<Locale>::new(NegotiatorConfig::default());
+    let mut registered = brocanth::plugin_hooks::hook_names(&plugin).expect("the hooks install");
+    registered.sort_unstable();
+    let manifest = brocanth_i18n::scaffold::I18n.manifest();
+    let mut declared: Vec<&str> = manifest.hooks.iter().map(|(name, _, _)| *name).collect();
+    declared.sort_unstable();
+    assert_eq!(registered, declared);
+}
