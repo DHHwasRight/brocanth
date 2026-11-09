@@ -108,6 +108,13 @@ brocanth-test.workspace = true
 # which cargo allows: the suite links this crate's library, not its tests.
 brocanth-cache-conformance = { path = "../brocanth-cache-conformance" }
 
+# `tests/scaffold.rs`: the `cache` and `cache-memory` modules, written into
+# a project by the CLI's generator and compared with goldens. The CLI takes
+# this crate's `scaffold` side, and these tests take the CLI: a
+# dev-dependency cycle, which cargo allows.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 # `postgres` is the default and the only backend here. SQLite is the "smaller
 # setups, different crate" case, and this crate is shaped so that crate can

@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 44. For all
+One page per module that `brocanth create` offers. There are 46. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -69,6 +69,8 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`db`](db.md) | one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver | Enhancer, Middleware, Renderer |  |
 | [`model`](model.md) | SeaORM, validations, migrations; without it no SQL driver at all | Enhancer, Middleware |  |
 | [`cache`](cache.md) | a cache on an unlogged Postgres table, not Redis; without it no cache at all | Enhancer |  |
+| [`cache-memory`](cache-memory.md) | the cache in this process's memory, for tests and development; never in production | Enhancer |  |
+| [`cache-redis`](cache-redis.md) | the cache on Redis or Valkey instead of Postgres; one more server to run | Enhancer |  |
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |

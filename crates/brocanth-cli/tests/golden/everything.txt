@@ -19,7 +19,8 @@ brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git", feature
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
-brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "admin"], default-features = false }
+brocanth-cache-redis = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the cache's Redis backend
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1931,9 +1932,6 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::cache::Cache>("cache")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -2016,6 +2014,9 @@ macro_rules! register {
             )
             .map_err(|e| e.to_string())?;
         let builder = builder
+            .plugin_from_config::<crate::plugins::cache::Cache>("cache")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::policy::Policies>("policy")
             .map_err(|e| e.to_string())?;
 
@@ -2061,8 +2062,7 @@ type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
 type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
 type WithObservability = After<crate::plugins::observability::Observe, WithI18n>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
-type WithCache = After<crate::plugins::cache::Cache, WithDb>;
-type WithJobs = After<crate::plugins::jobs::Jobs, WithCache>;
+type WithJobs = After<crate::plugins::jobs::Jobs, WithDb>;
 type WithAuth = After<crate::plugins::auth::Auth, WithJobs>;
 type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
 type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
@@ -2074,7 +2074,8 @@ type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
 type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
-type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
+type WithCache = After<crate::plugins::cache::Cache, WithMiddlewareSecurityHeaders>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithCache>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 pub type Installed = WithMiddlewareRateLimit;
 
@@ -2197,6 +2198,11 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    }
+    // The cache, as a tab: Purge expired, and Clear for each namespace you
+    // name with `.namespace(..)`.
+    if crate::modules::cache::MODULE.integrate.admin {
+        config = config.panel(brocanth_cache::admin::CachePanel::installed());
     }
     config
 }
@@ -2619,33 +2625,6 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
-    },
-    Setting {
-        path: "cache.url",
-        help: "The Postgres URL the cache lives in.",
-        flag: false,
-        file: "src/modules/cache.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "cache.migrate",
-        help: "Create the unlogged cache table at startup if it is absent.",
-        flag: true,
-        file: "src/modules/cache.rs",
-        flags: crate::modules::cache::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "cache.sweep_every",
-        help: "Seconds between two sweeps of expired entries; 0 turns the sweep off.",
-        flag: true,
-        file: "src/modules/cache.rs",
-        flags: crate::modules::cache::MODULE.flags,
-        none_as: None,
-        text: false,
     },
     Setting {
         path: "jobs.url",
@@ -3071,6 +3050,15 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "cache.url",
+        help: "The Redis or Valkey URL the cache lives in.",
+        flag: false,
+        file: "src/modules/cache_redis.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "policy.dialect",
         help: "The SQL a condition compiles to: postgres or sqlite.",
         flag: true,
@@ -3187,9 +3175,6 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::db::MODULE.rename {
-        renames.push((key.path(), *flag));
-    }
-    for (key, flag) in crate::modules::cache::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::jobs::MODULE.rename {
@@ -3398,7 +3383,6 @@ fn defaults() -> Vec<(&'static str, String)> {
     let i18n = brocanth_i18n::NegotiatorConfig::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
-    let cache = crate::plugins::cache::Settings::default();
     let jobs = crate::plugins::jobs::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
@@ -3410,6 +3394,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
+    let cache = crate::plugins::cache::Settings::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let server = crate::plugins::ServerSettings::default();
@@ -3491,9 +3476,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
-        ("cache.url", format!("{:?}", cache.url)),
-        ("cache.migrate", format!("{:?}", cache.migrate)),
-        ("cache.sweep_every", format!("{:?}", cache.sweep_every)),
         ("jobs.url", format!("{:?}", jobs.url)),
         ("jobs.migrate", format!("{:?}", jobs.migrate)),
         ("jobs.worker", format!("{:?}", jobs.worker)),
@@ -3601,6 +3583,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "security_headers.csp.report_uri",
             format!("{:?}", security_headers.csp.report_uri),
         ),
+        ("cache.url", format!("{:?}", cache.url)),
         ("policy.dialect", format!("{:?}", policy.dialect)),
         (
             "rate_limit.ip_header",
@@ -3754,7 +3737,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e28a425c15bc0441
+// brocanth-digest: 581fb74291b55df6
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4149,40 +4132,41 @@ pub mod model {
 
 /// The shape of src/modules/cache.rs.
 pub mod cache {
-    pub use super::{Flag, Flags};
-
-    /// A setting of `[cache]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Key {
-        Migrate,
-        SweepEvery,
+    /// The code `cache` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a tab at /admin/cache: purge expired entries, clear a
+        /// namespace you name.
+        pub admin: bool,
     }
 
-    impl Key {
-        /// The setting, as `config/<env>.toml` and the flag spell it.
-        pub const fn path(self) -> &'static str {
-            match self {
-                Key::Migrate => "cache.migrate",
-                Key::SweepEvery => "cache.sweep_every",
-            }
-        }
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
     }
 
     /// What src/modules/cache.rs holds.
     pub struct Module {
-        /// Whether the settings of this module have flags.
-        pub flags: Flags,
-        /// Flags under another name, or no flag.
-        pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
         /// The value of each field the file does not name.
         pub const DEFAULT: Self = Self {
-            flags: Flags::Project,
-            rename: &[],
+            integrate: Integrate::DEFAULT,
         };
+    }
+}
+
+/// The shape of src/modules/cache_redis.rs.
+pub mod cache_redis {
+    /// What src/modules/cache_redis.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -5041,7 +5025,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 7739d1b6b6e148f8
+// brocanth-digest: 96611327d01ae43d
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5065,6 +5049,7 @@ pub mod admin_model;
 pub mod analytics;
 pub mod auth;
 pub mod cache;
+pub mod cache_redis;
 pub mod ci;
 pub mod ci_github;
 pub mod client;
@@ -5117,6 +5102,7 @@ pub const ALL: &[&str] = &[
     "db",
     "model",
     "cache",
+    "cache-redis",
     "jobs",
     "auth",
     "policy",
@@ -5150,7 +5136,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 2170b3161967c7b4
+// brocanth-digest: e7f3b0c994fc6cd8
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5402,30 +5388,36 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
-//!
-//! A value that differs per deployment is a setting, not a choice: [cache] in
-//! the config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
-#[allow(unused_imports)]
-use crate::plugins::shape::cache::{Flag, Flags, Key, Module};
+use crate::plugins::shape::cache::{Integrate, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [cache]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
-    flags: Flags::Project,
-
-    // Another name for a flag, or no flag. The variable and the config key
-    // keep the declared name. Examples:
-    //   (Key::Migrate, Flag::As("migrate")),
-    //   (Key::Migrate, Flag::Hidden),
-    rename: &[],
+    integrate: Integrate {
+        // A tab at /admin/cache: purge expired entries, clear a namespace you
+        // name. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
+===== src/modules/cache_redis.rs =====
+//! `cache-redis`: the cache on Redis or Valkey instead of Postgres; one more
+//! server to run.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::cache_redis::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/jobs.rs =====
 //! `jobs`: a queue in Postgres with retries and a dead letter; a worker in this
 //! process.
@@ -6249,19 +6241,6 @@ application_name = "my-blog"
 # Unset, the pool trusts the system's roots.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 
-[cache]
-# The Postgres URL the cache lives in.
-# A URL can carry a password, so no flag sets it.
-url = "postgres://localhost/development"
-# Create the unlogged cache table at startup if it is absent.
-# Development only: see `PgCache::schema_sql` for the statements to put in a
-# migration instead.
-migrate = true
-# Seconds between two sweeps of expired entries; 0 turns the sweep off.
-# Each wait moves by up to a quarter, so instances do not sweep together.
-# Expired entries are never served; the sweep only frees their space.
-sweep_every = 300
-
 [jobs]
 # The database the queue lives in.
 # A URL can carry a password, so no flag sets it.
@@ -6469,6 +6448,11 @@ enabled = true
 report_only = false
 # Where a browser reports what the policy blocked. Empty means none.
 # report_uri = "/csp-reports"
+
+[cache]
+# The Redis or Valkey URL the cache lives in.
+# A URL can carry a password, so no flag sets it.
+url = "redis://localhost:6379"
 
 [policy]
 # The SQL a condition compiles to: postgres or sqlite.
@@ -9054,31 +9038,31 @@ impl Plugin for Auth {
 ===== src/plugins/cache/mod.rs =====
 //! The cache, as this application registers it.
 //!
-//! The cache is a table, and the table is `UNLOGGED`: Postgres writes no
-//! write-ahead log for it, ships it to no replica, and truncates it on crash
-//! recovery. For any other table that is a catastrophe. For a cache it is the
-//! only state you can reason about, and it is what makes a cache in a
-//! relational database defensible at all. A deployment that already runs
-//! Postgres therefore gets a cache without running Redis.
+//! The cache is a Redis or Valkey server. It costs one more server to run,
+//! back up and watch, and it is the right trade when the cache is a workload
+//! of its own: many writes a second, reads sent to replicas, or a need to
+//! evict under `maxmemory`. The server expires entries by itself, so there is
+//! no sweep and no table to create.
 //!
 //! `brocanth-cache` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application caches nothing and links nothing to do it with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and delete
+//! this file, and the application caches nothing and links nothing to do it
+//! with.
 //!
 //! The crate also ships `CachePlugin`, and this is not that. `CachePlugin` is
 //! handed a cache that is already open, because a pool is made asynchronously
-//! and `Plugin::new` is not async. An application whose cache is one URL wants
-//! the shorter road, so this plugin takes the URL, builds the pool at startup,
-//! and publishes the same `CacheHandle`. Hand-built caches -- a shared pool, a
-//! second namespace policy, a different backend -- are what `CachePlugin` is
-//! for, and swapping to it is a change in this file alone.
+//! and `Plugin::new` is not async. An application whose cache is one setting
+//! wants the shorter road, so this plugin opens the cache at startup and
+//! publishes the same `CacheHandle`. Hand-built caches -- a second namespace
+//! policy, a backend of your own -- are what `CachePlugin` is for, and
+//! swapping to it is a change in this file alone.
 
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
-use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_cache::{CacheHandle, PgCache, Sweeper};
+use brocanth_cache::CacheHandle;
+use brocanth_cache_redis::RedisCache;
 
 /// What this plugin is built from.
 ///
@@ -9088,35 +9072,24 @@ use brocanth_cache::{CacheHandle, PgCache, Sweeper};
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// The Postgres URL the cache lives in. Postgres and nothing else, on
-    /// purpose: a cache for a SQLite deployment is a separate crate behind the
-    /// same `Cache` trait.
+    /// The Redis or Valkey URL the cache lives in: one server, a primary,
+    /// or Sentinel. Not Redis Cluster: see `brocanth_cache_redis`.
     pub url: String,
-    /// Create the unlogged cache table at startup if it is absent.
-    pub migrate: bool,
-    /// Seconds between two sweeps of expired entries; 0 turns the sweep off.
-    pub sweep_every: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
-            migrate: true,
-            sweep_every: 300,
+            url: "redis://localhost:6379".to_string(),
         }
     }
 }
 
 pub struct Cache {
-    url: String,
-    migrate: bool,
-    sweep_every: u64,
+    settings: Settings,
     /// Open at `before_start` and not before, so the field is an `Option` for
     /// exactly the length of the build.
     handle: Option<CacheHandle>,
-    /// The sweep, from `start` to `shutdown`.
-    sweeper: Option<Sweeper>,
 }
 
 impl Plugin for Cache {
@@ -9124,103 +9097,57 @@ impl Plugin for Cache {
     type Provides = ProvidesContext<CacheHandle>;
     const NAME: &'static str = "cache";
 
-    fn new(config: Settings) -> Self {
+    fn new(settings: Settings) -> Self {
         Self {
-            url: config.url,
-            migrate: config.migrate,
-            sweep_every: config.sweep_every,
+            settings,
             handle: None,
-            sweeper: None,
         }
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.url.is_empty() {
+        if self.settings.url.is_empty() {
             return Err(PluginError::new(
-                "[cache] url is required; there is no default cache",
+                "[cache] url is required; there is no default cache\n\
+                 help: set `url` under [cache] in the config file, or the variable for `cache.url`",
             ));
         }
         Ok(())
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // The lifecycle hooks are synchronous and opening a pool is not, so
-        // the pool opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
+        // The connection opens on the first command, so nothing here waits.
+        // Its task is spawned on the runtime, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[cache] needs a Tokio runtime at startup to open its pool ({e})"
+                "[cache] needs a Tokio runtime at startup to connect ({e})"
             ))
         })?;
         let cache = {
             let _entered = runtime.enter();
-            PgCache::connect_lazy(&self.url)
+            RedisCache::open(&self.settings.url)
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
-        // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers. With
-        // `migrate`, the first check creates the table, as the jobs module
-        // does, so a new project starts; a project with reviewers turns it
-        // off and keeps `PgCache::schema_sql` in a migration. `serve` awaits
-        // this once before it listens, so an unreachable store stops the
-        // start there.
+        // Ready when one read answers. A miss is a pass: the question is
+        // whether the server answers. `serve` awaits this once before it
+        // listens, so an unreachable server stops the start there.
         let probe = Arc::clone(&cache);
-        let migrate = self.migrate;
-        let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {
             let probe = Arc::clone(&probe);
-            let migrated = Arc::clone(&migrated);
             async move {
-                if migrate {
-                    migrated
-                        .get_or_try_init(|| probe.migrate())
-                        .await
-                        .map_err(|e| format!("creating the cache table: {e}"))?;
-                }
                 let key = brocanth_cache::Namespace::new("brocanth.readyz")
                     .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
                     .map_err(|e| e.to_string())?;
                 probe.get(&key).await.map(drop).map_err(|e| {
-                    format!(
-                        "{e}\nhelp: check `[cache] url`; with `migrate = false`, the \
-                         `brocanth_cache` table must exist: `PgCache::schema_sql()` has the \
-                         statements for a migration"
-                    )
+                    format!("{e}\nhelp: check `[cache] url`, and that the Redis server runs")
                 })
             }
         });
-        self.handle = Some(CacheHandle::new(cache));
-        Ok(())
-    }
-
-    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // Nothing else deletes expired rows. Every read checks expiry
-        // already, so this only keeps the table small. Each instance runs
-        // it, and the deletes do not mind.
-        let Some(handle) = self.handle.as_ref().filter(|_| self.sweep_every > 0) else {
-            return Ok(());
-        };
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!("[cache] needs a Tokio runtime to sweep ({e})"))
-        })?;
-        let on_error = |e: &brocanth_cache::CacheError| {
-            crate::plugins::say!(warn, "[cache] sweep: {e}"; error = %e);
-        };
-        self.sweeper = Some(Sweeper::spawn(
-            &runtime,
-            Arc::clone(handle.inner()),
-            std::time::Duration::from_secs(self.sweep_every),
-            Arc::new(on_error),
-        ));
-        Ok(())
-    }
-
-    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
-        if let Some(sweeper) = self.sweeper.take() {
-            sweeper.stop();
-        }
+        let handle = CacheHandle::new(cache);
+        // The first cache this process opens is the one the admin's cache
+        // tab reads: the admin is built before any plugin starts.
+        handle.install();
+        self.handle = Some(handle);
         Ok(())
     }
 
@@ -12276,6 +12203,7 @@ request.
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
+- `cache-redis`  the cache on Redis or Valkey instead of Postgres; one more server to run
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
@@ -12308,7 +12236,7 @@ request.
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
 
-**Absent:** `logging`, `beacon`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `beacon`, `cache-memory`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -12748,7 +12676,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea33a316d3ebcecf -->
+<!-- brocanth-digest: 35cda625d788f591 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -12760,7 +12688,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -12845,9 +12773,17 @@ adapted_to = ["config", "commands"]
 [modules.cache]
 version = "0.1.0"
 kind = ["enhancer"]
-files = ["src/modules/cache.rs", "src/plugins/cache/"]
-config = ["cache"]
+files = ["src/modules/cache.rs"]
+config = []
 crates = ["brocanth-cache"]
+adapted_to = ["config", "db", "cache-redis", "admin"]
+
+[modules.cache-redis]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/cache_redis.rs"]
+config = ["cache"]
+crates = ["brocanth-cache-redis"]
 adapted_to = ["config"]
 
 [modules.jobs]
@@ -13098,4 +13034,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: af098bda4db3fb81
+# brocanth-digest: 6c0958b82a1b98c1

@@ -244,3 +244,25 @@ The data models also differ. Jobs keeps a `state` column. Queue derives the stat
 6. **A project picks a backend through child modules** (`cache-redis`,
    `cache-memory`), with conflicts between siblings, because a backend
    changes `Cargo.toml`.
+
+### Status: the cache side
+
+Decisions 1, 3, 5 and 6 are built for the cache. Jobs is not changed.
+
+- `brocanth-cache-conformance` holds the `Cache` contract as a suite.
+  `MemoryCache` runs it always, `PgCache` with a database, and
+  `RedisCache` with a Redis or Valkey server
+  (`BROCANTH_CACHE_TEST_REDIS`).
+- `cache-memory` writes the plugin over `MemoryCache`. Its manifest says
+  `development_only`, so `brocanth check --deploy` reports
+  `deploy/development-only` as an error.
+- `brocanth-cache-redis` and `cache-redis`. With a child, `brocanth-cache`
+  loses its `postgres` feature (`Dep::feature_unless`). The two children
+  conflict.
+- With `db`, the Postgres cache reads the `db` pool and declares no `url`.
+- The admin tab is an integration of `cache` with `admin`, on by default
+  (`integrate.admin` in `src/modules/cache.rs`). It reads the cache the
+  plugin installs (`CacheHandle::install`), whatever the backend.
+- The sweep runs for every backend. On Redis it is not written into the
+  generated plugin, because the server expires keys and `purge_expired`
+  answers 0. `CachePlugin` keeps its `Sweeper` for every backend.

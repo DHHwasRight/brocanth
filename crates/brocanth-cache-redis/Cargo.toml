@@ -38,6 +38,9 @@ brocanth-scaffold = { workspace = true, optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
 brocanth-cache-conformance = { path = "../brocanth-cache-conformance" }
 brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, features = ["runtime"] }
+# `tests/scaffold.rs`: the `cache-redis` module through the CLI's generator.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
 default = ["runtime"]
@@ -49,7 +52,9 @@ runtime = [
     "dep:redis",
     "dep:async-trait",
 ]
-scaffold = ["dep:brocanth-scaffold"]
+# The module writes its plugin through `brocanth_cache::scaffold`, so the
+# parent's generator comes too, and still no runtime.
+scaffold = ["dep:brocanth-scaffold", "dep:brocanth-cache", "brocanth-cache/scaffold"]
 
 [lints.rust]
 missing_docs = "warn"

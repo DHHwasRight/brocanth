@@ -92,6 +92,10 @@ pub const ALL: &[&dyn Module] = &[
     // From `brocanth-cache` itself, which is the point: a module can live in
     // the crate it scaffolds, and joining the menu is still one line here.
     &brocanth_cache::scaffold::Cache,
+    // Its backends other than Postgres, each a child that writes the plugin
+    // file instead, because a backend changes `Cargo.toml`.
+    &brocanth_cache::scaffold::CacheMemory,
+    &brocanth_cache_redis::scaffold::CacheRedis,
     // The queue, from the crate that is the queue.
     &brocanth_jobs::scaffold::Jobs,
     // Accounts, from the crate that is the accounts. The local path only:

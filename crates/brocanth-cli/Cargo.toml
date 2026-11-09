@@ -25,6 +25,10 @@ path = "src/main.rs"
 # links a generator.
 brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, features = ["scaffold"] }
 
+# The cache on Redis, for its `cache-redis` module alone, on the same terms:
+# the CLI links no Redis client.
+brocanth-cache-redis = { path = "../brocanth-cache-redis", version = "0.1.0", default-features = false, features = ["scaffold"] }
+
 # The database pool, for its scaffold module alone, on the same terms.
 brocanth-db = { path = "../brocanth-db", version = "0.1.0", default-features = false, features = ["scaffold"] }
 

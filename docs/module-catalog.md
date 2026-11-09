@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 44 modules. Each name links to its own page
+what to build next. There are 46 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -67,11 +67,13 @@ nothing holds this page.
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
-### Enhancer (10)
+### Enhancer (12)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`cache`](modules/cache.md) | A cache on an unlogged Postgres table, not Redis; without it no cache at all |  |  |  |  |
+| [`cache-memory`](modules/cache-memory.md) | The cache in this process's memory, for tests and development; never in production |  |  | part of `cache`, off until you tick it | `check --deploy` refuses it |
+| [`cache-redis`](modules/cache-redis.md) | The cache on Redis or Valkey instead of Postgres; one more server to run |  |  | part of `cache`, off until you tick it |  |
 | [`client`](modules/client.md) | A subcommand that calls this application's own API, built from its routes |  |  | needs `input`: the client is built from what each page takes and gives, and that table is what `input` writes; `commands`: the client is a subcommand, and a project with no command line has nowhere to put one |  |
 | [`commands`](modules/commands.md) | This project's own command line, `serve` plus whatever you add |  | yes |  | static-site safe |
 | [`config`](modules/config.md) | Config/<env>.toml, merged; without it nothing links a TOML parser |  | yes |  | static-site safe |
