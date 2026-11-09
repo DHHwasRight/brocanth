@@ -12,25 +12,25 @@ readme = "README.md"
 # `MailPlugin` and a `Services` entry, so it needs the contract those two
 # words name. The core costs three crates (`wayfind`, `http`, `thiserror`) and
 # has never heard of this one.
-brocanth.workspace = true
+brocanth = { workspace = true, optional = true }
 
 # The trait is async and object-safe. `async fn` in a trait is still not
 # object-safe, and `Arc<dyn Mailer>` is the normal way to hold one -- the same
 # choice `brocanth-storage` made for `Storage` and `brocanth-auth` for
 # `AuthStore`. Async is also what keeps the queue possible: a mailer that
 # hands a message to `brocanth-jobs` enqueues, and enqueuing is async.
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 
 # RFC 2047 encoded-words and the base64 body transfer encoding. Same crate and
 # same major version `brocanth-auth` and `brocanth-storage` already resolve to,
 # so an application that links all three links one copy.
-base64 = "0.23"
+base64 = { version = "0.23", optional = true }
 
 # The OS CSPRNG, for the multipart boundary. One use, and the argument for it
 # is in `message.rs`.
-getrandom = "0.4"
+getrandom = { version = "0.4", optional = true }
 
-thiserror = "2"
+thiserror = { version = "2", optional = true }
 
 # `Message` on the wire, so a message can be a `brocanth-jobs` payload. Off by
 # default and this crate never names the queue: §8 says a plugin that needs
@@ -60,7 +60,18 @@ lettre = { version = "0.11", default-features = false, features = [
     "pool",
 ], optional = true }
 
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `mail`. It lives beside the crate it writes into a project, so a renamed
+# backend breaks the generator's build here and not a generated project
+# later. Optional and off: only the CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
 [dev-dependencies]
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator and checked with `brocanth_scaffold::testing`. A cycle through
+# dev-dependencies, which cargo allows.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 # One, and it is a format rather than a runtime. The tests drive the async
 # trait through the twenty-line executor in `src/rt.rs`, because a runtime that
 # exists only to make a test compile is still a runtime in the tree (PLAN §8.2,
@@ -74,15 +85,29 @@ lettre = { version = "0.11", default-features = false, features = [
 serde_json = "1"
 
 [features]
-# Empty, and that is the rule rather than an oversight. The backend that
-# matters today is `Memory`, and it needs nothing.
-default = []
+# The runtime alone. The backend that matters in a test is `Memory`, and it
+# needs nothing more.
+default = ["runtime"]
+
+# What an application runs: every dependency but the scaffold's. On by
+# default. The CLI turns it off, so `brocanth create` never links it.
+runtime = [
+    "dep:brocanth",
+    "dep:async-trait",
+    "dep:base64",
+    "dep:getrandom",
+    "dep:thiserror",
+]
+
+# The code that writes this crate into a project. Off, so an application
+# that depends on this crate never links the generator.
+scaffold = ["dep:brocanth-scaffold"]
 
 # The SMTP backend. See the dependency line above.
-smtp = ["dep:lettre"]
+smtp = ["runtime", "dep:lettre"]
 
 # `Message`, `Address` and `Subject` on the wire.
-serde = ["dep:serde"]
+serde = ["runtime", "dep:serde"]
 
 [lints.rust]
 missing_docs = "warn"

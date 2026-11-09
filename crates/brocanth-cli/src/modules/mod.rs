@@ -94,6 +94,9 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_cache::scaffold::Cache,
     // The queue, from the crate that is the queue.
     &brocanth_jobs::scaffold::Jobs,
+    // Mail, from the crate that is the mail. After the queue, because
+    // `deliver_later` rides on it when it is there.
+    &brocanth_mail::scaffold::Mail,
     // Accounts, from the crate that is the accounts. The local path only:
     // there is one `AuthStore` in the workspace and it is a `HashMap`, and
     // a provider cannot be a second choice until a crate can appear in two

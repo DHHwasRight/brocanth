@@ -18,7 +18,7 @@ then what the module unblocks. Both scans put `mail` first.
 
 | # | Key | What it does | Maps to | Effort |
 |---|---|---|---|---|
-| 1 | `mail` | Sends mail from a project; `deliver_later` through `jobs`. The `brocanth-mail` crate exists; no module adds it. | Action Mailer, django.core.mail, react-email, PocketBase mail | S |
+| 1 | `mail` | **Built** ([page](modules/mail.md)). Sends mail from a project; `deliver_later` through `jobs`. | Action Mailer, django.core.mail, react-email, PocketBase mail | S |
 | 2 | `flash` | Messages that survive a redirect after a form POST | contrib.messages, Rails flash | S |
 | 3 | `auth-screens` | Sign-up, sign-in, reset, verify, TOTP screens over `brocanth-auth`, which has the flows and no pages. Needs `mail` and `flash`. | Devise, allauth, Rails 8 auth generator | M |
 | 4 | `auth-oauth` | Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |

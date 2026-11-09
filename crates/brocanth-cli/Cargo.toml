@@ -40,6 +40,7 @@ brocanth-analytics = { workspace = true, default-features = false, features = [
 # contract rather than a module that can be written today.
 brocanth-auth = { path = "../brocanth-auth", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-mail = { path = "../brocanth-mail", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-client = { path = "../brocanth-client", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-input = { path = "../brocanth-input", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-middleware = { path = "../brocanth-middleware", version = "0.1.0", default-features = false, features = ["scaffold"] }

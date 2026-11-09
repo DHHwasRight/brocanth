@@ -370,6 +370,73 @@ mod rendering {
     }
 }
 
+mod development_backends {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::dev::{Folder, Log};
+
+    #[test]
+    fn the_folder_writes_each_message_as_the_wire_would_carry_it() {
+        let dir = std::env::temp_dir().join(format!("brocanth-mail-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = Folder::new(dir.join("nested"));
+        let message = every_field();
+
+        block_on(folder.send(&message)).expect("the first send makes the folder");
+        block_on(folder.send(&message)).expect("a second file beside the first");
+
+        let mut files: Vec<_> = std::fs::read_dir(folder.dir())
+            .expect("the folder exists")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "two messages are two files: {files:?}");
+        assert!(files
+            .iter()
+            .all(|f| f.extension().is_some_and(|e| e == "eml")));
+        // Not compared byte for byte: each render draws a new multipart
+        // boundary.
+        let written = std::fs::read_to_string(&files[0]).expect("readable");
+        assert!(
+            written.contains("Subject: Reset your password\r\n"),
+            "{written}"
+        );
+        assert!(written.contains("To: "), "{written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_made_is_a_transport_error_with_help() {
+        let file = std::env::temp_dir().join(format!("brocanth-mail-file-{}", std::process::id()));
+        std::fs::write(&file, b"not a folder").expect("a file");
+        let folder = Folder::new(file.join("below"));
+
+        let err = block_on(folder.send(&every_field())).expect_err("a file is not a folder");
+
+        assert!(matches!(err, MailError::Transport(_)), "{err:?}");
+        assert!(err.to_string().contains("help:"), "{err}");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_log_hands_each_message_to_its_function_and_delivers_nothing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Log::new({
+            let seen = Arc::clone(&seen);
+            move |message: &Message| {
+                seen.lock()
+                    .expect("not poisoned")
+                    .push(message.subject().as_str().to_string());
+            }
+        });
+
+        block_on(log.send(&every_field())).expect("the log accepts everything");
+
+        assert_eq!(*seen.lock().expect("not poisoned"), ["Reset your password"]);
+    }
+}
+
 mod memory_backend {
     use super::*;
 
