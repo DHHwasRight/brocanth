@@ -2002,11 +2002,26 @@ pub mod snippet {
         }
         let statement = if project.has("config") {
             match &adjust {
-                None => format!(
-                    "        let builder = builder\n\
-                     \x20           .plugin_hooking_from_config::<{ty}>({section:?})\n\
-                     \x20           .map_err(|e| e.to_string())?;\n"
-                ),
+                None => {
+                    // rustfmt breaks the argument onto its own line when
+                    // the call does not fit in 100 columns.
+                    let call =
+                        format!("            .plugin_hooking_from_config::<{ty}>({section:?})");
+                    let call = if call.len() <= 100 {
+                        call
+                    } else {
+                        format!(
+                            "            .plugin_hooking_from_config::<{ty}>(\n\
+                             \x20               {section:?},\n\
+                             \x20           )"
+                        )
+                    };
+                    format!(
+                        "        let builder = builder\n\
+                         {call}\n\
+                         \x20           .map_err(|e| e.to_string())?;\n"
+                    )
+                }
                 Some(adjust) => {
                     let one = format!("                |config| config{adjust},\n");
                     let closure = if one.trim_end().len() <= 100 {
