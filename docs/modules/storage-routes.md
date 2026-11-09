@@ -28,7 +28,9 @@ The wizard calls it: *Upload and download routes, file tokens and thumbnails*.
   `FileStore::tokens`, which your page calls after your policy allowed the
   read. Without a valid token the answer is `403`.
 - `&thumb=WxH` serves a thumbnail. It is rendered once per size and kept.
-- A file that is not a known image is served as an attachment, never inline.
+- A file that is not a known image is served as an attachment of type
+  `application/octet-stream`, never inline. The type the client declared
+  is not repeated.
 
 **Who may upload is your decision.** The module writes `may_upload` in
 `src/plugins/storage_routes/mod.rs`, and it answers no. Nobody can upload

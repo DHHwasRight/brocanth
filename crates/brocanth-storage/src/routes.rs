@@ -37,7 +37,9 @@
 //!   puts it in the header the check reads. The check itself is unchanged.
 //! * **What is served inline is what the bytes are.** The type comes from
 //!   the store, which sniffed it. Anything that is not a recognised image
-//!   is an attachment, with `nosniff` and a sandbox policy beside it.
+//!   is an attachment of type `application/octet-stream`, with `nosniff`
+//!   and a sandbox policy beside it. The type the client declared is not
+//!   repeated: it is the client's claim, and `text/html` is a page.
 //! * **A thumbnail is rendered at most once per size.** The first request
 //!   renders and caches it; the next ones read the cache. Without the
 //!   `variants` feature a thumbnail is served from the cache only.
@@ -263,8 +265,11 @@ impl FileRoutes {
         let location = format!("{}/{hex}?token={}", config.path, token.as_str());
         match sent.field("return_to").filter(|to| is_local(to)) {
             Some(to) => {
+                // The query goes before a fragment: after it, the browser
+                // keeps it on the client and the page never reads it.
+                let (to, fragment) = to.split_at(to.find('#').unwrap_or(to.len()));
                 let joint = if to.contains('?') { '&' } else { '?' };
-                let back = format!("{to}{joint}file={hex}&token={}", token.as_str());
+                let back = format!("{to}{joint}file={hex}&token={}{fragment}", token.as_str());
                 let mut answer = plain(303, "");
                 set(&mut answer, http::header::LOCATION, &back);
                 answer
@@ -356,6 +361,14 @@ impl FileRoutes {
                     meta.filename.map(|f| f.as_str().to_string()),
                 )
             }
+        };
+        // A type that is not a sniffed image is the client's claim, so it is
+        // not what the answer says: `text/html` from an upload form would
+        // be a page on this origin wherever the attachment header is lost.
+        let content_type = if content_type.is_safe_to_inline() {
+            content_type
+        } else {
+            ContentType::octet_stream()
         };
         let head = request.method() == http::Method::HEAD;
         let length = bytes.len();
