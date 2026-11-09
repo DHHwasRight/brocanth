@@ -58,7 +58,7 @@ use crate::clock::{Clock, UnixTime};
 use crate::error::AuthError;
 use crate::identity::AccountId;
 use crate::impersonation::Impersonation;
-use crate::mfa::{Admitted, Elevation, FactorSet};
+use crate::mfa::{Admitted, Elevation, FactorSet, Verified};
 use crate::random::{b64, ct_eq, random_bytes, random_secret, unb64};
 use crate::storage::{AuthStore, SessionRecord};
 
@@ -667,6 +667,23 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     pub fn seal(&self, id: &SessionId) -> String {
         let sig = self.key.sign_message(id.as_str().as_bytes());
         format!("{}.{}", id.as_str(), b64(&sig))
+    }
+
+    /// Seals a half-finished sign-in for the second-factor form, with this
+    /// manager's key and clock. See [`Verified::seal`].
+    ///
+    /// Here so a page never holds the session key: the one key signs both
+    /// cookies, and a page that could read it could forge either.
+    ///
+    /// [`Verified::seal`]: crate::mfa::Verified::seal
+    pub fn seal_proof(&self, proof: &Verified, ttl: i64) -> String {
+        proof.seal(&self.key, self.clock.now(), ttl)
+    }
+
+    /// The proof [`Sessions::seal_proof`] sealed, or `None` when the value
+    /// is malformed, forged or expired.
+    pub fn unseal_proof(&self, sealed: &str) -> Option<Verified> {
+        Verified::unseal(&self.key, self.clock.now(), sealed)
     }
 
     /// Recovers a session id from a signed cookie value, or `None`.

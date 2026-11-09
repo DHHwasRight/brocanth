@@ -70,8 +70,9 @@ use crate::mfa::FactorSet;
 use crate::otp::OtpChallengeId;
 use crate::session::{Privilege, SessionId};
 use crate::storage::{
-    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    AccountDirectory, AuthStore, LockoutStore, MfaStore, NewAccount, NewProviderLink,
+    OtpChallengeRecord, OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -919,5 +920,57 @@ impl SignInLocationStore for PgStore {
             .await
             .map_err(backend)?
             .rows_affected())
+    }
+}
+
+#[async_trait]
+impl LockoutStore for PgStore {
+    async fn record_failed_login(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        let n: i32 = sqlx::query(sql::RECORD_FAILED_LOGIN)
+            .bind(account.as_str())
+            .bind(at)
+            .bind(window_start)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend)?
+            .try_get(0)
+            .map_err(backend)?;
+        Ok(u32::try_from(n).unwrap_or(0))
+    }
+
+    async fn lock_account(&self, account: &AccountId, until: UnixTime) -> Result<(), StoreError> {
+        sqlx::query(sql::LOCK_ACCOUNT)
+            .bind(account.as_str())
+            .bind(until)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn locked_until(&self, account: &AccountId) -> Result<Option<UnixTime>, StoreError> {
+        let row = sqlx::query(sql::LOCKED_UNTIL)
+            .bind(account.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend)?;
+        match row {
+            Some(row) => row.try_get(0).map_err(backend),
+            None => Ok(None),
+        }
+    }
+
+    async fn clear_failed_logins(&self, account: &AccountId) -> Result<(), StoreError> {
+        sqlx::query(sql::CLEAR_FAILED_LOGINS)
+            .bind(account.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
     }
 }

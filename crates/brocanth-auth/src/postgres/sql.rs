@@ -150,6 +150,13 @@ pub(crate) const SCHEMA: &[&str] = &[
         last_seen_at BIGINT NOT NULL,
         PRIMARY KEY (account, fingerprint)
     )"#,
+    // -- lockout ---------------------------------------------------------------
+    r#"CREATE TABLE IF NOT EXISTS brocanth_auth_failed_logins (
+        account      TEXT    PRIMARY KEY,
+        failures     INTEGER NOT NULL CHECK (failures >= 0),
+        since        BIGINT  NOT NULL,
+        locked_until BIGINT
+    )"#,
 ];
 
 /// The name of the unique index on the email, for telling
@@ -371,6 +378,30 @@ pub(crate) const COUNT_SIGN_IN_LOCATIONS: &str =
 
 pub(crate) const PURGE_SIGN_IN_LOCATIONS: &str =
     "DELETE FROM brocanth_auth_sign_in_locations WHERE last_seen_at < $1";
+
+// ---------------------------------------------------------------------------
+// lockout
+// ---------------------------------------------------------------------------
+
+/// One failure, in one statement: a window that began before `$3` starts
+/// again at 1 from `$2`. The conflict path locks the row, so two failures at
+/// once count two.
+pub(crate) const RECORD_FAILED_LOGIN: &str = "INSERT INTO brocanth_auth_failed_logins AS f \
+     (account, failures, since) VALUES ($1, 1, $2) \
+     ON CONFLICT (account) DO UPDATE SET \
+     failures = CASE WHEN f.since < $3 THEN 1 ELSE f.failures + 1 END, \
+     since = CASE WHEN f.since < $3 THEN $2 ELSE f.since END \
+     RETURNING failures";
+
+pub(crate) const LOCK_ACCOUNT: &str = "INSERT INTO brocanth_auth_failed_logins \
+     (account, failures, since, locked_until) VALUES ($1, 0, $2, $2) \
+     ON CONFLICT (account) DO UPDATE SET failures = 0, locked_until = $2";
+
+pub(crate) const LOCKED_UNTIL: &str =
+    "SELECT locked_until FROM brocanth_auth_failed_logins WHERE account = $1";
+
+pub(crate) const CLEAR_FAILED_LOGINS: &str =
+    "DELETE FROM brocanth_auth_failed_logins WHERE account = $1";
 
 // ---------------------------------------------------------------------------
 // sweeping

@@ -24,6 +24,7 @@
 //! brocanth_auth::mfa_store_conformance!(fresh);
 //! brocanth_auth::otp_store_conformance!(fresh);
 //! brocanth_auth::sign_in_location_store_conformance!(fresh);
+//! brocanth_auth::lockout_store_conformance!(fresh);
 //! ```
 //!
 //! Each macro writes a module of `#[tokio::test]` functions, one per case, so
@@ -58,8 +59,9 @@ use crate::mfa::{FactorKind, FactorSet};
 use crate::otp::OtpChallengeId;
 use crate::session::{Privilege, SessionId};
 use crate::storage::{
-    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    AccountDirectory, AuthStore, LockoutStore, MfaStore, NewAccount, NewProviderLink,
+    OtpChallengeRecord, OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -242,6 +244,22 @@ macro_rules! sign_in_location_store_conformance {
                 a_network_is_new_once,
                 purging_forgets_unused_networks,
                 concurrent_first_sign_ins_report_new_once,
+            ]
+        );
+    };
+}
+
+/// Every [`LockoutStore`] case, as tests.
+#[macro_export]
+macro_rules! lockout_store_conformance {
+    ($fresh:ident) => {
+        $crate::__auth_conformance_cases!(
+            $fresh,
+            lockout_store,
+            [
+                failures_count_within_a_window_and_start_again_after_it,
+                a_lock_resets_the_count_and_clear_forgets_it,
+                concurrent_failures_all_count,
             ]
         );
     };
@@ -1214,5 +1232,102 @@ pub mod sign_in_location_store {
             "each sign-in saw a different previous one: {results:?}"
         );
         assert_eq!(store.count_sign_in_locations(&ada).await.unwrap(), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LockoutStore
+// ---------------------------------------------------------------------------
+
+/// The [`LockoutStore`] cases.
+pub mod lockout_store {
+    use super::*;
+
+    /// Each failure adds one in its window. A failure after the window
+    /// starts again at 1. Counts are per account.
+    pub async fn failures_count_within_a_window_and_start_again_after_it<S: LockoutStore>(
+        store: Arc<S>,
+    ) {
+        let ada = account(&*store, None).await;
+        let eve = account(&*store, None).await;
+        for (i, expected) in [1u32, 2, 3].into_iter().enumerate() {
+            let at = T0 + i as i64;
+            let n = store.record_failed_login(&ada, at, T0 - 100).await.unwrap();
+            assert_eq!(n, expected);
+        }
+        assert_eq!(
+            store.record_failed_login(&eve, T0, T0 - 100).await.unwrap(),
+            1,
+            "another account has its own count"
+        );
+        assert_eq!(
+            store
+                .record_failed_login(&ada, T0 + 500, T0 + 1)
+                .await
+                .unwrap(),
+            1,
+            "a window that began before the start is over"
+        );
+        assert_eq!(
+            store
+                .record_failed_login(&ada, T0 + 501, T0 + 1)
+                .await
+                .unwrap(),
+            2,
+            "the new window began at T0 + 500"
+        );
+        assert_eq!(store.locked_until(&ada).await.unwrap(), None);
+    }
+
+    /// A lock is read back, sets the count to 0, and `clear` forgets both.
+    pub async fn a_lock_resets_the_count_and_clear_forgets_it<S: LockoutStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let eve = account(&*store, None).await;
+        store.record_failed_login(&ada, T0, T0 - 100).await.unwrap();
+        store.record_failed_login(&ada, T0, T0 - 100).await.unwrap();
+        store.lock_account(&ada, T0 + 300).await.unwrap();
+        assert_eq!(store.locked_until(&ada).await.unwrap(), Some(T0 + 300));
+        assert_eq!(
+            store
+                .record_failed_login(&ada, T0 + 1, T0 - 100)
+                .await
+                .unwrap(),
+            1,
+            "the lock set the count to 0"
+        );
+        store.lock_account(&eve, T0 + 60).await.unwrap();
+        assert_eq!(
+            store.locked_until(&eve).await.unwrap(),
+            Some(T0 + 60),
+            "an account with no failures can be locked"
+        );
+        store.clear_failed_logins(&ada).await.unwrap();
+        assert_eq!(store.locked_until(&ada).await.unwrap(), None);
+        assert_eq!(
+            store
+                .record_failed_login(&ada, T0 + 2, T0 - 100)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.locked_until(&eve).await.unwrap(), Some(T0 + 60));
+    }
+
+    /// Many failures at once: each one counts, and each sees its own count.
+    pub async fn concurrent_failures_all_count<S: LockoutStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let counts = race(&store, |store, _| {
+            let ada = ada.clone();
+            async move {
+                store
+                    .record_failed_login(&ada, T0, T0 - 100)
+                    .await
+                    .expect("record")
+            }
+        })
+        .await;
+        let seen: HashSet<u32> = counts.iter().copied().collect();
+        assert_eq!(seen.len(), RACERS, "a count was seen twice: {counts:?}");
+        assert_eq!(seen.iter().max().copied(), Some(RACERS as u32));
     }
 }

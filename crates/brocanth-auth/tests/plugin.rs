@@ -204,3 +204,66 @@ fn the_plugin_also_builds_with_the_real_clock() {
     .expect("build");
     assert!(auth.providers().is_empty());
 }
+
+#[tokio::test]
+async fn a_half_finished_sign_in_survives_the_round_trip_and_nothing_else_does() {
+    use brocanth_auth::AuthStore as _;
+
+    let config = config(Vec::new());
+    let clock = config.clock.clone();
+    let auth = TestAuth::build(config).expect("build");
+    let registered = auth
+        .accounts()
+        .register("ada@example.com", "a long enough password")
+        .await
+        .expect("register");
+    let brocanth_auth::accounts::RegistrationNotice::Created { account, .. } = registered.notice
+    else {
+        panic!("a new address makes an account");
+    };
+    let proof = auth
+        .accounts()
+        .login("ada@example.com", "a long enough password")
+        .await
+        .expect("login")
+        .into_proof();
+
+    let sealed = auth.sessions().seal_proof(&proof, 60);
+    let back = auth
+        .sessions()
+        .unseal_proof(&sealed)
+        .expect("the same key opens it");
+    assert_eq!(back.account(), &account.id);
+
+    // Another key and an expired seal both fail.
+    let other = TestAuth::build(other_key()).expect("build");
+    assert!(other.sessions().unseal_proof(&sealed).is_none());
+    clock.advance(61);
+    assert!(auth.sessions().unseal_proof(&sealed).is_none());
+
+    // The second factors share the store: nothing is enrolled yet.
+    let enrolled = auth
+        .mfa()
+        .expect("mfa")
+        .second_factors(&back)
+        .await
+        .expect("asked");
+    assert!(matches!(
+        brocanth_auth::FactorPolicy::recommended().admit(&enrolled, back),
+        brocanth_auth::Admission::Admit(_)
+    ));
+    assert!(auth
+        .store()
+        .account(&account.id)
+        .await
+        .expect("read")
+        .is_some());
+}
+
+/// The same configuration with another signing key.
+fn other_key() -> AuthConfig<MemoryStore, StubHttp, TestClock> {
+    AuthConfig {
+        signing_key: SigningKey::from_bytes([2u8; 32]),
+        ..config(Vec::new())
+    }
+}

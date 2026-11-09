@@ -1668,6 +1668,14 @@ mod tests {
             [
                 "/",
                 "/about",
+                "/account/code",
+                "/account/forgot",
+                "/account/reset/{token}",
+                "/account/signin",
+                "/account/signout",
+                "/account/signup",
+                "/account/totp",
+                "/account/verify/{token}",
                 "/admin",
                 "/admin/{*rest}",
                 "/openapi.json",
@@ -1789,6 +1797,8 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
 pub mod admin;
 pub mod auth;
+pub mod auth_lockout;
+pub mod auth_screens;
 pub mod cache;
 pub mod db;
 pub mod i18n;
@@ -2057,6 +2067,9 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
             .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::auth_screens::AuthScreens>("auth_screens")
+            .map_err(|e| e.to_string())?;
         builder
     }};
 }
@@ -2095,7 +2108,8 @@ type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders,
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareRateLimit>;
-pub type Installed = WithFlash;
+type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFlash>;
+pub type Installed = WithAuthScreens;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
@@ -3245,6 +3259,24 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "auth_screens.base_url",
+        help: "The address links in mail start with: scheme, host, port.",
+        flag: true,
+        file: "src/modules/auth_screens.rs",
+        flags: crate::modules::auth_screens::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_screens.issuer",
+        help: "The name an authenticator app shows beside the code.",
+        flag: true,
+        file: "src/modules/auth_screens.rs",
+        flags: crate::modules::auth_screens::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -3337,6 +3369,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::auth::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::auth_screens::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::policy::MODULE.rename {
@@ -3558,6 +3593,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let flash = brocanth_middleware::FlashConfig::default();
+    let auth_screens = crate::plugins::auth_screens::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
@@ -3774,6 +3810,11 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("flash.key_env", format!("{:?}", flash.key_env)),
         ("flash.secure", format!("{:?}", flash.secure)),
         (
+            "auth_screens.base_url",
+            format!("{:?}", auth_screens.base_url),
+        ),
+        ("auth_screens.issuer", format!("{:?}", auth_screens.issuer)),
+        (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
@@ -3913,7 +3954,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b1e01abab7a204f8
+// brocanth-digest: a162ff1b477c3710
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4480,6 +4521,73 @@ pub mod auth {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/auth_screens.rs.
+pub mod auth_screens {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[auth_screens]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        BaseUrl,
+        Issuer,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::BaseUrl => "auth_screens.base_url",
+                Key::Issuer => "auth_screens.issuer",
+            }
+        }
+    }
+
+    /// What src/modules/auth_screens.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Where a person lands after signing in.
+        pub after_sign_in: &'static str,
+        /// How long a sign-in waits for its second factor, in seconds.
+        pub pending_secs: u64,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            after_sign_in: "/",
+            pending_secs: 300,
+        };
+    }
+}
+
+/// The shape of src/modules/auth_lockout.rs.
+pub mod auth_lockout {
+    /// What src/modules/auth_lockout.rs holds.
+    pub struct Module {
+        /// Wrong passwords that lock an account, 3 or more.
+        pub max_failures: u64,
+        /// The seconds in which those wrong passwords count, 60 to 86400.
+        pub window_secs: u64,
+        /// How long a lock lasts, in seconds, 60 to 86400.
+        pub lock_for_secs: u64,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            max_failures: 10,
+            window_secs: 900,
+            lock_for_secs: 900,
         };
     }
 }
@@ -5294,7 +5402,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: e742a833136977bf
+// brocanth-digest: 7248102319b170de
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5317,6 +5425,8 @@ pub mod admin;
 pub mod admin_model;
 pub mod analytics;
 pub mod auth;
+pub mod auth_lockout;
+pub mod auth_screens;
 pub mod cache;
 pub mod ci;
 pub mod ci_github;
@@ -5375,6 +5485,8 @@ pub const ALL: &[&str] = &[
     "jobs",
     "mail",
     "auth",
+    "auth-screens",
+    "auth-lockout",
     "policy",
     "storage",
     "input",
@@ -5407,7 +5519,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: fb1291ffe0760bfa
+// brocanth-digest: ff1edc7d60fc356a
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -5769,6 +5881,65 @@ pub const MODULE: Module = Module {
     //   (Key::SigningKeyEnv, Flag::As("signing-key-env")),
     //   (Key::SigningKeyEnv, Flag::Hidden),
     rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/auth_screens.rs =====
+//! `auth-screens`: sign-up, sign-in, sign-out, reset, verify and TOTP pages
+//! under /account.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [auth_screens] in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::auth_screens::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [auth_screens]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::BaseUrl, Flag::As("base-url")),
+    //   (Key::BaseUrl, Flag::Hidden),
+    rename: &[],
+
+    // Where a person lands after signing in.
+    after_sign_in: "/",
+
+    // How long a sign-in waits for its second factor, in seconds.
+    pending_secs: 300,
+
+    ..Module::DEFAULT
+};
+===== src/modules/auth_lockout.rs =====
+//! `auth-lockout`: locks an account for minutes after too many wrong passwords.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+use crate::plugins::shape::auth_lockout::Module;
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // Wrong passwords that lock an account, 3 or more.
+    max_failures: 10,
+
+    // The seconds in which those wrong passwords count, 60 to 86400.
+    window_secs: 900,
+
+    // How long a lock lasts, in seconds, 60 to 86400.
+    lock_for_secs: 900,
 
     ..Module::DEFAULT
 };
@@ -6763,7 +6934,7 @@ collector_origins = []
 # each one as an .eml file into `folder`. Only `smtp` delivers.
 transport = "log"
 # The address every message comes from.
-from = "no-reply@localhost"
+from = "no-reply@example.com"
 # The name shown beside that address.
 from_name = "My Blog"
 # Where `folder` writes its .eml files.
@@ -6850,6 +7021,13 @@ cookie = "flash"
 key_env = "FLASH_KEY"
 # Send the cookie over HTTPS only.
 secure = true
+
+[auth_screens]
+# The address links in mail start with: scheme, host, port.
+# Never the request's Host header: a reset link must not go where a request says.
+base_url = "http://localhost:3000"
+# The name an authenticator app shows beside the code.
+issuer = "My Blog"
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -8017,6 +8195,591 @@ pub fn About(title: &str, verb: &str, path: &str) -> Element {
         an <code>Allow</code> header rather than a 404.
     </p>
     <p>The shell around this is <code>src/pages/layout.rsx</code>, which {title} shares with every page.</p>
+}
+===== src/pages/account/code.rs =====
+//! `/account/code` -- the second factor, after the password passed.
+//!
+//! The password's proof waits in the `auth_pending` cookie, sealed with
+//! the session key and good for a few minutes. Six digits are a TOTP code;
+//! anything longer is a recovery code.
+
+use brocanth_auth::AuthError;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other, PENDING};
+
+#[derive(zod::Entry)]
+pub struct Presented {
+    #[check(zod::Text::new().min(6).max(64))]
+    code: String,
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    again(ctx, "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(proof) =
+        screens::cookie(ctx, PENDING).and_then(|sealed| auth.sessions().unseal_proof(&sealed))
+    else {
+        screens::flash(ctx, Level::Error, "That took too long. Sign in again.");
+        return Ok(see_other("/account/signin"));
+    };
+    let Some(form) = screens::form::<Presented>(ctx)? else {
+        return again(ctx, "Enter the code your app shows.", 422);
+    };
+    let code: String = form.code.chars().filter(|c| !c.is_whitespace()).collect();
+    let mfa = auth.mfa()?;
+    let account = proof.account().clone();
+    let second = if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+        mfa.verify_totp(&account, &code).await
+    } else {
+        mfa.verify_recovery_code(&account, &code)
+            .await
+            .map(|accepted| accepted.proof)
+    };
+    let second = match second {
+        Ok(second) => second,
+        Err(AuthError::InvalidCredentials) => {
+            return again(ctx, "That code is wrong or already used.", 422)
+        }
+        Err(other) => return Err(other.into()),
+    };
+    screens::admit(ctx, &auth, proof.and(second)?).await
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(ctx, views::account::screens::Code { csrf: &csrf, error })?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/forgot.rs =====
+//! `/account/forgot` -- a reset link by mail, if the address has an account.
+
+use brocanth_auth::accounts::ResetOutcome;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Address {
+    #[check(zod::Text::new().min(1).max(254))]
+    email: String,
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let csrf = csrf_field(ctx);
+    html!(ctx, views::account::screens::Forgot { csrf: &csrf })
+}
+
+/// The same answer whether or not the address has an account.
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let links = screens::screens(ctx)?;
+    if let Some(form) = screens::form::<Address>(ctx)? {
+        let requested = auth.accounts().request_password_reset(&form.email).await?;
+        if let ResetOutcome::Issue { token, .. } = requested.outcome {
+            let link = links.link(&format!("/account/reset/{}", token.secret()));
+            let text = format!(
+                "Choose a new password with this link:\n\n{link}\n\n\
+                 If you did not ask for it, ignore this mail: your password stays.\n"
+            );
+            screens::mail(ctx, &form.email, "Reset your password", text).await?;
+        }
+    }
+    screens::flash(
+        ctx,
+        Level::Info,
+        "If that address has an account, a link to reset its password is on its way.",
+    );
+    Ok(see_other("/account/signin"))
+}
+===== src/pages/account/reset/[token].rs =====
+//! `/account/reset/{token}` -- a new password, from the link in the mail.
+
+use brocanth_auth::AuthError;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct NewPassword {
+    #[check(zod::Text::new().min(12).max(1024))]
+    password: String,
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    again(ctx, "", 200)
+}
+
+/// A changed password ends every session of the account, which the crate
+/// does by itself, so the person signs in again.
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let token = ctx.require("token")?.to_string();
+    let Some(form) = screens::form::<NewPassword>(ctx)? else {
+        return again(ctx, "Choose a password of 12 characters or more.", 422);
+    };
+    match auth.accounts().reset_password(&token, &form.password).await {
+        Ok(account) => {
+            crate::plugins::auth_lockout::lockout(&auth)?
+                .clear(&account)
+                .await?;
+            screens::flash(
+                ctx,
+                Level::Success,
+                "Your password is changed. Sign in with it.",
+            );
+            Ok(see_other("/account/signin"))
+        }
+        Err(AuthError::InvalidToken) => {
+            screens::flash(
+                ctx,
+                Level::Error,
+                "This link is spent or too old. Ask for a new one.",
+            );
+            Ok(see_other("/account/forgot"))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let action = ctx.path.clone();
+    let mut page = html!(
+        ctx,
+        views::account::screens::Reset {
+            csrf: &csrf,
+            action: &action,
+            error,
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/screens.rsx =====
+// The markup of the account screens. One file, so the forms read alike;
+// each page in this directory names its own component.
+//
+// `csrf` is the hidden input the CSRF hook minted for this request. It is
+// HTML already, so it goes in with `{! }`. Nothing else here is raw.
+
+fn Problem(text: &str) -> Element {
+    if !text.is_empty() {
+        <p role="alert">{text}</p>
+    }
+}
+
+pub fn Signup(csrf: &str, email: &str, error: &str) -> Element {
+    <section>
+        <h1>Create an account</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/signup">
+            {! csrf}
+            <label>Email <input type="email" name="email" value={email} autocomplete="email" required></label>
+            <label>Password <input type="password" name="password" autocomplete="new-password" minlength="12" required></label>
+            <button>Create the account</button>
+        </form>
+        <p><a href="/account/signin">I have an account</a></p>
+    </section>
+}
+
+pub fn Signin(csrf: &str, email: &str, error: &str) -> Element {
+    <section>
+        <h1>Sign in</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/signin">
+            {! csrf}
+            <label>Email <input type="email" name="email" value={email} autocomplete="username" required></label>
+            <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+            <button>Sign in</button>
+        </form>
+        <p><a href="/account/forgot">I forgot my password</a></p>
+        <p><a href="/account/signup">Create an account</a></p>
+    </section>
+}
+
+pub fn Signout(csrf: &str) -> Element {
+    <section>
+        <h1>Sign out</h1>
+        <form method="post" action="/account/signout">
+            {! csrf}
+            <button>Sign out</button>
+        </form>
+    </section>
+}
+
+pub fn Forgot(csrf: &str) -> Element {
+    <section>
+        <h1>Reset your password</h1>
+        <form method="post" action="/account/forgot">
+            {! csrf}
+            <label>Email <input type="email" name="email" autocomplete="email" required></label>
+            <button>Send me a link</button>
+        </form>
+    </section>
+}
+
+pub fn Reset(csrf: &str, action: &str, error: &str) -> Element {
+    <section>
+        <h1>Choose a new password</h1>
+        <Problem text={error} />
+        <form method="post" action={action}>
+            {! csrf}
+            <label>New password <input type="password" name="password" autocomplete="new-password" minlength="12" required></label>
+            <button>Change the password</button>
+        </form>
+    </section>
+}
+
+pub fn Verify(csrf: &str, action: &str) -> Element {
+    <section>
+        <h1>Confirm your address</h1>
+        <form method="post" action={action}>
+            {! csrf}
+            <button>Confirm my address</button>
+        </form>
+    </section>
+}
+
+pub fn Code(csrf: &str, error: &str) -> Element {
+    <section>
+        <h1>Enter your code</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/code">
+            {! csrf}
+            <label>Code from your app, or a recovery code <input name="code" autocomplete="one-time-code" required></label>
+            <button>Continue</button>
+        </form>
+    </section>
+}
+
+pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) -> Element {
+    <section>
+        <h1>Two-step sign-in</h1>
+        if !codes.is_empty() {
+            <p>Two-step sign-in is on. Keep these recovery codes somewhere safe. Each works once, and this page will not show them again.</p>
+            <ul>
+                for code in codes {
+                    <li><code>{code}</code></li>
+                }
+            </ul>
+        } else {
+            <Problem text={error} />
+            if !secret.is_empty() {
+                <p>Add this account to your authenticator app: <a href={uri}>open it in the app</a>, or type the key <code>{secret}</code>.</p>
+            }
+            <form method="post" action="/account/totp">
+                {! csrf}
+                <label>The code the app shows <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+                <button>Turn it on</button>
+            </form>
+            <p><a href="/account/totp">Start again with a new key</a></p>
+        }
+    </section>
+}
+===== src/pages/account/signin.rs =====
+//! `/account/signin` -- a password, then a second factor if the account has
+//! one.
+
+use brocanth_auth::Attempt;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field};
+
+#[derive(zod::Entry)]
+pub struct Credentials {
+    #[check(zod::Text::new().min(1).max(254))]
+    email: String,
+    #[check(zod::Text::new().min(1).max(1024))]
+    password: String,
+}
+
+/// One sentence for a wrong password, an unknown address and an account
+/// with no password: which one it was is what an attacker wants.
+const WRONG: &str = "That email and password do not match an account.";
+
+pub fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    again(ctx, "", "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(form) = screens::form::<Credentials>(ctx)? else {
+        return again(ctx, "", "Enter your email and your password.", 422);
+    };
+    let lockout = crate::plugins::auth_lockout::lockout(&auth)?;
+    let attempt = lockout
+        .login(auth.accounts(), &form.email, &form.password)
+        .await?;
+    let proof = match attempt {
+        Attempt::Admitted(signed) => signed.into_proof(),
+        Attempt::Refused => return again(ctx, &form.email, WRONG, 422),
+        Attempt::JustLocked { account, .. } => {
+            screens::mail_locked(ctx, &account, lockout.policy().lock_for()).await?;
+            return again(ctx, &form.email, WRONG, 422);
+        }
+    };
+    screens::admit(ctx, &auth, proof).await
+}
+
+fn again(ctx: &mut Ctx, email: &str, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(
+        ctx,
+        views::account::screens::Signin {
+            csrf: &csrf,
+            email,
+            error
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/signout.rs =====
+//! `/account/signout` -- a button, because a sign-out is a POST: a link
+//! that signs out is a link any page can make a browser follow.
+
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let csrf = csrf_field(ctx);
+    html!(ctx, views::account::screens::Signout { csrf: &csrf })
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let cleared = match screens::signed_in(ctx, &auth).await {
+        Some(session) => auth.sessions().revoke(&session.id).await?,
+        None => auth.sessions().clearing_cookie(),
+    };
+    screens::flash(ctx, Level::Info, "You are signed out.");
+    Ok(see_other("/").with_header("set-cookie", cleared.to_string()))
+}
+===== src/pages/account/signup.rs =====
+//! `/account/signup` -- a new account, and a mail to confirm the address.
+
+use brocanth_auth::accounts::RegistrationNotice;
+use brocanth_auth::AuthError;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct NewAccount {
+    #[check(zod::Text::new().min(3).max(254))]
+    email: String,
+    #[check(zod::Text::new().min(12).max(1024))]
+    password: String,
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    again(ctx, "", "", 200)
+}
+
+/// The same answer for a new address and a taken one: a stranger must not
+/// learn who has an account. The mail says which it was, to its owner.
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let links = screens::screens(ctx)?;
+    let Some(form) = screens::form::<NewAccount>(ctx)? else {
+        return again(
+            ctx,
+            "",
+            "Enter an email and a password of 12 characters or more.",
+            422,
+        );
+    };
+    let accepted = match auth.accounts().register(&form.email, &form.password).await {
+        Ok(accepted) => accepted,
+        Err(AuthError::InvalidEmail(_)) => {
+            return again(ctx, &form.email, "This is not an email address.", 422)
+        }
+        Err(other) => return Err(other.into()),
+    };
+    let (subject, text) = match accepted.notice {
+        RegistrationNotice::Created { verification, .. } => (
+            "Confirm your address",
+            format!(
+                "Confirm your address with this link:\n\n{}\n",
+                links.link(&format!("/account/verify/{}", verification.secret()))
+            ),
+        ),
+        RegistrationNotice::AlreadyRegistered { .. } => (
+            "Somebody tried to create an account",
+            format!(
+                "Somebody tried to create an account with this address, which has one.\n\
+                 If it was you, reset your password:\n\n{}\n",
+                links.link("/account/forgot")
+            ),
+        ),
+    };
+    screens::mail(ctx, &form.email, subject, text).await?;
+    screens::flash(
+        ctx,
+        Level::Info,
+        "Check your inbox to confirm your address, then sign in.",
+    );
+    Ok(see_other("/account/signin"))
+}
+
+fn again(ctx: &mut Ctx, email: &str, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(
+        ctx,
+        views::account::screens::Signup {
+            csrf: &csrf,
+            email,
+            error
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/totp.rs =====
+//! `/account/totp` -- turn on two-step sign-in with an authenticator app.
+//!
+//! The GET draws a new key and stores it unconfirmed; the POST confirms it
+//! with a code from the app and shows the recovery codes, once.
+
+use brocanth_auth::{AccountHolder, AuthError};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Confirm {
+    #[check(zod::Text::new().min(6).max(16))]
+    code: String,
+}
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let links = screens::screens(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::of(&session)?;
+    let label = screens::email_of(&auth, &session).await?;
+    let enrolment = auth
+        .mfa()?
+        .begin_totp_enrolment(&holder, links.issuer(), &label)
+        .await?;
+    let secret = enrolment.secret.to_base32();
+    page(ctx, &secret, &enrolment.uri, "", &[], 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::of(&session)?;
+    let Some(form) = screens::form::<Confirm>(ctx)? else {
+        return page(
+            ctx,
+            "",
+            "",
+            "Enter the six digits your app shows.",
+            &[],
+            422,
+        );
+    };
+    match auth
+        .mfa()?
+        .confirm_totp_enrolment(&holder, form.code.trim())
+        .await
+    {
+        Ok(recovery) => {
+            let codes: Vec<String> = recovery
+                .codes()
+                .iter()
+                .map(|code| code.as_str().to_string())
+                .collect();
+            page(ctx, "", "", "", &codes, 200)
+        }
+        Err(AuthError::InvalidCredentials) => page(
+            ctx,
+            "",
+            "",
+            "That code does not match. Check the clock of your device, or start again.",
+            &[],
+            422,
+        ),
+        Err(other) => Err(other.into()),
+    }
+}
+
+fn page(
+    ctx: &mut Ctx,
+    secret: &str,
+    uri: &str,
+    error: &str,
+    codes: &[String],
+    status: u16,
+) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(
+        ctx,
+        views::account::screens::Totp {
+            csrf: &csrf,
+            secret,
+            uri,
+            error,
+            codes,
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/verify/[token].rs =====
+//! `/account/verify/{token}` -- the address is confirmed by a click, not
+//! by the GET: a mail scanner follows every link it sees.
+
+use brocanth_auth::AuthError;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let csrf = csrf_field(ctx);
+    let action = ctx.path.clone();
+    html!(
+        ctx,
+        views::account::screens::Verify {
+            csrf: &csrf,
+            action: &action,
+        }
+    )
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let token = ctx.require("token")?.to_string();
+    match auth.accounts().verify_email(&token).await {
+        Ok(_) => screens::flash(ctx, Level::Success, "Your address is confirmed."),
+        Err(AuthError::InvalidToken) => screens::flash(
+            ctx,
+            Level::Error,
+            "This link is spent or too old. Sign in to ask for a new one.",
+        ),
+        Err(other) => return Err(other.into()),
+    }
+    Ok(see_other("/account/signin"))
 }
 ===== src/pages/index.rsx =====
 use crate::pages::views::link::Link;
@@ -9406,6 +10169,322 @@ impl Plugin for Auth {
         }
     }
 }
+===== src/plugins/auth_lockout.rs =====
+//! Account lockout: after too many wrong passwords, an account refuses
+//! password sign-in for a while. The policy is in
+//! `src/modules/auth_lockout.rs`.
+//!
+//! Sign in through `lockout(&auth)?.login(auth.accounts(), email, password)`
+//! and render `Attempt::Refused` and `Attempt::JustLocked` alike: a page
+//! that says "locked" tells a stranger the address has an account. On
+//! `JustLocked`, mail the owner. After a password reset, call `clear`.
+
+use brocanth_auth::{AuthError, Lockout, LockoutPolicy};
+
+use crate::plugins::auth::{Clock, Services, Store};
+
+/// The policy in `src/modules/auth_lockout.rs`.
+///
+/// # Errors
+/// [`AuthError::Misconfigured`] when an option is out of its range.
+pub fn policy() -> Result<LockoutPolicy, AuthError> {
+    let max = crate::modules::auth_lockout::MODULE.max_failures;
+    let window = crate::modules::auth_lockout::MODULE.window_secs;
+    let lock_for = crate::modules::auth_lockout::MODULE.lock_for_secs;
+    LockoutPolicy::new(
+        u32::try_from(max).unwrap_or(u32::MAX),
+        i64::try_from(window).unwrap_or(i64::MAX),
+        i64::try_from(lock_for).unwrap_or(i64::MAX),
+    )
+}
+
+/// Password sign-in that counts failures, over the auth store.
+///
+/// # Errors
+/// [`AuthError::Misconfigured`] when an option is out of its range.
+pub fn lockout(auth: &Services) -> Result<Lockout<Store, Clock>, AuthError> {
+    Ok(auth.lockout(policy()?))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_policy_in_the_module_file_is_valid() {
+        if let Err(e) = super::policy() {
+            panic!("{e}\nhelp: change the values in src/modules/auth_lockout.rs");
+        }
+    }
+}
+===== src/plugins/auth_screens/mod.rs =====
+//! The account screens' plugin, and what every screen under
+//! `src/pages/account/` shares.
+//!
+//! The pages are yours: change the words in `src/pages/account/screens.rsx`
+//! and the flow in each page. Keep three rules:
+//!
+//! 1. Answer alike for an address that has an account and one that has
+//!    not. A different word is how a stranger learns who signed up.
+//! 2. Build a link in mail from [`Screens::link`], never from the request.
+//! 3. Every form carries [`csrf_field`].
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth_auth::{Admission, AuthStore, FactorPolicy, SessionRecord, Verified};
+use brocanth_middleware::{Flash, Level};
+
+use crate::pages::{Ctx, Error, Response, Sent};
+use crate::plugins::auth::Services;
+use crate::plugins::mail::Outbox;
+
+/// The cookie that carries a sign-in waiting for its second factor.
+pub const PENDING: &str = "auth_pending";
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[auth_screens]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The address links in mail start with: `https://example.com`.
+    pub base_url: String,
+    /// The name an authenticator app shows beside the code.
+    pub issuer: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:3000".to_string(),
+            issuer: "My Blog".to_string(),
+        }
+    }
+}
+
+/// What a screen reads off the context.
+#[derive(Clone, Debug)]
+pub struct Screens {
+    base_url: String,
+    issuer: String,
+}
+
+impl ContextItem for Screens {}
+
+impl Screens {
+    /// An absolute link to `path` on this site, for a mail.
+    pub fn link(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url.trim_end_matches('/'))
+    }
+
+    /// The name an authenticator app shows.
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+}
+
+pub struct AuthScreens {
+    screens: Screens,
+}
+
+impl Plugin for AuthScreens {
+    type Config = Settings;
+    type Provides = ProvidesContext<Screens>;
+    const NAME: &'static str = "auth_screens";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            screens: Screens {
+                base_url: config.base_url,
+                issuer: config.issuer,
+            },
+        }
+    }
+
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let url = &self.screens.base_url;
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(PluginError::new(format!(
+                "[auth_screens] base_url is {url:?}, which is not an absolute address\n\
+                 help: set it to the address people reach this site at, such as \
+                 https://example.com"
+            )));
+        }
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(self.screens.clone());
+    }
+}
+
+/// The auth services. A clone: one `Arc`, so a page can hold it across an
+/// `.await` and still write to the context.
+pub fn services(ctx: &Ctx) -> Result<Services, Error> {
+    ctx.provided::<Services, _>().cloned().ok_or_else(|| {
+        Error::new(
+            500,
+            "the auth services are not on this context\nhelp: register the auth plugin",
+        )
+    })
+}
+
+/// The base address and the issuer.
+pub fn screens(ctx: &Ctx) -> Result<Screens, Error> {
+    ctx.provided::<Screens, _>().cloned().ok_or_else(|| {
+        Error::new(
+            500,
+            "the account screens' settings are not on this context\n\
+             help: register the auth_screens plugin",
+        )
+    })
+}
+
+/// The hidden input a form carries for the CSRF check. HTML, so a
+/// template writes it with `{! }`.
+pub fn csrf_field(ctx: &Ctx) -> String {
+    ctx.hooked::<brocanth_middleware::CsrfToken>()
+        .map(|token| token.hidden_field())
+        .unwrap_or_default()
+}
+
+/// The form, or `None` when a field broke its rule. A body nobody can read
+/// is an error: no form sent it.
+pub fn form<T: zod::Entry>(ctx: &Ctx) -> Result<Option<T>, Error> {
+    match ctx.read::<T>() {
+        Sent::Good(value) => Ok(Some(value)),
+        Sent::Faulty(_) => Ok(None),
+        Sent::Unreadable(why) => Err(Error::new(why.status(), why.to_string())),
+    }
+}
+
+/// One cookie of the request, by name.
+pub fn cookie(ctx: &Ctx, name: &str) -> Option<String> {
+    ctx.headers()
+        .filter(|(header, _)| header.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, line)| line.split(';'))
+        .find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key.trim() == name).then(|| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+/// The session this request carries, if it is a live one.
+pub async fn signed_in(ctx: &Ctx, auth: &Services) -> Option<SessionRecord> {
+    let value = cookie(ctx, &auth.sessions().config().cookie_name)?;
+    auth.sessions().load(&value).await.ok()
+}
+
+/// A message for the next page.
+pub fn flash(ctx: &mut Ctx, level: Level, text: &str) {
+    if let Some(flash) = ctx.hooked_mut::<Flash>() {
+        flash.push(level, text);
+    }
+}
+
+/// `303 See Other`: after a post, the browser asks for `location` with GET.
+pub fn see_other(location: &str) -> Response {
+    Response::empty(303).with_header("location", location)
+}
+
+/// A mail with a plain-text body, through the outbox.
+pub async fn mail(ctx: &Ctx, to: &str, subject: &str, text: String) -> Result<(), Error> {
+    let outbox = ctx.provided::<Outbox, _>().cloned().ok_or_else(|| {
+        Error::new(
+            500,
+            "no outbox on this context\nhelp: register the mail plugin",
+        )
+    })?;
+    let message = outbox
+        .message()
+        .to(brocanth_mail::Address::parse(to)?)
+        .subject(subject)
+        .text(text)
+        .build()?;
+    outbox.deliver_later(message).await?;
+    Ok(())
+}
+
+/// The email of the account a session belongs to, for a label.
+pub async fn email_of(auth: &Services, session: &SessionRecord) -> Result<String, Error> {
+    let account = auth
+        .store()
+        .account(&session.account)
+        .await
+        .map_err(|e| Error::new(500, e.to_string()))?;
+    Ok(account
+        .and_then(|account| account.email)
+        .map(|email| email.as_str().to_string())
+        .unwrap_or_default())
+}
+
+/// The second half of every sign-in: ask the policy, then open a session,
+/// or wait for a second factor, or refuse.
+pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Response, Error> {
+    let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let secure = if auth.sessions().config().secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    match FactorPolicy::recommended().admit(&enrolled, proof) {
+        Admission::Admit(admitted) => {
+            // The session the browser had, if any, is replaced: a new
+            // identifier at sign-in is the defence against fixation.
+            let before = cookie(ctx, &auth.sessions().config().cookie_name)
+                .and_then(|value| auth.sessions().unseal(&value));
+            let started = auth
+                .sessions()
+                .begin_with_factors(admitted, before.as_ref())
+                .await?;
+            flash(ctx, Level::Success, "You are signed in.");
+            Ok(see_other(crate::modules::auth_screens::MODULE.after_sign_in)
+                .with_header("set-cookie", started.cookie.to_string())
+                .with_header(
+                    "set-cookie",
+                    format!("{PENDING}=; Path=/account; Max-Age=0; HttpOnly; SameSite=Strict{secure}"),
+                ))
+        }
+        Admission::Incomplete { proof, .. } => {
+            let ttl = crate::modules::auth_screens::MODULE.pending_secs;
+            let sealed = auth.sessions().seal_proof(&proof, ttl as i64);
+            Ok(see_other("/account/code").with_header(
+                "set-cookie",
+                format!(
+                    "{PENDING}={sealed}; Path=/account; Max-Age={ttl}; HttpOnly; SameSite=Strict{secure}"
+                ),
+            ))
+        }
+        Admission::EnrolmentRequired { .. } | Admission::Insufficient => {
+            flash(
+                ctx,
+                Level::Error,
+                "This account needs a second factor that it does not have.",
+            );
+            Ok(see_other("/account/signin"))
+        }
+    }
+}
+
+/// Tells the owner of an account that just locked, with the way back in.
+pub async fn mail_locked(
+    ctx: &Ctx,
+    account: &brocanth_auth::Account,
+    lock_for: i64,
+) -> Result<(), Error> {
+    let Some(email) = &account.email else {
+        return Ok(());
+    };
+    let link = screens(ctx)?.link("/account/forgot");
+    let text = format!(
+        "Somebody entered a wrong password for your account too many times, \
+         so it refuses to sign in for {} minutes. Nobody signed in.\n\n\
+         If it was you, wait, or choose a new password now:\n\n{link}\n",
+        lock_for / 60
+    );
+    mail(ctx, email.as_str(), "Your account is locked", text).await
+}
 ===== src/plugins/cache/mod.rs =====
 //! The cache, as this application registers it.
 //!
@@ -10273,7 +11352,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             transport: "log".to_string(),
-            from: "no-reply@localhost".to_string(),
+            from: "no-reply@example.com".to_string(),
             from_name: "My Blog".to_string(),
             folder: "tmp/mail".to_string(),
             smtp_host: "localhost".to_string(),
@@ -10410,7 +11489,7 @@ impl MailPlugin {
             "folder" => Arc::new(Folder::new(&s.folder)),
             "smtp" => {
                 let security = match s.smtp_security.as_str() {
-                    "tls" => Security::Tls,
+                    "tls" => Security::ImplicitTls,
                     "starttls" => Security::StartTls,
                     "plain" => Security::PlaintextForLocalCatcherOnly,
                     other => {
@@ -12977,6 +14056,8 @@ request.
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 - `mail`  send mail through SMTP, or to the log or a folder in development
 - `auth`  argon2id accounts and signed sessions; no provider, so no HTTP client
+- `auth-screens`  sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account
+- `auth-lockout`  locks an account for minutes after too many wrong passwords
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 - `input`  a form or a JSON body, read into a struct, with every fault at once
@@ -13296,6 +14377,15 @@ password in a file that is in git or on a command line.
 In development `[mail] transport` is `log`: each message is in the log,
 and nothing is sent.
 
+## Account lockout
+
+`src/plugins/auth_lockout.rs` builds the lockout with the policy in
+`src/modules/auth_lockout.rs`. Sign in through `lockout(&auth)?.login(..)`,
+not `auth.accounts().login(..)`, or wrong passwords are not counted.
+Render `Attempt::Refused` and `Attempt::JustLocked` with the same words
+and status; mail the owner on `JustLocked`. Call `clear` after a password
+reset.
+
 ## Security headers
 
 `brocanth_middleware::SecurityHeaders` is registered in
@@ -13442,6 +14532,26 @@ layout carries. Keep that element in the layout. A page that draws a
 form again without a redirect uses `flash.now(level, text)`. The text
 is plain: the hook escapes it. Never put HTML or a secret in a message.
 
+## Account screens
+
+`src/pages/account/` holds the sign-up, sign-in, sign-out, reset,
+verify and TOTP pages; their markup is `src/pages/account/screens.rsx`,
+and the helpers are in `src/plugins/auth_screens/mod.rs`. Where a person
+lands after signing in (`after_sign_in`) and how long a sign-in waits
+for its second factor (`pending_secs`) are in
+`src/modules/auth_screens.rs`.
+
+Rules when you change them:
+
+- Answer alike for an address with an account and one without, in the
+  words and the status. Say which it was only in the mail.
+- Build a link in mail with `Screens::link`, which reads
+  `[auth_screens] base_url`. Never build one from the `Host` header.
+- Every form carries `csrf_field(ctx)`, written with `{! }`.
+- A page that changes state answers a POST, never a GET.
+- Read who is signed in with `auth_screens::signed_in`. Do not trust a
+  cookie value you did not unseal.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -13479,7 +14589,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 5a9e8d3f362d3637 -->
+<!-- brocanth-digest: 39b74f892652dd8e -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -13491,7 +14601,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "mail", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "mail", "auth", "auth-screens", "auth-lockout", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -13604,6 +14714,22 @@ files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
 adapted_to = ["config", "jobs", "cache"]
+
+[modules.auth-screens]
+version = "0.1.0"
+kind = ["routes", "enhancer"]
+files = ["src/modules/auth_screens.rs", "src/pages/account/code.rs", "src/pages/account/forgot.rs", "src/pages/account/reset/[token].rs", "src/pages/account/screens.rsx", "src/pages/account/signin.rs", "src/pages/account/signout.rs", "src/pages/account/signup.rs", "src/pages/account/totp.rs", "src/pages/account/verify/[token].rs", "src/plugins/auth_screens/"]
+config = ["auth_screens"]
+crates = []
+adapted_to = ["config", "jobs", "cache", "auth-lockout"]
+
+[modules.auth-lockout]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/auth_lockout.rs", "src/plugins/auth_lockout.rs"]
+config = []
+crates = []
+adapted_to = []
 
 [modules.policy]
 version = "0.1.0"
@@ -13845,4 +14971,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: d7f1c2a7eba69746
+# brocanth-digest: 5510fc93ea6b1d54

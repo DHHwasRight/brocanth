@@ -83,6 +83,12 @@
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
+mod lockout;
+mod screens;
+
+pub use lockout::AuthLockout;
+pub use screens::AuthScreens;
+
 /// Accounts, as a choice on the `brocanth create` menu.
 ///
 /// A unit struct, because a module is asked once per run and everything it

@@ -159,6 +159,8 @@ pub mod impersonation;
 #[cfg(feature = "runtime")]
 pub mod linking;
 #[cfg(feature = "runtime")]
+pub mod lockout;
+#[cfg(feature = "runtime")]
 pub mod memory;
 #[cfg(feature = "runtime")]
 pub mod mfa;
@@ -219,6 +221,8 @@ pub use impersonation::{AccountHolder, Impersonation, Restricted};
 #[cfg(feature = "runtime")]
 pub use linking::{LinkRefusal, Linking, SignInOutcome};
 #[cfg(feature = "runtime")]
+pub use lockout::{Attempt, Lockout, LockoutPolicy};
+#[cfg(feature = "runtime")]
 pub use memory::MemoryStore;
 #[cfg(feature = "runtime")]
 pub use mfa::{
@@ -247,8 +251,9 @@ pub use recovery::{RecoveryCode, RecoveryCodes};
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
 #[cfg(feature = "runtime")]
 pub use storage::{
-    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    AccountDirectory, AuthStore, LockoutStore, MfaStore, NewAccount, NewProviderLink,
+    OtpChallengeRecord, OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 #[cfg(feature = "runtime")]
 pub use tokens::{IssuedToken, TokenPurpose, Tokens};

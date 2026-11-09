@@ -102,6 +102,12 @@ pub const ALL: &[&dyn Module] = &[
     // a provider cannot be a second choice until a crate can appear in two
     // modules' dependency lists.
     &brocanth_auth::scaffold::Auth,
+    // The pages over those services, from the same crate. Off with its
+    // parent: it needs five other modules, and it writes eight pages.
+    &brocanth_auth::scaffold::AuthScreens,
+    // Wrong passwords counted per account, from the same crate. Off with
+    // its parent: a lock costs the owner minutes.
+    &brocanth_auth::scaffold::AuthLockout,
     // The rule algebra. `after("model")` and not `needs`: a condition
     // inverts into a broadcast key as well as a `WHERE`, so requiring an
     // ORM would refuse a project that broadcasts and stores nothing.
