@@ -113,23 +113,7 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
     let pool = pool_or_skip!();
     let t = token("legacy");
 
-    for sql in [
-        "CREATE TABLE brocanth_jobs (
-            id BIGSERIAL PRIMARY KEY, queue TEXT NOT NULL, job_name TEXT NOT NULL,
-            payload TEXT NOT NULL, priority BIGINT NOT NULL DEFAULT 0,
-            state TEXT NOT NULL DEFAULT 'pending', attempts BIGINT NOT NULL DEFAULT 0,
-            max_attempts BIGINT NOT NULL, run_at BIGINT NOT NULL, created_at BIGINT NOT NULL,
-            unique_key TEXT, locked_by TEXT, locked_at BIGINT, heartbeat_at BIGINT,
-            last_error TEXT)",
-        "CREATE TABLE brocanth_dead_jobs (
-            id BIGSERIAL PRIMARY KEY, job_id BIGINT NOT NULL, queue TEXT NOT NULL,
-            job_name TEXT NOT NULL, payload TEXT NOT NULL, priority BIGINT NOT NULL,
-            attempts BIGINT NOT NULL, max_attempts BIGINT NOT NULL, unique_key TEXT,
-            error TEXT NOT NULL, failure_kind TEXT NOT NULL, backtrace TEXT,
-            enqueued_at BIGINT NOT NULL, failed_at BIGINT NOT NULL)",
-    ] {
-        sqlx::query(sql).execute(&pool).await.expect("an old table");
-    }
+    create_old_tables(&pool).await;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -194,6 +178,238 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
         "both moved jobs to run",
         Duration::from_secs(10),
         || async { log(&t).len() == 2 },
+    )
+    .await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+}
+
+/// The first queue's two tables, as its `migrate` created them.
+async fn create_old_tables(pool: &sqlx::PgPool) {
+    for sql in [OLD_JOBS, OLD_DEAD] {
+        sqlx::query(sql).execute(pool).await.expect("an old table");
+    }
+}
+
+const OLD_JOBS: &str = "CREATE TABLE brocanth_jobs (
+    id BIGSERIAL PRIMARY KEY, queue TEXT NOT NULL, job_name TEXT NOT NULL,
+    payload TEXT NOT NULL, priority BIGINT NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'pending', attempts BIGINT NOT NULL DEFAULT 0,
+    max_attempts BIGINT NOT NULL, run_at BIGINT NOT NULL, created_at BIGINT NOT NULL,
+    unique_key TEXT, locked_by TEXT, locked_at BIGINT, heartbeat_at BIGINT,
+    last_error TEXT)";
+
+const OLD_DEAD: &str = "CREATE TABLE brocanth_dead_jobs (
+    id BIGSERIAL PRIMARY KEY, job_id BIGINT NOT NULL, queue TEXT NOT NULL,
+    job_name TEXT NOT NULL, payload TEXT NOT NULL, priority BIGINT NOT NULL,
+    attempts BIGINT NOT NULL, max_attempts BIGINT NOT NULL, unique_key TEXT,
+    error TEXT NOT NULL, failure_kind TEXT NOT NULL, backtrace TEXT,
+    enqueued_at BIGINT NOT NULL, failed_at BIGINT NOT NULL)";
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// One old job row.
+async fn old_job(
+    pool: &sqlx::PgPool,
+    queue: &str,
+    payload: &str,
+    run_at: i64,
+    unique: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO brocanth_jobs (queue, job_name, payload, attempts, max_attempts, \
+         run_at, created_at, unique_key, last_error) \
+         VALUES ($1, 'echo', $2, 2, 7, $3, $4, $5, 'flaky smtp')",
+    )
+    .bind(queue)
+    .bind(payload)
+    .bind(run_at)
+    .bind(now_ms())
+    .bind(unique)
+    .execute(pool)
+    .await
+    .expect("an old job");
+}
+
+/// `migrate` on a schema that is already current changes nothing: the
+/// jobs, the dead letter and the schedules are all still there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrate_twice_on_a_current_schema_is_a_no_op() {
+    let queue = queue_or_skip!();
+    let t = token("migrate-twice");
+
+    let id = queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .await
+        .expect("enqueue");
+    queue
+        .recurring("kept", "0 * * * *", common::Nightly { token: t.clone() })
+        .install()
+        .await
+        .expect("install");
+    let before = queue.stats().await.expect("stats");
+
+    queue.migrate().await.expect("migrate again");
+    queue.migrate().await.expect("and again");
+
+    let after = queue.stats().await.expect("stats");
+    assert_eq!(
+        (after.ready, after.scheduled, after.running, after.dead),
+        (before.ready, before.scheduled, before.running, before.dead),
+    );
+    assert_eq!(after.ready, 1);
+    assert!(queue
+        .inspect(id.id().expect("an id"))
+        .await
+        .expect("inspect")
+        .is_some());
+    // The schedule survived: removing it finds it.
+    assert!(queue.remove_recurring("kept").await.expect("remove"));
+}
+
+/// An old row keeps its queue, its time, its attempts, its error and its
+/// unique key. A future `run_at` stays in the future.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrate_keeps_what_each_old_row_said() {
+    let pool = pool_or_skip!();
+    let t = token("legacy-fields");
+    create_old_tables(&pool).await;
+
+    let payload = format!(r#"{{"token":"{t}","n":1}}"#);
+    let in_an_hour = now_ms() + 3_600_000;
+    old_job(&pool, "mail", &payload, in_an_hour, Some("invoice:7")).await;
+
+    let queue = Queue::from_pool(pool.clone());
+    queue.migrate().await.expect("migrate");
+
+    let stats = queue.stats().await.expect("stats");
+    assert_eq!(stats.ready, 0, "a future job is not ready: {stats:?}");
+    // It ran twice before: it lists as a retry, with its old error.
+    let waiting = queue.retries(10, 0).await.expect("retries");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    let row = &waiting[0];
+    assert_eq!(row.kind, "echo");
+    assert_eq!(row.queue, "mail");
+    assert_eq!(row.attempt, 2);
+    assert_eq!(row.max_attempts, 7);
+    assert_eq!(row.last_error.as_deref(), Some("flaky smtp"));
+    let due = row
+        .available_at
+        .duration_since(std::time::SystemTime::now())
+        .expect("still in the future");
+    assert!(due > Duration::from_secs(3_000), "{due:?}");
+
+    // The unique key came along: the same key folds into the moved row.
+    let again = queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 2,
+        })
+        .queue("mail")
+        .unique("invoice:7")
+        .await
+        .expect("enqueue");
+    assert!(again.is_duplicate(), "the old row still holds its key");
+}
+
+/// During a rolling deploy an old worker keeps writing to the old table.
+/// The next boot's `migrate` moves those rows too, and a row whose unique
+/// key the engine already holds is folded, not doubled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_later_migrate_moves_what_an_old_worker_wrote_and_folds_a_held_key() {
+    let queue = queue_or_skip!();
+    let pool = queue_pool(&queue).await;
+    let t = token("legacy-later");
+
+    // The new version already runs, and holds `report:1`.
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .unique("report:1")
+        .await
+        .expect("enqueue");
+
+    // An old worker, still up, writes two jobs to its own table.
+    create_old_tables(&pool).await;
+    let payload = format!(r#"{{"token":"{t}","n":9}}"#);
+    old_job(&pool, "default", &payload, now_ms(), Some("report:1")).await;
+    old_job(&pool, "default", &payload, now_ms(), None).await;
+
+    queue.migrate().await.expect("migrate");
+
+    assert_eq!(
+        queue.stats().await.expect("stats").ready,
+        2,
+        "the job with the held key folded into the one already queued"
+    );
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM brocanth_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(left, 0, "the old table is empty");
+}
+
+/// Only the old dead letter is left (somebody dropped `brocanth_jobs`).
+/// It still moves, and a dead row with no backtrace says so by saying
+/// nothing about one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrate_moves_an_old_dead_letter_on_its_own() {
+    let pool = pool_or_skip!();
+    let t = token("legacy-dead");
+    sqlx::query(OLD_DEAD)
+        .execute(&pool)
+        .await
+        .expect("the old dead table");
+    sqlx::query(
+        "INSERT INTO brocanth_dead_jobs (job_id, queue, job_name, payload, priority, attempts, \
+         max_attempts, error, failure_kind, enqueued_at, failed_at) \
+         VALUES (3, 'mail', 'echo', $1, 0, 1, 1, 'still running after 30s', 'timed out', $2, $2)",
+    )
+    .bind(format!(r#"{{"token":"{t}","n":1}}"#))
+    .bind(now_ms())
+    .execute(&pool)
+    .await
+    .expect("an old dead job");
+
+    let queue = Queue::from_pool(pool.clone());
+    queue.migrate().await.expect("migrate");
+    queue
+        .migrate()
+        .await
+        .expect("migrate again moves nothing twice");
+
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].queue, "mail");
+    assert_eq!(dead[0].failure, "timed out: still running after 30s");
+
+    // And it can be put back, on its own queue, and run.
+    let requeued = queue
+        .requeue_dead(&dead[0].id)
+        .await
+        .expect("requeue")
+        .expect("a new row");
+    let row = queue.job(&requeued).await.expect("job").expect("the row");
+    assert_eq!(row.queue, "mail");
+    let worker = Worker::builder(&queue)
+        .queues(["mail"])
+        .poll_interval(Duration::from_millis(10))
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    wait_for(
+        "the requeued job to run",
+        Duration::from_secs(10),
+        || async { log(&t) == vec!["ran 1"] },
     )
     .await;
     worker.shutdown(Duration::from_secs(5)).await.expect("stop");

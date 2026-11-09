@@ -322,3 +322,101 @@ impl Job for Nightly {
         Ok(())
     }
 }
+
+/// Fails its first attempt and succeeds on the next. A small backoff, no
+/// jitter.
+#[derive(Serialize, Deserialize)]
+pub struct FailsFirst {
+    pub token: String,
+}
+
+impl Job for FailsFirst {
+    const NAME: &'static str = "fails_first";
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF: brocanth_jobs::Backoff =
+        brocanth_jobs::Backoff::new(Duration::from_millis(50), Duration::from_secs(60)).jitter(0.0);
+    type Error = String;
+
+    async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
+        record(&self.token, format!("attempt {}", cx.attempt()));
+        if cx.attempt() == 1 {
+            return Err("not yet".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Fails, and has one attempt only: the first failure is the last.
+#[derive(Serialize, Deserialize)]
+pub struct DiesAtOnce {
+    pub token: String,
+}
+
+impl Job for DiesAtOnce {
+    const NAME: &'static str = "dies_at_once";
+    const MAX_ATTEMPTS: u32 = 1;
+    type Error = String;
+
+    async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
+        record(&self.token, format!("attempt {}", cx.attempt()));
+        Err(format!("gave up on {}", self.token))
+    }
+}
+
+/// Never returns, and has one attempt: a worker's job timeout kills it.
+#[derive(Serialize, Deserialize)]
+pub struct TimesOut {
+    pub token: String,
+}
+
+impl Job for TimesOut {
+    const NAME: &'static str = "times_out";
+    const MAX_ATTEMPTS: u32 = 1;
+    type Error = std::convert::Infallible;
+
+    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
+        record(&self.token, "started");
+        loop {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+        }
+    }
+}
+
+/// Panics, and has one attempt.
+#[derive(Serialize, Deserialize)]
+pub struct Panics {
+    pub token: String,
+}
+
+impl Job for Panics {
+    const NAME: &'static str = "panics";
+    const MAX_ATTEMPTS: u32 = 1;
+    type Error = std::convert::Infallible;
+
+    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
+        record(&self.token, "started");
+        panic!("boom in {}", self.token);
+    }
+}
+
+/// Fails, and waits an hour before its retry, so the retry stays on the
+/// retries screen for the whole test, however slow the machine. `AlwaysFails` comes due again in
+/// 120 ms, and a due retry is a ready job, not a row on that screen.
+#[derive(Serialize, Deserialize)]
+pub struct RetriesInAnHour {
+    pub token: String,
+}
+
+impl Job for RetriesInAnHour {
+    const NAME: &'static str = "retries_in_an_hour";
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF: brocanth_jobs::Backoff =
+        brocanth_jobs::Backoff::new(Duration::from_secs(3600), Duration::from_secs(7200))
+            .jitter(0.0);
+    type Error = String;
+
+    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
+        record(&self.token, "failed");
+        Err("try again later".to_string())
+    }
+}

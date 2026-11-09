@@ -107,10 +107,10 @@ async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter(queue: Queue)
         second_gap >= Duration::from_millis(220),
         "the second retry waited {second_gap:?}, which is less than the 240 ms step"
     );
-    assert!(
-        second_gap > first_gap + Duration::from_millis(50),
-        "the backoff did not grow: {first_gap:?} then {second_gap:?}"
-    );
+    // The second floor (240 ms) is twice the base, so the two floors above
+    // already prove the growth. Comparing the two gaps to each other does
+    // not: a slow poll after the first failure stretches the first gap past
+    // the second.
 
     wait_for("the dead letter", Duration::from_secs(5), || async {
         queue.stats().await.expect("stats").dead == 1
@@ -638,13 +638,13 @@ async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts(queue: Queue) {
 
     // Runs, fails, and is put back with a backoff ahead of it.
     queue
-        .enqueue(AlwaysFails { token: t.clone() })
+        .enqueue(RetriesInAnHour { token: t.clone() })
         .await
         .expect("enqueued");
     let worker = Worker::builder(&queue)
         .concurrency(1)
         .poll_interval(Duration::from_millis(20))
-        .register::<AlwaysFails>()
+        .register::<RetriesInAnHour>()
         .register::<Echo>()
         .start()
         .expect("started");
@@ -669,7 +669,7 @@ async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts(queue: Queue) {
 
     assert_eq!(
         retries.iter().map(|j| j.kind.as_str()).collect::<Vec<_>>(),
-        ["always_fails"],
+        ["retries_in_an_hour"],
         "ran and failed, so it is a retry and not scheduled"
     );
     assert!(retries[0].attempt > 0);
@@ -849,6 +849,274 @@ async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again(queue: Queu
     again.abort();
 }
 
+// ---------------------------------------------------------------------------
+// How each kind of failure ends
+// ---------------------------------------------------------------------------
+
+/// A job that fails once and then succeeds is done: no dead row, no live
+/// row, and the retry came after the backoff and not before.
+async fn a_job_that_fails_once_succeeds_on_its_retry(queue: Queue) {
+    let token = token("fails-first");
+    let enqueued = queue
+        .enqueue(FailsFirst {
+            token: token.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<FailsFirst>()
+        .start()
+        .expect("start");
+    wait_for("the second attempt", Duration::from_secs(5), || async {
+        log(&token).len() >= 2
+    })
+    .await;
+    wait_for("the row to go", Duration::from_secs(5), || async {
+        queue
+            .inspect(enqueued.id().expect("an id"))
+            .await
+            .expect("inspect")
+            .is_none()
+    })
+    .await;
+    worker
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect("shutdown");
+
+    assert_eq!(log(&token), vec!["attempt 1", "attempt 2"]);
+    let at = timings(&token);
+    assert!(
+        at[1] - at[0] >= Duration::from_millis(40),
+        "the retry waited {:?}, less than the 50 ms backoff",
+        at[1] - at[0]
+    );
+    let stats = queue.stats().await.expect("stats");
+    assert_eq!(stats.dead, 0, "a job that succeeded is not dead");
+    assert_eq!(stats.total(), 0);
+}
+
+/// `MAX_ATTEMPTS = 1` means the first failure is the last: no retry, and
+/// the dead letter says one attempt of one.
+async fn a_job_with_one_attempt_goes_to_the_dead_letter_on_its_first_failure(queue: Queue) {
+    let token = token("dies-at-once");
+    queue
+        .enqueue(DiesAtOnce {
+            token: token.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<DiesAtOnce>()
+        .start()
+        .expect("start");
+    wait_for("the dead letter", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").dead == 1
+    })
+    .await;
+    // Time for a retry that must not happen.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    worker
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect("shutdown");
+
+    assert_eq!(log(&token), vec!["attempt 1"], "no second attempt");
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].attempts, 1);
+    assert_eq!(dead[0].max_attempts, Some(1));
+    assert!(
+        dead[0].failure.starts_with("returned"),
+        "{}",
+        dead[0].failure
+    );
+    assert!(
+        dead[0].failure.contains("gave up on"),
+        "{}",
+        dead[0].failure
+    );
+    assert!(queue.retries(10, 0).await.expect("retries").is_empty());
+}
+
+/// A job still running at the worker's `job_timeout` is stopped, and the
+/// dead letter names the kind of failure: a timeout, not an error.
+async fn a_job_past_the_worker_timeout_fails_as_timed_out(queue: Queue) {
+    let token = token("times-out");
+    queue
+        .enqueue(TimesOut {
+            token: token.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .job_timeout(Duration::from_millis(100))
+        .register::<TimesOut>()
+        .start()
+        .expect("start");
+    wait_for("the dead letter", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").dead == 1
+    })
+    .await;
+    let report = worker
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect("shutdown");
+
+    assert_eq!(log(&token), vec!["started"]);
+    assert_eq!(report.returned, 0, "nothing was left running to give back");
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    assert!(
+        dead[0].failure.starts_with("timed out"),
+        "the failure kind is the timeout: {}",
+        dead[0].failure
+    );
+    assert!(
+        dead[0].failure.contains("100ms"),
+        "and it says which limit: {}",
+        dead[0].failure
+    );
+}
+
+/// No `job_timeout` is the default: a slow job is not stopped.
+async fn without_a_timeout_a_slow_job_is_left_to_finish(queue: Queue) {
+    let token = token("no-timeout");
+    queue
+        .enqueue(Slow {
+            token: token.clone(),
+            millis: 300,
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Slow>()
+        .start()
+        .expect("start");
+    wait_for("the slow job to finish", Duration::from_secs(5), || async {
+        log(&token).contains(&"slow finished".to_string())
+    })
+    .await;
+    worker
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect("shutdown");
+    assert_eq!(queue.stats().await.expect("stats").dead, 0);
+}
+
+/// A panic is caught, the worker lives on, and the dead letter says
+/// `panicked` with the panic's message.
+async fn a_panicking_job_is_dead_lettered_as_panicked_and_the_worker_lives(queue: Queue) {
+    let token = token("panics");
+    queue
+        .enqueue(Panics {
+            token: token.clone(),
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Panics>()
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    wait_for("the dead letter", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").dead == 1
+    })
+    .await;
+
+    // The same worker still runs work.
+    queue
+        .enqueue(Echo {
+            token: token.clone(),
+            n: 7,
+        })
+        .await
+        .expect("enqueue");
+    wait_for("the next job", Duration::from_secs(5), || async {
+        log(&token).contains(&"ran 7".to_string())
+    })
+    .await;
+    assert!(
+        !worker.is_finished(),
+        "the panic did not take the worker down"
+    );
+    worker
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect("shutdown");
+
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    assert!(
+        dead[0].failure.starts_with("panicked"),
+        "{}",
+        dead[0].failure
+    );
+    assert!(dead[0].failure.contains("boom in"), "{}", dead[0].failure);
+}
+
+/// A graceful stop finishes what runs and claims nothing new: a job that
+/// was waiting behind it stays waiting, untouched, for the next worker.
+async fn a_graceful_stop_claims_nothing_new(queue: Queue) {
+    let token = token("drain");
+    queue
+        .enqueue(Slow {
+            token: token.clone(),
+            millis: 300,
+        })
+        .await
+        .expect("enqueue");
+
+    let worker = Worker::builder(&queue)
+        .concurrency(1)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Slow>()
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    wait_for("the slow job to start", Duration::from_secs(5), || async {
+        queue.stats().await.expect("stats").running == 1
+    })
+    .await;
+
+    // Behind it, while it runs.
+    let waiting = queue
+        .enqueue(Echo {
+            token: token.clone(),
+            n: 1,
+        })
+        .await
+        .expect("enqueue");
+    let report = worker
+        .shutdown(Duration::from_secs(5))
+        .await
+        .expect("shutdown");
+
+    assert_eq!(report.finished, 1, "the running job finished: {report:?}");
+    assert_eq!(report.returned, 0);
+    assert!(log(&token).contains(&"slow finished".to_string()));
+    assert!(
+        !log(&token).contains(&"ran 1".to_string()),
+        "a stopping worker claimed a new job: {:?}",
+        log(&token)
+    );
+    let state = queue
+        .inspect(waiting.id().expect("an id"))
+        .await
+        .expect("inspect")
+        .expect("the waiting row");
+    assert_eq!(state.state, "pending");
+    assert_eq!(state.attempts, 0);
+}
+
 on_every_backend!(
     a_job_goes_in_comes_out_and_runs,
     a_failing_job_backs_off_and_then_lands_in_the_dead_letter,
@@ -865,4 +1133,10 @@ on_every_backend!(
     run_now_moves_a_waiting_job_and_leaves_a_running_one_alone,
     discard_removes_a_waiting_job_without_a_dead_letter_row,
     a_job_interrupted_by_stop_when_is_given_back_and_runs_again,
+    a_job_that_fails_once_succeeds_on_its_retry,
+    a_job_with_one_attempt_goes_to_the_dead_letter_on_its_first_failure,
+    a_job_past_the_worker_timeout_fails_as_timed_out,
+    without_a_timeout_a_slow_job_is_left_to_finish,
+    a_panicking_job_is_dead_lettered_as_panicked_and_the_worker_lives,
+    a_graceful_stop_claims_nothing_new,
 );

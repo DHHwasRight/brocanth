@@ -18,7 +18,7 @@ use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Submission};
 use brocanth_jobs::admin::JobsPanel;
 use brocanth_jobs::{Queue, Worker};
-use common::{log, token, wait_for, AlwaysFails, Echo, Slow};
+use common::{log, token, wait_for, DiesAtOnce, Echo, RetriesInAnHour, Slow};
 
 struct Operator;
 
@@ -94,13 +94,13 @@ async fn retries_and_scheduled_are_two_screens_of_one_table(queue: Queue) {
         .await
         .expect("scheduled");
     queue
-        .enqueue(AlwaysFails { token: t.clone() })
+        .enqueue(RetriesInAnHour { token: t.clone() })
         .await
         .expect("enqueued");
     let worker = Worker::builder(&queue)
         .concurrency(1)
         .poll_interval(Duration::from_millis(20))
-        .register::<AlwaysFails>()
+        .register::<RetriesInAnHour>()
         .register::<Echo>()
         .start()
         .expect("started");
@@ -113,19 +113,19 @@ async fn retries_and_scheduled_are_two_screens_of_one_table(queue: Queue) {
     let a = admin(&queue, true);
 
     let retries = get(&a, "/admin/jobs/retries");
-    assert!(retries.contains("always_fails"), "{retries}");
+    assert!(retries.contains("retries_in_an_hour"), "{retries}");
     assert!(
         !retries.contains(">echo<"),
         "a scheduled job is not a retry"
     );
     // A retry says why, which is the column the screen exists for, and
     // the words are the job's own.
-    assert!(retries.contains("nope, attempt"), "{retries}");
+    assert!(retries.contains("try again later"), "{retries}");
 
     let scheduled = get(&a, "/admin/jobs/scheduled");
     assert!(scheduled.contains("echo"), "{scheduled}");
     assert!(
-        !scheduled.contains("always_fails"),
+        !scheduled.contains("retries_in_an_hour"),
         "a retry is not a scheduled job"
     );
 }
@@ -290,13 +290,13 @@ async fn show() {
             .expect("enqueued");
     }
     queue
-        .enqueue(AlwaysFails { token: t.clone() })
+        .enqueue(RetriesInAnHour { token: t.clone() })
         .await
         .expect("enqueued");
     let worker = Worker::builder(&queue)
         .concurrency(1)
         .poll_interval(Duration::from_millis(20))
-        .register::<AlwaysFails>()
+        .register::<RetriesInAnHour>()
         .start()
         .expect("started");
     wait_for("a failure", Duration::from_secs(5), || async {
@@ -591,6 +591,209 @@ async fn the_history_screen_plots_what_the_archive_kept() {
     .expect("drop");
 }
 
+// ---------------------------------------------------------------------------
+// The buttons need staff
+// ---------------------------------------------------------------------------
+
+/// Who is signed in, as the application's policy sees it.
+struct User {
+    staff: bool,
+}
+
+/// The policy a project writes: anyone signed in may look at the queue,
+/// only staff may press a button, and nobody anonymous sees anything.
+fn staff_admin(queue: &Queue) -> Admin {
+    Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(JobsPanel::new(Arc::new(queue.clone())))
+            .with_policy(policy_fn(|p: &Principal<'_>, r: Request<'_>| {
+                match p.downcast::<User>() {
+                    None => false,
+                    Some(user) => r.action != Action::ActOnPanel || user.staff,
+                }
+            })),
+    )
+}
+
+/// What one request answered: the status, and where a redirect points.
+fn send(admin: &Admin, who: Option<&User>, method: &str, path: &str) -> (u16, Option<String>) {
+    let principal = match who {
+        Some(user) => Principal::new(user),
+        None => Principal::anonymous(),
+    };
+    let response = block_on(admin.dispatch(principal, method, path, "", &Submission::new()))
+        .expect("dispatch");
+    let location = match &response {
+        brocanth_admin::Response::Redirect { location, .. } => Some(location.clone()),
+        _ => None,
+    };
+    (response.status(), location)
+}
+
+/// One row on each screen with a button: a retry, a scheduled job and two
+/// dead jobs. Answers their ids.
+async fn one_row_per_button(queue: &Queue) -> (String, String, String, String) {
+    let t = token("panel-staff");
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_(Duration::from_secs(3600))
+        .await
+        .expect("scheduled");
+    queue
+        .enqueue(RetriesInAnHour { token: t.clone() })
+        .await
+        .expect("enqueued");
+    for _ in 0..2 {
+        queue
+            .enqueue(DiesAtOnce { token: t.clone() })
+            .await
+            .expect("enqueued");
+    }
+    let worker = Worker::builder(queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<RetriesInAnHour>()
+        .register::<DiesAtOnce>()
+        .start()
+        .expect("started");
+    wait_for("one retry and two dead", Duration::from_secs(5), || async {
+        let stats = queue.stats().await.expect("stats");
+        stats.dead == 2 && !queue.retries(10, 0).await.expect("retries").is_empty()
+    })
+    .await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+
+    let retry = queue.retries(10, 0).await.expect("retries")[0].id.0.clone();
+    let scheduled = queue.scheduled(10, 0).await.expect("scheduled")[0]
+        .id
+        .0
+        .clone();
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    (retry, scheduled, dead[0].id.0.clone(), dead[1].id.0.clone())
+}
+
+/// Counts of the three screens the buttons change.
+async fn counts(queue: &Queue) -> (usize, usize, usize) {
+    (
+        queue.retries(10, 0).await.expect("retries").len(),
+        queue.scheduled(10, 0).await.expect("scheduled").len(),
+        queue.dead_jobs(10, 0).await.expect("dead").len(),
+    )
+}
+
+async fn retry_and_discard_need_staff(queue: Queue) {
+    let (retry, scheduled, dead_a, dead_b) = one_row_per_button(&queue).await;
+    let a = staff_admin(&queue);
+    let reader = User { staff: false };
+    let staff = User { staff: true };
+
+    let buttons = [
+        format!("/admin/jobs/retries/{retry}/delete"),
+        format!("/admin/jobs/scheduled/{scheduled}/run"),
+        format!("/admin/jobs/dead/{dead_a}/retry"),
+        format!("/admin/jobs/dead/{dead_b}/delete"),
+    ];
+
+    // A signed-in reader sees the screens and may press nothing.
+    assert_eq!(send(&a, Some(&reader), "GET", "/admin/jobs/dead").0, 200);
+    let before = counts(&queue).await;
+    assert_eq!(before, (1, 1, 2));
+    for path in &buttons {
+        assert_eq!(send(&a, Some(&reader), "POST", path).0, 403, "{path}");
+        assert_eq!(send(&a, None, "POST", path).0, 403, "{path}");
+    }
+    assert_eq!(counts(&queue).await, before, "a refused button did nothing");
+
+    // Nobody anonymous even reads.
+    assert_eq!(send(&a, None, "GET", "/admin/jobs/dead").0, 403);
+
+    // Staff press each one, and land back on the screen it was on.
+    for (path, back) in buttons.iter().zip([
+        "/admin/jobs/retries",
+        "/admin/jobs/scheduled",
+        "/admin/jobs/dead",
+        "/admin/jobs/dead",
+    ]) {
+        let (status, location) = send(&a, Some(&staff), "POST", path);
+        assert_eq!(status, 303, "{path}");
+        assert_eq!(location.as_deref(), Some(back), "{path}");
+    }
+    assert_eq!(
+        counts(&queue).await,
+        (0, 0, 0),
+        "the retry was discarded, the scheduled job made ready, \
+         one dead job requeued and one forgotten"
+    );
+    let stats = queue.stats().await.expect("stats");
+    assert_eq!(
+        stats.ready, 2,
+        "the job run now and the dead job requeued are ready: {stats:?}"
+    );
+}
+
+async fn the_default_policy_refuses_the_panel(queue: Queue) {
+    let (_, scheduled, _, _) = one_row_per_button(&queue).await;
+    // No `with_policy`: the admin's default, which refuses everything.
+    let a = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(JobsPanel::new(Arc::new(queue.clone()))),
+    );
+    let staff = User { staff: true };
+    assert_eq!(send(&a, Some(&staff), "GET", "/admin/jobs").0, 403);
+    assert_eq!(
+        send(
+            &a,
+            Some(&staff),
+            "POST",
+            &format!("/admin/jobs/scheduled/{scheduled}/run")
+        )
+        .0,
+        403
+    );
+    assert_eq!(queue.scheduled(10, 0).await.expect("scheduled").len(), 1);
+}
+
+async fn a_button_the_panel_does_not_have_is_a_404_and_does_nothing(queue: Queue) {
+    let (retry, scheduled, dead, _) = one_row_per_button(&queue).await;
+    let a = staff_admin(&queue);
+    let staff = User { staff: true };
+    let before = counts(&queue).await;
+
+    for path in [
+        // A verb a screen does not have.
+        format!("/admin/jobs/dead/{dead}/run"),
+        format!("/admin/jobs/scheduled/{scheduled}/retry"),
+        format!("/admin/jobs/busy/{retry}/delete"),
+        // An id that is not one: the panel passes ids through as text, so
+        // it refuses anything but letters and digits.
+        format!("/admin/jobs/dead/{dead}%27/delete"),
+        "/admin/jobs/dead/..%2f..%2f/delete".to_string(),
+        "/admin/jobs/dead/a-b/delete".to_string(),
+        "/admin/jobs/dead//delete".to_string(),
+        // Too few or too many parts.
+        format!("/admin/jobs/dead/{dead}"),
+        format!("/admin/jobs/dead/{dead}/delete/again"),
+    ] {
+        assert_eq!(send(&a, Some(&staff), "POST", &path).0, 404, "{path}");
+    }
+    // A button is a POST: a GET on its path (a prefetch, a crawler) is a
+    // 404 and presses nothing.
+    for path in [
+        format!("/admin/jobs/dead/{dead}/delete"),
+        format!("/admin/jobs/scheduled/{scheduled}/run"),
+        format!("/admin/jobs/retries/{retry}/delete"),
+    ] {
+        assert_eq!(send(&a, Some(&staff), "GET", &path).0, 404, "{path}");
+    }
+    assert_eq!(counts(&queue).await, before, "nothing changed");
+}
+
 on_every_backend!(
     the_dashboard_counts_what_is_in_the_queue,
     retries_and_scheduled_are_two_screens_of_one_table,
@@ -599,4 +802,7 @@ on_every_backend!(
     a_button_is_a_dp_post_that_removes_its_row,
     a_reader_who_may_not_act_is_not_shown_the_buttons,
     every_tab_renders,
+    retry_and_discard_need_staff,
+    the_default_policy_refuses_the_panel,
+    a_button_the_panel_does_not_have_is_a_404_and_does_nothing,
 );

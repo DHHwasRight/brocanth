@@ -238,6 +238,45 @@ async fn a_recurring_job_runs_on_a_worker_like_any_other(queue: Queue) {
         .expect("shutdown");
 }
 
+/// Two running workers, each ticking the schedules on its own maintenance
+/// timer many times a second, run one occurrence once between them.
+async fn two_running_workers_run_one_occurrence_once(queue: Queue) {
+    let clock = ManualClock::new(noon());
+    let queue = queue.with_clock(clock.clone());
+    let t = token("two-workers-cron");
+
+    queue
+        .recurring("shared-workers", "0 * * * *", Nightly { token: t.clone() })
+        .install()
+        .await
+        .expect("install");
+    clock.set(noon() + chrono::Duration::seconds(3_605));
+
+    let start = |id: &str| {
+        brocanth_jobs::Worker::builder(&queue)
+            .id(id)
+            .poll_interval(Duration::from_millis(5))
+            .maintenance_interval(Duration::from_millis(5))
+            .register::<Nightly>()
+            .start()
+            .expect("start")
+    };
+    let a = start("cron-a");
+    let b = start("cron-b");
+
+    wait_for("the occurrence to run", Duration::from_secs(5), || async {
+        !log(&t).is_empty()
+    })
+    .await;
+    // A hundred more ticks from each worker, for a duplicate to show up in.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    a.shutdown(Duration::from_secs(2)).await.expect("stop a");
+    b.shutdown(Duration::from_secs(2)).await.expect("stop b");
+
+    assert_eq!(log(&t), vec!["nightly ran"], "one occurrence, one run");
+    assert_eq!(queue.stats().await.expect("stats").total(), 0);
+}
+
 on_every_backend!(
     an_hourly_schedule_fires_once_when_its_hour_arrives,
     after_downtime_the_default_skips_the_window_it_slept_through,
@@ -248,4 +287,5 @@ on_every_backend!(
     a_schedule_can_be_removed,
     a_bad_cron_expression_is_refused_at_install_rather_than_at_three_in_the_morning,
     a_recurring_job_runs_on_a_worker_like_any_other,
+    two_running_workers_run_one_occurrence_once,
 );
