@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 42 crates under `crates/` and two examples under
+A Cargo workspace of 43 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -174,7 +174,7 @@ puts the crate in a new project.
 | [`brocanth-events`](crates/brocanth-events/README.md) | `Change` and `ChangeSink`: the seam between writes and subscribers | with `model` |
 | [`brocanth-resource`](crates/brocanth-resource/README.md) | Typed CRUD routes over one table, with the policy in the `WHERE` | `resource` |
 | [`brocanth-cache`](crates/brocanth-cache/README.md) | A cache on unlogged Postgres tables, with tags | `cache` |
-| [`brocanth-storage`](crates/brocanth-storage/README.md) | File storage: one trait, local disk, content-addressed names, image variants | `storage` |
+| [`brocanth-storage`](crates/brocanth-storage/README.md) | File storage: one trait, local disk, content-addressed names, image variants | `storage`, `storage-routes` |
 | [`brocanth-auth`](crates/brocanth-auth/README.md) | argon2id accounts, server-side sessions, OAuth 2.0 and OIDC with PKCE | `auth` |
 | [`brocanth-policy`](crates/brocanth-policy/README.md) | Typed predicates: SQL for a list, evaluation for one row | `policy` |
 | [`brocanth-policy-macros`](crates/brocanth-policy-macros/README.md) | The `policy!` macro, re-exported by `brocanth-policy` behind `macro` | |
@@ -186,6 +186,7 @@ puts the crate in a new project.
 | [`brocanth-mail`](crates/brocanth-mail/README.md) | Mail: one trait, an in-memory backend, SMTP behind a feature | |
 | [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` and `realtime-websocket` carry it to a browser | `realtime` |
 | [`brocanth-static`](crates/brocanth-static/README.md) | Writes the application to files: every GET page, partials per layout depth, the assets | `static` |
+| [`brocanth-webhooks`](crates/brocanth-webhooks/README.md) | Webhooks in both directions: verified, deduplicated deliveries in; signed, retried events out | `webhooks`, `webhooks-in`, `webhooks-out` |
 | [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin` | `admin` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |

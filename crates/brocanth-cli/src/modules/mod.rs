@@ -106,6 +106,9 @@ pub const ALL: &[&dyn Module] = &[
     // Uploads on a local disk. The first module to write a `.gitignore`
     // line, which is also why that slot is now read.
     &brocanth_storage::scaffold::FileStorage,
+    // Its HTTP edge, off until asked for: an upload route behind the
+    // project's guard, a download route behind a file token, thumbnails.
+    &brocanth_storage::scaffold::StorageRoutes,
     // The five edge hooks. The first crate in the workspace whose whole
     // job is to implement `HookSource`: the pipeline was there, tested,
     // and every implementation of it was a test fixture.
@@ -138,6 +141,13 @@ pub const ALL: &[&dyn Module] = &[
     // reads rows through the ORM the model plugin builds on the `db` pool.
     &brocanth_admin::scaffold::Backoffice,
     &brocanth_admin::scaffold::BackofficeModels,
+    // Webhooks in both directions, from one crate: the incoming half is a
+    // hook ahead of the CSRF check, the outgoing half a job per delivery.
+    // After the admin, whose deliveries tab is an integration of the
+    // outgoing half.
+    &brocanth_webhooks::scaffold::Webhooks,
+    &brocanth_webhooks::scaffold::WebhooksIn,
+    &brocanth_webhooks::scaffold::WebhooksOut,
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,

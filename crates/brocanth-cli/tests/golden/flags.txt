@@ -21,6 +21,7 @@ edition = "2021"
 #   brocanth-jobs         no queue; slow work happens inside the request that asked for it
 #   brocanth-auth         no accounts; nothing hashes a password and nothing signs a session cookie
 #   brocanth-policy       no rule algebra; authorisation is whatever each handler remembered to check
+#   storage-routes        no upload or download route; a handler stores and serves each file itself
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
 #   brocanth-middleware   no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
@@ -33,6 +34,9 @@ edition = "2021"
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
 #   brocanth-admin        no backoffice; a row is changed through a page somebody wrote, or SQL
 #   brocanth-admin-model  the admin reads no table; its data source is an empty fixture
+#   brocanth-webhooks     no webhooks; a payment provider or a partner has no verified way in or out
+#   webhooks-in           no incoming webhooks; a sender's POST meets the CSRF check and is refused
+#   webhooks-out          no outgoing webhooks; a partner polls for what changed
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
@@ -2438,7 +2442,7 @@ impl Plugin for Files {
         }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.root.is_empty() {
             return Err(PluginError::new(
                 "[storage] root is required; there is no default directory",
@@ -2465,11 +2469,16 @@ impl Plugin for Files {
                 PluginError::new(format!("[storage] opening {:?}: {e}", self.settings.root))
             })?
             .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
-        self.store = Some(Arc::new(disk));
-        self.tokens = Some(
-            FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
-                .with_ttl(self.settings.token_ttl),
-        );
+        let store: Arc<dyn Storage> = Arc::new(disk);
+        let tokens = FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
+            .with_ttl(self.settings.token_ttl);
+        // On the services too, where a plugin registered after this one
+        // reads them at its own `configure`: the upload and download routes
+        // of `storage-routes` do.
+        lc.services_mut().insert(Arc::clone(&store));
+        lc.services_mut().insert(tokens.clone());
+        self.store = Some(store);
+        self.tokens = Some(tokens);
         Ok(())
     }
 
@@ -2513,7 +2522,7 @@ request.
 - `sessions`  a cookie, and a `Session` the context hands a handler
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `db`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `webhooks`, `webhooks-in`, `webhooks-out`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2572,7 +2581,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 8f6898a9d425bcbb -->
+<!-- brocanth-digest: a14f88882fe89b30 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

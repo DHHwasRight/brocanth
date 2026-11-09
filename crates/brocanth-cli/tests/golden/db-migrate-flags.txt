@@ -22,6 +22,7 @@ default-run = "my-blog"
 #   brocanth-auth         no accounts; nothing hashes a password and nothing signs a session cookie
 #   brocanth-policy       no rule algebra; authorisation is whatever each handler remembered to check
 #   brocanth-storage      no file storage; an upload has nowhere to go and no address to be read back from
+#   storage-routes        no upload or download route; a handler stores and serves each file itself
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
 #   brocanth-middleware   no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
@@ -34,6 +35,9 @@ default-run = "my-blog"
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
 #   brocanth-admin        no backoffice; a row is changed through a page somebody wrote, or SQL
 #   brocanth-admin-model  the admin reads no table; its data source is an empty fixture
+#   brocanth-webhooks     no webhooks; a payment provider or a partner has no verified way in or out
+#   webhooks-in           no incoming webhooks; a sender's POST meets the CSRF check and is refused
+#   webhooks-out          no outgoing webhooks; a partner polls for what changed
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
@@ -2787,7 +2791,7 @@ request.
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `model`, `cache`, `jobs`, `auth`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `webhooks`, `webhooks-in`, `webhooks-out`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2927,7 +2931,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 0a11ed9333cde6c8 -->
+<!-- brocanth-digest: 52df124f81eb7061 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
