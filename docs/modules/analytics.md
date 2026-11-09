@@ -13,14 +13,16 @@ The wizard calls it: *Count page views on the server: no cookie, no script, no t
 | Part of | nothing |
 | Needs | [`db`](db.md): the views are rows in the database the `db` module opens |
 | After | [`db`](db.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`admin`](admin.md) |
 | Conflicts | [`beacon`](beacon.md): both would count one page: the hook on the server, and the beacon in the browser; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-analytics` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no page-view counts; nothing is measured, so nothing needs consent |
 
-With [`admin`](admin.md), the admin module adds a tab at `/admin/analytics`
-(`admin` adapts to `analytics`).
+With [`admin`](admin.md), a tab at `/admin/analytics`, in the generated
+`plugins::admin_panels`. `integrate.admin` in `src/modules/analytics.rs` turns
+it off. `hooks.count` and `hooks.collect` in the same file turn off a hook: a
+server that only collects beacons sets `count: false`.
 
 ## What it writes
 
@@ -56,7 +58,7 @@ Slots:
 
 ## Settings
 
-Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `--analytics.<key>`. Rename a flag in `src/flags.rs`.
+Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `--analytics.<key>`. Rename or hide a flag in `src/modules/analytics.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

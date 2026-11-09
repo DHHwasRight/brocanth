@@ -6,6 +6,7 @@
 //! [`ui::Ui`] carrying that answer. No command calls `println!`, checks
 //! `is_terminal`, or reads `NO_COLOR`.
 
+mod choices;
 mod commands;
 mod modules;
 mod owned;

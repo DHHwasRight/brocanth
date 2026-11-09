@@ -55,6 +55,9 @@ pub fn kind(path: &str) -> Kind {
         // `Response`, `Ctx` and the error contract, which are the
         // developer's to change.
         "src/plugins/mod.rs" | "src/commands/mod.rs" => Kind::Owned,
+        // The module list and the types the module files fill. Each module
+        // file beside the list is the developer's.
+        "src/modules/mod.rs" | "src/plugins/shape.rs" => Kind::Owned,
         // The brief is a list of what this project has and what it
         // therefore does not, and a stale one is worse than none: a model
         // that reads "no queue here" and finds one guesses about
@@ -93,6 +96,10 @@ fn instead(path: &str) -> &'static str {
             "Change the module list with `brocanth add` and `brocanth remove`, not here."
         }
         "AGENTS.md" => "Notes of your own go in a file of your own, beside this one.",
+        "src/modules/mod.rs" => "A choice of yours goes in the module's own file, beside this one.",
+        "src/plugins/shape.rs" => {
+            "Your choices go in src/modules/<module>.rs; this file is their shape."
+        }
         MIGRATOR => {
             "A migration is a file beside this one; `migrate make` and `migrate sync` list it here."
         }

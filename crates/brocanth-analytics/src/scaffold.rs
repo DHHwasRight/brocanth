@@ -11,8 +11,11 @@
 //! - one registration in `src/plugins/mod.rs`, after the `db` plugin, so
 //!   the plugin finds the pool and writes to `PgStore`;
 //! - `[analytics]` in the config file, or flags and variables without one;
-//! - with `admin`, a tab at `/admin/analytics`. The admin module writes that
-//!   line: it is the admin's file.
+//! - with `admin`, a tab at `/admin/analytics`, in the generated
+//!   `plugins::admin_panels`. `integrate.admin` in `src/modules/analytics.rs`
+//!   turns it off: the toggle is in the file of the module that is a guest.
+//! - `hooks.count` and `hooks.collect` in the same file: a server that only
+//!   collects beacons turns `count` off.
 //!
 //! No page, no route, no script and no cookie: the hook reads responses the
 //! application already sends.
@@ -23,8 +26,8 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::snippet::{configurable_hooking, integration, Hooking};
+use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// First-party analytics, as a choice on the `brocanth create` menu.
 pub struct PageViews;
@@ -57,6 +60,17 @@ impl Module for PageViews {
         // The plugin reads the pool from the services the `db` plugin
         // fills, so it registers after it.
         .after("db")
+        .hook("count", "count each page this server answers", Hook::on())
+        .hook(
+            "collect",
+            "accept beacons at `collector_path` from `collector_origins`",
+            Hook::on(),
+        )
+        .integration(
+            "admin",
+            "a tab at /admin/analytics with the page-view numbers",
+            true,
+        )
         .absent(
             "brocanth-analytics",
             "no page-view counts; nothing is measured, so nothing needs consent",
@@ -77,9 +91,18 @@ impl Module for PageViews {
             },
             settings(project),
         );
+        if project.has("admin") {
+            integration(s, "analytics", "admin", Slot::AdminPanels, ADMIN_TAB);
+        }
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
+
+/// The analytics tab, with the `admin` module. The panel finds the plugin's
+/// recorder when it renders, because the admin's `mount` runs before a
+/// plugin could hand it one.
+const ADMIN_TAB: &str = "// The page views the analytics plugin counts, as a tab.
+config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());";
 
 fn settings(project: &Project) -> Vec<Setting> {
     vec![

@@ -13,7 +13,7 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`admin-model`](admin-model.md), [`commands`](commands.md), [`analytics`](analytics.md) |
+| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`admin-model`](admin-model.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-admin` (no default features) |
@@ -40,7 +40,7 @@ Slots:
 
 ## Settings
 
-Section `[admin]`. Environment variable: `$<APP>_ADMIN__<KEY>`. Flag: `--admin.<key>`. Rename a flag in `src/flags.rs`.
+Section `[admin]`. Environment variable: `$<APP>_ADMIN__<KEY>`. Flag: `--admin.<key>`. Rename or hide a flag in `src/modules/admin.rs`.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|

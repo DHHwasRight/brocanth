@@ -180,11 +180,51 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     let mut by_hand: Vec<(String, String)> = Vec::new();
     let mut shared: Vec<(String, String, String)> = Vec::new();
 
+    // A project from before `src/modules/`: its `src/flags.rs` moves into
+    // the module files, which this add writes.
+    let moved = legacy_flags(
+        &root,
+        &create::module_shapes(&answers(after_picks.clone()))?,
+    )?;
+
     let mut kept_deleted: Vec<&str> = Vec::new();
     for (path, text) in &after {
         let full = root.join(path);
         let on_disk = std::fs::read_to_string(&full).ok();
         match owned::kind(path) {
+            // The project's choices: written when missing, never rewritten,
+            // so a choice is never lost and a later `add` never refuses on
+            // one. Missing means the module is new here, or the project is
+            // older than `src/modules/`; `mod.rs` names the file either way.
+            Kind::Theirs if crate::choices::is_module_file(path) => {
+                if on_disk.is_none() {
+                    let text = moved
+                        .as_ref()
+                        .and_then(|m| m.files.get(path))
+                        .unwrap_or(text);
+                    writes.push((full, text.clone(), "written"));
+                } else if moved.as_ref().is_some_and(|m| m.files.contains_key(path)) {
+                    refusals.push(legacy_in_the_way(path));
+                }
+            }
+            // The admin's file from before `plugins::admin_panels`, as the
+            // generator wrote it: rewritten, as an unedited file is.
+            // Edited: the one new line is printed, and the add goes on. The
+            // old file still works, with the analytics tab always on.
+            Kind::Theirs
+                if path == ADMIN_FILE
+                    && on_disk.as_deref().is_some_and(|current| {
+                        current != text && !current.contains(PANELS_CALL)
+                    })
+                    && text.contains(PANELS_CALL) =>
+            {
+                let current = on_disk.as_deref().unwrap_or_default();
+                if old_admin(text).iter().any(|old| old == current) {
+                    writes.push((full, text.clone(), "rewritten"));
+                } else {
+                    by_hand.push((path.clone(), owned::diff(current, text)));
+                }
+            }
             Kind::Owned => {
                 // The lines below `owned::YOURS` are the developer's, and
                 // they come along into the rewritten file.
@@ -242,10 +282,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
                 // change in it, around their own lines.
                 (Some(current), Some(was)) if applied(current, was, text) => {}
                 // Kept by an earlier `brocanth remove`: the migrations are
-                // the database's history and the `migrate` tool's list, and
-                // the flags file holds the developer's renames. Both are
-                // theirs, and this add writes around them.
-                (Some(_), None) if path.starts_with("migrations/") || path == "src/flags.rs" => {}
+                // the database's history and the `migrate` tool's list.
+                // They are theirs, and this add writes around them.
+                (Some(_), None) if path.starts_with("migrations/") => {}
                 (Some(_), was) => {
                     let was = was.cloned().unwrap_or_default();
                     if path == "src/app.rs" {
@@ -278,16 +317,6 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         }
     }
 
-    // Renames `brocanth remove` parked, for flags that are back.
-    let flags = root.join("src/flags.rs");
-    if let Ok(current) = std::fs::read_to_string(&flags) {
-        let present = create::setting_paths(&answers(after_picks.clone()))?;
-        let restored = crate::commands::remove::unpark(&current, &present);
-        if restored != current {
-            writes.push((flags, restored, "renames restored"));
-        }
-    }
-
     let mut table = Table::new();
     for (full, text, what) in &writes {
         if let Some(parent) = full.parent() {
@@ -299,6 +328,21 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
             Cell::styled(shown.display().to_string(), ACCENT),
             Cell::styled((*what).to_string(), DIM).right(),
         ]);
+    }
+    // The old flags file, now in src/modules/.
+    if let Some(moved) = &moved {
+        let flags = root.join(crate::choices::LEGACY_FLAGS);
+        std::fs::remove_file(&flags).map_err(|e| write_error(&flags, &e))?;
+        table.row(vec![
+            Cell::styled(crate::choices::LEGACY_FLAGS.to_string(), ACCENT),
+            Cell::styled("moved to src/modules/".to_string(), DIM).right(),
+        ]);
+        for line in &moved.lines {
+            table.row(vec![
+                Cell::styled(format!("  {line}"), DIM),
+                Cell::styled(String::new(), DIM),
+            ]);
+        }
     }
     // Screens ejected before a `brocanth remove admin`, installed again.
     if adding.contains(&"admin") {
@@ -326,13 +370,12 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     for (path, patch) in &by_hand {
         ui.gap();
         ui.warn(format!("{path} is yours, and one line belongs in it"));
-        ui.note(format!(
-            "  {}",
-            crate::ui::paint(
-                DIM,
-                "a mount is a decision, so the generator does not make it"
-            )
-        ));
+        let why = if path == ADMIN_FILE {
+            "without it the tabs of other modules stay as they are, and src/modules/ does not reach them"
+        } else {
+            "a mount is a decision, so the generator does not make it"
+        };
+        ui.note(format!("  {}", crate::ui::paint(DIM, why)));
         ui.gap();
         for line in patch.lines() {
             let style = if line.starts_with('+') { ACCENT } else { DIM };
@@ -369,6 +412,84 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     ]);
     ui.table_note(&next);
     Ok(ExitCode::SUCCESS)
+}
+
+// -- a project from before src/modules/ -------------------------------------
+
+/// The admin's own file.
+const ADMIN_FILE: &str = "src/plugins/admin/mod.rs";
+
+/// The line that reads the tabs of other modules into the admin.
+const PANELS_CALL: &str = "crate::plugins::admin_panels(config)";
+
+/// `text`, the admin file as the generator writes it now, in the two forms
+/// the generator wrote before `plugins::admin_panels`: no tab, and the
+/// analytics tab without a guard.
+fn old_admin(text: &str) -> Vec<String> {
+    use brocanth_admin::scaffold::{LEGACY_ANALYTICS_PANEL, PANELS};
+    vec![
+        text.replace(PANELS, ""),
+        text.replace(PANELS, LEGACY_ANALYTICS_PANEL),
+    ]
+}
+
+/// The old `src/flags.rs` of the project at `root`, moved into the module
+/// files of `shapes`. `None` when there is no such file.
+///
+/// The file is read as text. It must hold only what the generator wrote:
+/// `WITH_CONFIG` and `RENAMES` entries of two string literals. Anything
+/// else is the developer's, and an edit is never overwritten, so the
+/// command writes nothing and prints the lines to move by hand.
+pub(crate) fn legacy_flags(
+    root: &Path,
+    shapes: &[crate::choices::Shape],
+) -> Result<Option<crate::choices::Moved>, Vec<Diagnostic>> {
+    let path = root.join(crate::choices::LEGACY_FLAGS);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let help = "move these lines to src/modules/<module>.rs, then delete src/flags.rs";
+    let legacy = crate::choices::read_legacy(&text).map_err(|lines| {
+        let mut d = Diagnostic::error(
+            "flags",
+            "src/flags.rs holds lines that `brocanth` did not write",
+        )
+        .at(crate::choices::LEGACY_FLAGS)
+        .note("the flag choices now live in src/modules/, one file per module");
+        for line in &lines {
+            d = d.note(format!("not moved: {}", line.trim()));
+        }
+        vec![d.help(help)]
+    })?;
+    let moved = crate::choices::move_legacy(&legacy, shapes);
+    if !moved.stranded.is_empty() {
+        let mut d = Diagnostic::error(
+            "flags",
+            "src/flags.rs renames a flag that no module of this project declares",
+        )
+        .at(crate::choices::LEGACY_FLAGS)
+        .note("the flag choices now live in src/modules/, one file per module");
+        for line in &moved.stranded {
+            d = d.note(format!("not moved: {line}"));
+        }
+        return Err(vec![d.help(
+            "delete these lines from src/flags.rs, or add their module in the same command",
+        )]);
+    }
+    Ok(Some(moved))
+}
+
+/// A module file that exists while an old `src/flags.rs` holds a choice for
+/// it: both cannot be right, so the person decides.
+pub(crate) fn legacy_in_the_way(path: &str) -> Diagnostic {
+    Diagnostic::error(
+        "flags",
+        format!("src/flags.rs holds a choice for {path}, which already exists"),
+    )
+    .at(crate::choices::LEGACY_FLAGS)
+    .help(format!(
+        "move the choice into {path} by hand, then delete src/flags.rs"
+    ))
 }
 
 // -- what the project says about itself -------------------------------------

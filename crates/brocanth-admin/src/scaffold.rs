@@ -39,8 +39,8 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
 
 /// The backoffice, as a choice on the `brocanth create` menu.
 ///
@@ -76,11 +76,12 @@ impl Module for Backoffice {
             "commands",
             "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
-        .adapts_to(
-            "analytics",
-            "the page-view numbers are a tab, `AnalyticsPanel`, at /admin/analytics",
-        )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
+        .option(Opt::text(
+            "mount_at",
+            "/admin",
+            "Where the backoffice answers. A page of yours under this path is a build error, not a race. Every environment serves the same routes, so this is a constant and not a setting.",
+        ))
         .krate(
             Dep::brocanth("brocanth-admin")
                 // The `RouteSource` is for a host that mounts one. A
@@ -116,14 +117,7 @@ impl Module for Backoffice {
                 .replace("@HOLD@", pick(HOLD_ORM, HOLD))
                 .replace("@OVER_ORM@", pick(OVER_ORM, ""))
                 .replace("@HELD@", pick("OverOrm", "Admin"))
-                .replace(
-                    "@PANELS@",
-                    if project.has("analytics") {
-                        ANALYTICS_PANEL
-                    } else {
-                        ""
-                    },
-                )
+                .replace("@PANELS@", PANELS)
                 .replace(
                     "@SYNC@",
                     pick("Arc, Mutex, OnceLock, PoisonError", "Arc, OnceLock"),
@@ -167,8 +161,10 @@ impl Module for Backoffice {
         }
         // The prefix is the application's decision, so it is written at the
         // call and not inside `mount`.
-        s.at(Slot::RouterMounts)
-            .line("    crate::plugins::admin::mount(routes, \"/admin\")?;");
+        s.at(Slot::RouterMounts).line(format!(
+            "    crate::plugins::admin::mount(routes, {})?;",
+            module_ref("admin", "mount_at")
+        ));
         // Two patterns, and the table's own test lists every route.
         s.at(Slot::PagesRoutes).line("/admin");
         s.at(Slot::PagesRoutes).line("/admin/{*rest}");
@@ -452,10 +448,23 @@ const MODELS_DOC_ORM: &str = "\
 //! answers 403 on every screen. `brocanth_admin::rows` has the worked
 //! example.";
 
-/// The analytics tab, with the `analytics` module. The panel finds the
-/// plugin's recorder when it renders, because `mount` runs before a plugin
-/// could hand it one.
-const ANALYTICS_PANEL: &str = "    // The page views the analytics plugin counts, as a tab.
+/// The tabs other modules add. The generated `plugins::admin_panels` holds
+/// them, each behind the module file of the module that adds it, so this
+/// file names none of them.
+///
+/// Public for `brocanth add`, which recognises an admin file written
+/// before this line existed.
+pub const PANELS: &str =
+    "    // The tabs other modules add, such as analytics. Each one is on or off in
+    // the module file of the module that adds it: `integrate.admin`.
+    config = crate::plugins::admin_panels(config);
+";
+
+/// The analytics tab, as the generator wrote it into the admin's file with
+/// `analytics`, before `plugins::admin_panels`. `brocanth add` compares an
+/// old admin file with it, to rewrite an unedited one.
+pub const LEGACY_ANALYTICS_PANEL: &str =
+    "    // The page views the analytics plugin counts, as a tab.
     config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
 ";
 

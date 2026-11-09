@@ -28,10 +28,12 @@
 //!
 //! Three things a remove followed by an add must find again:
 //!
-//! * **Renames in `src/flags.rs`.** A rename of a flag that leaves with the
-//!   module is parked: the line becomes a comment that says so. A rename of
-//!   a flag nobody sets stops the binary, so it cannot stay live, and
-//!   deleting it would lose a decision. `add` restores the line.
+//! * **The module file, once it is edited.** `src/modules/<key>.rs` holds
+//!   the module's choices: its renames, its hooks, its integrations. An
+//!   unedited one is deleted. An edited one stays, out of
+//!   `src/modules/mod.rs`, so nothing compiles it, and `add` finds it: it
+//!   writes a module file only when it is missing. A rename survives a
+//!   remove and an add.
 //! * **Ejected admin screens.** The copies under
 //!   `src/plugins/admin/screens/` and their wiring stay. They are the
 //!   developer's work, and nothing compiles them once the admin plugin is
@@ -72,12 +74,6 @@ pub struct RemoveArgs {
     #[arg(long)]
     pub force: bool,
 }
-
-/// The file the renames live in.
-const FLAGS: &str = "src/flags.rs";
-
-/// What a parked rename starts with. One line, so `add` finds it again.
-const PARKED: &str = "// Parked by `brocanth remove`; `brocanth add` restores it: ";
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     let start = match dir {
@@ -142,12 +138,18 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
 
     ui.heading("remove", removing.join(", "));
 
+    // A project from before `src/modules/`: its `src/flags.rs` moves into
+    // the module files, those of the leaving modules included, which stay.
+    let before_shapes = create::module_shapes(&before_answers)?;
+    let after_shapes = create::module_shapes(&after_answers)?;
+    let moved = add::legacy_flags(&root, &before_shapes)?;
+
     // Nothing is written until every file has been accounted for, as in
     // `add`: half a remove is a project nobody can reason about.
     let mut writes: Vec<(PathBuf, String, &'static str)> = Vec::new();
     let mut deletes: Vec<PathBuf> = Vec::new();
     let mut refusals: Vec<Diagnostic> = Vec::new();
-    let mut kept: Vec<(String, &'static str)> = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
     let mut shared: Vec<(String, String, String, String)> = Vec::new();
 
     let paths: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
@@ -161,13 +163,45 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
             if on_disk.is_some() {
                 kept.push((
                     path.clone(),
-                    "the history of a database that still has the tables",
+                    "the history of a database that still has the tables".to_string(),
                 ));
             }
             continue;
         }
 
         match owned::kind(path) {
+            // The project's choices. A staying module's file is never
+            // rewritten. A leaving module's file goes while it is what the
+            // generator wrote, and stays once it holds a choice.
+            Kind::Theirs if crate::choices::is_module_file(path) => {
+                let legacy = moved.as_ref().and_then(|m| m.files.get(path));
+                match (now, was, on_disk.as_deref()) {
+                    (Some(text), _, None) => {
+                        writes.push((full, legacy.unwrap_or(text).clone(), "written"));
+                    }
+                    (Some(_), _, Some(current)) => {
+                        refusals.extend(stranded_keys(
+                            path,
+                            current,
+                            &before_shapes,
+                            &after_shapes,
+                        ));
+                        if legacy.is_some() {
+                            refusals.push(add::legacy_in_the_way(path));
+                        }
+                    }
+                    (None, _, None) => {
+                        if let Some(text) = legacy {
+                            writes.push((full, text.clone(), "written"));
+                            kept.push((path.clone(), returns(path, &removing)));
+                        }
+                    }
+                    (None, Some(was), Some(current)) if current == was && legacy.is_none() => {
+                        deletes.push(full);
+                    }
+                    (None, _, Some(_)) => kept.push((path.clone(), returns(path, &removing))),
+                }
+            }
             Kind::Owned => match (now, &on_disk) {
                 (Some(text), _) => {
                     let text = owned::keep_yours(path, on_disk.as_deref().unwrap_or(""), text);
@@ -244,18 +278,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
                     writes.push((full, text.clone(), "rewritten"));
                 }
                 (Some(text), Some(was), Some(current)) if add::applied(current, was, text) => {}
-                // Kept from an earlier remove: the developer's renames.
-                (Some(_), None, Some(_)) if path == FLAGS => {}
                 (Some(text), was, Some(_)) => {
                     refusals.push(would_change(path, was.map_or("", String::as_str), text))
                 }
                 (None, Some(was), Some(current)) if current == was => deletes.push(full),
-                (None, Some(_), Some(_)) if path == FLAGS => {
-                    kept.push((
-                        path.clone(),
-                        "it holds your renames, and nothing compiles it now",
-                    ));
-                }
                 (None, Some(was), Some(current))
                     if path == super::admin::PLUGIN && current == super::admin::wired(was) =>
                 {
@@ -266,28 +292,6 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
                 }
                 (None, None, Some(_)) => {}
             },
-        }
-    }
-
-    // The renames of flags that leave with the module.
-    let gone: Vec<String> = {
-        let stay = create::setting_paths(&after_answers)?;
-        create::setting_paths(&before_answers)?
-            .into_iter()
-            .filter(|path| !stay.contains(path))
-            .collect()
-    };
-    let flags = root.join(FLAGS);
-    if !deletes.contains(&flags) {
-        if let Ok(current) = std::fs::read_to_string(&flags) {
-            match park(&current, &gone) {
-                Ok(parked) if parked != current => {
-                    writes.retain(|(path, _, _)| *path != flags);
-                    writes.push((flags.clone(), parked, "renames parked"));
-                }
-                Ok(_) => {}
-                Err(d) => refusals.push(*d),
-            }
         }
     }
 
@@ -325,6 +329,14 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
             Cell::styled((*what).to_string(), DIM).right(),
         ]);
     }
+    if moved.is_some() {
+        let flags = root.join(crate::choices::LEGACY_FLAGS);
+        std::fs::remove_file(&flags).map_err(|e| write_error(&flags, &e))?;
+        table.row(vec![
+            Cell::styled(crate::choices::LEGACY_FLAGS.to_string(), ACCENT),
+            Cell::styled("moved to src/modules/".to_string(), DIM).right(),
+        ]);
+    }
     for full in &deletes {
         std::fs::remove_file(full).map_err(|e| write_error(full, &e))?;
         prune(&root, full);
@@ -342,7 +354,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     if removing.contains(&"admin") && root.join(super::admin::SCREENS).is_dir() {
         kept.push((
             super::admin::SCREENS.to_string(),
-            "your ejected screens; `brocanth add admin` installs them again",
+            "your ejected screens; `brocanth add admin` installs them again".to_string(),
         ));
     }
     for (path, why) in &kept {
@@ -464,74 +476,55 @@ fn ticked(keys: &[&str]) -> String {
         .join(", ")
 }
 
-// -- src/flags.rs ------------------------------------------------------------
+// -- the module files ---------------------------------------------------------
 
-/// `text` with every rename of a path in `gone` turned into a parked line.
-///
-/// A rename is parked only when it is a line of its own, as rustfmt writes
-/// a list that does not fit on one line. A rename on a shared line cannot
-/// be parked without rewriting the developer's line, so it is refused with
-/// the edit to make.
-pub(crate) fn park(text: &str, gone: &[String]) -> Result<String, Box<Diagnostic>> {
-    let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let body = line.trim_start();
-        let indent = &line[..line.len() - body.len()];
-        match renamed(body) {
-            Some(path) if gone.iter().any(|g| g == path) => {
-                out.push_str(&format!("{indent}{PARKED}{body}"));
-            }
-            _ => out.push_str(line),
-        }
-    }
-    // A rename of a leaving flag that is not alone on its line.
-    let live = out
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let stuck: Vec<&String> = gone
+/// What `remove` says about a module file it keeps.
+fn returns(path: &str, removing: &[&'static str]) -> String {
+    let key = removing
         .iter()
-        .filter(|path| live.contains(&format!("(\"{path}\"")))
-        .collect();
-    if let Some(path) = stuck.first() {
-        return Err(Box::new(
+        .find(|key| crate::choices::path_of(key) == path)
+        .copied()
+        .unwrap_or("<module>");
+    format!("your choices return with `brocanth add {key}`")
+}
+
+/// A staying module's file that names a `Key` the removal takes away: a
+/// setting another module declared only beside the leaving one. The file
+/// would not compile, and `remove` never edits it.
+fn stranded_keys(
+    path: &str,
+    current: &str,
+    before: &[crate::choices::Shape],
+    after: &[crate::choices::Shape],
+) -> Vec<Diagnostic> {
+    let variants = |shapes: &[crate::choices::Shape]| -> Vec<String> {
+        shapes
+            .iter()
+            .find(|shape| crate::choices::path_of(&shape.key) == path)
+            .map(|shape| shape.keys.iter().map(|(v, _)| v.clone()).collect())
+            .unwrap_or_default()
+    };
+    let (was, now) = (variants(before), variants(after));
+    crate::choices::keys_named(current)
+        .into_iter()
+        .filter(|key| was.contains(key) && !now.contains(key))
+        .map(|key| {
+            let line = current
+                .lines()
+                .find(|line| line.contains(&format!("Key::{key}")))
+                .unwrap_or_default()
+                .trim();
             Diagnostic::error(
                 "flags",
-                format!("{FLAGS} renames `{path}`, which leaves with the module"),
+                format!("{path} names `Key::{key}`, which leaves with this module"),
             )
-        .at(FLAGS)
-        .note("a rename of a flag nobody sets stops the binary, so `remove` parks it as a comment")
-        .help(format!(
-            "put the rename of `{path}` on a line of its own in RENAMES, and run the command again"
-        ))));
-    }
-    Ok(out)
-}
-
-/// `text` with every parked rename of a path in `present` restored.
-pub(crate) fn unpark(text: &str, present: &[String]) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let body = line.trim_start();
-        let indent = &line[..line.len() - body.len()];
-        match body.strip_prefix(PARKED) {
-            Some(rename) if renamed(rename).is_some_and(|p| present.iter().any(|h| h == p)) => {
-                out.push_str(&format!("{indent}{rename}"));
-            }
-            _ => out.push_str(line),
-        }
-    }
-    out
-}
-
-/// The path a line of `RENAMES` renames, for a line that holds one rename
-/// and nothing else: `("sessions.cookie", "cookie"),`.
-fn renamed(line: &str) -> Option<&str> {
-    let rest = line.trim_end().strip_prefix("(\"")?;
-    let (path, tail) = rest.split_once('"')?;
-    let tail = tail.trim_end_matches(',').trim_end();
-    (tail.ends_with(')') && !tail[..tail.len() - 1].contains(')')).then_some(path)
+            .at(path)
+            .note(format!("the line: {line}"))
+            .help(format!(
+                "delete that line from {path}, and run the command again"
+            ))
+        })
+        .collect()
 }
 
 // -- the two files both sides write in --------------------------------------
@@ -1180,13 +1173,15 @@ mod tests {
         let picks = with(DEFAULT, &["sessions", "admin"]);
         let root = project("rmround", &picks);
 
-        // A rename of a flag that leaves with `sessions`.
-        let flags = read(&root, FLAGS).replace(
-            "pub const RENAMES: &[(&str, &str)] = &[];",
-            "pub const RENAMES: &[(&str, &str)] = &[\n    (\"sessions.cookie\", \"cookie\"),\n];",
+        // A rename of a flag that leaves with `sessions`, in its module
+        // file. `admin.rs` stays as the generator wrote it.
+        let file = "src/modules/sessions.rs";
+        let choices = read(&root, file).replace(
+            "    rename: &[],",
+            "    rename: &[(Key::Cookie, Flag::As(\"cookie\"))],",
         );
-        assert!(flags.contains("sessions.cookie"), "{flags}");
-        std::fs::write(root.join(FLAGS), &flags).expect("write");
+        assert!(choices.contains("Key::Cookie"), "{choices}");
+        std::fs::write(root.join(file), &choices).expect("write");
         // An ejected screen.
         crate::commands::admin::run(
             &ui(),
@@ -1211,11 +1206,10 @@ mod tests {
         if let Err(e) = remove(&root, &["sessions", "admin"]) {
             panic!("{}", said(&e));
         }
-        let parked = read(&root, FLAGS);
-        assert!(
-            parked.contains(&format!("    {PARKED}(\"sessions.cookie\", \"cookie\"),")),
-            "{parked}"
-        );
+        // The edited file stays, out of the list; the unedited one goes.
+        assert_eq!(read(&root, file), choices);
+        assert!(!read(&root, "src/modules/mod.rs").contains("pub mod sessions;"));
+        assert!(!root.join("src/modules/admin.rs").exists());
         assert_eq!(read(&root, "src/plugins/admin/screens/list.rsx"), screen);
         assert!(!root.join("src/plugins/admin/mod.rs").exists());
         assert!(!root.join("src/plugins/sessions").exists());
@@ -1241,20 +1235,102 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_on_a_shared_line_is_refused_with_the_edit() {
-        let text = "pub const RENAMES: &[(&str, &str)] = &[(\"jobs.workers\", \"w\"), (\"a.b\", \"c\")];\n";
-        let refused = park(text, &["jobs.workers".to_string()]).expect_err("not alone on its line");
-        assert!(
-            refused.render().contains("line of its own"),
-            "{}",
-            refused.render()
+    fn a_rename_of_a_key_that_leaves_with_a_child_stops_the_remove() {
+        // `observability` declares `live_path` only beside
+        // `observability-health`, so the variant goes with the child.
+        let root = project("rmkey", DEFAULT);
+        let file = "src/modules/observability.rs";
+        let text = read(&root, file);
+        assert!(text.contains("rename: &[],"), "{text}");
+        let shapes = create::module_shapes(&answers("rmkey", DEFAULT)).expect("a project");
+        let Some((_, variant)) = crate::choices::key_of(&shapes, "observability.live_path") else {
+            panic!("no Key for observability.live_path");
+        };
+        let edited = text.replace(
+            "    rename: &[],",
+            &format!("    rename: &[(Key::{variant}, Flag::Hidden)],"),
         );
+        std::fs::write(root.join(file), &edited).expect("write");
+        let before = tree(&root);
+        let refused =
+            said(&remove(&root, &["observability-health"]).expect_err("the rename is in the way"));
+        assert!(refused.contains(&format!("Key::{variant}")), "{refused}");
+        assert!(refused.contains("help:"), "{refused}");
+        assert_eq!(tree(&root), before, "a refused remove wrote something");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
-        let text = "pub const RENAMES: &[(&str, &str)] = &[\n    (\"jobs.workers\", \"w\"),\n    (\"a.b\", \"c\"),\n];\n";
-        let parked = park(text, &["jobs.workers".to_string()]).expect("alone on its line");
-        assert!(parked.contains(&format!("    {PARKED}(\"jobs.workers\", \"w\"),\n")));
-        assert!(parked.contains("    (\"a.b\", \"c\"),\n"));
-        assert_eq!(unpark(&parked, &["jobs.workers".to_string()]), text);
-        assert_eq!(unpark(&parked, &[]), parked, "still absent: still parked");
+    #[test]
+    fn an_old_flags_file_moves_into_the_module_files_on_the_next_add() {
+        let root = project("addlegacy", &["config", "sessions"]);
+        // The project as the generator wrote it before src/modules/.
+        for path in ["src/modules", "src/plugins/shape.rs"] {
+            let full = root.join(path);
+            let _ = std::fs::remove_dir_all(&full);
+            let _ = std::fs::remove_file(&full);
+        }
+        std::fs::write(
+            root.join("src/flags.rs"),
+            "pub const WITH_CONFIG: bool = true;\n\
+             pub const RENAMES: &[(&str, &str)] = &[\n    (\"sessions.cookie\", \"cookie\"),\n];\n",
+        )
+        .expect("write");
+        if let Err(e) = add(&root, &["cache"]) {
+            panic!("{}", said(&e));
+        }
+        assert!(!root.join("src/flags.rs").exists());
+        assert!(read(&root, "src/modules/brocanth.rs").contains("flags_with_config: true,"));
+        assert!(read(&root, "src/modules/sessions.rs")
+            .contains("rename: &[(Key::Cookie, Flag::As(\"cookie\"))],"));
+        assert!(root.join("src/modules/cache.rs").exists());
+        assert!(root.join("src/plugins/shape.rs").exists());
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A line the generator did not write: nothing moves.
+        let root = project("addlegacy2", &["config", "sessions"]);
+        let _ = std::fs::remove_dir_all(root.join("src/modules"));
+        std::fs::write(
+            root.join("src/flags.rs"),
+            "pub const WITH_CONFIG: bool = false;\npub const MINE: u8 = 1;\n",
+        )
+        .expect("write");
+        let before = tree(&root);
+        let refused = said(&add(&root, &["cache"]).expect_err("a line of theirs"));
+        assert!(refused.contains("pub const MINE: u8 = 1;"), "{refused}");
+        assert!(
+            refused
+                .contains("move these lines to src/modules/<module>.rs, then delete src/flags.rs"),
+            "{refused}"
+        );
+        assert_eq!(tree(&root), before, "a refused add wrote something");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_admin_file_from_before_admin_panels_is_rewritten_or_shown() {
+        use brocanth_admin::scaffold::{LEGACY_ANALYTICS_PANEL, PANELS};
+        let file = "src/plugins/admin/mod.rs";
+        let picks = ["config", "db", "analytics", "admin"];
+        let root = project("addadmin", &picks);
+        let now = read(&root, file);
+        assert!(now.contains(PANELS), "{now}");
+        // As the generator wrote it before: the tab, with no guard.
+        std::fs::write(root.join(file), now.replace(PANELS, LEGACY_ANALYTICS_PANEL))
+            .expect("write");
+        if let Err(e) = add(&root, &["cache"]) {
+            panic!("{}", said(&e));
+        }
+        assert_eq!(read(&root, file), now);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Edited as well: the add goes on, and the file stays as it is.
+        let root = project("addadmin2", &picks);
+        let edited = format!("{}// mine\n", now.replace(PANELS, LEGACY_ANALYTICS_PANEL));
+        std::fs::write(root.join(file), &edited).expect("write");
+        if let Err(e) = add(&root, &["cache"]) {
+            panic!("{}", said(&e));
+        }
+        assert_eq!(read(&root, file), edited);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

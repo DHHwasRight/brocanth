@@ -10,7 +10,12 @@
 //!   `brocanth.toml` as text and nothing else. `check/module-version`: the
 //!   installed CLI writes a module at another version than the one
 //!   `brocanth.toml` records, so `add` and `remove` compare the project
-//!   with text it was not written from.
+//!   with text it was not written from. `check/module-files`: a module
+//!   without its file in `src/modules/`, or a `src/flags.rs` from before
+//!   those files. The values in the module files are the project's own
+//!   check (`docs/module-config.md`, section 3.3): a bad flag name stops
+//!   every command of the binary, `check` included, because each one
+//!   builds the flags.
 //! * **The configuration and source checks are the project's.** A project
 //!   with `config` and `commands` has a `check` command that loads the
 //!   configuration the way the application does (`brocanth_config::check`
@@ -78,6 +83,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
     let project = Project::find(dir)?;
 
     let mut findings = modules(&project);
+    findings.extend(module_files(&project));
     findings.retain(|d| !d.code.as_ref().is_some_and(|c| args.allow.contains(c)));
     for d in &findings {
         ui.diagnostic(d);
@@ -166,6 +172,44 @@ pub fn versions(project: &Project) -> Vec<Diagnostic> {
                 )),
             };
             Some(diagnostic.at("brocanth.toml"))
+        })
+        .collect()
+}
+
+/// The files of `src/modules/`: a module in `brocanth.toml` without its
+/// file, which does not compile, and a `src/flags.rs` from before them,
+/// whose values the next `brocanth add` moves.
+///
+/// Only presence. The values are Rust, and the compiler and the binary's
+/// own startup check read them; this tool links neither.
+pub fn module_files(project: &Project) -> Vec<Diagnostic> {
+    use crate::choices::{path_of, FRAMEWORK, LEGACY_FLAGS};
+    if project.root.join(LEGACY_FLAGS).exists() {
+        return vec![Diagnostic::warning(
+            "check/module-files",
+            "src/flags.rs is from before src/modules/",
+        )
+        .at(LEGACY_FLAGS)
+        .note("the flag choices now live in src/modules/, one file per module")
+        .help("the next `brocanth add` moves its values and deletes it")];
+    }
+    std::iter::once(FRAMEWORK)
+        .chain(project.modules.iter().map(String::as_str))
+        .filter(|key| !project.root.join(path_of(key)).exists())
+        .map(|key| {
+            let path = path_of(key);
+            let help = if key == FRAMEWORK {
+                format!("restore {path} from version control")
+            } else {
+                format!(
+                    "restore {path} from version control, or run `brocanth remove {key}` and \
+                     `brocanth add {key}`, which writes it with the defaults"
+                )
+            };
+            Diagnostic::warning("check/module-files", format!("{path} is missing"))
+                .at(path)
+                .note("src/modules/mod.rs names it, so the project does not compile without it")
+                .help(help)
         })
         .collect()
 }
@@ -328,5 +372,34 @@ mod tests {
             header.contains(&format!("brocanth-admin {}", recorded["admin"])),
             "{header}"
         );
+    }
+
+    #[test]
+    fn a_missing_module_file_and_an_old_flags_file_are_warnings() {
+        let root =
+            std::env::temp_dir().join(format!("brocanth-check-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/modules")).expect("mkdir");
+        std::fs::write(root.join("src/modules/brocanth.rs"), "").expect("write");
+        let mut p = project(&["config", "sessions"]);
+        p.root = root.clone();
+        std::fs::write(root.join("src/modules/config.rs"), "").expect("write");
+
+        let found = module_files(&p);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let said = found[0].render();
+        assert!(
+            said.contains("src/modules/sessions.rs is missing"),
+            "{said}"
+        );
+        assert!(said.contains("brocanth add sessions"), "{said}");
+
+        std::fs::write(root.join("src/flags.rs"), "").expect("write");
+        let said = module_files(&p)[0].render();
+        assert!(
+            said.contains("src/flags.rs is from before src/modules/"),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

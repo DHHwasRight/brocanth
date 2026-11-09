@@ -56,7 +56,7 @@
 //! [`snippet::configurable_hooking`]: brocanth_scaffold::snippet::configurable_hooking
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
 pub struct Middleware;
@@ -458,6 +458,16 @@ impl Module for RateLimit {
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
         .after("middleware-security-headers")
+        .hook(
+            "count",
+            "count each request against its rule, and answer 429 past the limit",
+            Hook::required(),
+        )
+        .hook(
+            "headers",
+            "send the RateLimit headers on each response a rule covers",
+            Hook::on(),
+        )
         .absent(
             "rate-limit",
             "no rate limit; a password guesser gets as many tries as the server answers",

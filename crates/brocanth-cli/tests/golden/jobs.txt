@@ -74,13 +74,13 @@ run = "cargo test"
 //! My Blog -- a brocanth application.
 //!
 //! No command line was asked for, so this binary does one thing. It takes the
-//! flags its settings declare, which `--help` lists and `src/flags.rs`
+//! flags its settings declare, which `--help` lists and `src/modules/`
 //! renames, and nothing else. Everything it contains is in `src/app.rs`;
 //! `brocanth add commands` turns this into a command line with `serve` as one
 //! of its commands.
 
 mod app;
-mod flags;
+mod modules;
 mod pages;
 mod plugins;
 
@@ -105,7 +105,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 32a281d6f318fea8
+// brocanth-digest: fea59c3fed8a9b00
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1325,12 +1325,14 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! is yours.
 
 pub mod jobs;
+pub mod shape;
 
 use brocanth::plugin_context::{After, Base};
 use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::AsyncNext;
 
 use crate::pages::{Ctx, Response};
+use crate::plugins::shape::{Flag, Flags};
 
 /// Every plugin this application contains, in dependency order.
 ///
@@ -1347,7 +1349,7 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth_config::AppBuilderConfigExt;
 
-        // The files, the environment and, once `src/flags.rs` turns them
+        // The files, the environment and, where src/modules/ turns them
         // on, the flags: `brocanth-config` layers them and types each
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
@@ -1444,13 +1446,17 @@ pub fn layer(name: &str) -> Option<Layer> {
 /// One declared setting, by the key it sets.
 pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
-    /// unless `src/flags.rs` renames it.
+    /// unless its module file renames it.
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
     /// Whether a flag may set it. A secret has none: every user on the host
     /// can read a process's arguments.
     pub flag: bool,
+    /// The module file that renames its flag and turns the flags on or off.
+    pub file: &'static str,
+    /// Whether its module reads flags, from that file.
+    pub flags: Flags,
     /// A value that means `None` as well as an empty one does.
     pub none_as: Option<&'static str>,
     /// Whether a flag's value stays a string whatever it looks like.
@@ -1458,12 +1464,14 @@ pub struct Setting {
 }
 
 /// Every setting the framework and the modules declared. `brocanth add`
-/// rewrites this list; `src/flags.rs` renames or hides a flag.
+/// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
         path: "jobs.url",
         help: "The database the queue lives in.",
         flag: false,
+        file: "src/modules/jobs.rs",
+        flags: Flags::Off,
         none_as: None,
         text: true,
     },
@@ -1471,6 +1479,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "jobs.migrate",
         help: "Create the three tables at startup if they are absent.",
         flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1478,6 +1488,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "jobs.worker",
         help: "Run a worker in this process.",
         flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1485,6 +1497,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "jobs.concurrency",
         help: "How many jobs the worker runs at once.",
         flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1492,6 +1506,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
+        file: "src/modules/brocanth.rs",
+        flags: Flags::Project,
         none_as: None,
         text: false,
     },
@@ -1507,29 +1523,21 @@ pub struct Given {
     pub value: String,
 }
 
-/// The name each flag answers to after `src/flags.rs`, whether the flags are
-/// read or not.
+/// The name each flag answers to after the renames in src/modules/, whether
+/// the flags are read or not.
 ///
-/// A rename of a key no flag sets, a name that is not spelled as a flag, and
-/// two flags under one name each stop the binary: each would otherwise be a
-/// flag that does nothing, or does something else.
+/// A name that is not spelled as a flag, and two flags under one name, each
+/// stop the binary: each would otherwise be a flag that does nothing, or does
+/// something else. A rename of a key no flag sets does not compile: `Key` has
+/// no variant for it.
 fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
-    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
-    for (path, _) in crate::flags::RENAMES {
-        if !flags().any(|setting| setting.path == *path) {
-            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
-            return Err(format!(
-                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
-                known.join(", ")
-            ));
-        }
-    }
+    let renames = renames();
     let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
-    for setting in flags() {
-        let name = crate::flags::RENAMES
+    for setting in SETTINGS.iter().filter(|setting| setting.flag) {
+        let name = renames
             .iter()
             .find(|(path, _)| *path == setting.path)
-            .map_or(setting.path, |(_, name)| *name);
+            .map_or(setting.path, |(_, flag)| flag.name());
         if name.is_empty() {
             continue;
         }
@@ -1539,12 +1547,18 @@ fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
         let taken = ["help", "version", "settings"].contains(&name);
         if !spelled || name.starts_with(['-', '.', '_']) || taken {
             return Err(format!(
-                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
+                "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
+                setting.file
             ));
         }
         if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            let files = if other.file == setting.file {
+                other.file.to_string()
+            } else {
+                format!("{} or {}", other.file, setting.file)
+            };
             return Err(format!(
-                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
                 other.path, setting.path
             ));
         }
@@ -1553,21 +1567,42 @@ fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
     Ok(names)
 }
 
-/// The flags this run reads: none unless `src/flags.rs` turns them on,
-/// because with a config file the file is the source.
-pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
-    if !crate::flags::WITH_CONFIG {
-        return Ok(Vec::new());
+/// Every rename in src/modules/, as the setting's path and its flag.
+fn renames() -> Vec<(&'static str, Flag)> {
+    let mut renames = Vec::new();
+    for (key, flag) in crate::modules::brocanth::MODULE.rename {
+        renames.push((key.path(), *flag));
     }
-    names()
+    for (key, flag) in crate::modules::jobs::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    renames
+}
+
+/// Whether a module's flags are read: its file says `Flags::On` or
+/// `Flags::Off`, or follows the project rule. With a config file, the file is
+/// the source until src/modules/brocanth.rs turns the flags on.
+fn flags_on(rule: Flags) -> bool {
+    match rule {
+        Flags::On => true,
+        Flags::Off => false,
+        Flags::Project => crate::modules::brocanth::MODULE.flags_with_config,
+    }
+}
+
+/// The flags this run reads: each module file decides, and
+/// src/modules/brocanth.rs holds the project rule. Every name is checked
+/// first, read or not.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    Ok(names()?
+        .into_iter()
+        .filter(|(setting, _)| flags_on(setting.flags))
+        .collect())
 }
 
 /// A flag given while the flags are off, refused by name with what to do
 /// instead. Silently ignoring it would run with a value nobody chose.
 pub fn refuse_off_flags() -> Result<(), String> {
-    if crate::flags::WITH_CONFIG {
-        return Ok(());
-    }
     let names = names()?;
     for arg in std::env::args_os().skip(1) {
         let arg = arg.to_string_lossy();
@@ -1578,12 +1613,22 @@ pub fn refuse_off_flags() -> Result<(), String> {
             continue;
         };
         let name = written.split_once('=').map_or(written, |(name, _)| name);
-        if let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) {
-            let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
-            return Err(format!(
-                "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set WITH_CONFIG = true in src/flags.rs, or set `{key}` under [{section}] in config/<env>.toml"
-            ));
+        let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        if flags_on(setting.flags) {
+            continue;
         }
+        let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
+        let fix = if setting.file.ends_with("/brocanth.rs") {
+            "flags_with_config: true"
+        } else {
+            "flags: Flags::On"
+        };
+        return Err(format!(
+            "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set `{fix}` in {}, or set `{key}` under [{section}] in config/<env>.toml",
+            setting.file
+        ));
     }
     Ok(())
 }
@@ -1633,7 +1678,7 @@ pub fn given() -> Result<Vec<Given>, String> {
 }
 
 /// The configuration this run reads: the files, the environment, and the
-/// flags on top once `src/flags.rs` turns them on.
+/// flags on top where src/modules/ turns them on.
 pub fn config() -> Result<brocanth_config::Config, String> {
     refuse_off_flags()?;
     let mut loader = brocanth_config::Loader::new(crate::app::APP);
@@ -1787,35 +1832,251 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: cc286f67f97a6a36
-===== src/flags.rs =====
-//! The command-line flags of this binary, and the one place to rename them.
+#[cfg(test)]
+mod flag_tests {
+    /// A rename in src/modules/ that is not spelled as a flag, or two flags
+    /// under one name, stops the binary at startup. This finds it first.
+    #[test]
+    fn flag_names_are_valid() {
+        if let Err(message) = super::names() {
+            panic!("{message}");
+        }
+    }
+}
+
+// brocanth-digest: 38740b57f9e4c576
+===== src/plugins/shape.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! Your choices go in src/modules/<module>.rs; this file is their shape.
 //!
-//! A module declares each of its settings once. From that the binary takes a
-//! flag, `--<module>.<key>=VALUE`, an environment variable,
-//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
-//! `config/<env>.toml`. `brocanth add` rewrites the list in
-//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
-//! and never again.
+//! The shape of each file in src/modules/: one Rust module per file.
+//!
+//! Each type has a `DEFAULT`, and each file ends with `..Module::DEFAULT`, so
+//! a field that a later version adds never breaks a file that predates it.
 
-/// Whether a project with a config file reads the flags too.
-///
-/// Off: with the `config` module, the file and the environment are the
-/// sources, and a flag is refused with a pointer to this line. On: a flag
-/// outranks both, for one run. Without the `config` module the flags are
-/// always read, and this is not.
-#[allow(dead_code)]
-pub const WITH_CONFIG: bool = false;
+// A choice this project does not read, such as an integration with a module
+// it does not have, is not dead code. `Flag` and `Flags` are in each module
+// for its file's one `use` line.
+#![allow(dead_code, unused_imports)]
 
-/// Flags under another name: the key as the module declares it, and the flag
-/// this binary answers to instead, without `--`. An empty name hides the
-/// flag.
-///
-/// ```text
-/// ("sessions.cookie", "cookie"),
-/// ("storage.root", ""),
-/// ```
-pub const RENAMES: &[(&str, &str)] = &[];
+/// Whether a module's settings have flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flags {
+    /// The project rule: on without a config file; with one,
+    /// `flags_with_config` in src/modules/brocanth.rs.
+    Project,
+    /// On, beside a config file too.
+    On,
+    /// Off. The variable and the config file still set each value.
+    Off,
+}
+
+/// The flag of one setting, when it is not the declared name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    /// `--<name>` in place of `--<section>.<key>`.
+    As(&'static str),
+    /// No flag. The variable and the config key still set the value.
+    Hidden,
+}
+
+impl Flag {
+    /// The name the flag answers to. Empty for no flag.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Flag::As(name) => name,
+            Flag::Hidden => "",
+        }
+    }
+}
+
+/// The shape of src/modules/brocanth.rs.
+pub mod brocanth {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[server]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        ShutdownGraceSecs,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::ShutdownGraceSecs => "server.shutdown_grace_secs",
+            }
+        }
+    }
+
+    /// What src/modules/brocanth.rs holds.
+    pub struct Module {
+        /// With the `config` module, whether `Flags::Project` reads flags.
+        pub flags_with_config: bool,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags_with_config: false,
+            rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/config.rs.
+pub mod config {
+    /// What src/modules/config.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/jobs.rs.
+pub mod jobs {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[jobs]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Migrate,
+        Worker,
+        Concurrency,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Migrate => "jobs.migrate",
+                Key::Worker => "jobs.worker",
+                Key::Concurrency => "jobs.concurrency",
+            }
+        }
+    }
+
+    /// What src/modules/jobs.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
+// brocanth-digest: 8f7261bd605d4466
+===== src/modules/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! A choice of yours goes in the module's own file, beside this one.
+//!
+//! The modules this project integrates, and the choices each one offers.
+//!
+//! One file per module beside this one, and `brocanth.rs` for the framework
+//! itself. Those files are yours: `brocanth add` writes one when it is
+//! missing and never again. The types they fill are in `src/plugins/shape.rs`.
+
+// A choice this project does not read, such as an integration with a module
+// it does not have, is not dead code.
+#![allow(dead_code)]
+
+/// The framework itself: `[server]`, and whether flags work beside a config
+/// file.
+pub mod brocanth;
+
+pub mod config;
+pub mod jobs;
+
+/// Every module in `brocanth.toml`, in registration order: the list of
+/// `[modules] enabled`, which `brocanth add` and `brocanth remove` keep.
+pub const ALL: &[&str] = &["config", "jobs"];
+
+// brocanth-digest: 44ac374b7407f846
+===== src/modules/brocanth.rs =====
+//! The framework itself: the flag rule of the project, and `[server]`.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::brocanth::{Flag, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // With the `config` module, whether the binary reads flags too. Off:
+    // the file and the environment are the sources, and a flag is refused
+    // with a pointer to this line. Without `config`, flags are always read.
+    // A module file with `Flags::On` or `Flags::Off` overrides this.
+    flags_with_config: false,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::ShutdownGraceSecs, Flag::As("shutdown-grace-secs")),
+    //   (Key::ShutdownGraceSecs, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/config.rs =====
+//! `config`: config/<env>.toml, merged; without it nothing links a TOML parser.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::config::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/jobs.rs =====
+//! `jobs`: a queue in Postgres with retries and a dead letter; a worker in this
+//! process.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [jobs] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::jobs::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [jobs]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Migrate, Flag::As("migrate")),
+    //   (Key::Migrate, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -2272,7 +2533,7 @@ enabled = ["config", "jobs"]
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
-files = ["config/development.toml"]
+files = ["src/modules/config.rs", "config/development.toml"]
 config = []
 crates = ["brocanth-config"]
 adapted_to = []
@@ -2280,9 +2541,9 @@ adapted_to = []
 [modules.jobs]
 version = "0.1.0"
 kind = ["enhancer"]
-files = ["src/plugins/jobs/"]
+files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
 adapted_to = ["config"]
 
-# brocanth-digest: ac402250019f37f0
+# brocanth-digest: 3acb41dec3619256

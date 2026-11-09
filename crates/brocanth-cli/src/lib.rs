@@ -13,6 +13,7 @@
 // The binary uses every command; this target uses the generator alone.
 #![allow(dead_code, unused_imports)]
 
+mod choices;
 mod commands;
 mod modules;
 mod owned;

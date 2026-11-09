@@ -74,13 +74,13 @@ run = "cargo test"
 //! My Blog -- a brocanth application.
 //!
 //! No command line was asked for, so this binary does one thing. It takes the
-//! flags its settings declare, which `--help` lists and `src/flags.rs`
+//! flags its settings declare, which `--help` lists and `src/modules/`
 //! renames, and nothing else. Everything it contains is in `src/app.rs`;
 //! `brocanth add commands` turns this into a command line with `serve` as one
 //! of its commands.
 
 mod app;
-mod flags;
+mod modules;
 mod pages;
 mod plugins;
 
@@ -105,7 +105,7 @@ fn main() -> ExitCode {
     }
 }
 
-// brocanth-digest: 32a281d6f318fea8
+// brocanth-digest: fea59c3fed8a9b00
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -1200,7 +1200,7 @@ pub fn page_async(
 fn mounted(
     routes: &mut ::brocanth::routing::RouterBuilder<Handler>,
 ) -> Result<(), ::brocanth::routing::BuildError> {
-    crate::plugins::admin::mount(routes, "/admin")?;
+    crate::plugins::admin::mount(routes, crate::modules::admin::MODULE.mount_at)?;
     Ok(())
 }
 
@@ -1375,6 +1375,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
 pub mod admin;
 pub mod db;
+pub mod shape;
 
 use brocanth::plugin_context::{After, Base};
 use brocanth::plugin_hooks::{Both, HookSource, NoHooks};
@@ -1382,6 +1383,7 @@ use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::AsyncNext;
 
 use crate::pages::{Ctx, Response};
+use crate::plugins::shape::{Flag, Flags};
 
 /// Every plugin this application contains, in dependency order.
 ///
@@ -1398,7 +1400,7 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth_config::AppBuilderConfigExt;
 
-        // The files, the environment and, once `src/flags.rs` turns them
+        // The files, the environment and, where src/modules/ turns them
         // on, the flags: `brocanth-config` layers them and types each
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
@@ -1420,6 +1422,11 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<brocanth_analytics::Analytics>("analytics")
             .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "analytics",
+            "src/modules/analytics.rs",
+            crate::modules::analytics::MODULE.hooks.off(),
+        );
         builder
     }};
 }
@@ -1512,16 +1519,30 @@ pub fn layer(name: &str) -> Option<Layer> {
     None
 }
 
+/// The tabs other modules add to the admin. Each one is behind the module
+/// file of the module that adds it: `integrate.admin` in src/modules/.
+pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+    // The page views the analytics plugin counts, as a tab.
+    if crate::modules::analytics::MODULE.integrate.admin {
+        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    }
+    config
+}
+
 /// One declared setting, by the key it sets.
 pub struct Setting {
     /// The key, as `config/<env>.toml` spells it. It is also the flag's name,
-    /// unless `src/flags.rs` renames it.
+    /// unless its module file renames it.
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
     /// Whether a flag may set it. A secret has none: every user on the host
     /// can read a process's arguments.
     pub flag: bool,
+    /// The module file that renames its flag and turns the flags on or off.
+    pub file: &'static str,
+    /// Whether its module reads flags, from that file.
+    pub flags: Flags,
     /// A value that means `None` as well as an empty one does.
     pub none_as: Option<&'static str>,
     /// Whether a flag's value stays a string whatever it looks like.
@@ -1529,12 +1550,14 @@ pub struct Setting {
 }
 
 /// Every setting the framework and the modules declared. `brocanth add`
-/// rewrites this list; `src/flags.rs` renames or hides a flag.
+/// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
         path: "admin.title",
         help: "The end of every <title>, and the header and index heading unless set.",
         flag: true,
+        file: "src/modules/admin.rs",
+        flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1542,6 +1565,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "admin.header",
         help: "What the top of the sidebar says. Empty means none.",
         flag: true,
+        file: "src/modules/admin.rs",
+        flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1549,6 +1574,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "admin.index_title",
         help: "The index page's heading. Empty means none.",
         flag: true,
+        file: "src/modules/admin.rs",
+        flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1556,6 +1583,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "admin.site_url",
         help: "Where the sidebar's \"View site\" link points. Empty means none.",
         flag: true,
+        file: "src/modules/admin.rs",
+        flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1563,6 +1592,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "admin.stylesheet",
         help: "A stylesheet every screen links after the shipped one: the theme. Empty means none.",
         flag: true,
+        file: "src/modules/admin.rs",
+        flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1570,6 +1601,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.url",
         help: "The Postgres URL: postgres://user:password@host:5432/database.",
         flag: false,
+        file: "src/modules/db.rs",
+        flags: Flags::Off,
         none_as: None,
         text: true,
     },
@@ -1577,6 +1610,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.max_connections",
         help: "The most connections the pool opens.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1584,6 +1619,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.min_connections",
         help: "The connections the pool keeps open when idle.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1591,6 +1628,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.acquire_timeout",
         help: "Seconds a statement waits for a connection, opening one included.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1598,6 +1637,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.idle_timeout",
         help: "Seconds before an idle connection closes. 0 keeps it open.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1605,6 +1646,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.statement_timeout",
         help: "Seconds before the server cancels a statement. 0 is no limit.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1612,6 +1655,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.read_only",
         help: "Every transaction is read-only: for a replica, or a reporting process.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1619,6 +1664,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.application_name",
         help: "The name pg_stat_activity shows. Empty sends none.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1626,6 +1673,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "db.ca_file",
         help: "A PEM bundle to trust, with verify-full. Empty means none.",
         flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1633,6 +1682,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.enabled",
         help: "Count page views. Off installs no hook.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1640,6 +1691,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.site",
         help: "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1647,6 +1700,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.retention_days",
         help: "Days a row is kept. 0 keeps rows forever.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1654,6 +1709,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.flush_interval",
         help: "Seconds between two writes of the buffer.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1661,6 +1718,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.respect_gpc",
         help: "Skip a request that sends Sec-GPC: 1 or DNT: 1.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1668,6 +1727,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.ip_header",
         help: "A header the edge sets to the client address. Unset, the socket's. Empty means none.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1675,6 +1736,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.country_header",
         help: "A header the edge sets to a two-letter country code. Unset, no country. Empty means none.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1682,6 +1745,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.migrate",
         help: "Create the two tables on the first readiness check.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -1689,6 +1754,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "analytics.collector_path",
         help: "The path that counts page views a static site sends with the `beacon` module.",
         flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
         none_as: None,
         text: true,
     },
@@ -1696,6 +1763,8 @@ pub const SETTINGS: &[Setting] = &[
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
+        file: "src/modules/brocanth.rs",
+        flags: Flags::Project,
         none_as: None,
         text: false,
     },
@@ -1711,29 +1780,21 @@ pub struct Given {
     pub value: String,
 }
 
-/// The name each flag answers to after `src/flags.rs`, whether the flags are
-/// read or not.
+/// The name each flag answers to after the renames in src/modules/, whether
+/// the flags are read or not.
 ///
-/// A rename of a key no flag sets, a name that is not spelled as a flag, and
-/// two flags under one name each stop the binary: each would otherwise be a
-/// flag that does nothing, or does something else.
+/// A name that is not spelled as a flag, and two flags under one name, each
+/// stop the binary: each would otherwise be a flag that does nothing, or does
+/// something else. A rename of a key no flag sets does not compile: `Key` has
+/// no variant for it.
 fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
-    let flags = || SETTINGS.iter().filter(|setting| setting.flag);
-    for (path, _) in crate::flags::RENAMES {
-        if !flags().any(|setting| setting.path == *path) {
-            let known: Vec<&str> = flags().map(|setting| setting.path).collect();
-            return Err(format!(
-                "src/flags.rs renames `{path}`, and no flag sets it\nhelp: the flags are {}",
-                known.join(", ")
-            ));
-        }
-    }
+    let renames = renames();
     let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
-    for setting in flags() {
-        let name = crate::flags::RENAMES
+    for setting in SETTINGS.iter().filter(|setting| setting.flag) {
+        let name = renames
             .iter()
             .find(|(path, _)| *path == setting.path)
-            .map_or(setting.path, |(_, name)| *name);
+            .map_or(setting.path, |(_, flag)| flag.name());
         if name.is_empty() {
             continue;
         }
@@ -1743,12 +1804,18 @@ fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
         let taken = ["help", "version", "settings"].contains(&name);
         if !spelled || name.starts_with(['-', '.', '_']) || taken {
             return Err(format!(
-                "src/flags.rs names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`"
+                "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
+                setting.file
             ));
         }
         if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
+            let files = if other.file == setting.file {
+                other.file.to_string()
+            } else {
+                format!("{} or {}", other.file, setting.file)
+            };
             return Err(format!(
-                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in src/flags.rs",
+                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
                 other.path, setting.path
             ));
         }
@@ -1757,21 +1824,48 @@ fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
     Ok(names)
 }
 
-/// The flags this run reads: none unless `src/flags.rs` turns them on,
-/// because with a config file the file is the source.
-pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
-    if !crate::flags::WITH_CONFIG {
-        return Ok(Vec::new());
+/// Every rename in src/modules/, as the setting's path and its flag.
+fn renames() -> Vec<(&'static str, Flag)> {
+    let mut renames = Vec::new();
+    for (key, flag) in crate::modules::brocanth::MODULE.rename {
+        renames.push((key.path(), *flag));
     }
-    names()
+    for (key, flag) in crate::modules::db::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::analytics::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::admin::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    renames
+}
+
+/// Whether a module's flags are read: its file says `Flags::On` or
+/// `Flags::Off`, or follows the project rule. With a config file, the file is
+/// the source until src/modules/brocanth.rs turns the flags on.
+fn flags_on(rule: Flags) -> bool {
+    match rule {
+        Flags::On => true,
+        Flags::Off => false,
+        Flags::Project => crate::modules::brocanth::MODULE.flags_with_config,
+    }
+}
+
+/// The flags this run reads: each module file decides, and
+/// src/modules/brocanth.rs holds the project rule. Every name is checked
+/// first, read or not.
+pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+    Ok(names()?
+        .into_iter()
+        .filter(|(setting, _)| flags_on(setting.flags))
+        .collect())
 }
 
 /// A flag given while the flags are off, refused by name with what to do
 /// instead. Silently ignoring it would run with a value nobody chose.
 pub fn refuse_off_flags() -> Result<(), String> {
-    if crate::flags::WITH_CONFIG {
-        return Ok(());
-    }
     let names = names()?;
     for arg in std::env::args_os().skip(1) {
         let arg = arg.to_string_lossy();
@@ -1782,12 +1876,22 @@ pub fn refuse_off_flags() -> Result<(), String> {
             continue;
         };
         let name = written.split_once('=').map_or(written, |(name, _)| name);
-        if let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) {
-            let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
-            return Err(format!(
-                "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set WITH_CONFIG = true in src/flags.rs, or set `{key}` under [{section}] in config/<env>.toml"
-            ));
+        let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) else {
+            continue;
+        };
+        if flags_on(setting.flags) {
+            continue;
         }
+        let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
+        let fix = if setting.file.ends_with("/brocanth.rs") {
+            "flags_with_config: true"
+        } else {
+            "flags: Flags::On"
+        };
+        return Err(format!(
+            "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set `{fix}` in {}, or set `{key}` under [{section}] in config/<env>.toml",
+            setting.file
+        ));
     }
     Ok(())
 }
@@ -1837,7 +1941,7 @@ pub fn given() -> Result<Vec<Given>, String> {
 }
 
 /// The configuration this run reads: the files, the environment, and the
-/// flags on top once `src/flags.rs` turns them on.
+/// flags on top where src/modules/ turns them on.
 pub fn config() -> Result<brocanth_config::Config, String> {
     refuse_off_flags()?;
     let mut loader = brocanth_config::Loader::new(crate::app::APP);
@@ -2030,35 +2134,495 @@ pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Sto
     stopper.stop();
 }
 
-// brocanth-digest: 9dd25445b6ca4c48
-===== src/flags.rs =====
-//! The command-line flags of this binary, and the one place to rename them.
+#[cfg(test)]
+mod flag_tests {
+    /// A rename in src/modules/ that is not spelled as a flag, or two flags
+    /// under one name, stops the binary at startup. This finds it first.
+    #[test]
+    fn flag_names_are_valid() {
+        if let Err(message) = super::names() {
+            panic!("{message}");
+        }
+    }
+}
+
+// brocanth-digest: e97239e3ef2b6836
+===== src/plugins/shape.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! Your choices go in src/modules/<module>.rs; this file is their shape.
 //!
-//! A module declares each of its settings once. From that the binary takes a
-//! flag, `--<module>.<key>=VALUE`, an environment variable,
-//! `$<APP>_<MODULE>__<KEY>`, and, with the `config` module, a key in
-//! `config/<env>.toml`. `brocanth add` rewrites the list in
-//! `src/plugins/mod.rs`. This file is yours: it is written when it is missing
-//! and never again.
+//! The shape of each file in src/modules/: one Rust module per file.
+//!
+//! Each type has a `DEFAULT`, and each file ends with `..Module::DEFAULT`, so
+//! a field that a later version adds never breaks a file that predates it.
 
-/// Whether a project with a config file reads the flags too.
-///
-/// Off: with the `config` module, the file and the environment are the
-/// sources, and a flag is refused with a pointer to this line. On: a flag
-/// outranks both, for one run. Without the `config` module the flags are
-/// always read, and this is not.
-#[allow(dead_code)]
-pub const WITH_CONFIG: bool = false;
+// A choice this project does not read, such as an integration with a module
+// it does not have, is not dead code. `Flag` and `Flags` are in each module
+// for its file's one `use` line.
+#![allow(dead_code, unused_imports)]
 
-/// Flags under another name: the key as the module declares it, and the flag
-/// this binary answers to instead, without `--`. An empty name hides the
-/// flag.
-///
-/// ```text
-/// ("sessions.cookie", "cookie"),
-/// ("storage.root", ""),
-/// ```
-pub const RENAMES: &[(&str, &str)] = &[];
+/// Whether a module's settings have flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flags {
+    /// The project rule: on without a config file; with one,
+    /// `flags_with_config` in src/modules/brocanth.rs.
+    Project,
+    /// On, beside a config file too.
+    On,
+    /// Off. The variable and the config file still set each value.
+    Off,
+}
+
+/// The flag of one setting, when it is not the declared name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    /// `--<name>` in place of `--<section>.<key>`.
+    As(&'static str),
+    /// No flag. The variable and the config key still set the value.
+    Hidden,
+}
+
+impl Flag {
+    /// The name the flag answers to. Empty for no flag.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Flag::As(name) => name,
+            Flag::Hidden => "",
+        }
+    }
+}
+
+/// The shape of src/modules/brocanth.rs.
+pub mod brocanth {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[server]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        ShutdownGraceSecs,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::ShutdownGraceSecs => "server.shutdown_grace_secs",
+            }
+        }
+    }
+
+    /// What src/modules/brocanth.rs holds.
+    pub struct Module {
+        /// With the `config` module, whether `Flags::Project` reads flags.
+        pub flags_with_config: bool,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags_with_config: false,
+            rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/config.rs.
+pub mod config {
+    /// What src/modules/config.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/db.rs.
+pub mod db {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[db]` that has a flag. A secret or a list has no flag, so
+    /// it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        MaxConnections,
+        MinConnections,
+        AcquireTimeout,
+        IdleTimeout,
+        StatementTimeout,
+        ReadOnly,
+        ApplicationName,
+        CaFile,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::MaxConnections => "db.max_connections",
+                Key::MinConnections => "db.min_connections",
+                Key::AcquireTimeout => "db.acquire_timeout",
+                Key::IdleTimeout => "db.idle_timeout",
+                Key::StatementTimeout => "db.statement_timeout",
+                Key::ReadOnly => "db.read_only",
+                Key::ApplicationName => "db.application_name",
+                Key::CaFile => "db.ca_file",
+            }
+        }
+    }
+
+    /// What src/modules/db.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/analytics.rs.
+pub mod analytics {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[analytics]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Enabled,
+        Site,
+        RetentionDays,
+        FlushInterval,
+        RespectGpc,
+        IpHeader,
+        CountryHeader,
+        Migrate,
+        CollectorPath,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Enabled => "analytics.enabled",
+                Key::Site => "analytics.site",
+                Key::RetentionDays => "analytics.retention_days",
+                Key::FlushInterval => "analytics.flush_interval",
+                Key::RespectGpc => "analytics.respect_gpc",
+                Key::IpHeader => "analytics.ip_header",
+                Key::CountryHeader => "analytics.country_header",
+                Key::Migrate => "analytics.migrate",
+                Key::CollectorPath => "analytics.collector_path",
+            }
+        }
+    }
+
+    /// The hooks of `analytics` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `analytics.count`: count each page this server answers.
+        pub count: bool,
+        /// `analytics.collect`: accept beacons at `collector_path` from
+        /// `collector_origins`.
+        pub collect: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            count: true,
+            collect: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.count {
+                off.push("count");
+            }
+            if !self.collect {
+                off.push("collect");
+            }
+            off
+        }
+    }
+
+    /// The code `analytics` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a tab at /admin/analytics with the page-view numbers.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/analytics.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            hooks: Hooks::DEFAULT,
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/admin.rs.
+pub mod admin {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[admin]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Title,
+        Header,
+        IndexTitle,
+        SiteUrl,
+        Stylesheet,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Title => "admin.title",
+                Key::Header => "admin.header",
+                Key::IndexTitle => "admin.index_title",
+                Key::SiteUrl => "admin.site_url",
+                Key::Stylesheet => "admin.stylesheet",
+            }
+        }
+    }
+
+    /// What src/modules/admin.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Where the backoffice answers. A page of yours under this path is a build
+        /// error, not a race. Every environment serves the same routes, so this is
+        /// a constant and not a setting.
+        pub mount_at: &'static str,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            mount_at: "/admin",
+        };
+    }
+}
+
+// brocanth-digest: cfee62fa8256f8ce
+===== src/modules/mod.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! A choice of yours goes in the module's own file, beside this one.
+//!
+//! The modules this project integrates, and the choices each one offers.
+//!
+//! One file per module beside this one, and `brocanth.rs` for the framework
+//! itself. Those files are yours: `brocanth add` writes one when it is
+//! missing and never again. The types they fill are in `src/plugins/shape.rs`.
+
+// A choice this project does not read, such as an integration with a module
+// it does not have, is not dead code.
+#![allow(dead_code)]
+
+/// The framework itself: `[server]`, and whether flags work beside a config
+/// file.
+pub mod brocanth;
+
+pub mod admin;
+pub mod analytics;
+pub mod config;
+pub mod db;
+
+/// Every module in `brocanth.toml`, in registration order: the list of
+/// `[modules] enabled`, which `brocanth add` and `brocanth remove` keep.
+pub const ALL: &[&str] = &["config", "db", "analytics", "admin"];
+
+// brocanth-digest: 36ec8332a79ce066
+===== src/modules/brocanth.rs =====
+//! The framework itself: the flag rule of the project, and `[server]`.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::brocanth::{Flag, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // With the `config` module, whether the binary reads flags too. Off:
+    // the file and the environment are the sources, and a flag is refused
+    // with a pointer to this line. Without `config`, flags are always read.
+    // A module file with `Flags::On` or `Flags::Off` overrides this.
+    flags_with_config: false,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::ShutdownGraceSecs, Flag::As("shutdown-grace-secs")),
+    //   (Key::ShutdownGraceSecs, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/config.rs =====
+//! `config`: config/<env>.toml, merged; without it nothing links a TOML parser.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::config::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/db.rs =====
+//! `db`: one Postgres pool and sea-query statements, read as ctx.db(); without
+//! it no SQL driver.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [db] in the
+//! config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::db::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [db]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::MaxConnections, Flag::As("max-connections")),
+    //   (Key::MaxConnections, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/analytics.rs =====
+//! `analytics`: page views counted on the server: no cookie, no script, no
+//! third party; rows in your Postgres.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [analytics]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::analytics::{Flag, Flags, Hooks, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [analytics]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Enabled, Flag::As("enabled")),
+    //   (Key::Enabled, Flag::Hidden),
+    rename: &[],
+
+    hooks: Hooks {
+        // `analytics.count`: count each page this server answers.
+        count: true,
+        // `analytics.collect`: accept beacons at `collector_path` from
+        // `collector_origins`.
+        collect: true,
+        ..Hooks::DEFAULT
+    },
+
+    integrate: Integrate {
+        // A tab at /admin/analytics with the page-view numbers. Without the
+        // `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/admin.rs =====
+//! `admin`: a Django-shaped backoffice at /admin, locked until you say who may
+//! in.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [admin] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::admin::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [admin]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Title, Flag::As("title")),
+    //   (Key::Title, Flag::Hidden),
+    rename: &[],
+
+    // Where the backoffice answers. A page of yours under this path is a build
+    // error, not a race. Every environment serves the same routes, so this is
+    // a constant and not a setting.
+    mount_at: "/admin",
+
+    ..Module::DEFAULT
+};
 ===== config/development.toml =====
 # The configuration of this environment.
 #
@@ -2261,8 +2825,9 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-    // The page views the analytics plugin counts, as a tab.
-    config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+    // The tabs other modules add, such as analytics. Each one is on or off in
+    // the module file of the module that adds it: `integrate.admin`.
+    config = crate::plugins::admin_panels(config);
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
@@ -2740,7 +3305,7 @@ enabled = ["config", "db", "analytics", "admin"]
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
-files = ["config/development.toml"]
+files = ["src/modules/config.rs", "config/development.toml"]
 config = []
 crates = ["brocanth-config"]
 adapted_to = []
@@ -2748,7 +3313,7 @@ adapted_to = []
 [modules.db]
 version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
-files = ["src/plugins/db/"]
+files = ["src/modules/db.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
 adapted_to = ["config"]
@@ -2756,17 +3321,17 @@ adapted_to = ["config"]
 [modules.analytics]
 version = "0.1.0"
 kind = ["middleware"]
-files = []
+files = ["src/modules/analytics.rs"]
 config = ["analytics"]
 crates = ["brocanth-analytics"]
-adapted_to = ["config"]
+adapted_to = ["config", "admin"]
 
 [modules.admin]
 version = "0.1.0"
 kind = ["routes", "enhancer"]
-files = ["src/plugins/admin/"]
+files = ["src/modules/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "analytics"]
+adapted_to = ["config"]
 
-# brocanth-digest: 4d7462c2920bfb42
+# brocanth-digest: bd8883c52817b7cc
