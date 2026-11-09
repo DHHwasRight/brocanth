@@ -1,0 +1,42 @@
+[package]
+name = "brocanth-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Postgres full-text and trigram search for brocanth: a generated tsvector column and its index, ranked queries with the policy's condition in the WHERE, and a site search page."
+readme = "README.md"
+
+# No search service. Postgres is already the base of every brocanth
+# deployment, and `tsvector`, `websearch_to_tsquery` and `pg_trgm` answer a
+# site's search without a second system to run, back up and keep in step.
+[dependencies]
+# The condition the search is ANDed with. Small and pure.
+brocanth-policy = { workspace = true, optional = true }
+# The page a search result is read in, and its links.
+brocanth-pagination = { workspace = true, optional = true, default-features = false, features = [
+    "runtime",
+] }
+thiserror = { version = "2", optional = true }
+
+# `postgres`: run a search and keep the site index, over the pool the `db`
+# module opens. Off, the crate writes SQL text and runs nothing.
+brocanth-db = { workspace = true, optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `search`. Off: only the CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-search = { path = ".", features = ["postgres", "scaffold"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = ["runtime", "postgres"]
+runtime = ["dep:brocanth-policy", "dep:brocanth-pagination", "dep:thiserror"]
+postgres = ["runtime", "dep:brocanth-db"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
