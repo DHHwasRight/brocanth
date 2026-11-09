@@ -83,6 +83,16 @@ pub(crate) fn all() -> Vec<Case> {
         case!(a_fragment_renders_once_until_its_tag_goes),
         case!(a_failed_fragment_is_not_stored),
         case!(purge_expired_keeps_live_entries),
+        case!(a_rewrite_sets_a_new_ttl),
+        case!(a_ttl_under_a_millisecond_is_accepted_and_soon_gone),
+        case!(a_ttl_past_the_end_of_time_is_refused),
+        case!(deleting_what_is_gone_is_not_an_error),
+        case!(an_empty_value_is_a_value),
+        case!(a_large_value_round_trips_byte_for_byte),
+        case!(concurrent_writers_leave_one_whole_value),
+        case!(concurrent_writers_on_many_keys_all_land),
+        case!(a_namespace_is_not_a_prefix_of_another),
+        case!(keys_are_plain_text_whatever_they_hold),
     ]
 }
 
@@ -767,6 +777,458 @@ async fn purge_expired_keeps_live_entries(cx: &Ctx) -> Result<(), String> {
         step("invalidate_tag", c.invalidate_tag(&t).await)?,
         1,
         "a live entry keeps its tags through the sweep"
+    );
+    Ok(())
+}
+
+async fn a_rewrite_sets_a_new_ttl(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let longer = cx.key("rewrite", "longer");
+    let shorter = cx.key("rewrite", "shorter");
+    let added = cx.key("rewrite", "added");
+    step("set", c.set(&longer, b"short", SHORT).await)?;
+    step("set", c.set(&longer, b"long", MINUTE).await)?;
+    step("set", c.set(&shorter, b"long", MINUTE).await)?;
+    step("set", c.set(&shorter, b"short", SHORT).await)?;
+    // A failed add must not touch the TTL of the live entry.
+    step("set", c.set(&added, b"first", SHORT).await)?;
+    ensure!(
+        !step("add", c.add(&added, b"second", MINUTE).await)?,
+        "a live entry blocks add"
+    );
+    tokio::time::sleep(PAST_SHORT).await;
+    same!(
+        step("get", c.get(&longer).await)?,
+        Some(b"long".to_vec()),
+        "a rewrite with a longer TTL outlives the first TTL"
+    );
+    same!(
+        step("get", c.get(&shorter).await)?,
+        None,
+        "a rewrite with a shorter TTL ends sooner"
+    );
+    same!(
+        step("get", c.get(&added).await)?,
+        None,
+        "a refused add leaves the old TTL"
+    );
+    Ok(())
+}
+
+async fn a_ttl_under_a_millisecond_is_accepted_and_soon_gone(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let tiny = Duration::from_micros(50);
+    let key = cx.key("tiny", "set");
+    let added = cx.key("tiny", "add");
+    let leased = cx.key("tiny", "lease");
+    step("set with a tiny TTL", c.set(&key, b"v", tiny).await)?;
+    step("add with a tiny TTL", c.add(&added, b"v", tiny).await)?;
+    step("lease with a tiny TTL", c.lease(&leased, tiny).await)?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    same!(
+        step("get", c.get(&key).await)?,
+        None,
+        "a set with a tiny TTL"
+    );
+    same!(
+        step("get", c.get(&added).await)?,
+        None,
+        "an add with a tiny TTL"
+    );
+    ensure!(
+        step("lease", c.lease(&leased, MINUTE).await)?,
+        "a lease with a tiny TTL frees the key"
+    );
+    Ok(())
+}
+
+async fn a_ttl_past_the_end_of_time_is_refused(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let key = cx.key("forever", "k");
+    let forever = Duration::MAX;
+    ensure!(
+        matches!(
+            c.set(&key, b"v", forever).await,
+            Err(CacheError::InvalidTtl(_))
+        ),
+        "set with Duration::MAX answers InvalidTtl"
+    );
+    ensure!(
+        matches!(
+            c.add(&key, b"v", forever).await,
+            Err(CacheError::InvalidTtl(_))
+        ),
+        "add with Duration::MAX answers InvalidTtl"
+    );
+    ensure!(
+        matches!(
+            c.set_tagged(&key, b"v", forever, &[cx.tag("forever")])
+                .await,
+            Err(CacheError::InvalidTtl(_))
+        ),
+        "set_tagged with Duration::MAX answers InvalidTtl"
+    );
+    ensure!(
+        matches!(c.lease(&key, forever).await, Err(CacheError::InvalidTtl(_))),
+        "lease with Duration::MAX answers InvalidTtl"
+    );
+    same!(step("get", c.get(&key).await)?, None, "nothing stored");
+
+    // Long, but representable: ten years is a TTL, not an error.
+    let decade = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+    step("set for ten years", c.set(&key, b"kept", decade).await)?;
+    same!(
+        step("get", c.get(&key).await)?,
+        Some(b"kept".to_vec()),
+        "a ten-year TTL"
+    );
+    Ok(())
+}
+
+async fn deleting_what_is_gone_is_not_an_error(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    ensure!(
+        !step("delete", c.delete(&cx.key("gone", "never")).await)?,
+        "delete of a key never written answers false"
+    );
+    // Whether an expired entry counts as "there" is the backend's own
+    // business (Redis has already dropped it). It must not fail, and the
+    // key must stay a miss.
+    let expired = cx.key("gone", "expired");
+    step("set", c.set(&expired, b"v", SHORT).await)?;
+    tokio::time::sleep(PAST_SHORT).await;
+    step("delete of an expired entry", c.delete(&expired).await)?;
+    same!(step("get", c.get(&expired).await)?, None, "still a miss");
+    ensure!(
+        !step("delete again", c.delete(&expired).await)?,
+        "a second delete answers false"
+    );
+    ensure!(
+        step("add", c.add(&expired, b"new", MINUTE).await)?,
+        "a deleted key is free for add"
+    );
+    same!(
+        step(
+            "clear an empty namespace",
+            c.clear(&cx.namespace("gone-none")).await
+        )?,
+        0,
+        "clear of a namespace never written"
+    );
+    Ok(())
+}
+
+async fn an_empty_value_is_a_value(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let key = cx.key("empty", "set");
+    step("set", c.set(&key, b"", MINUTE).await)?;
+    same!(
+        step("get", c.get(&key).await)?,
+        Some(Vec::new()),
+        "an empty value is a hit, not a miss"
+    );
+    same!(
+        step("get_many", c.get_many(std::slice::from_ref(&key)).await)?,
+        vec![Some(Vec::new())],
+        "get_many sees the empty value"
+    );
+    ensure!(
+        !step("lease", c.lease(&key, MINUTE).await)?,
+        "an empty value blocks a lease like any value"
+    );
+    ensure!(
+        !step("add", c.add(&key, b"other", MINUTE).await)?,
+        "an empty value blocks add"
+    );
+    step("release", c.release_lease(&key).await)?;
+    same!(
+        step("get", c.get(&key).await)?,
+        Some(Vec::new()),
+        "release_lease does not take an empty value for a lease"
+    );
+    let added = cx.key("empty", "add");
+    ensure!(
+        step("add", c.add(&added, b"", MINUTE).await)?,
+        "add stores an empty value"
+    );
+    same!(
+        step("get", c.get(&added).await)?,
+        Some(Vec::new()),
+        "the added empty value"
+    );
+    ensure!(
+        step("delete", c.delete(&key).await)?,
+        "delete answers true for an empty value"
+    );
+    Ok(())
+}
+
+async fn a_large_value_round_trips_byte_for_byte(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let cap = c.max_value_bytes();
+    // Every byte value, in an order that does not repeat on a short
+    // period, so a truncation, an encoding or a shifted chunk shows.
+    let pattern = |len: usize, seed: usize| -> Vec<u8> {
+        (0..len)
+            .map(|i| ((i.wrapping_mul(31) + i / 251 + seed) % 256) as u8)
+            .collect()
+    };
+    let ns = cx.namespace("large");
+    let sizes = [cap.min(64 * 1024), cap / 2 + 3, cap];
+    let mut keys = Vec::new();
+    for (n, len) in sizes.iter().enumerate() {
+        let key = ns.key(format!("k{n}")).unwrap();
+        let value = pattern(*len, n);
+        step("set", c.set(&key, &value, MINUTE).await)?;
+        let got = step("get", c.get(&key).await)?;
+        ensure!(
+            got.as_deref() == Some(&value[..]),
+            "a value of {len} bytes came back changed ({:?} bytes)",
+            got.map(|v| v.len())
+        );
+        keys.push(key);
+    }
+    let many = step("get_many", c.get_many(&keys).await)?;
+    for (n, (len, got)) in sizes.iter().zip(&many).enumerate() {
+        ensure!(
+            got.as_deref() == Some(&pattern(*len, n)[..]),
+            "get_many: the value of {len} bytes came back changed"
+        );
+    }
+    // A large value replaced by a small one leaves nothing of the old.
+    step("set small", c.set(&keys[2], b"small", MINUTE).await)?;
+    same!(
+        step("get", c.get(&keys[2]).await)?,
+        Some(b"small".to_vec()),
+        "a small value over a large one"
+    );
+    Ok(())
+}
+
+async fn concurrent_writers_leave_one_whole_value(cx: &Ctx) -> Result<(), String> {
+    const WRITERS: u8 = 16;
+    const LEN: usize = 32 * 1024;
+    let key = cx.key("writers", "one");
+    let whole = |v: &[u8]| v.len() == LEN && v.iter().all(|b| *b == v[0]) && v[0] < WRITERS;
+    let mut tasks = Vec::new();
+    for i in 0..WRITERS {
+        let cache = Arc::clone(&cx.cache);
+        let key = key.clone();
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..4 {
+                cache.set(&key, &vec![i; LEN], MINUTE).await?;
+                // A reader between writes sees one writer's value, whole.
+                if let Some(v) = cache.get(&key).await? {
+                    if !(v.len() == LEN && v.iter().all(|b| *b == v[0])) {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok::<_, CacheError>(true)
+        }));
+    }
+    for task in tasks {
+        let clean = task.await.map_err(|e| format!("a writer panicked: {e}"))?;
+        ensure!(step("write", clean)?, "a reader saw a torn value");
+    }
+    let last = step("get", cx.cache.get(&key).await)?;
+    ensure!(
+        last.as_deref().is_some_and(whole),
+        "after the race the value is one writer's, whole: got {:?} bytes",
+        last.map(|v| v.len())
+    );
+    Ok(())
+}
+
+async fn concurrent_writers_on_many_keys_all_land(cx: &Ctx) -> Result<(), String> {
+    const KEYS: usize = 64;
+    let ns = cx.namespace("fanout");
+    let t = cx.tag("fanout");
+    let mut tasks = Vec::new();
+    for i in 0..KEYS {
+        let cache = Arc::clone(&cx.cache);
+        let key = ns.key(format!("k{i}")).unwrap();
+        let t = t.clone();
+        tasks.push(tokio::spawn(async move {
+            let value = format!("v{i}");
+            if i % 2 == 0 {
+                cache.set(&key, value.as_bytes(), MINUTE).await
+            } else {
+                cache
+                    .set_tagged(&key, value.as_bytes(), MINUTE, std::slice::from_ref(&t))
+                    .await
+            }
+        }));
+    }
+    for task in tasks {
+        let done = task.await.map_err(|e| format!("a writer panicked: {e}"))?;
+        step("write", done)?;
+    }
+    let keys: Vec<_> = (0..KEYS)
+        .map(|i| ns.key(format!("k{i}")).unwrap())
+        .collect();
+    let got = step("get_many", cx.cache.get_many(&keys).await)?;
+    for (i, slot) in got.iter().enumerate() {
+        same!(
+            *slot,
+            Some(format!("v{i}").into_bytes()),
+            "the value at {i}"
+        );
+    }
+    same!(
+        step("invalidate_tag", cx.cache.invalidate_tag(&t).await)?,
+        (KEYS / 2) as u64,
+        "every concurrent tagged write recorded its tag"
+    );
+    same!(
+        step("clear", cx.cache.clear(&ns).await)?,
+        (KEYS / 2) as u64,
+        "the untagged half is left for clear"
+    );
+    Ok(())
+}
+
+async fn a_namespace_is_not_a_prefix_of_another(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let base = cx.namespace("pfx");
+    let name = base.as_str();
+    let others: Vec<Namespace> = [":sub", ".sub", "-sub", "_sub", "x"]
+        .iter()
+        .map(|tail| Namespace::new(format!("{name}{tail}")).unwrap())
+        .collect();
+    // The joined strings collide: `pfx` + `sub:k` and `pfx:sub` + `k`.
+    let in_base = base.key("sub:k").unwrap();
+    let in_sub = others[0].key("k").unwrap();
+    step("set", c.set(&in_base, b"base", MINUTE).await)?;
+    step("set", c.set(&in_sub, b"sub", MINUTE).await)?;
+    for ns in &others[1..] {
+        step("set", c.set(&ns.key("k").unwrap(), b"other", MINUTE).await)?;
+    }
+    same!(
+        step("get", c.get(&in_base).await)?,
+        Some(b"base".to_vec()),
+        "a key with the separator in it"
+    );
+    same!(
+        step("get", c.get(&in_sub).await)?,
+        Some(b"sub".to_vec()),
+        "a namespace that extends another"
+    );
+    same!(
+        step("get", c.get(&base.key("k").unwrap()).await)?,
+        None,
+        "the base namespace does not see a longer one"
+    );
+    same!(
+        step("clear", c.clear(&base).await)?,
+        1,
+        "clear takes its own namespace only"
+    );
+    same!(
+        step("get", c.get(&in_sub).await)?,
+        Some(b"sub".to_vec()),
+        "clearing a namespace leaves the one that extends it"
+    );
+    for ns in &others[1..] {
+        same!(
+            step("get", c.get(&ns.key("k").unwrap()).await)?,
+            Some(b"other".to_vec()),
+            "clearing `{name}` leaves `{ns}`"
+        );
+    }
+    same!(
+        step("clear", c.clear(&others[0]).await)?,
+        1,
+        "the longer namespace clears by itself"
+    );
+    Ok(())
+}
+
+async fn keys_are_plain_text_whatever_they_hold(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let ns = cx.namespace("text");
+    // Unicode, and every character a glob, a LIKE or a quote reads.
+    let long = format!("{}x", "日".repeat(341));
+    let names: Vec<String> = [
+        "café",
+        "日本語",
+        "🦀 crab",
+        "*",
+        "a*",
+        "?",
+        "[ab]",
+        "a\\b",
+        "^",
+        "%",
+        "_",
+        "100%_off",
+        "a b",
+        "it's",
+        "\"q\"",
+        "k:with:colons",
+        " ",
+        "{x}",
+        "$1",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .chain(std::iter::once(long))
+    .collect();
+    let keys: Vec<_> = names
+        .iter()
+        .map(|n| ns.key(n.clone()).map_err(|e| format!("key {n:?}: {e}")))
+        .collect::<Result<_, _>>()?;
+    let t = cx.tag("étiquette 🏷 *");
+    for (i, key) in keys.iter().enumerate() {
+        let value = format!("{i}:{}", names[i]);
+        if i % 3 == 0 {
+            step(
+                "set_tagged",
+                c.set_tagged(key, value.as_bytes(), MINUTE, std::slice::from_ref(&t))
+                    .await,
+            )?;
+        } else {
+            step("set", c.set(key, value.as_bytes(), MINUTE).await)?;
+        }
+    }
+    for (i, key) in keys.iter().enumerate() {
+        same!(
+            step("get", c.get(key).await)?,
+            Some(format!("{i}:{}", names[i]).into_bytes()),
+            "the value at {:?}",
+            names[i]
+        );
+    }
+    let got = step("get_many", c.get_many(&keys).await)?;
+    for (i, slot) in got.iter().enumerate() {
+        same!(
+            *slot,
+            Some(format!("{i}:{}", names[i]).into_bytes()),
+            "get_many at {:?}",
+            names[i]
+        );
+    }
+    // `*` is a key, not a pattern: deleting it takes it alone.
+    ensure!(
+        step("delete", c.delete(&keys[3]).await)?,
+        "delete of the key `*`"
+    );
+    same!(
+        step("get", c.get(&keys[4]).await)?,
+        Some(format!("4:{}", names[4]).into_bytes()),
+        "deleting `*` leaves `a*`"
+    );
+    let tagged = keys.len().div_ceil(3) as u64 - 1; // `*` (index 3) was tagged and is gone
+    same!(
+        step("invalidate_tag", c.invalidate_tag(&t).await)?,
+        tagged,
+        "a tag with Unicode and a `*` in it"
+    );
+    let left = keys.len() as u64 - 1 - tagged;
+    same!(
+        step("clear", c.clear(&ns).await)?,
+        left,
+        "clear counts every key left"
     );
     Ok(())
 }
