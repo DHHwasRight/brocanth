@@ -994,6 +994,142 @@ mod tests {
     }
 
     #[test]
+    fn every_spelling_of_a_private_address_is_refused() {
+        for url in [
+            // IPv4 written as one number, in octal, in hex, and short.
+            "http://2130706433/",
+            "http://0177.0.0.1/",
+            "http://0x7f.0.0.1/",
+            "http://127.1/",
+            "http://0.0.0.0/",
+            "http://0.1.2.3/",
+            "http://255.255.255.255/",
+            "http://224.0.0.1/",
+            "http://172.16.5.4/",
+            "http://172.31.255.255/",
+            "http://100.127.255.254/",
+            // IPv6: mapped, compatible, NAT64, link-local, unique local.
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:7f00:1]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[::127.0.0.1]/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[fe80::1]/",
+            "http://[fe80::1%25en0]/",
+            "http://[fec0::1]/",
+            "http://[fc00::1]/",
+            "http://[::]/",
+            "http://[ff02::1]/",
+            // Names.
+            "http://LOCALHOST/",
+            "http://localhost./",
+            "http://api.localhost/",
+            // The host is after the `@`.
+            "http://example.com@127.0.0.1/",
+            "http://user:pw@[::1]:8080/",
+        ] {
+            assert!(check_url(url, false).is_err(), "{url} was accepted");
+        }
+        for url in [
+            "http://8.8.8.8/",
+            "http://172.32.0.1/",
+            "http://100.128.0.1/",
+            "http://[2606:4700:4700::1111]/",
+            "http://[::ffff:8.8.8.8]/",
+            "http://[64:ff9b::808:808]/",
+            "http://127.0.0.1@example.com/",
+        ] {
+            assert!(check_url(url, false).is_ok(), "{url} was refused");
+        }
+    }
+
+    #[test]
+    fn a_name_that_resolves_only_to_private_addresses_is_refused() {
+        let addr = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let err = public_only("evil.example", [addr("127.0.0.1:0"), addr("[::1]:0")])
+            .expect_err("only private addresses");
+        assert!(err.0.contains("help:"), "{err}");
+        assert!(public_only("evil.example", []).is_err());
+        let kept = public_only(
+            "mixed.example",
+            [
+                addr("10.0.0.1:0"),
+                addr("93.184.216.34:0"),
+                addr("[fd00::1]:0"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(kept, vec![addr("93.184.216.34:0")], "only the public one");
+    }
+
+    #[tokio::test]
+    async fn the_resolver_refuses_localhost_through_the_system_resolver() {
+        use reqwest::dns::Resolve;
+        let found = PublicOnly.resolve("localhost".parse().unwrap()).await;
+        let err = found.err().expect("localhost resolves only to loopback");
+        assert!(err.to_string().contains("no public address"), "{err}");
+    }
+
+    /// The client of an `Outgoing` reaches a name on this machine only when
+    /// `allow_private` is on: the resolver is wired into it.
+    #[tokio::test]
+    async fn the_client_does_not_connect_to_a_name_on_this_machine() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        // `localhost` by name: check_url would refuse it before the client,
+        // so this asks the client directly.
+        let url = format!("http://localhost:{port}/hook");
+        let strict = client(&OutgoingConfig::default()).unwrap();
+        assert!(strict.post(&url).send().await.is_err());
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let open = client(&OutgoingConfig {
+            allow_private: true,
+            ..OutgoingConfig::default()
+        })
+        .unwrap();
+        let answer = open.post(&url).send().await.expect("allowed");
+        assert_eq!(answer.status().as_u16(), 204);
+    }
+
+    #[test]
+    fn the_retries_span_about_a_day_from_thirty_seconds_to_six_hours() {
+        let backoff = Deliver::BACKOFF;
+        assert_eq!(Deliver::MAX_ATTEMPTS, 8);
+        let waits: Vec<u64> = (1..Deliver::MAX_ATTEMPTS)
+            .map(|attempt| backoff.base_delay(attempt).as_secs())
+            .collect();
+        assert_eq!(waits.first(), Some(&30));
+        assert_eq!(waits.last(), Some(&(6 * 3600)));
+        assert!(waits.windows(2).all(|w| w[0] <= w[1]), "{waits:?}");
+        let total: u64 = waits.iter().sum();
+        assert!(
+            (20 * 3600..=28 * 3600).contains(&total),
+            "about a day, not {total}s: {waits:?}"
+        );
+    }
+
+    #[test]
+    fn one_delivery_is_one_job_however_often_it_is_enqueued() {
+        let a = Deliver { delivery: 7 }.unique_key();
+        assert_eq!(a, Deliver { delivery: 7 }.unique_key());
+        assert_ne!(a, Deliver { delivery: 8 }.unique_key());
+    }
+
+    #[test]
     fn a_row_change_becomes_a_typed_event() {
         let fields = ["title"];
         let change = RowChange::updated("posts", 7_i64, fields.as_slice());

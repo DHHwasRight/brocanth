@@ -130,6 +130,15 @@ impl Got {
 /// A receiver on a free local port that answers every POST with `status`
 /// and keeps what it read.
 async fn receiver(status: u16) -> (String, Arc<Mutex<Vec<Got>>>) {
+    receiver_with(status, "", "no").await
+}
+
+/// The same, with more header lines and a body of its own.
+async fn receiver_with(
+    status: u16,
+    extra: &'static str,
+    reply: &'static str,
+) -> (String, Arc<Mutex<Vec<Got>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/hook", listener.local_addr().unwrap());
     let got = Arc::new(Mutex::new(Vec::new()));
@@ -181,7 +190,8 @@ async fn receiver(status: u16) -> (String, Arc<Mutex<Vec<Got>>>) {
                     body: buffer[head_end..].to_vec(),
                 });
                 let answer = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno"
+                    "HTTP/1.1 {status} X\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
                 );
                 let _ = socket.write_all(answer.as_bytes()).await;
             });
@@ -330,4 +340,406 @@ async fn a_failed_attempt_is_retried_and_a_410_turns_the_endpoint_off() {
         .expect_err("a loopback endpoint is refused by default");
     assert!(refused.0.contains("help:"), "{refused}");
     scope.drop_schema().await;
+}
+
+#[tokio::test]
+async fn the_receiver_shares_its_keys_through_postgres_and_a_failure_frees_one() {
+    use brocanth_webhooks::sign::{decode_secret, new_secret, sign_standard};
+    use brocanth_webhooks::{Delivery, Handler, Incoming, Rejection};
+
+    let Some(scope) =
+        scoped("the_receiver_shares_its_keys_through_postgres_and_a_failure_frees_one").await
+    else {
+        return;
+    };
+    #[derive(Clone, Default)]
+    struct Count(Arc<AtomicU64>);
+    impl Handler for Count {
+        type Event = serde_json::Value;
+        async fn handle(&self, event: serde_json::Value, _: &Delivery) -> Result<(), Rejection> {
+            if event["fail"] == true {
+                return Err(Rejection::retry("later"));
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let secret = new_secret();
+    let key = decode_secret(&secret).unwrap();
+    let count = Count::default();
+    let seen = Arc::new(PgSeen::new(scope.db.clone()));
+    seen.migrate().await.expect("migrate");
+    // Two instances of the application, one table of keys.
+    let instance = || {
+        let receiver = Incoming::new("/webhooks")
+            .source("app", Scheme::standard(&secret).unwrap(), count.clone())
+            .unwrap()
+            .build()
+            .unwrap();
+        receiver.set_seen(seen.clone());
+        receiver
+    };
+    let (a, b) = (instance(), instance());
+    let now = 1_700_000_000;
+    let signed = |id: &str, body: &[u8]| {
+        vec![
+            ("webhook-id".to_string(), id.to_string()),
+            ("webhook-timestamp".to_string(), now.to_string()),
+            (
+                "webhook-signature".to_string(),
+                sign_standard(&key, id, now, body),
+            ),
+        ]
+    };
+
+    let body = br#"{"n":1}"#;
+    let h = signed("msg_pg", body);
+    let first = a.receive_at("app", look(&h), body, now).await;
+    assert_eq!(first.message, "ok");
+    let copy = b.receive_at("app", look(&h), body, now).await;
+    assert_eq!(copy.message, "already received", "b sees a's key");
+
+    let failing = br#"{"fail":true}"#;
+    let h = signed("msg_fail", failing);
+    let first = a.receive_at("app", look(&h), failing, now).await;
+    assert_eq!(first.status, 500);
+    let retry = b.receive_at("app", look(&h), failing, now).await;
+    assert_eq!(
+        retry.status, 500,
+        "the key was given back in the table: {retry:?}"
+    );
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    scope.drop_schema().await;
+}
+
+/// Each retry of one delivery carries the same `webhook-id`, and the
+/// incoming side of this crate verifies it and drops the copy.
+#[tokio::test]
+async fn every_retry_carries_one_id_and_the_incoming_receiver_drops_the_copy() {
+    use brocanth_webhooks::{Delivery, Handler, Incoming, Rejection};
+
+    let Some(scope) =
+        scoped("every_retry_carries_one_id_and_the_incoming_receiver_drops_the_copy").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, got) = receiver(503).await;
+    let endpoint = outgoing.add_endpoint(&url, &["*"], "flaky").await.unwrap();
+    let ids = outgoing
+        .emit("invoice.paid", &serde_json::json!({ "id": 7 }))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let err = outgoing.attempt(ids[0], false).await.expect_err("a 503");
+        assert!(err.contains("503"), "{err}");
+    }
+    assert_eq!(
+        state_of(&outgoing, ids[0]).await,
+        ("retrying".into(), 2, Some(503))
+    );
+    let sent = got.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].header("webhook-id"), sent[1].header("webhook-id"));
+    assert_eq!(sent[0].body, sent[1].body);
+    assert_eq!(sent[0].header("content-type"), Some("application/json"));
+
+    #[derive(Clone, Default)]
+    struct Count(Arc<AtomicU64>);
+    impl Handler for Count {
+        type Event = serde_json::Value;
+        async fn handle(&self, event: serde_json::Value, d: &Delivery) -> Result<(), Rejection> {
+            assert_eq!(event["type"], "invoice.paid");
+            assert_eq!(event["data"]["id"], 7);
+            assert!(d.id.starts_with("msg_"));
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let count = Count::default();
+    let incoming = Incoming::new("/webhooks")
+        .source(
+            "partner",
+            Scheme::standard(&endpoint.secret).unwrap(),
+            count.clone(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    for (n, one) in sent.iter().enumerate() {
+        let answer = incoming
+            .receive("partner", |name| one.header(name), &one.body)
+            .await;
+        let want = if n == 0 { "ok" } else { "already received" };
+        assert_eq!(answer.message, want, "attempt {n}");
+    }
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+
+    // Signed with another endpoint's secret, it is refused.
+    let other = Incoming::new("/webhooks")
+        .source(
+            "partner",
+            Scheme::standard(&brocanth_webhooks::sign::new_secret()).unwrap(),
+            count.clone(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let answer = other
+        .receive("partner", |name| sent[0].header(name), &sent[0].body)
+        .await;
+    assert_eq!(answer.status, 401);
+    scope.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_redirect_is_a_failed_attempt_and_is_not_followed() {
+    let Some(scope) = scoped("a_redirect_is_a_failed_attempt_and_is_not_followed").await else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (target, target_got) = receiver(204).await;
+    let location: &'static str = Box::leak(format!("location: {target}\r\n").into_boxed_str());
+    let (url, _) = receiver_with(307, location, "").await;
+    outgoing.add_endpoint(&url, &["*"], "moved").await.unwrap();
+    let ids = outgoing.emit("a.b", &serde_json::json!({})).await.unwrap();
+    let err = outgoing.attempt(ids[0], false).await.expect_err("a 307");
+    assert!(err.contains("307"), "{err}");
+    assert_eq!(state_of(&outgoing, ids[0]).await.2, Some(307));
+    assert!(
+        target_got.lock().unwrap().is_empty(),
+        "the redirect was followed"
+    );
+    scope.drop_schema().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_endpoint_is_retried_and_its_last_attempt_fails_it() {
+    let Some(scope) =
+        scoped("an_unreachable_endpoint_is_retried_and_its_last_attempt_fails_it").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    // A port that was free a moment ago: nothing listens on it.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        format!("http://{}/hook", listener.local_addr().unwrap())
+    };
+    outgoing
+        .add_endpoint(&closed, &["*"], "down")
+        .await
+        .unwrap();
+    let ids = outgoing.emit("a.b", &serde_json::json!({})).await.unwrap();
+    let err = outgoing
+        .attempt(ids[0], false)
+        .await
+        .expect_err("unreachable");
+    assert!(err.contains("could not reach"), "{err}");
+    assert_eq!(
+        state_of(&outgoing, ids[0]).await,
+        ("retrying".into(), 1, None)
+    );
+    let _ = outgoing.attempt(ids[0], true).await;
+    assert_eq!(
+        state_of(&outgoing, ids[0]).await,
+        ("failed".into(), 2, None)
+    );
+    scope.drop_schema().await;
+}
+
+#[tokio::test]
+async fn a_delivered_row_is_not_sent_again_and_an_endpoint_turned_off_gets_nothing() {
+    let Some(scope) =
+        scoped("a_delivered_row_is_not_sent_again_and_an_endpoint_turned_off_gets_nothing").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, got) = receiver(200).await;
+    let endpoint = outgoing.add_endpoint(&url, &["*"], "ok").await.unwrap();
+    let ids = outgoing.emit("a.b", &serde_json::json!({})).await.unwrap();
+    outgoing.attempt(ids[0], false).await.unwrap();
+    outgoing.attempt(ids[0], false).await.unwrap();
+    assert_eq!(got.lock().unwrap().len(), 1, "sent once");
+    assert_eq!(
+        state_of(&outgoing, ids[0]).await,
+        ("delivered".into(), 1, Some(200))
+    );
+    assert!(
+        !outgoing.redeliver(ids[0]).await.unwrap(),
+        "a delivered row is not sent again"
+    );
+
+    let pending = outgoing.emit("a.b", &serde_json::json!({})).await.unwrap();
+    outgoing.set_active(endpoint.id, false).await.unwrap();
+    outgoing.attempt(pending[0], false).await.expect("final");
+    let (state, _, _) = state_of(&outgoing, pending[0]).await;
+    assert_eq!(state, "failed");
+    assert_eq!(
+        got.lock().unwrap().len(),
+        1,
+        "an endpoint that is off gets nothing"
+    );
+    assert!(outgoing
+        .emit("a.b", &serde_json::json!({}))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(outgoing.remove_endpoint(endpoint.id).await.unwrap());
+    // Its deliveries went with it, and an attempt on one is a no-op.
+    outgoing.attempt(pending[0], false).await.expect("gone");
+    scope.drop_schema().await;
+}
+
+/// A row written before `allow_private` was turned off, or by SQL that
+/// never passed `add_endpoint`, is still refused at the attempt.
+#[tokio::test]
+async fn a_private_endpoint_already_in_the_table_is_refused_at_the_attempt() {
+    let Some(scope) =
+        scoped("a_private_endpoint_already_in_the_table_is_refused_at_the_attempt").await
+    else {
+        return;
+    };
+    let lax = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    lax.migrate().await.expect("migrate");
+    let (url, got) = receiver(204).await;
+    lax.add_endpoint(&url, &["*"], "inside").await.unwrap();
+    let ids = lax.emit("a.b", &serde_json::json!({})).await.unwrap();
+
+    let strict = Outgoing::new(scope.db.clone(), &OutgoingConfig::default()).unwrap();
+    strict
+        .attempt(ids[0], false)
+        .await
+        .expect("refused for good, not retried");
+    let row = strict
+        .deliveries(10, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == ids[0])
+        .unwrap();
+    assert_eq!(row.state, "failed");
+    assert!(
+        row.last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("own network"),
+        "{:?}",
+        row.last_error
+    );
+    assert!(got.lock().unwrap().is_empty(), "the request was sent");
+    scope.drop_schema().await;
+}
+
+#[tokio::test]
+async fn an_endpoint_url_that_is_not_http_or_is_private_is_refused_when_added() {
+    let Some(scope) =
+        scoped("an_endpoint_url_that_is_not_http_or_is_private_is_refused_when_added").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &OutgoingConfig::default()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    for url in [
+        "ftp://example.com/",
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "http://[::ffff:127.0.0.1]/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://2130706433/",
+        "not a url",
+    ] {
+        let err = outgoing
+            .add_endpoint(url, &["*"], "x")
+            .await
+            .expect_err(url);
+        assert!(err.0.contains("help:"), "{err}");
+    }
+    assert!(outgoing.endpoints().await.unwrap().is_empty());
+    scope.drop_schema().await;
+}
+
+/// The admin tab shows what a receiver answered. A receiver is not trusted:
+/// its answer is escaped, and only a person who may act sees the button.
+#[tokio::test]
+async fn the_admin_tab_escapes_a_receivers_answer_and_hides_the_button_from_a_reader() {
+    use brocanth_admin::form::Submission;
+    use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
+    use brocanth_webhooks::admin::DeliveriesPanel;
+
+    let Some(scope) =
+        scoped("the_admin_tab_escapes_a_receivers_answer_and_hides_the_button_from_a_reader").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, _) = receiver_with(500, "", "<script>alert(1)</script>").await;
+    outgoing
+        .add_endpoint(&url, &["<img src=x onerror=alert(2)>"], "x")
+        .await
+        .unwrap();
+    let ids = outgoing
+        .emit("<img src=x onerror=alert(2)>", &serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = outgoing.attempt(ids[0], false).await;
+
+    let panel = DeliveriesPanel::new(outgoing.clone());
+    let submission = Submission::default();
+    let render = |can_act: bool, post: bool, path: &'static str| {
+        let panel = &panel;
+        let submission = &submission;
+        async move {
+            panel
+                .render(PanelRequest {
+                    path,
+                    query: "",
+                    post,
+                    can_act,
+                    submission,
+                    mount: "/admin/webhooks",
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let Some(PanelPage::Body { html, .. }) = render(true, false, "").await else {
+        panic!("a body");
+    };
+    assert!(!html.contains("<script>"), "{html}");
+    assert!(!html.contains("<img"), "{html}");
+    assert!(html.contains("&lt;script&gt;"), "{html}");
+    assert!(html.contains("Send again"));
+
+    let Some(PanelPage::Body { html, .. }) = render(false, false, "").await else {
+        panic!("a body");
+    };
+    assert!(!html.contains("Send again"), "a reader sees no button");
+
+    // A POST from someone who may not act changes nothing.
+    let leaked: &'static str = Box::leak(format!("redeliver/{}", ids[0]).into_boxed_str());
+    let before = state_of(&outgoing, ids[0]).await;
+    render(false, true, leaked).await;
+    assert_eq!(state_of(&outgoing, ids[0]).await, before);
+    let Some(PanelPage::Redirect { .. }) = render(true, true, leaked).await else {
+        panic!("a redirect after the button");
+    };
+    assert_eq!(state_of(&outgoing, ids[0]).await.0, "pending");
+    scope.drop_schema().await;
+}
+
+/// Reads a header out of pairs, by its lower-case name.
+fn look<'a>(headers: &'a [(String, String)]) -> impl Fn(&str) -> Option<&'a str> + 'a {
+    move |name| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
