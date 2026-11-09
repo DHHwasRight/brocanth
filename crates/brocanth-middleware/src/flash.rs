@@ -573,21 +573,48 @@ mod tests {
         body: &str,
         page: impl FnOnce(&mut Flash),
     ) -> (Option<String>, String) {
-        let hook = hook();
-        let mut request = request(cookie);
-        let mut state = RequestState::new();
-        hook.before_dispatch(&mut request, &mut state)
-            .expect("read");
-        page(state.get_mut::<Flash>().expect("the hook put a flash"));
-        let mut head = head(status, "text/html; charset=utf-8");
-        let mut bytes = body.as_bytes().to_vec();
-        hook.on_body(&request, &mut head, &mut bytes, &mut state)
-            .expect("write");
+        let (head, body) = exchange_with(
+            &hook(),
+            cookie,
+            status,
+            "text/html; charset=utf-8",
+            body,
+            page,
+        );
         let set = head
             .headers
             .get("set-cookie")
             .map(|v| v.to_str().expect("text").to_string());
-        (set, String::from_utf8(bytes).expect("utf-8"))
+        (set, body)
+    }
+
+    /// [`exchange`] with the hook and the content type chosen, answering
+    /// the whole response head.
+    fn exchange_with(
+        hook: &Hook,
+        cookie: Option<&str>,
+        status: u16,
+        content_type: &str,
+        body: &str,
+        page: impl FnOnce(&mut Flash),
+    ) -> (ResponseHead, String) {
+        let mut request = match cookie {
+            Some(value) => http::Request::builder()
+                .uri("/")
+                .header("cookie", format!("{}={value}", hook.config.cookie))
+                .body(Vec::new())
+                .expect("a request"),
+            None => request(None),
+        };
+        let mut state = RequestState::new();
+        hook.before_dispatch(&mut request, &mut state)
+            .expect("read");
+        page(state.get_mut::<Flash>().expect("the hook put a flash"));
+        let mut head = head(status, content_type);
+        let mut bytes = body.as_bytes().to_vec();
+        hook.on_body(&request, &mut head, &mut bytes, &mut state)
+            .expect("write");
+        (head, String::from_utf8(bytes).expect("utf-8"))
     }
 
     fn value(set_cookie: &str) -> &str {
@@ -661,6 +688,198 @@ mod tests {
         assert_eq!(seen[0].text, "One");
         assert!(!body.contains("One"), "taken, so not drawn twice: {body}");
         assert!(cleared.is_some());
+    }
+
+    #[test]
+    fn a_cookie_that_is_not_one_this_hook_wrote_shows_nothing_and_is_cleared() {
+        let (set, _) = exchange(None, 303, "", |flash| flash.info("Hello"));
+        let held = value(&set.expect("a cookie")).to_string();
+        let (payload, tag) = held.rsplit_once('.').expect("payload.tag");
+        let mut flipped = tag.as_bytes().to_vec();
+        flipped[0] = if flipped[0] == b'A' { b'B' } else { b'A' };
+        let flipped = format!("{payload}.{}", String::from_utf8(flipped).unwrap());
+        for garbage in [
+            "no-dot-at-all",
+            ".",
+            "x.not!base64",
+            &format!("{payload}."),
+            &format!(".{tag}"),
+            &flipped,
+            &format!("{payload}x.{tag}"),
+        ] {
+            let mut seen = Vec::new();
+            let (cleared, body) = exchange(Some(garbage), 200, PAGE, |flash| {
+                seen = flash.messages().cloned().collect();
+            });
+            assert!(seen.is_empty(), "{garbage:?} opened: {seen:?}");
+            assert!(!body.contains("Hello"), "{garbage:?}: {body}");
+            assert!(
+                cleared.is_some_and(|c| c.contains("Max-Age=0")),
+                "{garbage:?} is cleared"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shown_message_is_gone_on_the_request_after() {
+        let (set, _) = exchange(None, 303, "", |flash| flash.success("Saved."));
+        let (cleared, first) = exchange(Some(value(&set.unwrap())), 200, PAGE, |_| {});
+        assert!(first.contains("Saved."));
+        assert!(cleared.unwrap().contains("Max-Age=0"));
+        // The browser applied the clear: the next request carries nothing.
+        let (set, second) = exchange(None, 200, PAGE, |_| {});
+        assert!(!second.contains("Saved."), "{second}");
+        assert!(set.is_none());
+    }
+
+    #[test]
+    fn keep_carries_what_arrived_to_the_next_request_too() {
+        let (set, _) = exchange(None, 303, "", |flash| flash.info("First"));
+        let (kept, _) = exchange(Some(value(&set.unwrap())), 303, "", |flash| {
+            flash.keep();
+            flash.warning("Second");
+        });
+        let kept = kept.expect("a new cookie");
+        let mut seen = Vec::new();
+        exchange(Some(value(&kept)), 200, PAGE, |flash| {
+            seen = flash.take();
+        });
+        let texts: Vec<&str> = seen.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["First", "Second"]);
+        assert_eq!(seen[1].level, Level::Warning);
+    }
+
+    #[test]
+    fn an_error_page_or_a_json_answer_keeps_the_messages() {
+        let (set, _) = exchange(None, 303, "", |flash| flash.error("Nope"));
+        let held = set.unwrap();
+        let (_, body) = exchange(Some(value(&held)), 404, PAGE, |_| {});
+        assert!(!body.contains("Nope"), "not on an error page: {body}");
+        let (head, body) = exchange_with(
+            &hook(),
+            Some(value(&held)),
+            200,
+            "application/json",
+            r##"{"html":"<div id="flash"></div>"}"##,
+            |_| {},
+        );
+        assert!(!body.contains("Nope"), "not in JSON: {body}");
+        assert!(head.headers.get("set-cookie").is_none(), "the cookie stays");
+        let (_, body) = exchange(Some(value(&held)), 200, PAGE, |_| {});
+        assert!(body.contains("Nope"), "the next page shows it: {body}");
+    }
+
+    #[test]
+    fn every_character_html_gives_meaning_to_is_escaped() {
+        let text = r#"<img src=x onerror='alert(1)'> & "quoted", dotted. é"#;
+        let (set, _) = exchange(None, 303, "", |flash| flash.info(text));
+        let mut seen = Vec::new();
+        let (_, body) = exchange(Some(value(&set.unwrap())), 200, PAGE, |flash| {
+            seen = flash.messages().cloned().collect();
+        });
+        assert_eq!(seen[0].text, text, "the text crosses the cookie unchanged");
+        assert!(!body.contains("<img"), "{body}");
+        assert!(
+            body.contains(
+                "&lt;img src=x onerror=&#39;alert(1)&#39;&gt; &amp; &quot;quoted&quot;, dotted. é"
+            ),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_drawn_page_varies_by_cookie() {
+        let (set, _) = exchange(None, 303, "", |flash| flash.info("Hi"));
+        let (head, _) = exchange_with(
+            &hook(),
+            Some(value(&set.unwrap())),
+            200,
+            "text/html",
+            PAGE,
+            |_| {},
+        );
+        let vary = head.headers.get("vary").expect("a Vary header");
+        assert!(vary.to_str().unwrap().contains("Cookie"), "{vary:?}");
+    }
+
+    #[test]
+    fn messages_that_do_not_fit_a_cookie_are_dropped_from_the_end() {
+        let (set, _) = exchange(None, 303, "", |flash| {
+            flash.info("first");
+            for _ in 0..10 {
+                flash.info("x".repeat(1000));
+            }
+        });
+        let set = set.expect("a cookie");
+        assert!(
+            set.len() < 4096,
+            "a browser keeps the cookie: {}",
+            set.len()
+        );
+        let mut seen = Vec::new();
+        exchange(Some(value(&set)), 200, PAGE, |flash| seen = flash.take());
+        assert_eq!(seen[0].text, "first");
+        assert!(seen.len() < 11, "some were dropped");
+    }
+
+    #[test]
+    fn the_cookie_name_and_secure_settings_reach_the_cookie() {
+        let hook = Hook {
+            config: FlashConfig {
+                cookie: "notice".into(),
+                ..FlashConfig::default()
+            }
+            .insecure(),
+            key: b"test key".to_vec(),
+        };
+        let (head, _) = exchange_with(&hook, None, 303, "text/html", "", |flash| flash.info("Hi"));
+        let set = head
+            .headers
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set.starts_with("notice="), "{set}");
+        assert!(!set.contains("Secure"), "{set}");
+        assert!(
+            set.contains("HttpOnly") && set.contains("SameSite=Lax"),
+            "{set}"
+        );
+        let value = set["notice=".len()..]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let mut seen = Vec::new();
+        exchange_with(&hook, Some(&value), 200, "text/html", PAGE, |flash| {
+            seen = flash.take()
+        });
+        assert_eq!(seen.len(), 1, "read back under its own name");
+        let mut under_another_name = http::HeaderMap::new();
+        under_another_name.insert("cookie", format!("flash={value}").parse().unwrap());
+        assert_eq!(
+            cookie(&under_another_name, "notice"),
+            None,
+            "a cookie under another name is not this hook's"
+        );
+    }
+
+    #[test]
+    fn a_custom_renderer_draws_the_messages() {
+        fn render(messages: &[FlashMessage]) -> String {
+            format!("<ul>{}</ul>", messages.len())
+        }
+        let hook = Hook {
+            config: FlashConfig::default().render(render),
+            key: b"test key".to_vec(),
+        };
+        let (head, body) = exchange_with(&hook, None, 200, "text/html", PAGE, |flash| {
+            flash.now(Level::Info, "one");
+            flash.now(Level::Info, "two");
+        });
+        assert!(body.contains(r#"role="status"><ul>2</ul></div>"#), "{body}");
+        assert!(head.headers.get("set-cookie").is_none());
     }
 
     #[test]

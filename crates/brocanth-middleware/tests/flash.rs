@@ -39,8 +39,12 @@ fn save() -> Handler<Base> {
 }
 
 fn client() -> TestClient<Base, impl HookFamilies, Handler<Base>> {
+    client_with(FlashConfig::default().insecure())
+}
+
+fn client_with(config: FlashConfig) -> TestClient<Base, impl HookFamilies, Handler<Base>> {
     let app = AppBuilder::new()
-        .plugin_hooking(FlashPlugin::new(FlashConfig::default().insecure()))
+        .plugin_hooking(FlashPlugin::new(config))
         .build()
         .expect("an application");
     let mut table = Router::builder();
@@ -104,4 +108,50 @@ fn a_cookie_name_that_cannot_go_in_a_header_stops_the_build() {
         panic!("a cookie name with a space was accepted");
     };
     assert!(why.to_string().contains("help:"), "{why}");
+}
+
+/// Two instances behind one balancer: the second reads the message the
+/// first wrote when both have the key in `key_env`.
+#[test]
+fn two_instances_with_the_key_in_key_env_read_each_others_messages() {
+    // A name no other test reads, so setting it races with nothing.
+    std::env::set_var("A046_FLASH_SHARED_KEY", "a key both instances read");
+    let config = || FlashConfig {
+        key_env: "A046_FLASH_SHARED_KEY".into(),
+        ..FlashConfig::default().insecure()
+    };
+    let first = client_with(config());
+    let second = client_with(config());
+    let cookie = pair(&first.post("/save", &[])).expect("a message");
+    let shown = second.send(TestRequest::get("/").header("cookie", &cookie));
+    assert_eq!(flash_text(&shown).trim(), "Saved.");
+}
+
+/// Without a key each process draws its own: another instance cannot read
+/// the cookie, and it shows nothing rather than an unsigned message.
+#[test]
+fn without_a_key_another_instance_ignores_the_cookie() {
+    let config = || FlashConfig {
+        key_env: "A046_FLASH_KEY_NOBODY_SETS".into(),
+        ..FlashConfig::default().insecure()
+    };
+    let first = client_with(config());
+    let second = client_with(config());
+    let cookie = pair(&first.post("/save", &[])).expect("a message");
+    let shown = second.send(TestRequest::get("/").header("cookie", &cookie));
+    assert_eq!(flash_text(&shown).trim(), "");
+    let same = first.send(TestRequest::get("/").header("cookie", &cookie));
+    assert_eq!(
+        flash_text(&same).trim(),
+        "Saved.",
+        "its own instance reads it"
+    );
+}
+
+/// The default sends the cookie over HTTPS only.
+#[test]
+fn the_default_cookie_is_secure() {
+    let posted = client_with(FlashConfig::default()).post("/save", &[]);
+    let line = posted.header("set-cookie").expect("a message");
+    assert!(line.contains("Secure"), "{line}");
 }
