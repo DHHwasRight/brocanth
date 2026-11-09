@@ -42,6 +42,7 @@ pub struct Layers<'a> {
     config: &'a Config,
     defaults: Vec<(String, String)>,
     secrets: Vec<String>,
+    notes: Vec<(String, String)>,
     redaction: Redaction,
 }
 
@@ -82,6 +83,7 @@ impl<'a> Layers<'a> {
             config,
             defaults: Vec::new(),
             secrets: Vec::new(),
+            notes: Vec::new(),
             redaction: Redaction::standard(),
         }
     }
@@ -103,6 +105,15 @@ impl<'a> Layers<'a> {
     #[must_use]
     pub fn secret(mut self, path: impl Into<String>) -> Self {
         self.secrets.push(path.into());
+        self
+    }
+
+    /// A note printed in brackets after the merged line of `path`, such
+    /// as `hook analytics.count is off in src/modules/analytics.rs`. Two
+    /// notes on one path print in the order they were added.
+    #[must_use]
+    pub fn note(mut self, path: impl Into<String>, note: impl Into<String>) -> Self {
+        self.notes.push((path.into(), note.into()));
         self
     }
 
@@ -247,13 +258,17 @@ impl fmt::Display for Layers<'_> {
         writeln!(f)?;
         writeln!(f, "merged")?;
         for (path, shown, n, name) in merged {
-            writeln!(
+            write!(
                 f,
                 "  {:<w$}  = {:<shown_width$}  {n} {name}",
                 path,
                 shown,
                 w = width + 6
             )?;
+            for (_, note) in self.notes.iter().filter(|(noted, _)| noted == path) {
+                write!(f, "  ({note})")?;
+            }
+            writeln!(f)?;
         }
         Ok(())
     }
@@ -324,5 +339,36 @@ mod tests {
              \x20 sessions.secure        = true               3 environment\n"
         );
         assert_eq!(text, expected, "\n{text}");
+    }
+
+    #[test]
+    fn a_note_follows_the_merged_line_of_its_path_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let config = Loader::new("my_app")
+            .env("test")
+            .root(root)
+            .cwd(root)
+            .env_lookup(|_| None)
+            .env_vars(Vec::new)
+            .load()
+            .unwrap();
+        let text = config
+            .layers()
+            .defaults(vec![
+                ("analytics.enabled", "true".to_string()),
+                ("analytics.site", "\"\"".to_string()),
+            ])
+            .note("analytics.enabled", "hook analytics.count is off")
+            .note("analytics.enabled", "hook analytics.collect is off")
+            .to_string();
+        let merged = text.split("merged\n").nth(1).unwrap();
+        assert_eq!(
+            merged,
+            "  analytics.enabled        = true  1 defaults  (hook analytics.count is off)  \
+             (hook analytics.collect is off)\n\
+             \x20 analytics.site           = \"\"    1 defaults\n",
+            "\n{text}"
+        );
     }
 }
