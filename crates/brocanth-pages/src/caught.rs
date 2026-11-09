@@ -291,6 +291,84 @@ mod tests {
     }
 
     #[test]
+    fn a_404_and_a_failure_each_find_their_own_nearest_file() {
+        let root = tree(&[
+            "not-found.rsx",
+            "error.rsx",
+            "admin/error.rsx",
+            "users/[id]/not-found.rsx",
+        ]);
+        let caught = read(Path::new("src/pages"), &root).expect("read");
+        // Sorted: the root (0), `admin` (1), `users/[id]` (2).
+        let pick = |file: &str| {
+            let (nf, er) = caught.nearest_to_file(file);
+            (nf.to_string(), er.to_string())
+        };
+        let root_nf = "Some (__error_pages :: not_found_0)".to_string();
+        let root_er = "Some (__error_pages :: failed_0)".to_string();
+        // `admin/` has an error page and no not-found page: a 404 there is
+        // the root's, a failure is its own.
+        assert_eq!(
+            pick("admin/settings.rs"),
+            (root_nf.clone(), "Some (__error_pages :: failed_1)".into())
+        );
+        // Deeper than the file: still the nearest above it.
+        assert_eq!(
+            pick("users/[id]/posts/[post].rs"),
+            (
+                "Some (__error_pages :: not_found_2)".into(),
+                root_er.clone()
+            )
+        );
+        // A sibling directory takes nothing from `users/[id]`.
+        assert_eq!(pick("users/index.rs"), (root_nf.clone(), root_er.clone()));
+        assert_eq!(pick("index.rs"), (root_nf, root_er));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_path_no_route_matched_tries_the_deepest_directory_first() {
+        let root = tree(&[
+            "not-found.rsx",
+            "users/not-found.rsx",
+            "users/[id]/not-found.rsx",
+            "admin/error.rsx",
+        ]);
+        let caught = read(Path::new("src/pages"), &root).expect("read");
+        let out = caught.items().to_string();
+        let deep = out
+            .find("& [Some (\"users\") , None]")
+            .expect("the parameter directory");
+        let shallow = out.find("& [Some (\"users\")]").expect("users");
+        let admin = out.find("& [Some (\"admin\")]").expect("admin");
+        assert!(deep < shallow && deep < admin, "deepest first: {out}");
+        // `admin/` has no not-found page: a missing path under it gets the
+        // root's, and its own error page for the rest.
+        let arm = &out[admin..];
+        let arm = &arm[..arm.find("else").expect("an arm")];
+        assert!(
+            arm.contains(
+                "(Some (__error_pages :: not_found_0) , Some (__error_pages :: failed_1))"
+            ),
+            "{arm}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tree_with_only_an_error_page_answers_a_404_plainly() {
+        let root = tree(&["error.rsx"]);
+        let caught = read(Path::new("src/pages"), &root).expect("read");
+        let (nf, er) = caught.nearest_to_file("users/[id].rs");
+        assert_eq!(nf.to_string(), "None");
+        assert_eq!(er.to_string(), "Some (__error_pages :: failed_0)");
+        let out = caught.items().to_string();
+        assert!(!out.contains("fn not_found_0"), "{out}");
+        assert!(out.contains("fn failed_0"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_tree_with_no_error_page_names_none() {
         let root = tree(&["layout.rsx"]);
         let caught = read(Path::new("src/pages"), &root).expect("read");

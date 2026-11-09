@@ -284,6 +284,169 @@ mod tests {
         assert_eq!(*heard.lock().expect("lock"), ["500 Hook the cache is down"]);
     }
 
+    fn fail(app: &App<Installed, Hooks>, uri: &str, method: http::Method) {
+        let mut request = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Vec::new())
+            .expect("a request");
+        let mut state = RequestState::new();
+        let response = app.run(&mut request, &mut state, |_, _| {
+            Err(HandlerError::message("the cache is down"))
+        });
+        assert_eq!(response.status(), 500, "the core still answers");
+    }
+
+    struct Fields(Arc<Mutex<Vec<String>>>);
+
+    impl Reporter for Fields {
+        fn report(&self, report: &Report<'_>) {
+            if let Ok(mut heard) = self.0.lock() {
+                heard.push(format!(
+                    "{} {} {} {:?}",
+                    report.status, report.method, report.path, report.origin
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn every_reporter_hears_each_failure_in_the_order_they_were_added() {
+        let app = app();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let reporters = app.context().get::<Reporters, _>().clone();
+        reporters.add(Fields(Arc::clone(&heard)));
+        reporters.add(Heard(Arc::clone(&heard)));
+        assert_eq!(reporters.len(), 2);
+
+        fail(&app, "/orders/7?token=secret", http::Method::POST);
+        fail(&app, "/b", http::Method::GET);
+        // The path has no query: a token in it never reaches a tracker.
+        assert_eq!(
+            *heard.lock().expect("lock"),
+            [
+                "500 POST /orders/7 Hook",
+                "500 Hook the cache is down",
+                "500 GET /b Hook",
+                "500 Hook the cache is down",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_handler_that_answers_is_not_reported() {
+        let app = app();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        app.context()
+            .get::<Reporters, _>()
+            .add(Heard(Arc::clone(&heard)));
+        let mut request = http::Request::builder()
+            .uri("/x")
+            .body(Vec::new())
+            .expect("a request");
+        let mut state = RequestState::new();
+        let response = app.run(&mut request, &mut state, |_, _| {
+            let mut r = http::Response::new(Vec::new().into());
+            *r.status_mut() = http::StatusCode::SERVICE_UNAVAILABLE;
+            Ok(r)
+        });
+        // A page's own 5xx answer is the project's `caught` to report.
+        assert_eq!(response.status(), 503);
+        assert!(heard.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn with_the_report_hook_off_a_hook_failure_reaches_no_reporter() {
+        let app: App<Installed, Hooks> = AppBuilder::new()
+            .plugin_hooking(Errors::new(ErrorsConfig::default()))
+            .hooks_off("errors", ["report"])
+            .build()
+            .expect("an application");
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let reporters = app.context().get::<Reporters, _>().clone();
+        reporters.add(Heard(Arc::clone(&heard)));
+        fail(&app, "/x", http::Method::GET);
+        assert!(heard.lock().expect("lock").is_empty());
+        // The reporters are still published, for a page's failure.
+        reporters.report(&Report {
+            status: 502,
+            message: "upstream",
+            method: "GET",
+            path: "/x",
+            origin: Origin::Page,
+        });
+        assert_eq!(*heard.lock().expect("lock"), ["502 Page upstream"]);
+    }
+
+    /// A plugin that adds its reporter where the docs say: in
+    /// `after_config`, from the services.
+    struct Tracker(Arc<Mutex<Vec<String>>>);
+
+    impl Plugin for Tracker {
+        type Config = ();
+        type Provides = brocanth::plugin_context::NoContext;
+        const NAME: &'static str = "tracker";
+
+        fn new(_config: ()) -> Self {
+            Self(Arc::default())
+        }
+
+        fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+            let reporters = lc
+                .services()
+                .get::<Reporters>()
+                .ok_or_else(|| PluginError::new("no reporters"))?;
+            reporters.add(Heard(Arc::clone(&self.0)));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reporter_added_in_after_config_hears_every_request() {
+        let tracker = Tracker::new(());
+        let heard = Arc::clone(&tracker.0);
+        let app = AppBuilder::new()
+            .plugin_hooking(Errors::new(ErrorsConfig::default()))
+            .plugin(tracker)
+            .build()
+            .expect("an application");
+        let mut request = http::Request::builder()
+            .uri("/x")
+            .body(Vec::new())
+            .expect("a request");
+        let mut state = RequestState::new();
+        let _ = app.run(&mut request, &mut state, |_, _| {
+            Err(HandlerError::message("boom"))
+        });
+        assert_eq!(*heard.lock().expect("lock"), ["500 Hook boom"]);
+    }
+
+    #[test]
+    fn the_details_setting_reaches_the_reporters() {
+        let app: App<Installed, Hooks> = AppBuilder::new()
+            .plugin_hooking(Errors::new(ErrorsConfig { details: false }))
+            .build()
+            .expect("an application");
+        assert!(!app.context().get::<Reporters, _>().details());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn the_section_reads_details_and_refuses_an_unknown_key() {
+        use serde::de::value::{Error, MapDeserializer};
+        use serde::Deserialize;
+
+        let read = |pairs: Vec<(&'static str, bool)>| {
+            ErrorsConfig::deserialize(MapDeserializer::<_, Error>::new(pairs.into_iter()))
+        };
+        assert_eq!(read(vec![]).expect("empty"), ErrorsConfig { details: true });
+        assert_eq!(
+            read(vec![("details", false)]).expect("details"),
+            ErrorsConfig { details: false }
+        );
+        assert!(read(vec![("detail", false)]).is_err(), "a typo is refused");
+    }
+
     #[test]
     fn details_is_the_setting_and_is_on_by_default() {
         let app = app();

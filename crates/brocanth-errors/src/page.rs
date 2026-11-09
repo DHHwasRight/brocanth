@@ -241,6 +241,78 @@ mod tests {
     }
 
     #[test]
+    fn no_5xx_carries_its_message_to_a_page() {
+        for status in [500, 501, 502, 503, 504, 599] {
+            let caught = Caught::new(status, "password=hunter2 at db.rs:7", "/x");
+            assert_eq!(caught.message, None, "{status}");
+            assert!(!plain_page(&caught).contains("hunter2"), "{status}");
+        }
+        for status in [400, 403, 404, 409, 422, 429] {
+            let caught = Caught::new(status, "the title is empty", "/x");
+            assert_eq!(caught.message.as_deref(), Some("the title is empty"));
+            assert!(plain_page(&caught).contains("<p>the title is empty</p>"));
+        }
+        assert_eq!(Caught::new(418, "", "/").reason, "Error");
+        assert_eq!(Caught::new(503, "", "/a/b").path, "/a/b");
+        assert!(!Caught::new(500, "", "/").is_not_found());
+    }
+
+    #[test]
+    fn the_development_page_hides_credentials_in_any_case() {
+        let caught = Caught::new(500, "boom", "/x");
+        let html = development_page(
+            &caught,
+            "boom",
+            "POST",
+            [
+                ("Cookie", "session=abc"),
+                ("AUTHORIZATION", "Bearer tok"),
+                ("proxy-authorization", "Basic cHc="),
+                ("user-agent", "<img src=x onerror=alert(1)>"),
+            ],
+        );
+        for secret in ["session=abc", "Bearer tok", "cHc="] {
+            assert!(!html.contains(secret), "{secret}: {html}");
+        }
+        assert_eq!(html.matches("(hidden)").count(), 3, "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains("&lt;img src=x"), "{html}");
+        assert!(html.contains("<code>POST /x</code>"), "{html}");
+        assert!(html.contains("<title>500 Internal Server Error</title>"));
+    }
+
+    #[test]
+    fn the_cause_and_the_path_are_escaped_on_the_development_page() {
+        let caught = Caught::new(500, "", "/<script>");
+        let html = development_page(&caught, "</pre><script>x()</script>", "GET", []);
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;/pre&gt;&lt;script&gt;x()"), "{html}");
+    }
+
+    #[test]
+    fn only_a_client_that_reads_html_gets_a_page() {
+        for accept in [
+            "TEXT/HTML",
+            "application/json;q=0.9, text/html;q=0.1",
+            "text/*",
+            "application/xhtml+xml",
+            " */* ",
+        ] {
+            assert!(accepts_html(Some(accept)), "{accept}");
+        }
+        for accept in [
+            "application/json",
+            "text/plain",
+            "text/html;q=0.0",
+            "text/html; q=0, */*;q=0",
+            "application/json, text/event-stream",
+            "",
+        ] {
+            assert!(!accepts_html(Some(accept)), "{accept}");
+        }
+    }
+
+    #[test]
     fn a_range_with_q_zero_is_refused() {
         assert!(!accepts_html(Some("text/html;q=0, application/json")));
         assert!(accepts_html(Some("application/json, text/*;q=0.5")));
