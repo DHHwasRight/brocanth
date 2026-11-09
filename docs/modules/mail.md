@@ -60,7 +60,7 @@ Section `[mail]`. Environment variable: `$<APP>_MAIL__<KEY>`. Flag: `--mail.<key
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
 | `transport` | text | `"log"` | `--mail.transport` | Where mail goes: `smtp`, `log` or `folder`. |
-| `from` | text | `"no-reply@localhost"` | `--mail.from` | The address every message comes from. |
+| `from` | text | `"no-reply@example.com"` | `--mail.from` | The address every message comes from. |
 | `from_name` | text | the project title | `--mail.from_name` | The name shown beside that address. |
 | `folder` | text | `"tmp/mail"` | `--mail.folder` | Where `folder` writes its .eml files. |
 | `smtp_host` | text | `"localhost"` | `--mail.smtp_host` | The SMTP relay. |

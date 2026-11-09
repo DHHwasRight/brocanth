@@ -99,7 +99,7 @@ fn settings(project: &Project) -> Vec<Setting> {
         ),
         Setting::text(
             "from",
-            "no-reply@localhost",
+            "no-reply@example.com",
             "The address every message comes from.",
         ),
         Setting::text(
@@ -427,7 +427,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             transport: "log".to_string(),
-            from: "no-reply@localhost".to_string(),
+            from: "no-reply@example.com".to_string(),
             from_name: "@TITLE@".to_string(),
             folder: "tmp/mail".to_string(),
             smtp_host: "localhost".to_string(),
@@ -492,7 +492,7 @@ impl MailPlugin {
             "folder" => Arc::new(Folder::new(&s.folder)),
             "smtp" => {
                 let security = match s.smtp_security.as_str() {
-                    "tls" => Security::Tls,
+                    "tls" => Security::ImplicitTls,
                     "starttls" => Security::StartTls,
                     "plain" => Security::PlaintextForLocalCatcherOnly,
                     other => {
