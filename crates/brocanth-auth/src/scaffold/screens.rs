@@ -163,7 +163,7 @@ const ROUTES: &[&str] = &[
 ];
 
 /// The plugin, the helpers every screen shares, and, when the store is in
-/// memory, a test that walks sign-up and sign-in through the application.
+/// memory, tests that walk every screen through the application.
 fn plugin_rs(project: &Project, with_test: bool) -> String {
     let (derive, note) = settings_derive(project, "auth_screens");
     let mut out = PLUGIN_RS
@@ -176,7 +176,12 @@ fn plugin_rs(project: &Project, with_test: bool) -> String {
         out.push_str(LOCKED_MAIL_RS);
     }
     if with_test {
-        out.push_str(TEST_RS);
+        let lockout = if project.has("auth-lockout") {
+            LOCKOUT_TEST_RS
+        } else {
+            ""
+        };
+        out.push_str(&TEST_RS.replace("@LOCKOUT@", lockout));
     }
     out
 }
@@ -504,118 +509,601 @@ pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Re
 }
 "#;
 
-/// Walks the screens through the application, with the store in memory.
-const TEST_RS: &str = r#"
+/// Walks the screens through the application, with the store in memory:
+/// every form, every token, and the answers a stranger must not tell apart.
+const TEST_RS: &str = r##"
 #[cfg(test)]
 mod tests {
     use brocanth::routing::Verb;
-    use brocanth_server::{Request, Response};
+    use brocanth_server::{Body, Request, Response};
 
-    async fn send(request: Request) -> Response {
-        let app = crate::app::build().expect("the application builds");
-        crate::app::handle(&app, request).await
+    use crate::plugins::auth::Services;
+
+    const PASSWORD: &str = "correct horse battery";
+
+    /// One application and one cookie jar: what a browser keeps between
+    /// requests. Each `Browser` builds its own application, so each has its
+    /// own memory store.
+    struct Browser {
+        app: crate::app::App,
+        jar: Vec<(String, String)>,
     }
 
-    fn cookies(response: &Response) -> Vec<String> {
-        response
-            .headers()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
-            .filter_map(|(_, value)| value.split(';').next().map(str::to_string))
-            .collect()
+    impl Browser {
+        async fn new() -> Self {
+            let mut browser = Self {
+                app: crate::app::build().expect("the application builds"),
+                jar: Vec::new(),
+            };
+            let first = browser.get("/account/signup").await;
+            assert_eq!(first.status, 200);
+            assert!(browser.cookie("csrf_token").is_some(), "a CSRF cookie");
+            browser
+        }
+
+        fn auth(&self) -> Services {
+            self.app.core.context().get::<Services, _>().clone()
+        }
+
+        fn cookie(&self, name: &str) -> Option<String> {
+            self.jar
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+
+        fn set_cookie(&mut self, name: &str, value: &str) {
+            self.jar.retain(|(key, _)| key != name);
+            self.jar.push((name.to_string(), value.to_string()));
+        }
+
+        async fn send(&mut self, mut request: Request) -> Response {
+            if !self.jar.is_empty() {
+                let line: Vec<String> = self.jar.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                request = request.with_header("cookie", &line.join("; "));
+            }
+            let response = crate::app::handle(&self.app, request).await;
+            for (name, line) in response.headers() {
+                if !name.eq_ignore_ascii_case("set-cookie") {
+                    continue;
+                }
+                let pair = line.split(';').next().unwrap_or_default();
+                let Some((key, value)) = pair.split_once('=') else {
+                    continue;
+                };
+                self.jar.retain(|(k, _)| k != key);
+                if !value.is_empty() && !line.contains("Max-Age=0") {
+                    self.jar.push((key.to_string(), value.to_string()));
+                }
+            }
+            response
+        }
+
+        async fn get(&mut self, path: &str) -> Response {
+            self.send(Request::new(Verb::Get, path)).await
+        }
+
+        /// A form post with the CSRF field, as the page's form sends it.
+        async fn post(&mut self, path: &str, form: &str) -> Response {
+            let token = self.cookie("csrf_token").expect("a CSRF cookie");
+            self.post_raw(path, &format!("_csrf_token={token}&{form}"))
+                .await
+        }
+
+        async fn post_raw(&mut self, path: &str, body: &str) -> Response {
+            let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            let mut request = Request::new(Verb::Post, path)
+                .with_header("content-type", "application/x-www-form-urlencoded");
+            request.query = query.to_string();
+            request.body = body.to_string().into();
+            self.send(request).await
+        }
+
+        /// The page a redirect points at, as the browser asks for it next.
+        async fn follow(&mut self, response: &Response) -> String {
+            assert_eq!(response.status, 303, "a redirect");
+            let location = response.header("location").expect("a location").to_string();
+            let page = self.get(&location).await;
+            text(&page)
+        }
+
+        async fn sign_up(&mut self, email: &str) -> Response {
+            self.post("/account/signup", &credentials(email, PASSWORD))
+                .await
+        }
+
+        async fn sign_in(&mut self, email: &str, password: &str) -> Response {
+            self.post("/account/signin", &credentials(email, password))
+                .await
+        }
+
+        /// Whether the jar holds a session.
+        fn signed_in(&self) -> bool {
+            let name = self.auth().sessions().config().cookie_name.clone();
+            self.cookie(&name).is_some()
+        }
     }
 
-    /// The CSRF cookie a first GET hands out.
-    async fn token() -> String {
-        let page = send(Request::new(Verb::Get, "/account/signup")).await;
-        assert_eq!(page.status, 200);
-        cookies(&page)
-            .into_iter()
-            .find_map(|pair| pair.strip_prefix("csrf_token=").map(str::to_string))
-            .expect("the first page sets the CSRF cookie")
+    fn credentials(email: &str, password: &str) -> String {
+        format!(
+            "email={}&password={}",
+            email.replace('@', "%40"),
+            password.replace(' ', "+")
+        )
     }
 
-    async fn post(path: &str, token: &str, form: &str) -> Response {
-        let mut request = Request::new(Verb::Post, path)
-            .with_header("content-type", "application/x-www-form-urlencoded")
-            .with_header("cookie", &format!("csrf_token={token}"));
-        request.body = format!("_csrf_token={token}&{form}").into();
-        send(request).await
+    fn text(response: &Response) -> String {
+        match &response.body {
+            Body::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            Body::Stream(_) => panic!("a page, not a stream"),
+        }
+    }
+
+    /// The `<p role="alert">` of a form drawn again.
+    fn alert(response: &Response) -> String {
+        let body = text(response);
+        let start = body.find(r#"<p role="alert">"#).expect("an alert");
+        let rest = &body[start..];
+        rest[..rest.find("</p>").expect("closed")].to_string()
+    }
+
+    /// A reset token, as the link in the reset mail carries it.
+    async fn reset_token(browser: &Browser, email: &str) -> String {
+        match browser
+            .auth()
+            .accounts()
+            .request_password_reset(email)
+            .await
+            .expect("a reset")
+            .outcome
+        {
+            brocanth_auth::accounts::ResetOutcome::Issue { token, .. } => {
+                token.secret().to_string()
+            }
+            _ => panic!("{email} has an account"),
+        }
+    }
+
+    const POSTS: &[&str] = &[
+        "/account/signup",
+        "/account/signin",
+        "/account/code",
+        "/account/signout",
+        "/account/forgot",
+        "/account/reset/a-token",
+        "/account/verify/a-token",
+        "/account/totp",
+    ];
+
+    #[tokio::test]
+    async fn every_form_without_the_csrf_token_is_refused() {
+        let mut browser = Browser::new().await;
+        for path in POSTS {
+            let none = browser.post_raw(path, "email=ada%40example.com").await;
+            assert_eq!(none.status, 403, "{path} took a post with no token");
+            let wrong = browser
+                .post_raw(path, "_csrf_token=forged&email=ada%40example.com")
+                .await;
+            assert_eq!(wrong.status, 403, "{path} took a forged token");
+        }
     }
 
     #[tokio::test]
-    async fn a_form_without_the_csrf_token_is_refused() {
-        let mut request = Request::new(Verb::Post, "/account/signin")
+    async fn every_page_draws_its_form_with_the_token_in_it() {
+        let mut browser = Browser::new().await;
+        let token = browser.cookie("csrf_token").expect("a CSRF cookie");
+        for path in [
+            "/account/signup",
+            "/account/signin",
+            "/account/code",
+            "/account/signout",
+            "/account/forgot",
+            "/account/reset/a-token",
+            "/account/verify/a-token",
+        ] {
+            let page = browser.get(path).await;
+            assert_eq!(page.status, 200, "{path}");
+            assert!(text(&page).contains(&token), "{path} has no CSRF field");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_put_to_a_screen_is_not_a_post() {
+        let mut browser = Browser::new().await;
+        let token = browser.cookie("csrf_token").expect("a CSRF cookie");
+        let mut request = Request::new(Verb::Put, "/account/signin")
             .with_header("content-type", "application/x-www-form-urlencoded");
-        request.body = "email=ada%40example.com&password=x".into();
-        assert_eq!(send(request).await.status, 403);
+        request.body = format!("_csrf_token={token}").into();
+        assert_eq!(browser.send(request).await.status, 405);
     }
 
     #[tokio::test]
     async fn a_person_signs_up_then_signs_in_and_a_wrong_password_is_refused() {
-        let token = token().await;
-        let password = "correct horse battery";
-        let form = format!(
-            "email=ada%40example.com&password={}",
-            password.replace(' ', "+")
-        );
-        // Each request builds the application again, so each has its own
-        // memory store: sign up and sign in within one build instead.
-        let app = crate::app::build().expect("the application builds");
-        let mut signup = Request::new(Verb::Post, "/account/signup")
-            .with_header("content-type", "application/x-www-form-urlencoded")
-            .with_header("cookie", &format!("csrf_token={token}"));
-        signup.body = format!("_csrf_token={token}&{form}").into();
-        let answered = crate::app::handle(&app, signup).await;
-        assert_eq!(answered.status, 303);
-        assert_eq!(answered.header("location"), Some("/account/signin"));
+        let mut browser = Browser::new().await;
+        let signed_up = browser.sign_up("ada@example.com").await;
+        assert_eq!(signed_up.header("location"), Some("/account/signin"));
+        assert!(browser
+            .follow(&signed_up)
+            .await
+            .contains("Check your inbox"));
 
-        let mut signin = Request::new(Verb::Post, "/account/signin")
-            .with_header("content-type", "application/x-www-form-urlencoded")
-            .with_header("cookie", &format!("csrf_token={token}"));
-        signin.body = format!("_csrf_token={token}&{form}").into();
-        let answered = crate::app::handle(&app, signin).await;
-        assert_eq!(answered.status, 303);
-        assert!(
-            answered
-                .headers()
-                .any(|(name, value)| name.eq_ignore_ascii_case("set-cookie")
-                    && value.contains("HttpOnly")
-                    && !value.starts_with("csrf_token=")
-                    && !value.starts_with("flash=")
-                    && !value.contains("Max-Age=0")),
-            "a session cookie"
-        );
-
-        let wrong = post(
-            "/account/signin",
-            &token,
-            "email=ada%40example.com&password=not+the+password",
-        )
-        .await;
+        let wrong = browser.sign_in("ada@example.com", "not the password").await;
         assert_eq!(wrong.status, 422);
+        assert!(!browser.signed_in());
+
+        let signed_in = browser.sign_in("ada@example.com", PASSWORD).await;
+        assert_eq!(signed_in.status, 303);
+        assert_eq!(
+            signed_in.header("location"),
+            Some(crate::modules::auth_screens::MODULE.after_sign_in),
+            "the option in the module file decides where a person lands"
+        );
+        assert!(browser.signed_in(), "a session cookie");
+
+        let signed_out = browser.post("/account/signout", "").await;
+        assert_eq!(signed_out.header("location"), Some("/"));
+        assert!(!browser.signed_in(), "the session cookie is cleared");
+    }
+
+    #[tokio::test]
+    async fn a_next_parameter_does_not_choose_where_sign_in_lands() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        for query in [
+            "next=https%3A%2F%2Fevil.example",
+            "return_to=%2F%2Fevil.example",
+            "redirect=https://evil.example",
+        ] {
+            let path = format!("/account/signin?{query}");
+            let answered = browser
+                .post(&path, &credentials("ada@example.com", PASSWORD))
+                .await;
+            assert_eq!(answered.status, 303, "{query}");
+            assert_eq!(
+                answered.header("location"),
+                Some(crate::modules::auth_screens::MODULE.after_sign_in),
+                "{query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_taken_address_signs_up_with_the_same_answer_as_a_new_one() {
+        let mut browser = Browser::new().await;
+        let new = browser.sign_up("ada@example.com").await;
+        let new_page = browser.follow(&new).await;
+        let taken = browser.sign_up("ada@example.com").await;
+        let taken_page = browser.follow(&taken).await;
+        assert_eq!(new.header("location"), taken.header("location"));
+        assert_eq!(new_page, taken_page, "the same words, the same page");
+        assert_eq!(
+            browser.sign_in("ada@example.com", PASSWORD).await.status,
+            303,
+            "the second sign-up did not change the password"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_address_and_a_wrong_password_get_the_same_words() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        let wrong = browser.sign_in("ada@example.com", "not the password").await;
+        let unknown = browser.sign_in("eve@example.com", "not the password").await;
+        let malformed = browser.sign_in("not an address", "not the password").await;
+        assert_eq!(
+            (wrong.status, unknown.status, malformed.status),
+            (422, 422, 422)
+        );
+        assert_eq!(alert(&wrong), alert(&unknown));
+        assert_eq!(alert(&wrong), alert(&malformed));
+    }
+
+    #[tokio::test]
+    async fn a_bad_form_is_drawn_again_with_its_value_escaped() {
+        let mut browser = Browser::new().await;
+        let short = browser
+            .post("/account/signup", "email=ada%40example.com&password=short")
+            .await;
+        assert_eq!(short.status, 422);
+        assert!(alert(&short).contains("12 characters"));
+
+        let script = "%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E+x";
+        let answered = browser
+            .post(
+                "/account/signup",
+                &format!("email={script}&password=a+long+enough+password"),
+            )
+            .await;
+        assert_eq!(answered.status, 422);
+        let body = text(&answered);
+        assert!(!body.contains("<script>alert(1)"), "{body}");
+        assert!(
+            body.contains("&lt;script&gt;"),
+            "the value is drawn, escaped"
+        );
+
+        let page = browser
+            .get("/account/verify/%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+            .await;
+        assert!(!text(&page).contains("<script>alert(1)"));
     }
 
     #[tokio::test]
     async fn a_reset_request_answers_alike_for_an_unknown_address() {
-        let token = token().await;
-        let answered = post("/account/forgot", &token, "email=nobody%40example.com").await;
-        assert_eq!(answered.status, 303);
-        assert_eq!(answered.header("location"), Some("/account/signin"));
+        let mut browser = Browser::new().await;
+        let signed_up = browser.sign_up("ada@example.com").await;
+        browser.follow(&signed_up).await;
+        let mut pages = Vec::new();
+        for email in ["ada%40example.com", "nobody%40example.com", ""] {
+            let answered = browser
+                .post("/account/forgot", &format!("email={email}"))
+                .await;
+            assert_eq!(
+                answered.header("location"),
+                Some("/account/signin"),
+                "{email}"
+            );
+            pages.push(browser.follow(&answered).await);
+        }
+        assert_eq!(pages[0], pages[1], "a known and an unknown address");
+        assert_eq!(pages[0], pages[2], "a known address and an empty field");
     }
 
     #[tokio::test]
-    async fn a_spent_reset_link_sends_the_person_back_to_ask_again() {
-        let token = token().await;
-        let answered = post(
-            "/account/reset/not-a-token",
-            &token,
-            "password=a+long+new+password",
-        )
-        .await;
-        assert_eq!(answered.status, 303);
-        assert_eq!(answered.header("location"), Some("/account/forgot"));
+    async fn a_reset_link_works_once_and_ends_every_session() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        browser.sign_in("ada@example.com", PASSWORD).await;
+        assert!(browser.signed_in());
+        let session = browser
+            .cookie(&browser.auth().sessions().config().cookie_name)
+            .expect("a session");
+        let token = reset_token(&browser, "ada@example.com").await;
+        let path = format!("/account/reset/{token}");
+
+        let short = browser.post(&path, "password=short").await;
+        assert_eq!(short.status, 422, "a short password is drawn again");
+
+        let changed = browser.post(&path, "password=a+brand+new+password").await;
+        assert_eq!(changed.header("location"), Some("/account/signin"));
+        assert!(browser
+            .follow(&changed)
+            .await
+            .contains("Your password is changed"));
+        assert!(
+            browser.auth().sessions().load(&session).await.is_err(),
+            "the old session ended"
+        );
+        assert_eq!(
+            browser.sign_in("ada@example.com", PASSWORD).await.status,
+            422,
+            "the old password is gone"
+        );
+        assert_eq!(
+            browser
+                .sign_in("ada@example.com", "a brand new password")
+                .await
+                .status,
+            303
+        );
+
+        let again = browser.post(&path, "password=yet+another+password").await;
+        assert_eq!(again.header("location"), Some("/account/forgot"));
+        assert!(browser.follow(&again).await.contains("spent or too old"));
+        assert_eq!(
+            browser
+                .sign_in("ada@example.com", "yet another password")
+                .await
+                .status,
+            422,
+            "a spent link changed nothing"
+        );
     }
-}
+
+    #[tokio::test]
+    async fn a_reset_link_of_one_account_is_not_a_verify_link() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        let token = reset_token(&browser, "ada@example.com").await;
+        let answered = browser.post(&format!("/account/verify/{token}"), "").await;
+        assert!(browser.follow(&answered).await.contains("spent or too old"));
+    }
+
+    #[tokio::test]
+    async fn a_verify_link_needs_a_click_and_works_once() {
+        use brocanth_auth::AuthStore as _;
+
+        let mut browser = Browser::new().await;
+        let accepted = browser
+            .auth()
+            .accounts()
+            .register("ada@example.com", PASSWORD)
+            .await
+            .expect("register");
+        let brocanth_auth::accounts::RegistrationNotice::Created {
+            account,
+            verification,
+        } = accepted.notice
+        else {
+            panic!("a new account");
+        };
+        let path = format!("/account/verify/{}", verification.secret());
+        let verified = |browser: &Browser| {
+            let auth = browser.auth();
+            let id = account.id.clone();
+            async move {
+                auth.store()
+                    .account(&id)
+                    .await
+                    .expect("the store")
+                    .expect("the account")
+                    .email_verified
+            }
+        };
+
+        assert_eq!(browser.get(&path).await.status, 200);
+        assert!(!verified(&browser).await, "a GET confirms nothing");
+
+        let confirmed = browser.post(&path, "").await;
+        assert!(browser
+            .follow(&confirmed)
+            .await
+            .contains("Your address is confirmed"));
+        assert!(verified(&browser).await);
+
+        let again = browser.post(&path, "").await;
+        assert!(browser.follow(&again).await.contains("spent or too old"));
+    }
+
+    #[tokio::test]
+    async fn the_code_page_wants_the_sealed_cookie_of_a_password_that_passed() {
+        let mut browser = Browser::new().await;
+        let none = browser.post("/account/code", "code=123456").await;
+        assert_eq!(none.header("location"), Some("/account/signin"));
+        assert!(browser.follow(&none).await.contains("took too long"));
+
+        browser.set_cookie(super::PENDING, "forged.value");
+        let forged = browser.post("/account/code", "code=123456").await;
+        assert_eq!(forged.header("location"), Some("/account/signin"));
+        assert!(!browser.signed_in());
+    }
+
+    #[tokio::test]
+    async fn the_totp_page_wants_a_session() {
+        let mut browser = Browser::new().await;
+        let page = browser.get("/account/totp").await;
+        assert_eq!(page.header("location"), Some("/account/signin"));
+        let post = browser.post("/account/totp", "code=123456").await;
+        assert_eq!(post.header("location"), Some("/account/signin"));
+    }
+
+    /// Two-step sign-in, from turning it on to a replayed code.
+    #[tokio::test]
+    async fn a_second_factor_is_asked_for_and_a_wrong_or_spent_code_is_refused() {
+        use brocanth_auth::{Clock, SystemClock, Totp, TotpSecret};
+
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        browser.sign_in("ada@example.com", PASSWORD).await;
+        let page = text(&browser.get("/account/totp").await);
+        let start = page.find("<code>").expect("the key") + "<code>".len();
+        let secret = &page[start..start + page[start..].find("</code>").expect("closed")];
+        let secret = TotpSecret::from_base32(secret).expect("base32");
+        let code = |at: i64| Totp::interoperable().code_at(&secret, at);
+        let now = SystemClock.now();
+
+        let wrong = if code(now) == "000000" {
+            "111111"
+        } else {
+            "000000"
+        };
+        let refused = browser
+            .post("/account/totp", &format!("code={wrong}"))
+            .await;
+        assert_eq!(refused.status, 422);
+        let on = browser
+            .post("/account/totp", &format!("code={}", code(now)))
+            .await;
+        assert_eq!(on.status, 200);
+        let page = text(&on);
+        let recovery: Vec<String> = page
+            .split("<li><code>")
+            .skip(1)
+            .map(|rest| rest[..rest.find("</code>").expect("closed")].to_string())
+            .collect();
+        assert!(!recovery.is_empty(), "the recovery codes, once: {page}");
+
+        // The password alone now leads to the code page, not a session.
+        browser.post("/account/signout", "").await;
+        let first = browser.sign_in("ada@example.com", PASSWORD).await;
+        assert_eq!(first.header("location"), Some("/account/code"));
+        assert!(!browser.signed_in());
+        assert!(browser.cookie(super::PENDING).is_some());
+
+        let wrong = browser
+            .post("/account/code", &format!("code={wrong}"))
+            .await;
+        assert_eq!(wrong.status, 422);
+        assert!(!browser.signed_in());
+
+        // The code that turned it on is spent; the next step's code works.
+        let next = code(now + 30);
+        let replayed = browser
+            .post("/account/code", &format!("code={}", code(now)))
+            .await;
+        assert_eq!(replayed.status, 422, "the enrolment code is spent");
+        let admitted = browser.post("/account/code", &format!("code={next}")).await;
+        assert_eq!(
+            admitted.header("location"),
+            Some(crate::modules::auth_screens::MODULE.after_sign_in)
+        );
+        assert!(browser.signed_in());
+        assert!(
+            browser.cookie(super::PENDING).is_none(),
+            "the pending cookie is cleared"
+        );
+
+        // A recovery code works once.
+        browser.post("/account/signout", "").await;
+        browser.sign_in("ada@example.com", PASSWORD).await;
+        let replayed = browser.post("/account/code", &format!("code={next}")).await;
+        assert_eq!(replayed.status, 422, "a TOTP code works once");
+        let recovered = browser
+            .post("/account/code", &format!("code={}", recovery[0]))
+            .await;
+        assert_eq!(recovered.status, 303);
+        assert!(browser.signed_in());
+        browser.post("/account/signout", "").await;
+        browser.sign_in("ada@example.com", PASSWORD).await;
+        let spent = browser
+            .post("/account/code", &format!("code={}", recovery[0]))
+            .await;
+        assert_eq!(spent.status, 422, "a recovery code works once");
+    }
+@LOCKOUT@}
+"##;
+
+/// With `auth-lockout`: the lock, seen through the sign-in page.
+const LOCKOUT_TEST_RS: &str = r#"
+    #[tokio::test]
+    async fn a_locked_account_answers_like_a_wrong_password_until_a_reset() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        let policy = crate::plugins::auth_lockout::policy().expect("a policy");
+        let mut refusals = Vec::new();
+        for _ in 0..policy.max_failures() {
+            refusals.push(browser.sign_in("ada@example.com", "not the password").await);
+        }
+        let locked = browser.sign_in("ada@example.com", PASSWORD).await;
+        assert_eq!(
+            locked.status, 422,
+            "the right password is refused while locked"
+        );
+        assert!(!browser.signed_in());
+        let unknown = browser.sign_in("eve@example.com", PASSWORD).await;
+        for answered in refusals.iter().chain([&locked, &unknown]) {
+            assert_eq!(answered.status, 422);
+            assert_eq!(
+                alert(answered),
+                alert(&unknown),
+                "a lock tells a stranger nothing"
+            );
+        }
+
+        let token = reset_token(&browser, "ada@example.com").await;
+        let reset = browser
+            .post(
+                &format!("/account/reset/{token}"),
+                "password=a+brand+new+password",
+            )
+            .await;
+        assert_eq!(reset.header("location"), Some("/account/signin"));
+        let back = browser
+            .sign_in("ada@example.com", "a brand new password")
+            .await;
+        assert_eq!(back.status, 303, "the reset lifted the lock");
+        assert!(browser.signed_in());
+    }
 "#;
 
 /// The markup of every screen.

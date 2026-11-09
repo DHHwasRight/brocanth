@@ -25,7 +25,10 @@ Files:
 
 - `src/plugins/mail/mod.rs`: the plugin, and the `Outbox` a page sends
   through. With `jobs`, also the `DeliverMail` job and a worker for the
-  `mail` queue.
+  `mail` queue. Its tests start the plugin with the default settings and
+  with each transport and security, so a default that cannot start fails
+  `cargo test`, not a deploy. Without `jobs`, a test also builds the whole
+  application.
 
 Slots:
 

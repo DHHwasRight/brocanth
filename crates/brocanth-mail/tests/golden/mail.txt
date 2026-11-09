@@ -2308,6 +2308,17 @@ pub struct MailPlugin {
 }
 
 impl MailPlugin {
+    /// `[mail] from`, with `[mail] from_name` beside it.
+    fn sender(&self) -> Result<Address, PluginError> {
+        let s = &self.settings;
+        if s.from_name.is_empty() {
+            Address::parse(&s.from)
+        } else {
+            Address::named(&s.from_name, &s.from)
+        }
+        .map_err(|e| PluginError::new(format!("[mail] from: {e}\nhelp: set a plain address")))
+    }
+
     /// The backend `[mail] transport` names.
     fn mailer(&self) -> Result<Arc<dyn brocanth_mail::Mailer>, PluginError> {
         let s = &self.settings;
@@ -2364,13 +2375,7 @@ impl Plugin for MailPlugin {
     }
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let s = &self.settings;
-        let from = if s.from_name.is_empty() {
-            Address::parse(&s.from)
-        } else {
-            Address::named(&s.from_name, &s.from)
-        }
-        .map_err(|e| PluginError::new(format!("[mail] from: {e}\nhelp: set a plain address")))?;
+        let from = self.sender()?;
         // The SMTP pool spawns its upkeep on the runtime, so it needs the
         // runtime entered. It opens no connection here.
         let mailer = match tokio::runtime::Handle::try_current() {
@@ -2401,6 +2406,85 @@ impl Plugin for MailPlugin {
         // the outbox is here by the time any request builds a context.
         if let Some(outbox) = &self.outbox {
             cx.insert(outbox.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(edit: impl FnOnce(&mut Settings)) -> MailPlugin {
+        let mut settings = Settings::default();
+        edit(&mut settings);
+        MailPlugin::new(settings)
+    }
+
+    fn refusal(result: Result<impl Sized, PluginError>) -> String {
+        match result {
+            Ok(_) => panic!("a wrong setting was taken"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// The defaults are what a new project starts with: a sender that
+    /// does not parse stops every start.
+    #[tokio::test]
+    async fn the_default_settings_start() {
+        let mail = plugin(|_| {});
+        if let Err(e) = mail.sender() {
+            panic!("the default sender: {e}");
+        }
+        if let Err(e) = mail.mailer() {
+            panic!("the default transport: {e}");
+        }
+    }
+
+    /// Each transport with each security, with and without a user name.
+    /// No connection opens: the relay is asked at the first send.
+    #[tokio::test]
+    async fn every_transport_and_every_security_start() {
+        for transport in ["log", "folder", "smtp"] {
+            for security in ["tls", "starttls", "plain"] {
+                for username in ["", "relay-user"] {
+                    let mail = plugin(|s| {
+                        s.transport = transport.to_string();
+                        s.smtp_security = security.to_string();
+                        s.smtp_username = username.to_string();
+                        s.smtp_password = "a password".to_string();
+                    });
+                    if let Err(e) = mail.mailer() {
+                        panic!("{transport} with {security}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_value_stops_the_start_and_says_what_to_set() {
+        let transport = refusal(plugin(|s| s.transport = "pigeon".to_string()).mailer());
+        assert!(transport.contains("help:"), "{transport}");
+        let security = refusal(
+            plugin(|s| {
+                s.transport = "smtp".to_string();
+                s.smtp_security = "ssl".to_string();
+            })
+            .mailer(),
+        );
+        assert!(security.contains("help:"), "{security}");
+        let from = refusal(plugin(|s| s.from = "no-reply@localhost".to_string()).sender());
+        assert!(from.contains("help:"), "{from}");
+        let name = plugin(|s| s.from_name = "Shop\r\nBcc: list@example.com".to_string());
+        assert!(name.sender().is_err(), "a line break in the sender's name");
+    }
+
+    /// The settings `cargo run` reads: the development file, or the
+    /// literal in `src/plugins/mod.rs`.
+    #[test]
+    fn the_application_starts_with_its_settings() {
+        if let Err(e) = crate::app::build() {
+            panic!("{e}");
         }
     }
 }

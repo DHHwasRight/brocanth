@@ -61,7 +61,13 @@ fn the_screens_are_pages_with_a_csrf_field_in_every_form() {
     let forms = markup.matches("<form method=\"post\"").count();
     assert_eq!(forms, 8, "every screen posts");
     assert_eq!(markup.matches("{! csrf}").count(), forms, "{markup}");
-    assert!(file(&files, "src/plugins/auth_screens/mod.rs").contains("mod tests"));
+    let plugin = file(&files, "src/plugins/auth_screens/mod.rs");
+    assert!(plugin.contains("mod tests"));
+    assert!(plugin.contains("fn every_form_without_the_csrf_token_is_refused"));
+    assert!(
+        !plugin.contains("a_locked_account"),
+        "no lockout test without the lockout"
+    );
 }
 
 /// Accounts in Postgres: the same pages, and no test that needs a database.
@@ -99,6 +105,8 @@ fn with_the_lockout_sign_in_goes_through_it() {
     assert!(file(&files, "src/pages/account/reset/[token].rs").contains(".clear(&account)"));
     assert!(file(&files, "src/plugins/auth_lockout.rs")
         .contains("fn the_policy_in_the_module_file_is_valid"));
+    assert!(file(&files, "src/plugins/auth_screens/mod.rs")
+        .contains("fn a_locked_account_answers_like_a_wrong_password_until_a_reset"));
 }
 
 /// The lockout alone: the function, and no page.

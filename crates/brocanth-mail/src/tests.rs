@@ -119,6 +119,29 @@ mod header_injection {
     }
 
     #[test]
+    fn a_body_that_looks_like_headers_stays_in_the_body() {
+        // The body is the one field a form fills with free text. A blank
+        // line and a header line in it must not reach the header block.
+        let body = "\r\nBcc: harvest@attacker.test\r\n\r\n.\r\nSubject: other";
+        for message in [
+            Message::builder(from()).to(to()).subject("Hi").text(body),
+            Message::builder(from())
+                .to(to())
+                .subject("Hi")
+                .text("plain")
+                .html(body),
+        ] {
+            let wire = rendered(&message.build().expect("a body is free text"));
+            assert_eq!(count_headers(&wire, "Bcc:"), 0, "{wire}");
+            assert_eq!(count_headers(&wire, "Subject:"), 1, "{wire}");
+            assert!(
+                bodies(&wire).iter().any(|b| b == body),
+                "the body round-trips"
+            );
+        }
+    }
+
+    #[test]
     fn a_quoted_display_name_cannot_close_its_own_quotes() {
         let address = Address::named("Ex\"ample\\, Bcc: harvest@attacker.test", "a@example.test")
             .expect("quotes and backslashes are text");

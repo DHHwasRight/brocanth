@@ -27,8 +27,10 @@ Files:
   `code.rs`, `totp.rs`, `reset/[token].rs`, `verify/[token].rs`
 - `src/pages/account/screens.rsx`: the markup of every screen
 - `src/plugins/auth_screens/mod.rs`: the plugin and the helpers every page
-  shares. With the store in memory, it also holds a test that walks
-  sign-up and sign-in through the application.
+  shares. With the store in memory, it also holds tests that walk every
+  screen through the application: CSRF on each form, reset and verify
+  tokens used twice, a second factor, the same answer for a known and an
+  unknown address, and, with `auth-lockout`, a lock that a reset lifts.
 
 Slots:
 
