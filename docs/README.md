@@ -16,6 +16,7 @@ map.
 
 | Page | What it covers |
 |---|---|
+| [module-candidates.md](module-candidates.md) | New modules worth building, ranked, from Django, Rails, Next.js and PocketBase. |
 | [module-catalog.md](module-catalog.md) | Every module on one page, by category, and what to build next. |
 | [modules/README.md](modules/README.md) | One page per module key: manifest, what it writes, its settings. |
 | [module-map.md](module-map.md) | The modules in five categories, with the dependency graph. |

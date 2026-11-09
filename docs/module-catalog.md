@@ -111,6 +111,9 @@ nothing holds this page.
 
 ## What to build next
 
+New modules from other frameworks are ranked in
+[module-candidates.md](module-candidates.md).
+
 Ranked: first what a user hits today, then what unblocks new modules, then
 the rest. Each item says where it is recorded.
 
