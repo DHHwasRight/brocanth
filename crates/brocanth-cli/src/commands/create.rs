@@ -2120,7 +2120,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20           headers: vec![(\"allow\".to_string(), allow.to_string())],\n\
         \x20           ..Default::default()\n\
         \x20       },\n\
-        \x20       Dispatch::NotFound => Response::new(404, \"Not Found\"),\n\
+        \x20       Dispatch::NotFound => @NOT_FOUND@\n\
         \x20   }\n\
          }\n",
     );
@@ -2140,6 +2140,23 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     // on the context, and `Ctx::new` cannot build one because the
     // providers live in the application. This is the one place that has
     // both.
+    // With `errors`, a path no route matched is a page too: the nearest
+    // `not-found.rsx`, inside its layouts, which need a context.
+    let not_found = if a.has("errors") {
+        format!(
+            "{{\n\
+             \x20           let mut ctx = Ctx::new(verb, path, brocanth::routing::Params::empty())\n\
+             \x20               .with_plugins(app.core.context_for(request, state))\n\
+             \x20               .with_state(std::mem::take(state))\n\
+             \x20               .sent(\n{deeper}\x20               );\n\
+             \x20           let response = pages::not_found(&mut ctx);\n\
+             \x20           *state = ctx.take_state();\n\
+             \x20           response\n\
+             \x20       }}"
+        )
+    } else {
+        "Response::new(404, \"Not Found\"),".to_string()
+    };
     out.replace(
         "@CTX@",
         &format!(
@@ -2149,6 +2166,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
              \x20               .sent(\n{deeper}\x20               )"
         ),
     )
+    .replace("@NOT_FOUND@", &not_found)
 }
 
 /// The grace period, `serve`, and the stop that follows it, in `src/app.rs`.
@@ -3565,6 +3583,9 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // which names `brocanth_input` and `zod`. A project that chose
     // neither must not be made to depend on them by a macro.
     let describe = if a.has("input") { ", describe" } else { "" };
+    // `errors` makes every page go through `catching` and emits
+    // `not_found`, which name the items the `errors` module writes.
+    let errors = if a.has("errors") { ", errors" } else { "" };
     // The second word, and only when something mounts. `mounted` is a
     // function the macro calls and does not write, so a project with
     // nothing to mount must not be told to call it.
@@ -3619,7 +3640,7 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     };
 
     out.replace("@ROUTES@", &routes)
-        .replace("@DESCRIBE@", &format!("{describe}{mounts}"))
+        .replace("@DESCRIBE@", &format!("{describe}{mounts}{errors}"))
 }
 
 fn index_rs(a: &Answers) -> String {
@@ -6384,8 +6405,9 @@ mod tests {
         let table = pages_mod_rs(&a, &built_for(&a));
         // `mounts` too: `admin` and `resource` each offer a `mount`, so the
         // table has a second source and the macro is told to call it.
+        // `errors` too: every page goes through `catching`.
         assert!(
-            table.contains(r#"brocanth_pages::pages!("src/pages", describe, mounts);"#),
+            table.contains(r#"brocanth_pages::pages!("src/pages", describe, mounts, errors);"#),
             "{table}"
         );
         // Code, not prose: the comment beside the templates explains why the

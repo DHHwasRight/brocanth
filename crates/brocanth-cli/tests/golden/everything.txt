@@ -43,6 +43,7 @@ brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
 brocanth-meta = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-errors = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge", "websocket"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
@@ -634,7 +635,19 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
             headers: vec![("allow".to_string(), allow.to_string())],
             ..Default::default()
         },
-        Dispatch::NotFound => Response::new(404, "Not Found"),
+        Dispatch::NotFound => {
+            let mut ctx = Ctx::new(verb, path, brocanth::routing::Params::empty())
+                .with_plugins(app.core.context_for(request, state))
+                .with_state(std::mem::take(state))
+                .sent(
+                    request.uri().query().unwrap_or(""),
+                    request.body().clone(),
+                    headers(request),
+                );
+            let response = pages::not_found(&mut ctx);
+            *state = ctx.take_state();
+            response
+        }
     }
 }
 ===== src/pages/mod.rs =====
@@ -652,7 +665,7 @@ pub async fn dispatch(app: &App, request: &hooks::Request, state: &mut RequestSt
 //!
 //! `brocanth_pages::pages!` and `cargo expand` is how to read the result.
 
-brocanth_pages::pages!("src/pages", describe, mounts);
+brocanth_pages::pages!("src/pages", describe, mounts, errors);
 
 use brocanth::plugin_body::{BodyStream, Streaming};
 use brocanth::plugin_context::{Context, ContextItem, Has};
@@ -1739,6 +1752,10 @@ impl Ctx {
     }
 }
 
+/// What `pages!("src/pages", errors)` expands to: every page goes through
+/// `catching`, and a failure through `caught`. See `src/plugins/errors/mod.rs`.
+pub use crate::plugins::errors::{catching, caught, Caught, ErrorPage};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1880,6 +1897,7 @@ pub mod admin;
 pub mod auth;
 pub mod cache;
 pub mod db;
+pub mod errors;
 pub mod i18n;
 pub mod jobs;
 pub mod meta;
@@ -2137,6 +2155,21 @@ macro_rules! register {
             "src/modules/middleware_rate_limit.rs",
             crate::modules::middleware_rate_limit::MODULE.hooks.off(),
         );
+
+        // -- brocanth-errors: error pages and reporters --------------------
+        //
+        // Publishes the reporters another plugin adds to, and reports a
+        // hook's failure. A page's failure goes through
+        // `crate::plugins::errors::caught`. Whether a debug build shows the
+        // cause is a setting, under [errors] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_errors::Errors>("errors")
+            .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "errors",
+            "src/modules/errors.rs",
+            crate::modules::errors::MODULE.hooks.off(),
+        );
         builder
     }};
 }
@@ -2174,7 +2207,8 @@ type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithModel>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
-pub type Installed = WithMiddlewareRateLimit;
+type WithErrors = After<brocanth_errors::Errors, WithMiddlewareRateLimit>;
+pub type Installed = WithErrors;
 
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
@@ -2184,6 +2218,7 @@ type HookedSecurityHeaders =
     Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
 type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
+type HookedErrors = Both<<brocanth_errors::Errors as HookSource>::Families, HookedRateLimit>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2191,7 +2226,7 @@ type HookedRateLimit =
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedRateLimit;
+pub type Hooks = HookedErrors;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -3259,6 +3294,15 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "errors.details",
+        help: "Show the cause of a 500 in a debug build. A release build never shows it.",
+        flag: true,
+        file: "src/modules/errors.rs",
+        flags: crate::modules::errors::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -3390,6 +3434,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::meta::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::errors::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     renames
@@ -3568,6 +3615,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let errors = brocanth_errors::ErrorsConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
@@ -3776,6 +3824,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
+        ("errors.details", format!("{:?}", errors.details)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -3916,7 +3965,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 9a9a3a8c5d99a515
+// brocanth-digest: ba3f6e1a38d39506
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -5217,6 +5266,67 @@ pub mod meta {
     }
 }
 
+/// The shape of src/modules/errors.rs.
+pub mod errors {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[errors]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Details,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Details => "errors.details",
+            }
+        }
+    }
+
+    /// The hooks of `errors` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `errors.report`: tell the reporters about a hook's failure.
+        pub report: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { report: true };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.report {
+                off.push("report");
+            }
+            off
+        }
+    }
+
+    /// What src/modules/errors.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The hooks that run.
+        pub hooks: Hooks,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            hooks: Hooks::DEFAULT,
+        };
+    }
+}
+
 /// The shape of src/modules/docker.rs.
 pub mod docker {
     /// What src/modules/docker.rs holds.
@@ -5261,7 +5371,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: b9bb3adab477cac7
+// brocanth-digest: dd29c4253acead23
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5293,6 +5403,7 @@ pub mod config;
 pub mod db;
 pub mod docker;
 pub mod docker_kubernetes;
+pub mod errors;
 pub mod gtag;
 pub mod i18n;
 pub mod i18n_routing;
@@ -5368,13 +5479,14 @@ pub const ALL: &[&str] = &[
     "i18n",
     "i18n-routing",
     "meta",
+    "errors",
     "docker",
     "docker-kubernetes",
     "ci",
     "ci-github",
 ];
 
-// brocanth-digest: 679f7427dd066e68
+// brocanth-digest: 2ae5bcd5b93098ba
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -6322,6 +6434,42 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/errors.rs =====
+//! `errors`: HTML 404 and 500 pages in your layouts, the cause in a debug
+//! build, a reporter hook.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [errors] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::errors::{Flag, Flags, Hooks, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [errors]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Details, Flag::As("details")),
+    //   (Key::Details, Flag::Hidden),
+    rename: &[],
+
+    hooks: Hooks {
+        // `errors.report`: tell the reporters about a hook's failure.
+        report: true,
+        ..Hooks::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
 ===== src/modules/docker.rs =====
 //! `docker`: a cargo-chef Dockerfile: slim Debian, a user that is not root, a
 //! HEALTHCHECK on /up.
@@ -6782,6 +6930,11 @@ paths = ["/login"]
 methods = ["POST"]
 limit = 5
 window_secs = 60
+
+[errors]
+# Show the cause of a 500 in a debug build. A release build never shows it.
+# Turn it off to see error.rsx while you design it.
+details = true
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -7950,6 +8103,25 @@ pub fn About(title: &str, verb: &str, path: &str) -> Element {
     </p>
     <p>The shell around this is <code>src/pages/layout.rsx</code>, which {title} shares with every page.</p>
 }
+===== src/pages/error.rsx =====
+// The page for every failure but a 404: a page that returned an error, a
+// 500 included. The layouts above this file wrap it. An `error.rsx` in a
+// directory below answers for that directory.
+//
+// A 5xx has no message here: the cause is in the log, and a debug build
+// shows it on a page of its own. A 4xx has the message the page gave.
+
+use crate::pages::Caught;
+
+pub fn ErrorPage(caught: &Caught) -> Element {
+    <h1>{caught.status} {caught.reason}</h1>
+    if let Some(message) = &caught.message {
+        <p>{message}</p>
+    } else {
+        <p>Something went wrong on our side. Try again in a moment.</p>
+    }
+    <p><a href="/">Back to the home page</a></p>
+}
 ===== src/pages/index.rsx =====
 use crate::pages::views::link::Link;
 
@@ -8025,6 +8197,24 @@ pub fn Layout(layout: &str, meta: &Head, children: Element) -> Element {
 
 pub fn Link(to: &str, children: Element) -> Element {
     <a href={to} dp-boost>{children}</a>
+}
+===== src/pages/not-found.rsx =====
+// The page for a 404: a path nothing answers, or a page that returned
+// `Error::new(404, ..)`. The layouts above this file wrap it, as they wrap a
+// page. A `not-found.rsx` in a directory below answers for that directory.
+//
+// `caught` is what `pages!` gives an error page: the status, the reason
+// phrase, the message of a 4xx, and the path.
+
+use crate::pages::Caught;
+
+pub fn NotFound(caught: &Caught) -> Element {
+    <h1>Page not found</h1>
+    <p>Nothing answers at <code>{caught.path}</code>.</p>
+    if let Some(message) = &caught.message {
+        <p>{message}</p>
+    }
+    <p><a href="/">Back to the home page</a></p>
 }
 ===== src/pages/openapi.json.rs =====
 //! `/openapi.json` -- because the file is called `openapi.json.rs`.
@@ -9722,6 +9912,192 @@ impl Plugin for Database {
         if let Some(db) = &self.db {
             cx.insert(db.clone());
         }
+    }
+}
+===== src/plugins/errors/mod.rs =====
+//! Written by `brocanth`. What a failure becomes.
+//!
+//! `pages!("src/pages", errors)` wraps every page in [`catching`]. A page
+//! that returns an error reaches [`caught`] with the error pages nearest its
+//! file: `not-found.rsx` for a 404, `error.rsx` for the rest, each inside
+//! the layouts above it. A path no route matched reaches it too, through
+//! `pages::not_found`, which `src/app.rs` calls.
+//!
+//! A 5xx is logged and told to every reporter. A debug build shows the
+//! cause on a page of its own; a release build never does.
+
+use std::sync::Arc;
+
+use brocanth_errors::{Origin, Report, Reporters};
+
+use crate::pages::{Ctx, Error, Handler, Response};
+
+pub use brocanth_errors::Caught;
+
+/// An error page: `not-found.rsx` or `error.rsx`, inside its layouts.
+/// `pages!` writes one function per file.
+pub type ErrorPage = fn(&mut Ctx, &Caught) -> Result<Response, Error>;
+
+/// A page whose failure goes to [`caught`], with the error pages nearest
+/// its file. `pages!` wraps every page in it.
+pub fn catching(
+    handler: Handler,
+    not_found: Option<ErrorPage>,
+    failed: Option<ErrorPage>,
+) -> Handler {
+    // Shared, because the future a request gets must not borrow the table.
+    let handler = Arc::new(handler);
+    Box::new(move |ctx| {
+        let handler = Arc::clone(&handler);
+        Box::pin(async move {
+            let answered = (handler.as_ref())(&mut *ctx).await;
+            match answered {
+                Ok(response) => Ok(response),
+                Err(error) => caught(ctx, error, not_found, failed),
+            }
+        })
+    })
+}
+
+/// What a failure becomes.
+///
+/// An error that names its own `content-type` is for a program, and so is
+/// a client that does not read HTML: both keep the plain answer, which
+/// `Err` hands back to `src/app.rs`. Every other failure answers a page
+/// with the error's status and headers.
+pub fn caught(
+    ctx: &mut Ctx,
+    error: Error,
+    not_found: Option<ErrorPage>,
+    failed: Option<ErrorPage>,
+) -> Result<Response, Error> {
+    let reporters = ctx.provided::<Reporters, _>().cloned();
+    if error.status >= 500 {
+        if let Some(reporters) = &reporters {
+            let method = ctx.verb.to_string();
+            reporters.report(&Report {
+                status: error.status,
+                message: &error.message,
+                method: &method,
+                path: &ctx.path,
+                origin: Origin::Page,
+            });
+        }
+    }
+    let typed = error
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"));
+    if typed || !brocanth_errors::accepts_html(ctx.header("accept")) {
+        return Err(error);
+    }
+
+    let caught = Caught::new(error.status, &error.message, &ctx.path);
+    if error.status >= 500 {
+        let (status, message) = (error.status, &error.message);
+        crate::plugins::say!(error, "error {status}: {message}"; status, %message);
+        // A release binary never shows the cause, whatever the setting.
+        if cfg!(debug_assertions) && reporters.as_ref().is_some_and(Reporters::details) {
+            let method = ctx.verb.to_string();
+            let page =
+                brocanth_errors::development_page(&caught, &error.message, &method, ctx.headers());
+            return Ok(answer(page, error));
+        }
+    }
+
+    let page = if caught.is_not_found() {
+        not_found
+    } else {
+        failed
+    };
+    let body = match page.map(|page| page(ctx, &caught)) {
+        Some(Ok(rendered)) => rendered.body,
+        Some(Err(broken)) => {
+            // The error page failed too. The plain page cannot.
+            let message = broken.message;
+            crate::plugins::say!(error, "the error page failed: {message}"; %message);
+            brocanth_errors::plain_page(&caught)
+        }
+        None => brocanth_errors::plain_page(&caught),
+    };
+    Ok(answer(body, error))
+}
+
+/// A page with the error's status, and the headers it carried: a
+/// `www-authenticate` for a 401, a `retry-after` for a 429.
+fn answer(body: String, error: Error) -> Response {
+    let mut response = Response::new(error.status, body);
+    response.headers = error.headers;
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use brocanth::routing::Verb;
+    use brocanth_errors::{Report, Reporter, Reporters};
+    use brocanth_server::{Request, Response};
+
+    /// A path no route answers, and one whose page fails with a 500.
+    const MISSING: &str = "/en/nowhere";
+    const BROKEN: &str = "/en/users/x";
+
+    fn body(response: &Response) -> String {
+        let bytes = response.body.bytes().expect("a whole body");
+        String::from_utf8(bytes.to_vec()).expect("utf-8")
+    }
+
+    #[tokio::test]
+    async fn a_path_no_route_matches_answers_an_html_404() {
+        let app = crate::app::build().expect("the application builds");
+        let request = Request::new(Verb::Get, MISSING).with_header("accept", "text/html");
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 404);
+        let body = body(&response);
+        assert!(body.contains("Page not found"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_reads_json_keeps_the_plain_answer() {
+        let app = crate::app::build().expect("the application builds");
+        let request = Request::new(Verb::Get, MISSING).with_header("accept", "application/json");
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 404);
+        assert_eq!(body(&response), "Not Found");
+    }
+
+    struct Heard(Arc<Mutex<Vec<String>>>);
+
+    impl Reporter for Heard {
+        fn report(&self, report: &Report<'_>) {
+            if let Ok(mut heard) = self.0.lock() {
+                heard.push(format!("{} {}", report.status, report.path));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_is_reported_and_shows_its_cause_only_in_a_debug_build() {
+        let app = crate::app::build().expect("the application builds");
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let cx = app.core.context();
+        let reporters: &Reporters = cx.get();
+        reporters.add(Heard(Arc::clone(&heard)));
+
+        // `/users/{id}` parses its parameter, so this fails with a 500. The
+        // reporter hears the path the page answered.
+        let request = Request::new(Verb::Get, BROKEN).with_header("accept", "text/html");
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 500);
+        assert_eq!(*heard.lock().expect("lock"), ["500 /users/x"]);
+        let cause = "invalid digit found in string";
+        assert_eq!(
+            body(&response).contains(cause),
+            cfg!(debug_assertions),
+            "{}",
+            body(&response)
+        );
     }
 }
 ===== src/plugins/i18n/mod.rs =====
@@ -12733,6 +13109,7 @@ request.
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `i18n-routing`  a locale segment in the path (/fr/about), a redirect from a path without one
 - `meta`  a title, a description, a canonical URL and Open Graph tags for each page
+- `errors`  HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
@@ -13173,6 +13550,28 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
 `X-Forwarded-For`, unless the edge overwrites it.
 
+## Errors
+
+A page fails with `Err(Error::new(status, message))` or `?`, and
+`src/plugins/errors/mod.rs` turns the failure into a page. Do not build
+an error page in a handler. A 404 is `Error::new(404, "no user 7")`. A
+4xx message is shown to the visitor; a 5xx message is logged and never
+shown, so put the cause in it.
+
+An error with a `content-type` header, and a client that does not
+accept HTML, keep the plain answer: an API stays an API.
+
+To hear about every 5xx, implement `brocanth_errors::Reporter` and add
+it in a plugin's `after_config`:
+`lc.services().get::<brocanth_errors::Reporters>()`. A reporter must
+not wait.
+
+`not-found.rsx` answers a 404 and `error.rsx` every other failure, for
+the pages in its directory and below it, inside the layouts above it.
+The nearest file wins. The components are `NotFound` and `ErrorPage`,
+and each may declare `caught: &Caught`. After you add one where there
+was none, run `touch src/pages/mod.rs`.
+
 ## Tasks
 
 A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
@@ -13210,7 +13609,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 78e7d1685bc26f7b -->
+<!-- brocanth-digest: d040041bd3fe7a91 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -13222,7 +13621,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "i18n-routing", "meta", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "jobs", "auth", "policy", "storage", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "robots", "sitemap", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -13475,7 +13874,7 @@ adapted_to = ["input"]
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
-files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
+files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/error.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/not-found.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
 adapted_to = ["rsx-tailwind", "rsx-htmx", "meta"]
@@ -13544,6 +13943,14 @@ config = ["meta"]
 crates = ["brocanth-meta"]
 adapted_to = ["config", "i18n", "i18n-routing", "rsx"]
 
+[modules.errors]
+version = "0.1.0"
+kind = ["renderer", "middleware"]
+files = ["src/modules/errors.rs", "src/pages/error.rsx", "src/pages/not-found.rsx", "src/plugins/errors/"]
+config = ["errors"]
+crates = ["brocanth-errors"]
+adapted_to = ["config", "rsx", "i18n-routing"]
+
 [modules.docker]
 version = "0.1.0"
 kind = ["external"]
@@ -13576,4 +13983,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 1cb6395bd0378e85
+# brocanth-digest: 92cd4f081eb13db9

@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 47 modules. Each name links to its own page
+what to build next. There are 48 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -45,10 +45,11 @@ nothing holds this page.
 | [`sessions`](modules/sessions.md) | A cookie, and a `Session` the context hands a handler |  |  |  |  |
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
 
-### Renderer (4)
+### Renderer (5)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`errors`](modules/errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Middleware |  |  | a client that does not read HTML keeps the plain answer |
 | [`jt`](modules/jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Routes |  |  | static-site safe |
 | [`meta`](modules/meta.md) | A title, a description, a canonical URL and Open Graph tags for each page | Enhancer |  |  | static-site safe; no canonical URL until `base_url` is set |
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |

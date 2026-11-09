@@ -788,6 +788,7 @@ dependencies = [
  "brocanth-client",
  "brocanth-config",
  "brocanth-db",
+ "brocanth-errors",
  "brocanth-gtag",
  "brocanth-i18n",
  "brocanth-input",
@@ -875,6 +876,18 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "brocanth-errors"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-cli",
+ "brocanth-errors",
+ "brocanth-scaffold",
+ "http",
+ "serde",
 ]
 
 [[package]]

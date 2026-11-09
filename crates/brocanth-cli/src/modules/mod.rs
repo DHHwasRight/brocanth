@@ -172,6 +172,9 @@ pub const ALL: &[&dyn Module] = &[
     // A title, a description and share tags for each page. The root
     // layout writes them, so `rsx` adapts to it.
     &brocanth_meta::scaffold::PageMeta,
+    // HTML 404 and 500 pages inside the layouts, the cause in a debug
+    // build, and the reporter hook.
+    &brocanth_errors::scaffold::ErrorPages,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

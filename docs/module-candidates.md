@@ -24,7 +24,7 @@ then what the module unblocks. Both scans put `mail` first.
 | 4 | `auth-oauth` | Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |
 | 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. **Built:** `brocanth-meta`, `docs/modules/meta.md`. | Next.js metadata, next-seo, django-meta | M |
 | 6 | `storage-routes` | Upload and download routes, `?thumb=`, protected file tokens over `storage` | Active Storage, uploadthing, PocketBase files | S |
-| 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
+| 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. **Built:** `brocanth-errors`, `docs/modules/errors.md`. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
 | 8 | `compression` | gzip and brotli on responses | GZipMiddleware, Rack::Deflater | S |
 | 9 | `conditional-get` | Dynamic `ETag` and 304 | ConditionalGetMiddleware, `fresh_when` | S |
 | 10 | `superuser` | Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |

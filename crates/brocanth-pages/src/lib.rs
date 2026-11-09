@@ -69,6 +69,7 @@
 //! that belongs to one request belongs on the page component, which the
 //! handler builds and which already has the context.
 
+mod caught;
 mod naming;
 mod table;
 
@@ -115,24 +116,25 @@ pub fn pages(input: TokenStream) -> TokenStream {
     // Words rather than booleans, because `pages!("src/pages", true, true)`
     // says nothing at the call site about what is true. Order does not
     // matter and a word may appear once.
-    let mut describe = false;
-    let mut mounts = false;
+    let mut words = table::Words::default();
     for word in rest.split(',').map(str::trim).filter(|w| !w.is_empty()) {
         match word {
-            "describe" => describe = true,
-            "mounts" => mounts = true,
+            "describe" => words.describe = true,
+            "mounts" => words.mounts = true,
+            "errors" => words.errors = true,
             other => {
                 return error(&format!(
                     "`{other}` is not a word this macro knows. After the path \
                      it takes `describe`, which emits what every route takes \
-                     and gives, and `mounts`, which lets the table hold routes \
-                     a module contributed -- as in \
-                     `pages!(\"src/pages\", describe, mounts)`"
+                     and gives, `mounts`, which lets the table hold routes \
+                     a module contributed, and `errors`, which renders \
+                     `not-found.rsx` and `error.rsx` for a failure -- as in \
+                     `pages!(\"src/pages\", describe, mounts, errors)`"
                 ))
             }
         }
     }
-    table::expand(Path::new(&root), &manifest_dir(), describe, mounts).into()
+    table::expand(Path::new(&root), &manifest_dir(), words).into()
 }
 
 /// The path out of `pages!("...")`, without pulling in a parser for it.
@@ -287,7 +289,12 @@ fn layout_in(dir: &Path, owned: &[&str]) -> Result<Option<PathBuf>, String> {
 /// the directories above a file are a fact about its path rather than
 /// something to search for.
 fn layouts_above(file: &Path) -> Result<Vec<Layout>, String> {
-    let root = manifest_dir();
+    layouts_above_in(&manifest_dir(), file)
+}
+
+/// [`layouts_above`] for a package at `root`. `pages!` passes the package
+/// it was given, so a test can expand a tree in a temporary directory.
+fn layouts_above_in(root: &Path, file: &Path) -> Result<Vec<Layout>, String> {
     let mut found = Vec::new();
 
     let mut dir = file.parent();
@@ -303,6 +310,7 @@ fn layouts_above(file: &Path) -> Result<Vec<Layout>, String> {
                 prefix: prefix_of(current),
                 wants_prefix: declares(&candidate, "Layout", "layout"),
                 wants_path: declares(&candidate, "Layout", "path"),
+                wants_meta: declares(&candidate, "Layout", "meta"),
                 oob: defines(&candidate, "Oob").then(|| Wants {
                     prefix: declares(&candidate, "Oob", "layout"),
                     path: declares(&candidate, "Oob", "path"),
@@ -342,6 +350,11 @@ struct Layout {
     /// answered. A layout that marks the link it is currently under needs
     /// it, and nothing else does.
     wants_path: bool,
+    /// Whether the component declares `meta`, the page's metadata as the
+    /// head renders it. Filled with `ctx.head()`, which the `meta` module
+    /// writes into `src/pages/mod.rs`. Only a layout that writes the
+    /// document's `<head>` asks for it.
+    wants_meta: bool,
     /// Whether the file also defines `Oob`, and what that component asks
     /// for.
     ///
@@ -510,6 +523,10 @@ fn expand(layouts: &[Layout], ctx: &TokenStream2, content: &TokenStream2) -> Tok
             if layout.wants_path {
                 fields = quote!(path: &(#ctx).path, #fields);
             }
+            if layout.wants_meta {
+                // Method syntax, so `ctx` may be a `&mut Ctx` or a `Ctx`.
+                fields = quote!(meta: &(#ctx).head(), #fields);
+            }
             if layout.wants_prefix {
                 fields = quote!(layout: #prefix, #fields);
             }
@@ -585,6 +602,7 @@ mod tests {
             prefix: prefix_of(Path::new(dir)),
             wants_prefix: false,
             wants_path: false,
+            wants_meta: false,
             oob: None,
             file: PathBuf::from("/tmp/layout.rsx"),
         }
@@ -644,6 +662,19 @@ mod tests {
 
         let out = expand(&[layout("src/pages")], &quote!(ctx), &quote!(Page {})).to_string();
         assert!(!out.contains("path :"), "nothing asked: {out}");
+    }
+
+    #[test]
+    fn a_layout_is_handed_the_head_only_when_it_asks() {
+        // The page sets its metadata on the context; the layout that
+        // writes `<head>` reads it back, resolved against the site.
+        let mut wants = layout("src/pages");
+        wants.wants_meta = true;
+        let out = expand(&[wants], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(out.contains("meta : & (ctx) . head ()"), "{out}");
+
+        let out = expand(&[layout("src/pages")], &quote!(ctx), &quote!(Page {})).to_string();
+        assert!(!out.contains("head ()"), "nothing asked: {out}");
     }
 
     #[test]
