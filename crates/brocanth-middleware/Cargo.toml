@@ -59,10 +59,11 @@ brocanth-config.workspace = true
 # `tests/rate_limit_postgres.rs`, skipped without a database.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
-# This crate, with both optional features on, so `cargo test -p
-# brocanth-middleware` runs the configuration and Postgres tests rather
-# than compiling them out. The pattern `brocanth-config` uses for `admin`.
-brocanth-middleware = { path = ".", features = ["config", "postgres"] }
+# This crate, with its optional features on, so `cargo test -p
+# brocanth-middleware` runs the configuration, Postgres and manifest tests
+# rather than compiling them out. The pattern `brocanth-config` uses for
+# `admin`.
+brocanth-middleware = { path = ".", features = ["config", "postgres", "scaffold"] }
 
 [features]
 default = ["runtime"]
