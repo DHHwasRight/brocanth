@@ -225,3 +225,22 @@ The data models also differ. Jobs keeps a `state` column. Queue derives the stat
 - **D4. Is SQLite a target for generated projects?** If yes, `db` needs a dialect choice first. If no, think about whether to drop the `sqlite` feature in jobs, or at least move it out of the scaffold story, because nothing selects it today.
 - **D5. Pool sharing as the default:** with `db` present, should `cache`/`jobs` reuse its pool and drop their own `url`? Or keep separate URLs so that a project can move the cache to another database?
 - **D6. The selection mechanism:** child modules per backend (recommended), or wait for enum options in `src/modules/` (which cannot change Cargo deps without generator support).
+
+## Decisions (Max, 2026-11-09)
+
+1. **Memory backends, for tests and development only.** A memory backend
+   must pass the backend's conformance suite. `brocanth check --deploy`
+   reports it as an error in production.
+2. **One job system: `brocanth-queue` is the engine.** `brocanth-jobs`
+   becomes a thin layer over it that adds cron and the admin panel. The
+   jobs memory backend is the queue memory backend.
+3. **Redis/Valkey: a first-party `brocanth-cache-redis` crate and a
+   `cache-redis` module.** Jobs on Redis can come later, as a queue
+   backend.
+4. **SQLite for generated projects: not now.** It needs `db` to have a
+   dialect choice first. The jobs `sqlite` feature stays a library option.
+5. **Cache and jobs reuse the `db` pool when `db` is chosen**, and drop
+   their own `url` setting then.
+6. **A project picks a backend through child modules** (`cache-redis`,
+   `cache-memory`), with conflicts between siblings, because a backend
+   changes `Cargo.toml`.
