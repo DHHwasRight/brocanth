@@ -136,6 +136,9 @@ pub struct WorkerConfig {
     pub name: String,
     /// The queue to work.
     pub queue: String,
+    /// More queues to work, after `queue`. Each claim round starts at the
+    /// next queue in turn, so a busy queue does not starve the others.
+    pub extra_queues: Vec<String>,
     /// How many jobs run at once. Bounded by [`Budget`].
     pub concurrency: u32,
     /// How long a claim holds a job before it expires.
@@ -162,6 +165,7 @@ impl Default for WorkerConfig {
         WorkerConfig {
             name: default_worker_name(),
             queue: "default".into(),
+            extra_queues: Vec::new(),
             concurrency: 8,
             lease: Duration::from_secs(60),
             heartbeat: Duration::from_secs(15),
@@ -237,6 +241,30 @@ pub trait Observer: Send + Sync + 'static {
     fn on_lease_lost(&self, _kind: &str) {}
     /// A backend call failed.
     fn on_backend_error(&self, _op: &'static str, _error: &BackendError) {}
+    /// A job is about to run. The context names it, its attempt and the
+    /// worker, which the kind-only calls above do not.
+    fn on_start(&self, _cx: &JobContext) {}
+    /// A job ran, and the worker is about to settle it with `outcome`.
+    /// `took` is how long the body ran. Not called for a job released
+    /// because its kind is unknown, or abandoned because its lease ran out:
+    /// neither ran to an outcome.
+    fn on_settle(&self, _cx: &JobContext, _outcome: &Settle, _took: Duration) {}
+}
+
+/// What a worker did between its start and its stop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerReport {
+    /// Jobs that ran to an outcome: done, a retry or the dead letter.
+    pub finished: u64,
+    /// Jobs given back at the stop, without an attempt spent.
+    pub returned: u64,
+}
+
+/// How one job's task ended, for the report.
+enum RunEnd {
+    Finished,
+    Returned,
+    Other,
 }
 
 /// An observer that does nothing.
@@ -319,11 +347,38 @@ impl Worker {
         self
     }
 
-    /// Run until `stop` turns true, then finish or release what is running.
-    pub async fn run(mut self, mut stop: watch::Receiver<bool>) {
+    /// Run until `stop` turns true, then finish or release what is running
+    /// within [`WorkerConfig::shutdown_grace`].
+    pub async fn run(self, mut stop: watch::Receiver<bool>) {
+        let grace = self.config.shutdown_grace;
+        let (tx, rx) = watch::channel(None);
+        let forward = tokio::spawn(async move {
+            loop {
+                if *stop.borrow_and_update() {
+                    let _ = tx.send(Some(grace));
+                    return;
+                }
+                if stop.changed().await.is_err() {
+                    // Nobody can ask for a stop any more. Keep the sender,
+                    // so the worker does not read the drop as one.
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        self.drain(rx).await;
+        forward.abort();
+    }
+
+    /// Run until `stop` holds a grace period, then give running jobs that
+    /// long to finish, and release the rest without spending an attempt.
+    ///
+    /// The grace travels with the stop, because the caller often learns it
+    /// only then: a deploy says how long is left when it asks the process
+    /// to stop. [`Worker::run`] is this with [`WorkerConfig::shutdown_grace`].
+    pub async fn drain(mut self, mut stop: watch::Receiver<Option<Duration>>) -> WorkerReport {
         let permits = Arc::new(Semaphore::new(self.config.concurrency as usize));
-        let (job_stop_tx, job_stop_rx) = watch::channel(false);
-        let mut running = JoinSet::new();
+        let mut running: JoinSet<RunEnd> = JoinSet::new();
+        let mut report = WorkerReport::default();
         let max_batch = self
             .backend
             .capabilities()
@@ -331,6 +386,10 @@ impl Worker {
             .max(1)
             .min(self.config.concurrency as usize);
         let mut wakeup = self.wakeup.clone();
+        let queues: Vec<String> = std::iter::once(self.config.queue.clone())
+            .chain(self.config.extra_queues.iter().cloned())
+            .collect();
+        let mut turn = 0usize;
 
         // The relay gets its own stop signal, because it has to outlive the
         // jobs: one of them may enqueue bulk work on its way out.
@@ -346,59 +405,87 @@ impl Worker {
         // never promoted, exhausted rows were never dead-lettered, and the
         // deduplication table never shrank. The failure was invisible
         // because it needed load to appear.
+        let (sweep_stop_tx, sweep_stop_rx) = watch::channel(false);
         let sweeper = tokio::spawn(sweep_loop(
             Arc::clone(&self.backend),
             Arc::clone(&self.observer),
             self.config.sweep_every,
-            stop.clone(),
+            sweep_stop_rx,
         ));
 
-        while !*stop.borrow() {
+        while stop.borrow().is_none() {
             // Never claim more than there are permits for. A claimed job
             // that waits for a permit is a job holding a lease it is not
             // using, and the lease is what another worker is waiting on.
-            let free = permits.available_permits();
-            if free == 0 {
+            if permits.available_permits() == 0 {
                 tokio::select! {
                     _ = stop.changed() => continue,
                     _ = tokio::time::sleep(Duration::from_millis(10)) => continue,
                 }
             }
 
-            let req = ClaimRequest {
-                queue: self.config.queue.clone(),
-                max: free.min(max_batch),
-                lease: self.config.lease,
-                kinds: self
-                    .backend
-                    .capabilities()
-                    .filter_by_kind
-                    .then(|| self.registry.kinds()),
-                worker: self.config.name.clone(),
-            };
+            let mut claimed_any = false;
+            for i in 0..queues.len() {
+                let free = permits.available_permits();
+                if free == 0 {
+                    break;
+                }
+                let queue = &queues[(turn + i) % queues.len()];
+                let req = ClaimRequest {
+                    queue: queue.clone(),
+                    max: free.min(max_batch),
+                    lease: self.config.lease,
+                    kinds: self
+                        .backend
+                        .capabilities()
+                        .filter_by_kind
+                        .then(|| self.registry.kinds()),
+                    worker: self.config.name.clone(),
+                };
 
-            // The claim is awaited to completion and never raced against the
-            // stop signal. Dropping it mid-flight does not undo it: the
-            // statement commits on the server, and the rows it took come
-            // back with an attempt spent and a lease token no process has
-            // ever seen. They would be unreleasable, and invisible until the
-            // lease expired. Finishing the claim costs one round trip of
-            // shutdown latency and loses nothing.
-            let claimed = self.backend.claim(&req).await;
-
-            let claimed = match claimed {
-                Ok(c) => c,
-                Err(e) => {
-                    self.observer.on_backend_error("claim", &e);
-                    tokio::select! {
-                        _ = tokio::time::sleep(self.config.poll_idle) => {}
-                        _ = stop.changed() => {}
+                // The claim is awaited to completion and never raced against
+                // the stop signal. Dropping it mid-flight does not undo it:
+                // the statement commits on the server, and the rows it took
+                // come back with an attempt spent and a lease token no
+                // process has ever seen. They would be unreleasable, and
+                // invisible until the lease expired. Finishing the claim
+                // costs one round trip of shutdown latency and loses nothing.
+                let claimed = match self.backend.claim(&req).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.observer.on_backend_error("claim", &e);
+                        continue;
                     }
+                };
+                if claimed.is_empty() {
                     continue;
                 }
-            };
+                claimed_any = true;
+                self.observer.on_claim(queue, claimed.len());
+                for job in claimed {
+                    let permit = Arc::clone(&permits)
+                        .try_acquire_owned()
+                        .expect("claimed no more than there were permits");
+                    running.spawn(run_one(
+                        Arc::clone(&self.backend),
+                        Arc::clone(&self.registry),
+                        Arc::clone(&self.observer),
+                        Arc::clone(&self.unknown_seen),
+                        self.config.clone(),
+                        job,
+                        stop.clone(),
+                        permit,
+                    ));
+                }
+            }
+            turn = turn.wrapping_add(1);
 
-            if claimed.is_empty() {
+            // Reap what finished, without waiting.
+            while let Some(done) = running.try_join_next() {
+                reap(done, &mut report);
+            }
+
+            if !claimed_any {
                 tokio::select! {
                     _ = tokio::time::sleep(self.config.poll_idle) => {}
                     _ = async {
@@ -409,42 +496,26 @@ impl Worker {
                     } => {}
                     _ = stop.changed() => {}
                 }
-                continue;
             }
-
-            self.observer.on_claim(&self.config.queue, claimed.len());
-            for job in claimed {
-                let permit = Arc::clone(&permits)
-                    .try_acquire_owned()
-                    .expect("claimed no more than there were permits");
-                running.spawn(run_one(
-                    Arc::clone(&self.backend),
-                    Arc::clone(&self.registry),
-                    Arc::clone(&self.observer),
-                    Arc::clone(&self.unknown_seen),
-                    self.config.clone(),
-                    job,
-                    job_stop_rx.clone(),
-                    permit,
-                ));
-            }
-            // Reap what finished, without waiting.
-            while running.try_join_next().is_some() {}
         }
 
-        // Stopping. Tell the jobs, then wait out the grace period. A job
-        // that returns in time settles normally. One that does not is
-        // dropped, and its guard releases the lease so another worker takes
-        // it at once rather than after the lease expires.
-        let _ = job_stop_tx.send(true);
-        let grace = tokio::time::sleep(self.config.shutdown_grace);
-        tokio::pin!(grace);
+        // Stopping. Every job saw the same signal and started its own grace
+        // period. A job that returns in time settles normally; one that does
+        // not is released by its own task. The extra second is for those
+        // releases to land. Past it, what is left is dropped, and its guard
+        // releases the lease.
+        let grace = (*stop.borrow()).unwrap_or(self.config.shutdown_grace);
+        let deadline = tokio::time::sleep(grace.saturating_add(Duration::from_secs(1)));
+        tokio::pin!(deadline);
         loop {
             tokio::select! {
                 next = running.join_next() => {
-                    if next.is_none() { break; }
+                    match next {
+                        Some(done) => reap(done, &mut report),
+                        None => break,
+                    }
                 }
-                _ = &mut grace => {
+                _ = &mut deadline => {
                     running.shutdown().await;
                     break;
                 }
@@ -457,8 +528,19 @@ impl Worker {
             let _ = relay_stop_tx.send(true);
             let _ = task.await;
         }
+        let _ = sweep_stop_tx.send(true);
         sweeper.abort();
         let _ = sweeper.await;
+        report
+    }
+}
+
+/// Counts one finished task into the report.
+fn reap(done: Result<RunEnd, tokio::task::JoinError>, report: &mut WorkerReport) {
+    match done {
+        Ok(RunEnd::Finished) => report.finished += 1,
+        Ok(RunEnd::Returned) => report.returned += 1,
+        _ => {}
     }
 }
 
@@ -561,9 +643,9 @@ async fn run_one(
     unknown_seen: Arc<AtomicU64>,
     config: WorkerConfig,
     claimed: Claimed,
-    stopping: watch::Receiver<bool>,
+    stopping: watch::Receiver<Option<Duration>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
-) {
+) -> RunEnd {
     let mut guard = LeaseGuard {
         backend: Arc::clone(&backend),
         lease: Some(claimed.lease.clone()),
@@ -590,7 +672,7 @@ async fn run_one(
             config.settle_retries,
         )
         .await;
-        return;
+        return RunEnd::Other;
     };
 
     let cx = JobContext {
@@ -603,18 +685,18 @@ async fn run_one(
         stopping: stopping.clone(),
     };
 
+    observer.on_start(&cx);
     let started = std::time::Instant::now();
-    let mut handle = tokio::spawn(entry.run(claimed.payload.clone(), cx));
+    let mut handle = tokio::spawn(entry.run(claimed.payload.clone(), cx.clone()));
     let mut beat = tokio::time::interval(config.heartbeat);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     beat.tick().await; // the first tick is immediate
 
     let mut stopping = stopping;
-    let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = if *stopping.borrow() {
-        Some(Box::pin(tokio::time::sleep(config.shutdown_grace)))
-    } else {
-        None
+    let grace_of = |stop: &watch::Receiver<Option<Duration>>| {
+        (*stop.borrow()).map(|g| Box::pin(tokio::time::sleep(g)))
     };
+    let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = grace_of(&stopping);
 
     // What the worker believes the lease runs out at. A successful heartbeat
     // pushes it; a failed one does not. The backend reports the first expiry
@@ -654,7 +736,7 @@ async fn run_one(
                 handle.abort();
                 let _ = handle.await;
                 guard.disarm();
-                return;
+                return RunEnd::Other;
             }
             _ = beat.tick() => {
                 match backend.heartbeat(&claimed.lease, config.lease).await {
@@ -667,13 +749,13 @@ async fn run_one(
                         handle.abort();
                         let _ = handle.await;
                         guard.disarm();
-                        return;
+                        return RunEnd::Other;
                     }
                     Err(e) => observer.on_backend_error("heartbeat", &e),
                 }
             }
             _ = stopping.changed(), if deadline.is_none() => {
-                deadline = Some(Box::pin(tokio::time::sleep(config.shutdown_grace)));
+                deadline = grace_of(&stopping);
             }
             _ = async {
                 match deadline.as_mut() {
@@ -693,6 +775,15 @@ async fn run_one(
     };
 
     guard.disarm();
+    observer.on_settle(&cx, &outcome, started.elapsed());
+    let end = match outcome {
+        Settle::Release {
+            reason: ReleaseReason::Stopping,
+            ..
+        } => RunEnd::Returned,
+        Settle::Release { .. } => RunEnd::Other,
+        _ => RunEnd::Finished,
+    };
     settle_with_retries(
         &backend,
         &observer,
@@ -701,6 +792,7 @@ async fn run_one(
         config.settle_retries,
     )
     .await;
+    end
 }
 
 fn decide(

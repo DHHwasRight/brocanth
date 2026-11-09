@@ -48,15 +48,34 @@ pub const SCHEMA: &str = include_str!("schema.sql");
 /// go after a day with no sweep at all.
 const PARTITIONS_AHEAD: i64 = 2;
 
+/// The advisory lock [`migrate`] holds: the eight ASCII bytes of
+/// `brocqueu`, read as a big-endian `i64`, so the row in `pg_locks` reads
+/// back as text. `brocanth-jobs` uses `brocjobs`, `brocanth-cache`
+/// `brocache`: each schema has its own key.
+const MIGRATION_LOCK: i64 = i64::from_be_bytes(*b"brocqueu");
+
 /// Create the tables if they are not there.
+///
+/// Safe to call from several processes at once. `CREATE TABLE IF NOT
+/// EXISTS` checks the catalogue and creates in two steps, so two sessions
+/// on an empty schema both create and the loser fails on
+/// `pg_class_relname_nsp_index`. The statements run in one transaction
+/// under an advisory lock, so the second session waits and then finds the
+/// tables.
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *tx)
+        .await?;
     for statement in SCHEMA.split(";\n") {
         let s = statement.trim();
         if s.is_empty() || s.lines().all(|l| l.trim_start().starts_with("--")) {
             continue;
         }
-        sqlx::query(s).execute(pool).await?;
+        sqlx::query(s).execute(&mut *tx).await?;
     }
+    tx.commit().await?;
     partitions::ensure_archive_partitions(pool, PARTITIONS_AHEAD).await?;
     Ok(())
 }

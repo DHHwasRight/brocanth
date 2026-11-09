@@ -79,6 +79,7 @@ fn config() -> WorkerConfig {
     WorkerConfig {
         name: "test".into(),
         queue: "q".into(),
+        extra_queues: Vec::new(),
         concurrency: 4,
         lease: Duration::from_secs(5),
         heartbeat: Duration::from_millis(400),
