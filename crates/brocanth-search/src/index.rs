@@ -75,6 +75,9 @@ pub struct SearchQuery {
 /// a pasted page should still search for its start.
 pub const MAX_TERM: usize = 200;
 
+/// The largest `LIMIT` or `OFFSET` Postgres takes.
+const BIGINT_MAX: u64 = i64::MAX as u64;
+
 /// The search of one table.
 ///
 /// The column is a generated `tsvector`, so Postgres keeps it in step with
@@ -229,7 +232,15 @@ impl<E: Entity> Index<E> {
         let language = self.language.as_str();
         let vector = format!("\"{table}\".\"{}\"", self.column.as_str());
         let mut binds = condition.binds().to_vec();
-        binds.push(Value::Text(term.chars().take(MAX_TERM).collect()));
+        // A control character becomes a space. Postgres refuses NUL in a
+        // text value, and `?q=%00` is one keystroke away; the others are
+        // never part of a word.
+        binds.push(Value::Text(
+            term.chars()
+                .take(MAX_TERM)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect(),
+        ));
         let term = format!("${}", binds.len());
         let query = format!("websearch_to_tsquery('{language}', {term})");
 
@@ -247,6 +258,9 @@ impl<E: Entity> Index<E> {
             columns.push(format!("\"{table}\".\"{}\"", column.ident()?.as_str()));
         }
         let key = E::PRIMARY_KEY.ident()?.as_str();
+        // `LIMIT` and `OFFSET` are `bigint`: a `u64` above `i64::MAX` is
+        // "out of range", so a page size of `u64::MAX` means "all".
+        let (limit, offset) = (limit.min(BIGINT_MAX), offset.min(BIGINT_MAX));
         let select = format!(
             "SELECT {}, ({rank})::real AS search_rank FROM \"{table}\" WHERE {filter} \
              ORDER BY search_rank DESC, \"{table}\".\"{key}\" ASC LIMIT {limit} OFFSET {offset}",
