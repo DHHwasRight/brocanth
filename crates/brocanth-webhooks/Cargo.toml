@@ -1,0 +1,106 @@
+[package]
+name = "brocanth-webhooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Webhooks for brocanth: verified incoming deliveries with a replay window and an idempotency key, and signed outgoing deliveries with retries and a log."
+readme = "README.md"
+
+# One crate for both directions, because both directions are one scheme:
+# the outgoing side signs with Standard Webhooks, and the incoming side
+# verifies Standard Webhooks, Stripe and plain HMAC. One signing module
+# serves both, and a test proves that what one side signs the other accepts.
+#
+# Everything the application runs is behind `runtime`, on by default. The
+# CLI takes this crate with `default-features = false, features =
+# ["scaffold"]`, so the generator links no core, no tokio and no driver.
+# Every dependency below is already in the workspace tree.
+[dependencies]
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+
+# The MAC and the digest. The same versions `brocanth-storage` and
+# `brocanth-middleware` take, so this adds no second copy.
+hmac = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+# Constant-time comparison: `==` on a MAC leaks how many bytes matched.
+subtle = { version = "2.6", optional = true }
+base64 = { version = "0.23", optional = true }
+# The OS CSPRNG, for an endpoint secret and a message id.
+getrandom = { version = "0.4", optional = true }
+
+# A typed handler decodes its event from JSON.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# The idempotency store is a trait object behind an `Arc`.
+async-trait = { version = "0.1", optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "time",
+    "sync",
+], optional = true }
+
+# `postgres`: the idempotency keys, and the outgoing tables, in the database
+# the `db` module opened.
+brocanth-db = { workspace = true, optional = true }
+
+# `out`: a delivery is a `brocanth-jobs` job, so retries, backoff and the
+# dead letter are the queue's. Only `Job`, `Queue::enqueue` and a worker
+# are used.
+brocanth-jobs = { workspace = true, optional = true }
+brocanth-events = { workspace = true, optional = true }
+# The HTTP client. The same choice and features `brocanth-auth` and
+# `brocanth-client` made: rustls, no system TLS stack.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+], optional = true }
+# `Url::host`, to refuse an endpoint on a private address. Already in the
+# tree through reqwest.
+url = { version = "2", optional = true }
+
+# `admin`: the deliveries tab in `brocanth-admin`.
+brocanth-admin = { workspace = true, optional = true }
+
+# `scaffold`: the modules `brocanth create` offers as `webhooks`,
+# `webhooks-in` and `webhooks-out`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-test.workspace = true
+# The CSRF hook, to prove a delivery passes it and nothing else does.
+brocanth-middleware.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+# This crate with every feature on, so `cargo test -p brocanth-webhooks`
+# runs the outgoing, Postgres and panel tests.
+brocanth-webhooks = { path = ".", features = ["out", "config", "admin", "scaffold"] }
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:brocanth",
+    "dep:http",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:base64",
+    "dep:getrandom",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:async-trait",
+    "dep:tokio",
+]
+# The idempotency keys in Postgres.
+postgres = ["runtime", "dep:brocanth-db"]
+# Signed outgoing webhooks: the tables, the job, the worker, the client.
+out = ["runtime", "postgres", "dep:brocanth-jobs", "dep:brocanth-events", "dep:reqwest", "dep:url"]
+# `OutgoingConfig` reads from a `[webhooks_out]` section.
+config = ["runtime"]
+admin = ["out", "dep:brocanth-admin"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"
