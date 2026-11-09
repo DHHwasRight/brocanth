@@ -413,3 +413,70 @@ async fn a_migrating_cache_plugin_builds_on_a_current_thread_runtime() {
         .expect("builds");
     assert_eq!(app.readiness().check_all().await, Ok(()));
 }
+
+// ---------------------------------------------------------------------------
+// Beside conditional GET and compression
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cache_stores_the_identity_body_and_a_hit_is_tagged_and_compressed() {
+    use brocanth_middleware::{
+        Compression, CompressionConfig, ConditionalGet, ConditionalGetConfig,
+    };
+    use std::io::Read as _;
+
+    let map = Arc::new(Map::default());
+    // The cache is registered first, so the tie-break alone would run its
+    // store last, over a compressed body. The two hooks' own order puts the
+    // store first on the way out.
+    let app = AppBuilder::new()
+        .plugin_hooking(RouteCache::new(
+            RouteCacheConfig::new(map.clone()).rule(RouteRule::path("/", MINUTE)),
+        ))
+        .plugin_hooking(ConditionalGet::new(ConditionalGetConfig::default()))
+        .plugin_hooking(Compression::new(CompressionConfig::default()))
+        .build()
+        .expect("an application");
+    let handler = Handler::default();
+    let body = "<p>hello</p>".repeat(200);
+    let gzip = |uri: &str| {
+        let mut request = get(uri);
+        request
+            .headers_mut()
+            .insert("accept-encoding", "gzip".parse().unwrap());
+        request
+    };
+
+    let first = serve(&app, gzip("/"), &handler, || page(&body)).await;
+    assert_eq!(status(&first), Some("miss"));
+    assert_eq!(first.headers()["content-encoding"], "gzip");
+    let tag = first.headers()["etag"].to_str().unwrap().to_string();
+    stored(&map, 1).await;
+
+    // A client with no encoding gets the stored body as it is: the store
+    // ran before compression.
+    let plain = serve(&app, get("/"), &handler, || page("changed")).await;
+    assert_eq!(status(&plain), Some("hit"));
+    assert!(plain.headers().get("content-encoding").is_none());
+    assert_eq!(plain.body().buffered(), Some(body.as_bytes()));
+    assert_eq!(plain.headers()["etag"].to_str().unwrap(), tag);
+
+    // A hit is compressed for the client that asks.
+    let hit = serve(&app, gzip("/"), &handler, || page("changed")).await;
+    assert_eq!(status(&hit), Some("hit"));
+    let mut decoded = String::new();
+    flate2::read::GzDecoder::new(hit.body().buffered().unwrap())
+        .read_to_string(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, body);
+
+    // And a hit is a 304 for the client that has the page.
+    let mut again = gzip("/");
+    again
+        .headers_mut()
+        .insert("if-none-match", tag.parse().unwrap());
+    let revalidated = serve(&app, again, &handler, || page("changed")).await;
+    assert_eq!(revalidated.status(), 304);
+    assert_eq!(revalidated.body().buffered(), Some(&b""[..]));
+    assert_eq!(handler.runs(), 1, "every hit came from the cache");
+}
