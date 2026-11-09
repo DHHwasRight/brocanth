@@ -140,11 +140,15 @@ impl Cursor {
                     if rest.len() % 2 != 0 {
                         return Err(bad());
                     }
-                    let bytes = (0..rest.len())
-                        .step_by(2)
-                        .map(|i| u8::from_str_radix(&rest[i..i + 2], 16))
-                        .collect::<Result<Vec<u8>, _>>()
-                        .map_err(|_| bad())?;
+                    // Byte pairs, not `&rest[i..i + 2]`: a multi-byte
+                    // character can put a slice end inside itself, and
+                    // slicing there panics on input a client typed.
+                    let bytes = rest
+                        .as_bytes()
+                        .chunks(2)
+                        .map(|pair| Some(hex(pair[0])? * 16 + hex(pair[1])?))
+                        .collect::<Option<Vec<u8>>>()
+                        .ok_or_else(bad)?;
                     keys.push(Key::Text(String::from_utf8(bytes).map_err(|_| bad())?));
                 }
                 _ => return Err(bad()),
@@ -168,6 +172,12 @@ impl Cursor {
             })
         }
     }
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|d| u8::try_from(d).ok())
 }
 
 impl fmt::Display for Cursor {
