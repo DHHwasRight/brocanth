@@ -14,7 +14,7 @@ run = "cargo clippy --all-targets -- -D warnings"
 # `test`.
 [tasks.scaffold]
 run = """
-for c in admin auth cache client db gtag i18n input jobs middleware observe openapi policy realtime resource robots schema storage; do
+for c in admin auth cache client db gtag i18n input jobs middleware observe openapi policy realtime resource robots sanitize schema storage; do
   cargo test -p brocanth-$c --no-default-features --features scaffold --lib || exit 1
 done
 """
