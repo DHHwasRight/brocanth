@@ -659,7 +659,9 @@ impl ChangeSink for WebhookSink {
 ///
 /// Eight attempts, from thirty seconds apart to six hours apart, with
 /// jitter: about a day in all, then the job's dead letter and a `failed`
-/// row.
+/// row. The waits are 30 s, 4 min, 32 min, 4 h 16 min, then 6 h three
+/// times: 23 hours. The factor is 8, because doubling from 30 s reaches
+/// only 32 minutes by the last attempt, an hour in all.
 #[derive(Serialize, Deserialize)]
 pub struct Deliver {
     /// The delivery row.
@@ -670,7 +672,8 @@ impl Job for Deliver {
     const NAME: &'static str = "brocanth_webhooks.deliver";
     const QUEUE: &'static str = QUEUE;
     const MAX_ATTEMPTS: u32 = 8;
-    const BACKOFF: Backoff = Backoff::new(Duration::from_secs(30), Duration::from_secs(6 * 3600));
+    const BACKOFF: Backoff =
+        Backoff::new(Duration::from_secs(30), Duration::from_secs(6 * 3600)).factor(8);
     type Error = String;
 
     fn unique_key(&self) -> Option<String> {
