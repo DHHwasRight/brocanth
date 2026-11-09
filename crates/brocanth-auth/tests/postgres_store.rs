@@ -347,3 +347,102 @@ async fn a_url_that_is_not_postgres_is_refused_with_help() {
     assert!(text.contains("`sqlite` is not a Postgres URL"), "{text}");
     assert!(text.contains("help:"), "{text}");
 }
+
+/// The roles tab over `PgStore`: a superuser defines a role and gives it, the
+/// holder opens what it grants and presses no button, and deleting the role
+/// cascades to the assignment in the database.
+#[cfg(feature = "admin")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_roles_tab_runs_on_postgres() {
+    use brocanth_admin::policy::Principal;
+    use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture as Blog, Submission};
+    use brocanth_auth::admin::{RolesPanel, StaffPolicy};
+    use brocanth_auth::storage::StaffStore;
+    use brocanth_auth::Staff;
+
+    with_store!(None, |store| {
+        let admin = Admin::new(
+            Arc::new(Blog::blog()),
+            AdminConfig::new()
+                .discovering(Discovery::new().under("blog::models"))
+                .panel(RolesPanel::new(store.clone()))
+                .with_policy(StaffPolicy),
+        );
+        let new = |email: &str| NewAccount {
+            email: Some(EmailAddress::parse(email).unwrap()),
+            email_verified: true,
+            ..NewAccount::default()
+        };
+        let ops = store
+            .create_account(new("ops@example.com"))
+            .await
+            .unwrap()
+            .id;
+        let ed = store
+            .create_account(new("ed@example.com"))
+            .await
+            .unwrap()
+            .id;
+        store.set_superuser(&ops, true).await.unwrap();
+        let ops = Staff::load(&*store, &ops).await.unwrap().unwrap();
+
+        let post = |who: &Staff, body: &str| {
+            let submission = Submission::from_urlencoded(body);
+            let admin = &admin;
+            let who = who.clone();
+            async move {
+                admin
+                    .dispatch(
+                        Principal::new(&who),
+                        "POST",
+                        "/admin/roles",
+                        "",
+                        &submission,
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(
+            post(
+                &ops,
+                "do=define&role=editor&permissions=roles.view+post.change"
+            )
+            .await,
+            303
+        );
+        assert_eq!(
+            post(&ops, "do=assign&role=editor&email=ed%40example.com").await,
+            303
+        );
+        assert_eq!(store.roles_of(&ed).await.unwrap(), ["editor"]);
+
+        let ed_staff = Staff::load(&*store, &ed).await.unwrap().unwrap();
+        assert!(ed_staff.allows("post.change") && !ed_staff.allows("post.delete"));
+        let seen = admin
+            .dispatch(
+                Principal::new(&ed_staff),
+                "GET",
+                "/admin/roles",
+                "",
+                &Submission::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(seen.status(), 200);
+        assert!(seen.html().unwrap().contains("ed@example.com"));
+        assert_eq!(
+            post(&ed_staff, "do=define&role=editor&permissions=everything").await,
+            403
+        );
+
+        assert_eq!(post(&ops, "do=delete&role=editor").await, 303);
+        assert!(store.roles_of(&ed).await.unwrap().is_empty());
+        let (left,): (i64,) = sqlx::query_as("SELECT count(*) FROM brocanth_auth_account_roles")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "the cascade removed the assignment row");
+    });
+}

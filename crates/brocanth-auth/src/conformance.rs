@@ -261,6 +261,8 @@ macro_rules! staff_store_conformance {
                 a_role_grants_its_permissions,
                 an_unknown_role_is_not_assigned,
                 deleting_a_role_removes_its_assignments,
+                names_are_data,
+                a_superuser_is_made_once_however_many_start_at_once,
             ]
         );
     };
@@ -1347,5 +1349,71 @@ pub mod staff_store {
             .unwrap();
         assert!(store.permissions_of(&ada).await.unwrap().is_empty());
         assert!(store.members("editor").await.unwrap().is_empty());
+    }
+
+    /// A role name and a permission are data, whatever they hold: quotes,
+    /// SQL, braces an array literal would read, and text that is not ASCII
+    /// come back as they went in, and match nothing else.
+    pub async fn names_are_data<S: StaffStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let name = "o'brien\"; DROP TABLE brocanth_auth_roles; --";
+        let odd = ["{a,b}", "it's", "naïve.view", "a\"b", "%", "_"];
+        store.put_role(&Role::new(name, odd)).await.unwrap();
+        store
+            .put_role(&Role::new("plain", ["post.view"]))
+            .await
+            .unwrap();
+        assert!(store.assign_role(&ada, name).await.unwrap());
+        assert_eq!(store.roles_of(&ada).await.unwrap(), [name]);
+        let held = store.permissions_of(&ada).await.unwrap();
+        assert_eq!(held, odd.iter().map(|p| p.to_string()).collect());
+        // `%` and `_` are not patterns: they match only themselves.
+        assert!(!held.contains("post.view"));
+        assert!(!store.assign_role(&ada, "%").await.unwrap());
+        assert!(!store.delete_role("_").await.unwrap());
+        assert_eq!(
+            store.roles().await.unwrap().len(),
+            2,
+            "both roles still there"
+        );
+        assert!(store.delete_role(name).await.unwrap());
+        assert!(store.roles_of(&ada).await.unwrap().is_empty());
+    }
+
+    /// [`ensure_superuser`](crate::staff::ensure_superuser), started by
+    /// [`RACERS`] processes at once on one address (every replica of a
+    /// server boots together): one account, made once, a superuser, and
+    /// every caller answers it.
+    pub async fn a_superuser_is_made_once_however_many_start_at_once<S: StaffStore>(store: Arc<S>) {
+        use crate::staff::{ensure_superuser, SuperuserOutcome};
+
+        let outcomes = race(&store, |store, _| async move {
+            let passwords = crate::password::Passwords::new(
+                crate::password::PasswordCost::insecure_for_tests(),
+            )
+            .expect("passwords");
+            let clock = Arc::new(crate::clock::TestClock::at(T0));
+            let accounts =
+                crate::accounts::Accounts::new(store.clone(), clock, Arc::new(passwords))
+                    .expect("accounts");
+            ensure_superuser(&accounts, &*store, "ops@example.com", "a long passphrase")
+                .await
+                .expect("ensure_superuser")
+        })
+        .await;
+        let created = outcomes
+            .iter()
+            .filter(|o| matches!(o, SuperuserOutcome::Created(_)))
+            .count();
+        assert_eq!(created, 1, "{outcomes:?}");
+        let id = outcomes[0].account().clone();
+        assert!(outcomes.iter().all(|o| o.account() == &id), "{outcomes:?}");
+        assert_eq!(store.superusers().await.unwrap(), vec![id.clone()]);
+        let by_email = store
+            .account_by_email(&email("ops@example.com"))
+            .await
+            .unwrap()
+            .expect("the account");
+        assert_eq!(by_email.id, id);
     }
 }
