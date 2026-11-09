@@ -380,6 +380,53 @@ fn settings(title: &str) -> Vec<Setting> {
     ]
 }
 
+/// Actions over selected rows: a checkbox per row, a menu, a confirmation
+/// page. Django's admin actions.
+///
+/// The library has them for every admin (`crate::actions`). This choice
+/// turns on "Delete selected" for every model that allows a delete, and
+/// tells the agent how to add a typed action to one model.
+pub struct BackofficeActions;
+
+impl Module for BackofficeActions {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "admin-actions",
+            "\"Delete selected\" on every admin list, with a confirmation page",
+        )
+        .category(Category::Enhancer)
+        .asked_in("doors", "")
+        .part_of_but_off("admin")
+        .because("it adds actions to the admin's lists, so there is no list to act on without it")
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.at(Slot::AdminPanels).block(BULK_DELETE.to_string());
+        s.at(Slot::AgentsSections).block(ACTIONS_AGENTS.to_string());
+    }
+}
+
+/// The line in `plugins::admin_panels`. Not behind a module-file toggle:
+/// `brocanth remove admin-actions` takes it out.
+const BULK_DELETE: &str = "    // \"Delete selected\" on every model that allows a delete, after a
+    // confirmation page. A model leaves it off with
+    // `m.without_action(\"delete_selected\")` in src/plugins/admin/mod.rs.
+    config = config.action(brocanth_admin::actions::BulkAction::delete_selected());
+";
+
+/// What the generated `AGENTS.md` says about admin actions.
+const ACTIONS_AGENTS: &str = "\n\
+    ## Admin actions\n\
+    \n\
+    An action over selected rows belongs to one model, in\n\
+    `src/plugins/admin/mod.rs`:\n\
+    `.model(\"post\", |m| m.action(BulkAction::set(\"publish\", \"Publish selected\", [(\"published\", true)])))`.\n\
+    `BulkAction::set` writes fixed values; the admin refuses a column the\n\
+    model lacks when it starts. `BulkAction::custom` runs your function and\n\
+    writes through `cx.update` and `cx.delete`, which keep the row policy.\n\
+    Never write to the database directly in an action: the policy and the\n\
+    journal would not see the write.\n";
+
 /// The admin over SeaORM: its rows through the `model` plugin's ORM.
 pub struct BackofficeModels;
 

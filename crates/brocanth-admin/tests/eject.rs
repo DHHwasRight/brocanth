@@ -9,10 +9,11 @@
 
 use std::sync::Arc;
 
+use brocanth_admin::actions::BulkAction;
 use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
 use brocanth_admin::rt::block_on;
 use brocanth_admin::view::{
-    Chrome, DeleteCtx, DetailCtx, ErrorCtx, FormCtx, IndexCtx, LayoutCtx, ListCtx,
+    ActionCtx, Chrome, DeleteCtx, DetailCtx, ErrorCtx, FormCtx, IndexCtx, LayoutCtx, ListCtx,
 };
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Principal, Submission, Views};
 use rsx::{Template as _, Writer};
@@ -28,6 +29,9 @@ fn ejected_views() -> Views {
             ejected::layout::Layout { ctx }.render(w)
         })
         .with_index(|ctx: &IndexCtx, w: &mut Writer<'_>| ejected::index::Index { ctx }.render(w))
+        .with_confirm_action(|ctx: &ActionCtx, w: &mut Writer<'_>| {
+            ejected::action::ConfirmAction { ctx }.render(w)
+        })
         .with_list(|ctx: &ListCtx, w: &mut Writer<'_>| ejected::list::List { ctx }.render(w))
         .with_detail(|ctx: &DetailCtx, w: &mut Writer<'_>| {
             ejected::detail::Detail { ctx }.render(w)
@@ -55,6 +59,12 @@ fn blog(config: AdminConfig) -> Admin {
             .stylesheet("/theme.css")
             .script("/theme.js")
             .user_label(|_| Some("Ada".to_string()))
+            // The checkbox column, the action menu and an extra record link
+            // are part of the screens, so the comparison covers them.
+            .action(BulkAction::delete_selected())
+            .record_link("History", |r| {
+                Some(format!("/history/{}/{}", r.table, r.key))
+            })
             .discovering(Discovery::new().under("blog::models"))
             .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment),
@@ -102,6 +112,17 @@ fn every_ejected_screen_renders_what_the_shipped_one_does() {
             "GET {path}?{query} differs once ejected\n--- shipped\n{want}\n--- ejected\n{got}"
         );
     }
+}
+
+#[test]
+fn an_ejected_action_confirmation_renders_what_the_shipped_one_does() {
+    let shipped = blog(AdminConfig::new());
+    let ejected = blog(AdminConfig::new().with_views(ejected_views()));
+    let chosen = Submission::from_urlencoded("action=delete_selected&pk=1&pk=2&pk=999");
+    let want = page(&shipped, "POST", "/admin/post/actions", "", &chosen);
+    let got = page(&ejected, "POST", "/admin/post/actions", "", &chosen);
+    assert!(want.contains("confirm"), "no confirmation was drawn");
+    assert_eq!(want, got);
 }
 
 #[test]

@@ -13,10 +13,12 @@ use std::sync::Arc;
 use brocanth_policy::{CompileError, MaskViolation};
 use thiserror::Error;
 
+use crate::actions::{ActionCx, BulkAction, Run, Selected, MAX_SELECTED};
 use crate::config::{AdminConfig, ModelAdmin};
 use crate::data::{DataError, ListRequest, Search, SharedData};
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
+use crate::journal::{AdminWrite, FieldChange, Journal, RecordLinkFn, RecordRef, Written};
 use crate::model::{ColumnDescriptor, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::paging::Page;
 use crate::panel::{Panel, PanelPage, PanelRequest};
@@ -24,8 +26,9 @@ use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::rows::{Gate, RowAction, RowRules, Rules};
 use crate::view::{
-    self, Cell, Chrome, ColumnHeader, DeleteCtx, DetailCtx, DetailRow, ErrorCtx, FormCtx, IndexCtx,
-    IndexEntry, LayoutCtx, ListCtx, ModelHeading, NavItem, PageLink, RowView, Views,
+    self, ActionChoice, ActionCtx, Cell, Chrome, ColumnHeader, DeleteCtx, DetailCtx, DetailRow,
+    ErrorCtx, FormCtx, IndexCtx, IndexEntry, LayoutCtx, ListCtx, ModelHeading, NavItem, PageLink,
+    RecordLink, RowView, SelectedRecord, Views,
 };
 
 /// How many numbered page links a pager shows.
@@ -123,6 +126,10 @@ pub struct Admin {
     entries: Vec<Entry>,
     panels: Vec<std::sync::Arc<dyn Panel>>,
     unscoped_rows: bool,
+    /// Actions every model's list offers, before each model's own.
+    actions: Vec<BulkAction>,
+    journal: Option<Arc<dyn Journal>>,
+    record_links: Vec<(String, RecordLinkFn)>,
 }
 
 impl std::fmt::Debug for Admin {
@@ -189,6 +196,25 @@ impl Admin {
             })
             .filter(|entry| entry.admin.is_visible())
             .collect();
+        // A `set` action names columns, and a misspelt one would write
+        // nothing or fail on the first request. Named now instead.
+        for entry in &entries {
+            for action in entry.admin.own_actions() {
+                for column in action.columns() {
+                    if entry.descriptor.column(column).is_none() {
+                        panic!(
+                            "the admin action `{}` on `{}` sets `{column}`, which is not a column \
+                             of that model",
+                            action.key(),
+                            entry.descriptor.key
+                        );
+                    }
+                }
+            }
+        }
+        let actions = std::mem::take(&mut config.actions);
+        let journal = config.journal.take();
+        let record_links = std::mem::take(&mut config.record_links);
         let panels = config.panels;
         // Named now rather than discovered by a request that went to the
         // wrong screen. Two modules claiming one path is an error that
@@ -215,6 +241,9 @@ impl Admin {
             views: config.views,
             entries,
             panels,
+            actions,
+            journal,
+            record_links,
         }
     }
 
@@ -282,6 +311,18 @@ impl Admin {
         principal: Principal<'_>,
         model: &str,
         query: ListQuery,
+    ) -> Result<Response, AdminError> {
+        self.list_with(principal, model, query, None).await
+    }
+
+    /// The list, with the line about the action that just ran: its key and
+    /// how many records it acted on, as the redirect after it says.
+    async fn list_with(
+        &self,
+        principal: Principal<'_>,
+        model: &str,
+        query: ListQuery,
+        done: Option<(String, usize)>,
     ) -> Result<Response, AdminError> {
         let Some(entry) = self.entry(model) else {
             return self.missing(principal);
@@ -370,6 +411,23 @@ impl Admin {
                 && self.creates(principal, entry),
             create_href: self.new_url(model),
             query,
+            actions: self
+                .actions_for(principal, entry)
+                .into_iter()
+                .map(|action| ActionChoice {
+                    key: action.key.clone(),
+                    label: action.label.clone(),
+                })
+                .collect(),
+            actions_href: self.actions_url(model),
+            notice: done.and_then(|(key, count)| {
+                let action = self.offered(entry).into_iter().find(|a| a.key == key)?;
+                let noun = match count {
+                    1 => admin.name(descriptor).to_lowercase(),
+                    _ => admin.plural(descriptor).to_lowercase(),
+                };
+                Some(format!("{}: {count} {noun}.", action.label))
+            }),
         };
         let heading = admin.plural(descriptor);
         let body = view::render(
@@ -440,6 +498,24 @@ impl Admin {
                 && self.opens(principal, entry, RowAction::Delete))
             .then(|| self.delete_url(model, &record)),
             rows,
+            links: {
+                let key = record.to_segment();
+                let at = RecordRef {
+                    base_path: &self.base_path,
+                    model,
+                    table: &entry.descriptor.table,
+                    key: &key,
+                };
+                self.record_links
+                    .iter()
+                    .filter_map(|(label, href)| {
+                        href(&at).map(|href| RecordLink {
+                            label: label.clone(),
+                            href,
+                        })
+                    })
+                    .collect()
+            },
             label: label.clone(),
         };
         let body = view::render(
@@ -512,11 +588,17 @@ impl Admin {
         if !form.validate() {
             return self.render_rejected(principal, entry, form, None).await;
         }
-        match self.data.insert(&entry.descriptor, &form.values()).await {
-            Ok(key) => Ok(Response::Redirect {
-                status: 303,
-                location: self.detail_url(model, &key),
-            }),
+        let values = form.values();
+        match self.data.insert(&entry.descriptor, &values).await {
+            Ok(key) => {
+                let fields = crate::journal::changes(None, &values);
+                let label = entry.admin.label_for(&entry.descriptor, &row_of(&values));
+                self.tell(principal, entry, &key, &label, Written::Created, &fields);
+                Ok(Response::Redirect {
+                    status: 303,
+                    location: self.detail_url(model, &key),
+                })
+            }
             Err(DataError::Invalid(errors)) => {
                 form.reject(&errors);
                 self.render_rejected(principal, entry, form, None).await
@@ -616,15 +698,21 @@ impl Admin {
                 .render_rejected(principal, entry, form, Some(&record))
                 .await;
         }
+        let values = form.values();
         let written = self
             .data
-            .update(&entry.descriptor, &record, &form.values(), guard.scope())
+            .update(&entry.descriptor, &record, &values, guard.scope())
             .await;
         match written.map(|rows| guard.applied(rows)) {
-            Ok(Ok(_)) => Ok(Response::Redirect {
-                status: 303,
-                location: self.detail_url(model, &record),
-            }),
+            Ok(Ok(_)) => {
+                let fields = crate::journal::changes(Some(&row), &values);
+                let label = entry.admin.label_for(&entry.descriptor, &row);
+                self.tell(principal, entry, &record, &label, Written::Updated, &fields);
+                Ok(Response::Redirect {
+                    status: 303,
+                    location: self.detail_url(model, &record),
+                })
+            }
             Ok(Err(_lost)) => self.conflict(principal),
             Err(DataError::Invalid(errors)) => {
                 form.reject(&errors);
@@ -719,6 +807,11 @@ impl Admin {
         if guard.applied(removed).is_err() {
             return self.conflict(principal);
         }
+        if let Some(row) = &found {
+            let label = entry.admin.label_for(&entry.descriptor, row);
+            let fields = crate::journal::removed(row);
+            self.tell(principal, entry, &record, &label, Written::Deleted, &fields);
+        }
         Ok(Response::Redirect {
             status: 303,
             location: self.list_url(model),
@@ -751,7 +844,16 @@ impl Admin {
                 self.panel(principal, key, rest, query, post, submission)
                     .await
             }
-            Route::List(model) => self.list(principal, model, ListQuery::parse(query)).await,
+            Route::List(model) => {
+                // `done` and `n` come from the redirect after an action. The
+                // line names the action by its label, so a hand-made link
+                // can show a count but no text of its own.
+                let done = crate::query::param(query, "done")
+                    .zip(crate::query::param(query, "n").and_then(|n| n.parse::<usize>().ok()));
+                self.list_with(principal, model, ListQuery::parse(query), done)
+                    .await
+            }
+            Route::Action(model) => self.act(principal, model, submission).await,
             Route::New(model) => self.create_form(principal, model).await,
             Route::Create(model) => self.create(principal, model, submission).await,
             Route::Detail(model, key) => self.detail(principal, model, key).await,
@@ -1378,6 +1480,233 @@ impl Admin {
         }
     }
 
+    // --------------------------------------------------------------- actions
+
+    /// The actions this model's list could offer, before asking who is
+    /// looking: every model's, minus the ones it leaves off or replaces,
+    /// then its own; only those its configuration allows.
+    fn offered<'a>(&'a self, entry: &'a Entry) -> Vec<&'a BulkAction> {
+        let own = entry.admin.own_actions();
+        let mut out: Vec<&BulkAction> = self
+            .actions
+            .iter()
+            .filter(|a| !entry.admin.drops_action(&a.key) && !own.iter().any(|o| o.key == a.key))
+            .filter(|a| {
+                a.columns()
+                    .iter()
+                    .all(|c| entry.descriptor.column(c).is_some())
+            })
+            .collect();
+        out.extend(own.iter());
+        out.retain(|a| match a.needs {
+            RowAction::Delete => entry.admin.allows_delete(),
+            _ => entry.admin.allows_update(),
+        });
+        out
+    }
+
+    /// The actions this person may run on this model's list. Per subject,
+    /// like the edit and delete links: a record the rule refuses is skipped
+    /// when the action runs.
+    fn actions_for<'a>(
+        &'a self,
+        principal: Principal<'_>,
+        entry: &'a Entry,
+    ) -> Vec<&'a BulkAction> {
+        self.offered(entry)
+            .into_iter()
+            .filter(|a| {
+                let columns = a.columns();
+                self.allows(
+                    principal,
+                    Request::new(screen_action(a.needs), &entry.descriptor.key),
+                ) && self.opens(principal, entry, a.needs)
+                    && (columns.is_empty() || self.rules(entry).check(&principal, &columns).is_ok())
+            })
+            .collect()
+    }
+
+    /// Takes an action form: the confirmation without `confirm`, the writes
+    /// with it.
+    async fn act(
+        &self,
+        principal: Principal<'_>,
+        model: &str,
+        submission: &Submission,
+    ) -> Result<Response, AdminError> {
+        let Some(entry) = self.entry(model) else {
+            return self.missing(principal);
+        };
+        let wanted = submission.get("action").unwrap_or("");
+        let Some(action) = self.offered(entry).into_iter().find(|a| a.key == wanted) else {
+            return self.error_page(
+                principal,
+                400,
+                "No such action",
+                format!("This list has no action called “{wanted}”."),
+            );
+        };
+        let screen = screen_action(action.needs);
+        if !self.allows(principal, Request::new(screen, model)) {
+            return self.refuse(principal, screen);
+        }
+        // The field mask before any row is read, as on the edit form.
+        let columns = action.columns();
+        if !columns.is_empty() {
+            match self.rules(entry).check(&principal, &columns) {
+                Ok(()) => {}
+                Err(MaskViolation::Forbidden { fields }) => {
+                    return self.error_page(
+                        principal,
+                        403,
+                        "Not allowed",
+                        format!("You may not change: {}.", fields.join(", ")),
+                    )
+                }
+                Err(unknown) => return Err(AdminError::Mask(unknown)),
+            }
+        }
+        let gate = self.gate(principal, entry, action.needs)?;
+        let Some(scope) = gate.scope() else {
+            return self.refuse(principal, screen);
+        };
+        let mut keys: Vec<&str> = Vec::new();
+        for (name, value) in submission.pairs() {
+            if name == "pk" && !keys.contains(&value.as_str()) {
+                keys.push(value);
+            }
+        }
+        if keys.is_empty() {
+            return self.error_page(
+                principal,
+                422,
+                "Nothing selected",
+                "Tick at least one record on the list, then choose the action again.".to_string(),
+            );
+        }
+        if keys.len() > MAX_SELECTED {
+            return self.error_page(
+                principal,
+                422,
+                "Too many selected",
+                format!("One action takes at most {MAX_SELECTED} records."),
+            );
+        }
+        // Each record read under the action's rule: a record the rule
+        // refuses and a record that is gone are one answer, skipped.
+        let mut selected = Vec::new();
+        let mut skipped = 0;
+        for raw in keys {
+            let Some(record) = PrimaryKey::parse(&entry.descriptor, raw) else {
+                skipped += 1;
+                continue;
+            };
+            if !self.allows(principal, Request::on(screen, model, &record)) {
+                skipped += 1;
+                continue;
+            }
+            match self.data.fetch(&entry.descriptor, &record, scope).await? {
+                Some(row) => selected.push(Selected {
+                    label: entry.admin.label_for(&entry.descriptor, &row),
+                    key: record,
+                    row,
+                }),
+                None => skipped += 1,
+            }
+        }
+        if selected.is_empty() {
+            return self.error_page(
+                principal,
+                404,
+                "Nothing to act on",
+                "None of the selected records exist, or you may not change them.".to_string(),
+            );
+        }
+        if submission.get("confirm") != Some("yes") {
+            let context = ActionCtx {
+                chrome: self.chrome(principal, model),
+                model: self.heading(entry),
+                key: action.key.clone(),
+                label: action.label.clone(),
+                destructive: action.is_destructive(),
+                records: selected
+                    .iter()
+                    .map(|s| SelectedRecord {
+                        key: s.key.to_segment(),
+                        label: s.label.clone(),
+                        href: self.detail_url(model, &s.key),
+                    })
+                    .collect(),
+                skipped,
+                action: self.actions_url(model),
+                cancel_href: self.list_url(model),
+            };
+            let body = view::render(self.views.confirm_action.as_ref(), &context)?;
+            return self.page(200, principal, model, action.label.clone(), body);
+        }
+        let cx = ActionCx {
+            admin: self,
+            model,
+            principal,
+            selected: &selected,
+        };
+        let done = match &action.run {
+            Run::Delete => {
+                let mut done = 0;
+                for record in &selected {
+                    if cx.delete(&record.key).await? {
+                        done += 1;
+                    }
+                }
+                done
+            }
+            Run::Set(values) => {
+                let mut done = 0;
+                for record in &selected {
+                    if cx.update(&record.key, values).await? {
+                        done += 1;
+                    }
+                }
+                done
+            }
+            Run::Custom(run) => run(cx).await?,
+        };
+        Ok(Response::Redirect {
+            status: 303,
+            location: format!(
+                "{}?done={}&n={done}",
+                self.list_url(model),
+                crate::query::percent_encode(&action.key)
+            ),
+        })
+    }
+
+    /// Tells the journal about one write that succeeded.
+    fn tell(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+        key: &PrimaryKey,
+        label: &str,
+        kind: Written,
+        fields: &[FieldChange],
+    ) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let who = self.user_label.as_ref().and_then(|name| name(&principal));
+        let key = key.to_segment();
+        journal.record(&AdminWrite {
+            who: who.as_deref(),
+            model: &entry.descriptor.key,
+            table: &entry.descriptor.table,
+            key: &key,
+            label,
+            kind,
+            fields,
+        });
+    }
+
     // ------------------------------------------------------------------ urls
 
     /// The index.
@@ -1412,6 +1741,11 @@ impl Admin {
     pub fn delete_url(&self, model: &str, key: &PrimaryKey) -> String {
         format!("{}/{model}/{}/delete", self.base_path, key.to_segment())
     }
+
+    /// Where one model's action form posts.
+    pub fn actions_url(&self, model: &str) -> String {
+        format!("{}/{model}/actions", self.base_path)
+    }
 }
 
 /// Which screen a path and a method reach.
@@ -1435,6 +1769,9 @@ pub enum Route<'a> {
     ConfirmDelete(&'a str, &'a str),
     /// `POST {base}/{model}/{key}/delete`.
     Delete(&'a str, &'a str),
+    /// `POST {base}/{model}/actions`: an action over selected rows, first
+    /// its confirmation, then, with `confirm`, the writes.
+    Action(&'a str),
     /// Anything under a panel's key: `{base}/{key}` and below.
     ///
     /// One variant for the whole subtree, because the admin does not know
@@ -1455,7 +1792,8 @@ impl<'a> Route<'a> {
     ///
     /// `new` is a reserved key segment, as `add` is in Django: a record whose
     /// primary key is the literal text `new` cannot be reached. Say so rather
-    /// than discover it.
+    /// than discover it. `actions` is reserved for a POST: a record whose key
+    /// is the text `actions` can be read but not changed.
     /// `panels` is the set of keys that are tabs rather than models. It is
     /// a parameter and not a lookup because this function is pure and the
     /// test suite calls it directly; `Admin::dispatch` passes its own.
@@ -1497,6 +1835,7 @@ impl<'a> Route<'a> {
             ([model], false) => Some(Route::List(model)),
             ([model], true) => Some(Route::Create(model)),
             ([model, "new"], false) => Some(Route::New(model)),
+            ([model, "actions"], true) => Some(Route::Action(model)),
             ([model, key], false) => Some(Route::Detail(model, key)),
             ([model, key], true) => Some(Route::Update(model, key)),
             ([model, key, "edit"], false) => Some(Route::Edit(model, key)),
@@ -1505,6 +1844,147 @@ impl<'a> Route<'a> {
             _ => None,
         }
     }
+}
+
+impl ActionCx<'_> {
+    /// Sets `values` on one record, under the update rule, and tells the
+    /// journal. `Ok(false)` when the rules refuse the record, the record is
+    /// gone, it changed meanwhile, or the data source refused the values.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn update(
+        &self,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+    ) -> Result<bool, AdminError> {
+        let admin = self.admin;
+        let Some(entry) = admin.entry(self.model) else {
+            return Ok(false);
+        };
+        if !entry.admin.allows_update()
+            || !admin.allows(self.principal, Request::on(Action::Update, self.model, key))
+        {
+            return Ok(false);
+        }
+        let names: Vec<&str> = values.iter().map(|(name, _)| name.as_str()).collect();
+        match admin.rules(entry).check(&self.principal, &names) {
+            Ok(()) => {}
+            Err(MaskViolation::Forbidden { .. }) => return Ok(false),
+            Err(unknown) => return Err(AdminError::Mask(unknown)),
+        }
+        let Some(pending) =
+            admin
+                .rules(entry)
+                .admission(&self.principal, RowAction::Update, key)?
+        else {
+            return Ok(false);
+        };
+        let Some(row) = admin
+            .data
+            .fetch(&entry.descriptor, key, pending.scope())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Ok(guard) = pending.resolve(1) else {
+            return Ok(false);
+        };
+        let rows = match admin
+            .data
+            .update(&entry.descriptor, key, values, guard.scope())
+            .await
+        {
+            Ok(rows) => rows,
+            Err(DataError::Invalid(_)) => return Ok(false),
+            Err(other) => return Err(other.into()),
+        };
+        if guard.applied(rows).is_err() {
+            return Ok(false);
+        }
+        let label = entry.admin.label_for(&entry.descriptor, &row);
+        let fields = crate::journal::changes(Some(&row), values);
+        admin.tell(
+            self.principal,
+            entry,
+            key,
+            &label,
+            Written::Updated,
+            &fields,
+        );
+        Ok(true)
+    }
+
+    /// Deletes one record, under the delete rule, and tells the journal.
+    /// `Ok(false)` when the rules refuse it or it is gone.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn delete(&self, key: &PrimaryKey) -> Result<bool, AdminError> {
+        let admin = self.admin;
+        let Some(entry) = admin.entry(self.model) else {
+            return Ok(false);
+        };
+        if !entry.admin.allows_delete()
+            || !admin.allows(self.principal, Request::on(Action::Delete, self.model, key))
+        {
+            return Ok(false);
+        }
+        let Some(pending) =
+            admin
+                .rules(entry)
+                .admission(&self.principal, RowAction::Delete, key)?
+        else {
+            return Ok(false);
+        };
+        let found = admin
+            .data
+            .fetch(&entry.descriptor, key, pending.scope())
+            .await?;
+        let Some(row) = found else {
+            return Ok(false);
+        };
+        let Ok(guard) = pending.resolve(1) else {
+            return Ok(false);
+        };
+        let removed = admin
+            .data
+            .delete(&entry.descriptor, key, guard.scope())
+            .await?;
+        if guard.applied(removed).is_err() {
+            return Ok(false);
+        }
+        let label = entry.admin.label_for(&entry.descriptor, &row);
+        let fields = crate::journal::removed(&row);
+        admin.tell(
+            self.principal,
+            entry,
+            key,
+            &label,
+            Written::Deleted,
+            &fields,
+        );
+        Ok(true)
+    }
+}
+
+/// The screen policy's word for a row rule an action needs.
+fn screen_action(needs: RowAction) -> Action {
+    match needs {
+        RowAction::Delete => Action::Delete,
+        _ => Action::Update,
+    }
+}
+
+/// The submitted values as a row, to name a record that was just created.
+fn row_of(values: &[(String, Value)]) -> Row {
+    let mut row = Row::new();
+    for (name, value) in values {
+        row.set(name.clone(), value.clone());
+    }
+    row
 }
 
 /// A panel key that is also a model key, if there is one.

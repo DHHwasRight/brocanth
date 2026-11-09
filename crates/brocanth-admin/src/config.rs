@@ -54,6 +54,8 @@ pub struct ModelAdmin {
     stylesheets: Vec<String>,
     scripts: Vec<String>,
     views: ModelViews,
+    actions: Vec<crate::actions::BulkAction>,
+    without_actions: Vec<String>,
 }
 
 /// The screens one model replaces. `None` is the admin's own view.
@@ -103,6 +105,8 @@ impl ModelAdmin {
             stylesheets: Vec::new(),
             scripts: Vec::new(),
             views: ModelViews::default(),
+            actions: Vec::new(),
+            without_actions: Vec::new(),
         }
     }
 
@@ -327,6 +331,33 @@ impl ModelAdmin {
         &self.views
     }
 
+    /// Adds an action over selected rows to this model's list. Django's
+    /// `ModelAdmin.actions`. See [`crate::actions`].
+    ///
+    /// An action with the key of one added for every model replaces it on
+    /// this model.
+    pub fn action(mut self, action: crate::actions::BulkAction) -> Self {
+        self.actions.retain(|a| a.key != action.key);
+        self.actions.push(action);
+        self
+    }
+
+    /// Leaves an action added for every model off this model's list.
+    pub fn without_action(mut self, key: impl Into<String>) -> Self {
+        self.without_actions.push(key.into());
+        self
+    }
+
+    /// This model's own actions, in the order they were added.
+    pub(crate) fn own_actions(&self) -> &[crate::actions::BulkAction] {
+        &self.actions
+    }
+
+    /// Whether an action added for every model is left off this one.
+    pub(crate) fn drops_action(&self, key: &str) -> bool {
+        self.without_actions.iter().any(|k| k == key)
+    }
+
     /// Whether this configuration permits creating. The policy is asked as
     /// well, and both have to agree.
     pub fn allows_create(&self) -> bool {
@@ -538,6 +569,9 @@ pub struct AdminConfig {
     models: BTreeMap<String, ModelAdmin>,
     resources: Vec<std::sync::Arc<dyn crate::rows::RowRules>>,
     unscoped_rows: bool,
+    pub(crate) actions: Vec<crate::actions::BulkAction>,
+    pub(crate) journal: Option<std::sync::Arc<dyn crate::journal::Journal>>,
+    pub(crate) record_links: Vec<(String, crate::journal::RecordLinkFn)>,
 }
 
 impl std::fmt::Debug for AdminConfig {
@@ -585,6 +619,9 @@ impl AdminConfig {
             models: BTreeMap::new(),
             resources: Vec::new(),
             unscoped_rows: false,
+            actions: Vec::new(),
+            journal: None,
+            record_links: Vec::new(),
         }
     }
 
@@ -749,6 +786,66 @@ impl AdminConfig {
             + 'static,
     {
         self.panel(crate::panel::Page::new(key, label, render))
+    }
+
+    /// Adds an action over selected rows to every model's list. Django's
+    /// `AdminSite.add_action`. A model leaves it off with
+    /// [`ModelAdmin::without_action`], or replaces it with an action of the
+    /// same key. See [`crate::actions`].
+    ///
+    /// ```
+    /// use brocanth_admin::actions::BulkAction;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().action(BulkAction::delete_selected());
+    /// # let _ = config;
+    /// ```
+    pub fn action(mut self, action: crate::actions::BulkAction) -> Self {
+        self.actions.retain(|a| a.key != action.key);
+        self.actions.push(action);
+        self
+    }
+
+    /// Tells `journal` about every write the admin makes: who, which
+    /// record, and the values before and after. See [`crate::journal`].
+    ///
+    /// One journal. `brocanth-audit` installs one that keeps the change
+    /// history.
+    ///
+    /// ```
+    /// use brocanth_admin::journal::AdminWrite;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().journal(|write: &AdminWrite<'_>| {
+    ///     eprintln!("{} {} {}", write.kind.as_str(), write.model, write.key);
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn journal(mut self, journal: impl crate::journal::Journal + 'static) -> Self {
+        self.journal = Some(std::sync::Arc::new(journal));
+        self
+    }
+
+    /// Adds a link to every record's detail screen. `href` is asked per
+    /// record; `None` draws no link on that record.
+    ///
+    /// Django's History button is one: `brocanth-audit` adds a "History"
+    /// link to its panel.
+    ///
+    /// ```
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().record_link("History", |r| {
+    ///     Some(format!("{}/history?table={}&row={}", r.base_path, r.table, r.key))
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn record_link<F>(mut self, label: impl Into<String>, href: F) -> Self
+    where
+        F: Fn(&crate::journal::RecordRef<'_>) -> Option<String> + Send + Sync + 'static,
+    {
+        self.record_links.push((label.into(), Box::new(href)));
+        self
     }
 
     /// Sets the mount path. A trailing slash is dropped.

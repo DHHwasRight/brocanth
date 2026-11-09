@@ -31,6 +31,25 @@ pub fn List(ctx: &ListCtx) -> Element {
             <a class={parts::button_primary()} href={&ctx.create_href} dp-boost>{add_label(ctx)}</a>
         }
     </div>
+    if let Some(notice) = &ctx.notice {
+        <p class="mt-2 mb-5 text-sm text-ink-soft" role="status">{notice}</p>
+    }
+    if !ctx.actions.is_empty() {
+        // The checkboxes below join this form through their `form`
+        // attribute, so the table needs no form around it and the page
+        // works with no script. A POST: the admin answers with a
+        // confirmation, and only its second POST writes.
+        <form id={ACTIONS_FORM} class="flex gap-1.5 mb-4" method="post" action={&ctx.actions_href}>
+            <select
+                class="w-56 rounded-control border border-line bg-white px-2.5 py-1.5 text-sm text-ink focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+                name="action" aria-label="Action">
+                for action in &ctx.actions {
+                    <option value={&action.key}>{&action.label}</option>
+                }
+            </select>
+            <button class={parts::button()} type="submit">Go</button>
+        </form>
+    }
 
     if ctx.rows.is_empty() {
         <div class={parts::card()}><div class={parts::empty()}>{empty_message(ctx)}</div></div>
@@ -39,6 +58,9 @@ pub fn List(ctx: &ListCtx) -> Element {
             <table class={parts::table()}>
                 <thead>
                     <tr>
+                        if !ctx.actions.is_empty() {
+                            <th class={parts::th()} aria-label="Select"></th>
+                        }
                         for header in &ctx.columns {
                             <Header header={header} />
                         }
@@ -47,7 +69,7 @@ pub fn List(ctx: &ListCtx) -> Element {
                 </thead>
                 <tbody>
                     for row in &ctx.rows {
-                        <Record row={row} />
+                        <Record row={row} selectable={!ctx.actions.is_empty()} />
                     }
                 </tbody>
             </table>
@@ -86,8 +108,15 @@ pub fn Header(header: &ColumnHeader) -> Element {
 }
 
 /// One row. A foreign-key cell carries the target's label and links to it.
-pub fn Record(row: &RowView) -> Element {
+/// With actions, a checkbox that belongs to the action form.
+pub fn Record(row: &RowView, selectable: bool) -> Element {
     <tr class="hover:bg-stage/60">
+        if selectable {
+            <td class={parts::td()}>
+                <input type="checkbox" name="pk" value={&row.key} form={ACTIONS_FORM}
+                    aria-label={select_label(row)} />
+            </td>
+        }
         for cell in &row.cells {
             <td class={parts::td()}>
                 if let Some(href) = &cell.href {
@@ -113,6 +142,13 @@ pub fn Record(row: &RowView) -> Element {
 
 // Branching that produces a value lives in plain functions: inside a template
 // body `if` opens a markup conditional, so `let x = if …` never binds.
+
+/// The id of the action form, which every row's checkbox names.
+const ACTIONS_FORM: &str = "admin-actions";
+
+fn select_label(row: &RowView) -> String {
+    format!("Select {}", row.label)
+}
 
 /// Which way a sorted column is sorted, for a screen reader. The arrow
 /// beside the label is for everybody else.

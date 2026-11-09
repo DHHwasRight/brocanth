@@ -65,6 +65,8 @@
 mod assets;
 
 #[cfg(feature = "runtime")]
+pub mod actions;
+#[cfg(feature = "runtime")]
 pub mod adapter;
 #[cfg(feature = "runtime")]
 pub mod admin;
@@ -78,6 +80,8 @@ pub mod discovery;
 pub mod fixture;
 #[cfg(feature = "runtime")]
 pub mod form;
+#[cfg(feature = "runtime")]
+pub mod journal;
 #[cfg(feature = "runtime")]
 pub mod model;
 #[cfg(feature = "runtime")]

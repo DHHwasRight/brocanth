@@ -16,6 +16,9 @@ pub fn Detail(ctx: &DetailCtx) -> Element {
         if let Some(href) = &ctx.edit_href {
             <a class={parts::button_primary()} href={href} dp-boost>Edit</a>
         }
+        for link in &ctx.links {
+            <a class={parts::button()} href={&link.href} dp-boost>{&link.label}</a>
+        }
         if let Some(href) = &ctx.delete_href {
             <a class={parts::button_danger()} href={href} dp-boost>Delete</a>
         }
