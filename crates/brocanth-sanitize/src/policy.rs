@@ -158,12 +158,30 @@ impl Policy {
     }
 
     /// Allows more attributes on one tag.
+    ///
+    /// # Panics
+    ///
+    /// On an `on*` attribute (`onclick`, `onerror`, ...). ammonia keeps any
+    /// attribute it is told to keep, handlers too, and a handler runs the
+    /// value as script. A policy is built once at start-up, so the mistake
+    /// stops the program before it serves a page.
     #[must_use]
     pub fn allow_attributes(
         mut self,
         tag: &'static str,
         attributes: impl IntoIterator<Item = &'static str>,
     ) -> Self {
+        let attributes: Vec<&'static str> = attributes.into_iter().collect();
+        if let Some(handler) = attributes
+            .iter()
+            .find(|a| a.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("on")))
+        {
+            panic!(
+                "Policy::allow_attributes: `{handler}` on <{tag}> is an event handler, \
+                 and its value runs as script\n\
+                 help: remove `{handler}` from the list; a policy never keeps an `on*` attribute"
+            );
+        }
         self.builder.add_tag_attributes(tag, attributes);
         self
     }
@@ -214,4 +232,30 @@ pub fn rich_text(html: &str) -> SafeHtml {
 /// Cleans `html` with [`Policy::text`].
 pub fn text(html: &str) -> SafeHtml {
     TEXT.clean(html)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "help: remove `onclick`")]
+    fn an_event_handler_cannot_be_allowed() {
+        let _ = Policy::comment().allow_attributes("p", ["lang", "onclick"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "event handler")]
+    fn a_handler_in_upper_case_cannot_be_allowed_either() {
+        let _ = Policy::comment().allow_attributes("img", ["OnError"]);
+    }
+
+    #[test]
+    fn an_attribute_that_is_not_a_handler_is_allowed() {
+        let policy = Policy::comment().allow_attributes("p", ["lang"]);
+        assert_eq!(
+            policy.clean("<p lang=\"fr\">x</p>").as_str(),
+            "<p lang=\"fr\">x</p>"
+        );
+    }
 }
