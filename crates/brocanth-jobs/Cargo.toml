@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Background jobs for brocanth: a database-backed queue with retries, a dead letter, scheduling and a worker pool — a plugin, because an application that enqueues nothing should pay nothing."
+description = "Background jobs for brocanth: typed jobs, cron schedules, events and an admin panel over the brocanth-queue engine — a plugin, because an application that enqueues nothing should pay nothing."
 
 # The core has three dependencies and a test that fails the build if a fourth
 # kind arrives. This crate is where the async runtime and the SQL driver
@@ -18,12 +18,16 @@ description = "Background jobs for brocanth: a database-backed queue with retrie
 [dependencies]
 brocanth = { workspace = true, optional = true }
 
-# The job contract, for its read side only. `Inspect` is what the admin
-# screens are written against, so implementing it here is what lets one
-# panel serve this queue and `brocanth-queue` without knowing which it has.
-# It costs nothing in the tree: the contract names serde, serde_json,
-# thiserror and tokio, which is the set below already.
+# The engine. Its worker claims, leases, retries and buries the jobs; this
+# crate adds typed jobs, cron, events and the admin panel on top
+# (`brocanth-queue/docs/DECISIONS.md`, Part 6). It costs nothing in the
+# tree: the contract names serde, serde_json, thiserror and tokio, which is
+# the set below already.
 brocanth-queue = { workspace = true, optional = true }
+
+# The engine's backends, which hold the jobs. A feature below chooses.
+brocanth-queue-postgres = { workspace = true, optional = true }
+brocanth-queue-memory = { workspace = true, optional = true }
 
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros"], optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
@@ -73,81 +77,46 @@ async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
-tempfile = "3"
 
-# The other queue, so `tests/panel.rs` can render the same six screens over
-# a backend this crate knows nothing about. That is the claim the panel
-# makes — it does not know which queue it has — and a test is the only
-# thing that keeps it true.
+# The engine's backends, so `tests/panel.rs` can render the screens over
+# them directly, and the history screen over the one with an archive.
 brocanth-queue-memory.workspace = true
-
-# And the Postgres one, for the History screen: it is the only backend in
-# the workspace that keeps an archive, so it is the only one that can prove
-# the chart draws. Skipped with the rest of `tests/postgres.rs` when no
-# server is named.
 brocanth-queue-postgres.workspace = true
 
-# No backend feature here on purpose. It is the same `sqlx` the library
-# depends on, so whichever driver the build already has is the driver the
-# tests get. `tests/postgres.rs` uses it to build the throwaway schema the
-# migration-race test needs, which `Queue` has no reason to expose.
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
+# The same `sqlx` the library depends on, for the throwaway schema and the
+# transactions the Postgres tests open.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
 
-# This crate, as a dev-dependency on itself, with SQLite on. It is the answer
-# to the question the default change raises: `cargo test -p brocanth-jobs` on a
-# laptop with no server running still has to run the suite.
-#
-# The dev-dependency adds `sqlite` to whatever the test build already has, so
-# the file-backed harness is always there for tests, examples and benches, and
-# never for a library build. The ordinary dependency tree is unaffected: a
-# published build of this crate links the Postgres driver and nothing else.
-# `admin` as well, so the panel's tests render the real screens through the
-# real admin rather than asserting on a context struct. A screen that
-# compiles and produces the wrong page is the failure worth catching.
-brocanth-jobs = { path = ".", default-features = false, features = ["sqlite", "admin"] }
+# This crate, as a dev-dependency on itself, with `memory` and `admin` on:
+# `cargo test -p brocanth-jobs` on a laptop with no server runs the whole
+# suite on the memory backend, and the panel tests render the real screens.
+# A library build gets neither.
+brocanth-jobs = { path = ".", default-features = false, features = ["postgres", "memory", "admin"] }
 
 [features]
 # The backend is a compile-time choice made in `Cargo.toml`, which is the whole
 # answer to the Rails trap: Rails configures Solid Queue in `production.rb`
 # only, so development and test run a different queue and a job that works
-# locally fails in production. A Cargo feature cannot vary by `RAILS_ENV`. The
-# queue you build is the queue you run, in every environment. That reasoning is
-# unchanged and is the reason this is a feature at all.
+# locally fails in production. A Cargo feature cannot vary by `RAILS_ENV`.
 #
-# What changed is which one is the default.
+# `postgres` is the default, because Postgres is brocanth's base and the
+# engine's claim is `FOR UPDATE SKIP LOCKED`.
 #
-# `postgres` is the default, because Postgres is brocanth's base. The same
-# database holds the models, the cache and the blobs, and the queue's central
-# mechanism — `FOR UPDATE SKIP LOCKED` — is a Postgres mechanism that SQLite
-# answers with a whole-file write lock and serialised claims. Shipping a queue
-# whose default is the backend that cannot do the thing the queue is for was
-# the wrong way round.
+# `memory` is the engine's memory backend, for tests and development only:
+# the jobs live in the process and are gone when it stops. It passes the
+# same conformance suite as Postgres. `brocanth check --deploy` reports a
+# project that ships it.
 #
-# The cost is real and is stated rather than hidden. The previous default was
-# argued for on the grounds that the framework's own tests, a `cargo test` on a
-# laptop and a small single-machine deployment all want a backend that needs no
-# server. The last of those is still true, and `sqlite` is still supported for
-# exactly it. The first two are now paid for by `[dev-dependencies]`, where
-# this crate depends on itself with `sqlite` on, so `cargo test` keeps running
-# the whole suite with no server while a library build gets one driver.
-#
-# What is left unpaid: the default-built code path is now the one that a laptop
-# with no Postgres does not exercise. `tests/postgres.rs` closes that gap only
-# when `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names a
-# server, and it says loudly when it was skipped.
-#
-# A single-machine deployment writes:
-#
-# ```toml
-# brocanth-jobs = { version = "0.1", default-features = false, features = ["sqlite"] }
-# ```
-#
-# and gets no Postgres driver. Leaving `default-features` on and adding
-# `sqlite` compiles both drivers, which works and is almost never what you
-# meant.
+# The `sqlite` feature is gone: it was a second job system, and the engine
+# has no SQLite adapter yet (`brocanth-queue/docs/DECISIONS.md` §6.4).
 default = ["runtime", "postgres"]
-postgres = ["runtime", "sqlx/postgres", "sqlx/tls-rustls-ring"]
-sqlite = ["runtime", "sqlx/sqlite-bundled"]
+postgres = [
+    "runtime",
+    "sqlx/postgres",
+    "sqlx/tls-rustls-ring",
+    "dep:brocanth-queue-postgres",
+]
+memory = ["runtime", "dep:brocanth-queue-memory"]
 
 # The queue itself: everything but the scaffold module. Each backend turns it
 # on. The CLI turns every default off and takes `scaffold` alone, so

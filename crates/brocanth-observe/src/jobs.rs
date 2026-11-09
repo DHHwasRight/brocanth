@@ -88,7 +88,7 @@ impl JobTelemetry {
                 otel.kind = "consumer",
                 otel.status_code = tracing::field::Empty,
                 job = %name,
-                job_id = id.0,
+                job_id = id.0.as_str(),
                 attempt,
                 worker = %worker,
             );

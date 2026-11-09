@@ -2,8 +2,17 @@
 //!
 //! # Design notes
 //!
-//! Background jobs for brocanth: a database-backed queue with retries, a dead
-//! letter, scheduling, recurring work and a worker pool.
+//! Background jobs for brocanth: typed jobs, recurring schedules, events and
+//! an admin panel, over the `brocanth-queue` engine.
+//!
+//! # One job system
+//!
+//! The engine is `brocanth-queue`: its backends hold the jobs, its worker
+//! claims them under a lease, retries them and buries them in the dead
+//! letter. This crate is the layer an application writes against. It adds
+//! the typed [`Job`] trait, cron schedules ([`Queue::recurring`]), the
+//! [`JobEvents`] sink and the admin panel. `brocanth-queue/docs/DECISIONS.md`
+//! Part 6 records the move and what it changed.
 //!
 //! This is a plugin. The core is a router handing a request and a context to a
 //! controller, it has exactly three dependencies, and a test in it fails the
@@ -27,23 +36,25 @@
 //! **Rails configures Solid Queue in `production.rb` only**, so development and
 //! test run a different queue and a job that works locally fails in production.
 //! Here the backend is a **Cargo feature**, chosen once in `Cargo.toml`, and a
-//! Cargo feature cannot vary by environment. There is no in-memory mode, on
-//! purpose: an in-memory queue is a second implementation, and a second
-//! implementation is exactly the trap.
+//! Cargo feature cannot vary by environment.
 //!
 //! # Which backend
 //!
 //! **Postgres is the default**, because it is brocanth's base: the same
 //! database holds the models, the cache and the blobs, and `FOR UPDATE SKIP
-//! LOCKED` — the one mechanism this queue is built on — is a Postgres
-//! mechanism. **SQLite is supported** for a single-machine deployment that
-//! wants no server; it claims work under a whole-file write lock instead, so
-//! no job is ever claimed twice but claims serialise rather than overlap. The
-//! `store` module carries the two statements side by side.
+//! LOCKED` — the mechanism the engine's claim is built on — is a Postgres
+//! mechanism.
 //!
-//! The crate's own tests run on SQLite with no server, through a
-//! dev-dependency on itself with the `sqlite` feature on, and on Postgres when
-//! `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names one.
+//! **Memory** (the `memory` feature, [`Queue::memory`]) is for tests and
+//! development only. It is the engine's memory backend, which passes the
+//! same conformance suite as Postgres, so it is not a second implementation
+//! of this crate: the worker, the retries and the schedules are the same
+//! code on both. Its jobs are gone when the process stops, and
+//! `brocanth check --deploy` reports a project that ships it.
+//!
+//! The crate's own suite runs on memory with no server, and the same suite
+//! runs on Postgres when `BROCANTH_JOBS_TEST_POSTGRES` or
+//! `BROCANTH_TEST_DATABASE_URL` names one.
 //!
 //! # The shape of it
 //!
@@ -96,15 +107,9 @@
 //! Each design decision is argued where it lives, because an argument far from
 //! the code it justifies rots:
 //!
-//! * [`store`] — `FOR UPDATE SKIP LOCKED` on Postgres, and what SQLite does
-//!   instead, which is different in mechanism and identical in guarantee.
 //! * [`worker`] — **the runtime question**: which runtime runs the workers, is
-//!   it the one serving requests, and what that costs.
-//! * [`listen`] — **being told there is work instead of asking twice a
-//!   second.** `pg_notify` rides inside the insert, so it is delivered when
-//!   the insert commits and never before the row is visible. It can only
-//!   ever shorten a sleep, so losing every notification costs latency and
-//!   no job. SQLite has no equivalent and polls.
+//!   it the one serving requests, and what that costs; and what the engine
+//!   does under it.
 //! * [`clock`] — why time is a `BIGINT` and a parameter.
 //! * [`backoff`] — exponential, capped, jittered, and why the jitter matters.
 //! * [`cron`] — five fields, UTC only, and why there is no time zone.
@@ -157,13 +162,11 @@
 
 #[cfg(all(
     feature = "runtime",
-    not(any(feature = "postgres", feature = "sqlite"))
+    not(any(feature = "postgres", feature = "memory"))
 ))]
 compile_error!(
-    "brocanth-jobs needs a database to be a queue. Enable the `postgres` \
-     feature (the default) or the `sqlite` feature. There is no in-memory \
-     backend on purpose: a queue that is a different implementation in \
-     development is the trap this crate exists to avoid."
+    "brocanth-jobs needs a store for its jobs. Enable the `postgres` \
+     feature (the default), or `memory` for tests and development."
 );
 
 #[cfg(feature = "admin")]
@@ -179,8 +182,6 @@ pub mod cron;
 pub mod events;
 #[cfg(feature = "runtime")]
 pub mod job;
-#[cfg(feature = "runtime")]
-pub mod listen;
 #[cfg(feature = "runtime")]
 pub mod plugin;
 #[cfg(feature = "runtime")]
@@ -210,13 +211,18 @@ mod error;
 /// read it without knowing which queue they have.
 #[cfg(feature = "runtime")]
 mod inspect;
+#[cfg(feature = "postgres")]
+mod legacy;
 #[cfg(feature = "runtime")]
 mod panic_hook;
 #[cfg(feature = "runtime")]
-mod store;
+mod schedule;
 
 #[cfg(feature = "runtime")]
 pub use backoff::{Backoff, Prng};
+/// The engine's rows, which the read side of [`Queue`] returns.
+#[cfg(feature = "runtime")]
+pub use brocanth_queue::{DeadId, DeadRow, JobRow};
 #[cfg(feature = "runtime")]
 pub use clock::{Clock, ManualClock, SystemClock};
 #[cfg(feature = "runtime")]
@@ -232,11 +238,11 @@ pub use panic_hook::capture_backtraces;
 #[cfg(feature = "runtime")]
 pub use plugin::{JobsConfig, JobsPlugin};
 #[cfg(feature = "runtime")]
-pub use queue::{Enqueue, JobState, Misfire, Queue, Reclaimed, Recurring};
+pub use queue::{
+    Backend, Enqueue, Enqueued, JobState, Misfire, Queue, QueueDepth, Recurring, Stats,
+};
 #[cfg(feature = "runtime")]
 pub use registry::JobRegistry;
-#[cfg(feature = "runtime")]
-pub use store::{Backend, DeadJob, Enqueued, QueueDepth, RunningJob, Stats, WaitingJob};
 #[cfg(feature = "runtime")]
 pub use worker::{ShutdownReport, Worker, WorkerBuilder, WorkerConfig, WorkerHandle};
 

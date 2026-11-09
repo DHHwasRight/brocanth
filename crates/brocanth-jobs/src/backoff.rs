@@ -116,6 +116,23 @@ impl Backoff {
     }
 }
 
+impl Backoff {
+    /// The same schedule in the engine's terms.
+    ///
+    /// One difference, on purpose: the engine's jitter only subtracts, so a
+    /// delay never goes past `max`, which a backend may declare as its
+    /// ceiling. A jitter of 0.25 here is a delay between 75% and 100% of
+    /// the computed one, where the first queue spread it to 125%.
+    pub(crate) fn to_queue(self) -> brocanth_queue::Backoff {
+        brocanth_queue::Backoff::Exponential {
+            base: Duration::from_millis(self.base_ms),
+            factor: self.factor,
+            max: Duration::from_millis(self.max_ms),
+            jitter_pct: (self.jitter.clamp(0.0, 1.0) * 100.0).round() as u32,
+        }
+    }
+}
+
 impl Default for Backoff {
     fn default() -> Self {
         Self::DEFAULT

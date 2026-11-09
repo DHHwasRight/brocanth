@@ -169,6 +169,8 @@ impl Plugin for JobsPlugin {
     const NAME: &'static str = "jobs";
 
     fn new(config: JobsConfig) -> Self {
+        // So `JobsPanel::installed()` finds it.
+        config.queue.install();
         Self {
             queue: config.queue,
             worker: config.worker,
@@ -199,11 +201,7 @@ impl Plugin for JobsPlugin {
                         .map_err(|e| format!("creating the jobs tables: {e}"))?;
                     migrated.store(true, Ordering::Release);
                 }
-                queue
-                    .inspect(crate::job::JobId(0))
-                    .await
-                    .map(drop)
-                    .map_err(|e| e.to_string())
+                queue.ping().await.map_err(|e| e.to_string())
             }
         });
         Ok(())

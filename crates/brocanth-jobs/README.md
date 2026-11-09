@@ -1,43 +1,41 @@
 # brocanth-jobs
 
-Background jobs for brocanth: a database-backed queue with retries, a dead
-letter, delayed and recurring jobs, and a worker pool. A job that fails is
-retried with exponential backoff and jitter. A job that runs out of
-attempts goes to a dead-letter table with its payload and its error, and an
-operator can requeue it. The backend is a Cargo feature: Postgres by
-default, SQLite for one machine with no server. It is a plugin, so an
-application that does not register `JobsPlugin` links no Tokio, no `sqlx`
-and no queue.
+Background jobs for brocanth: typed jobs, delayed and recurring jobs,
+events and an admin panel. The engine under it is `brocanth-queue`: its
+worker claims a job under a lease, retries a failure with exponential
+backoff and jitter, and moves a job that runs out of attempts to a dead
+letter with its payload and its error, where an operator can requeue it.
+The store is a Cargo feature: Postgres by default, memory for development
+and tests. It is a plugin, so an application that does not register
+`JobsPlugin` links no Tokio, no `sqlx` and no queue.
 
 Use it for work that must not run inside the request that asked for it:
 mail, reports, a nightly sweep. This is the queue that `brocanth create
---with jobs` installs. Do not use it when a job must be able to move to SQS
-or another managed queue later. That is `brocanth-queue`, a separate
-contract with its own backends. The two share one admin panel through
-`brocanth_queue::Inspect`.
+--with jobs` installs. There is one job system: a job enqueued here is a
+`brocanth-queue` job, and `brocanth-queue/docs/DECISIONS.md` Part 6
+records the move.
 
 ## Getting started
 
 ```toml
 [dependencies]
 brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git" }
-# One machine, no Postgres:
-# brocanth-jobs = { git = "...", default-features = false, features = ["sqlite"] }
+# For tests and development, in memory:
+# brocanth-jobs = { git = "...", features = ["memory"] }
 ```
 
 Inside this workspace: `brocanth-jobs.workspace = true`.
 
 | Feature | Default | What it adds |
 |---|---|---|
-| `runtime` | on | The queue itself: everything but `scaffold`. Each backend turns it on. |
-| `postgres` | on | The Postgres store. The claim is `FOR UPDATE SKIP LOCKED`. |
-| `sqlite` | off | The SQLite store. Claims serialise under the file's write lock. |
+| `runtime` | on | The queue itself: everything but `scaffold`. Each store turns it on. |
+| `postgres` | on | The Postgres store (`brocanth-queue-postgres`). The claim is `FOR UPDATE SKIP LOCKED`. |
+| `memory` | off | The memory store (`brocanth-queue-memory`), for tests and development. Jobs are gone at restart. |
 | `admin` | off | `admin::JobsPanel`, the queue's tab in `brocanth-admin`. |
-| `scaffold` | off | The `jobs` module for `brocanth create`. Only the CLI turns it on. |
+| `scaffold` | off | The `jobs` and `jobs-memory` modules for `brocanth create`. Only the CLI turns it on. |
 
-Turn off the default features when you choose `sqlite`. With both on, both
-drivers compile. With neither, the build fails with a message that says
-which feature to turn on.
+With no store, the build fails with a message that says which feature to
+turn on. The `sqlite` feature is gone: the engine has no SQLite adapter yet.
 
 ### As a module
 
@@ -47,17 +45,28 @@ brocanth create my-app --with jobs
 brocanth add jobs
 ```
 
-The module writes `src/plugins/jobs/mod.rs`: a plugin that opens the queue
-from a URL, starts a worker in the process, and puts the `Queue` on the
-request context. It declares these settings in the `[jobs]` section:
+The module writes `src/plugins/jobs/mod.rs`: a plugin that opens the
+queue, starts a worker in the process, and puts the `Queue` on the request
+context. Where the jobs live depends on the other modules:
 
-| Key | Default | Flag | Environment |
-|---|---|---|---|
-| `url` | `postgres://localhost/development` | none (secret) | `$<APP>_JOBS__URL` |
-| `migrate` | `true` | `--jobs.migrate` | `$<APP>_JOBS__MIGRATE` |
-| `worker` | `true` | `--jobs.worker` | `$<APP>_JOBS__WORKER` |
-| `queues` | `["default"]` | none (a list) | by index, with `config` only |
-| `concurrency` | `5` | `--jobs.concurrency` | `$<APP>_JOBS__CONCURRENCY` |
+- with `db`, the queue runs on the `db` pool, and `[jobs]` has no `url`;
+- without `db`, the queue opens its own pool from `[jobs] url`;
+- with `jobs-memory` (a child of `jobs`, off by default), the queue lives
+  in the process. `brocanth check --deploy` reports it as an error
+  (`deploy/development-only`).
+
+With `admin`, the queue is a tab at `/admin/jobs`. It is an integration:
+`integrate.admin` in `src/modules/jobs.rs` turns it off.
+
+The `[jobs]` section holds these settings:
+
+| Key | Default | Flag | Environment | When |
+|---|---|---|---|---|
+| `url` | `postgres://localhost/development` | none (secret) | `$<APP>_JOBS__URL` | without `db` and `jobs-memory` |
+| `migrate` | `true` | `--jobs.migrate` | `$<APP>_JOBS__MIGRATE` | without `jobs-memory` |
+| `worker` | `true` | `--jobs.worker` | `$<APP>_JOBS__WORKER` | always |
+| `queues` | `["default"]` | none (a list) | by index, with `config` only | always |
+| `concurrency` | `5` | `--jobs.concurrency` | `$<APP>_JOBS__CONCURRENCY` | always |
 
 `url` has no flag because a URL can carry a password, and every user on the
 host can read a process's arguments. `migrate` is for development. In
@@ -67,8 +76,9 @@ unless `flags_with_config: true` in `src/modules/brocanth.rs`. See `docs/module-
 
 ## Examples
 
-The examples use the SQLite store in a temporary directory, so they run
-with no server. On Postgres, pass a `postgres://` URL to `Queue::connect`.
+The examples use the memory store, so they run with no server. On
+Postgres, pass a `postgres://` URL to `Queue::connect`, or a pool you
+already have to `Queue::from_pool`.
 
 ### Define a job and enqueue it
 
@@ -102,9 +112,7 @@ impl Job for SendWelcome {
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let dir = tempfile::tempdir()?;
-# let url = format!("sqlite://{}", dir.path().join("jobs.db").display());
-let queue = Queue::connect(&url).await?;
+let queue = Queue::memory(); // or Queue::connect("postgres://...").await?
 queue.migrate().await?;
 
 queue.enqueue(SendWelcome { user_id: 7 }).await?;
@@ -147,10 +155,7 @@ impl Job for ChargeCard {
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let dir = tempfile::tempdir()?;
-# let url = format!("sqlite://{}", dir.path().join("jobs.db").display());
-# let queue = Queue::connect(&url).await?;
-# queue.migrate().await?;
+# let queue = Queue::memory();
 queue.enqueue(ChargeCard { order: 42 }).await?;
 
 let worker = Worker::builder(&queue)
@@ -168,8 +173,8 @@ while queue.stats().await?.dead == 0 {
 worker.shutdown(Duration::from_secs(5)).await?;
 
 let dead = queue.dead_jobs(10, 0).await?;
-assert_eq!(dead[0].job_name, "charge_card");
-assert!(queue.requeue_dead(dead[0].id).await?.is_some());
+assert_eq!(dead[0].kind, "charge_card");
+assert!(queue.requeue_dead(&dead[0].id).await?.is_some());
 # Ok(())
 # }
 ```
@@ -198,16 +203,39 @@ impl Job for NightlyBilling {
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let dir = tempfile::tempdir()?;
-# let url = format!("sqlite://{}", dir.path().join("jobs.db").display());
-# let queue = Queue::connect(&url).await?;
-# queue.migrate().await?;
+# let queue = Queue::memory();
 queue
     .recurring("nightly-billing", "0 3 * * *", NightlyBilling)
     // Must run once a day even if the worker was down at 03:00.
     .misfire(Misfire::FireOnce)
     .install()
     .await?;
+# Ok(())
+# }
+```
+
+### Enqueue in a transaction
+
+On Postgres, `in_tx` writes the job in the caller's transaction, to the
+engine's outbox. The job commits with the data it refers to, or not at
+all. After the commit, the relay that every worker runs moves it to the
+queue.
+
+```rust,no_run
+# use brocanth_jobs::{Job, JobContext, Queue};
+# use serde::{Deserialize, Serialize};
+# #[derive(Serialize, Deserialize)] struct ChargeCard { order: i64 }
+# impl Job for ChargeCard {
+#     const NAME: &'static str = "charge_card";
+#     type Error = std::io::Error;
+#     async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> { Ok(()) }
+# }
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let queue = Queue::connect("postgres://localhost/app").await?;
+let mut tx = queue.pg_pool().expect("a Postgres queue").begin().await?;
+// ... insert the order with `&mut *tx` ...
+queue.enqueue(ChargeCard { order: 7 }).in_tx(&mut tx).await?;
+tx.commit().await?;
 # Ok(())
 # }
 ```
@@ -258,42 +286,34 @@ let admin = brocanth_admin::AdminConfig::new().panel(panel);
 cargo test -p brocanth-jobs
 ```
 
-The suite runs on SQLite with no server. The crate has a dev-dependency on
-itself with `sqlite` and `admin` on, so a test build always has the SQLite
-store, and a library build keeps only the driver it asked for. Each test
-gets its own SQLite file in its own temporary directory.
-
-The default backend is Postgres, so the SQLite suite does not test the
-default code path. `tests/postgres.rs` does, when a server is set:
+The behaviour suite (`tests/queue.rs`, `tests/recurring.rs`,
+`tests/panel.rs`) runs once per store: `memory::<test>` always, and
+`postgres::<test>` when a server is set. `tests/postgres.rs` holds what
+only Postgres has: the migration race, the move from the first queue's
+tables, the transactional enqueue and `LISTEN/NOTIFY`.
 
 ```sh
 BROCANTH_JOBS_TEST_POSTGRES=postgres://localhost/brocanth_jobs_test \
-    cargo test -p brocanth-jobs --test postgres
+    cargo test -p brocanth-jobs
 ```
 
 | Variable | Effect |
 |---|---|
-| `BROCANTH_JOBS_TEST_POSTGRES` | The database for `tests/postgres.rs`. Read first. |
-| `BROCANTH_TEST_DATABASE_URL` | The workspace-wide variable. Used when the first is not set. It is the only variable the History test in `tests/panel.rs` reads. |
+| `BROCANTH_JOBS_TEST_POSTGRES` | The database for the Postgres tests. Read first. |
+| `BROCANTH_TEST_DATABASE_URL` | The workspace-wide variable. Used when the first is not set. |
 
 Without either, each Postgres test prints `!! SKIPPED <test>` to stderr,
 past the output capture, and passes.
 
-**Isolation.** The tests in `tests/postgres.rs` share the queue tables in
-the given database. They never truncate. Each test works in its own queue
-name with its own token, as two applications on one database would. Two
-tests make their own schema and drop it after: the migration race in
-`tests/postgres.rs` and the History test in `tests/panel.rs`. Run one
-`cargo test` process per database at a time: `tick_schedules`,
-`reclaim_orphans` and `stats` act on the whole queue.
+**Isolation.** Each Postgres test creates a schema of its own and works in
+it through `search_path`. The tests run in parallel and truncate nothing.
 
-**Testing an application.** Open a `Queue` on a test database (a SQLite
-file in a temporary directory, or a Postgres database from the variables
-above), and give it to the application. For a route that enqueues, send
-the request with `brocanth-test`'s `TestClient`, then assert on
-`queue.ready(..)`, `queue.scheduled(..)` or `queue.stats()`. To test the
-job itself, run a `Worker` with the job registered and wait for the queue
-to empty, as the second example does.
+**Testing an application.** Give the application `Queue::memory()`, or a
+`Queue` on a test database. For a route that enqueues, send the request
+with `brocanth-test`'s `TestClient`, then assert on `queue.ready(..)`,
+`queue.scheduled(..)` or `queue.stats()`. To test the job itself, run a
+`Worker` with the job registered and wait for the queue to empty, as the
+second example does.
 
 ## Links
 
@@ -305,5 +325,7 @@ to empty, as the second example does.
 - `docs/observability.md`: the job span, log line and counter, and the
   readiness check.
 - The crate docs (below, and in `src/`): each design argument sits in the
-  module it justifies: `store` (the claim on each backend), `worker` (the
-  runtime question), `listen` (`pg_notify`), `cron`, `Misfire`, `backoff`.
+  module it justifies: `worker` (the runtime question, and what the
+  engine does), `queue` (the store), `registry`, `cron`, `Misfire`,
+  `backoff`.
+- `crates/brocanth-queue/docs/DECISIONS.md` Part 6: one job system.

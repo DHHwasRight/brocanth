@@ -2,11 +2,12 @@
 //!
 //! These assert on HTML and not on a context struct, because a screen that
 //! compiles and draws the wrong thing is the failure worth catching. The
-//! admin is real, the policy is real, and the queue is a real SQLite file
-//! with real rows in it.
+//! admin is real, the policy is real, and the queue is a real queue, on the memory
+//! backend and on Postgres, with real rows in it.
 
-#![cfg(all(feature = "admin", feature = "sqlite"))]
+#![cfg(all(feature = "admin", feature = "memory"))]
 
+#[macro_use]
 mod common;
 
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Submission};
 use brocanth_jobs::admin::JobsPanel;
 use brocanth_jobs::{Queue, Worker};
-use common::{log, sqlite_queue, token, wait_for, AlwaysFails, Echo, Slow};
+use common::{log, token, wait_for, AlwaysFails, Echo, Slow};
 
 struct Operator;
 
@@ -51,9 +52,7 @@ fn post(admin: &Admin, path: &str) -> u16 {
         .status()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_dashboard_counts_what_is_in_the_queue() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn the_dashboard_counts_what_is_in_the_queue(queue: Queue) {
     let t = token("panel-dash");
     queue
         .enqueue(Echo {
@@ -83,9 +82,7 @@ async fn the_dashboard_counts_what_is_in_the_queue() {
     assert!(html.contains("Oldest runnable job"), "{html}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retries_and_scheduled_are_two_screens_of_one_table() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn retries_and_scheduled_are_two_screens_of_one_table(queue: Queue) {
     let t = token("panel-waiting");
 
     queue
@@ -133,9 +130,7 @@ async fn retries_and_scheduled_are_two_screens_of_one_table() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn busy_names_the_worker_and_the_screen_shows_it() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn busy_names_the_worker_and_the_screen_shows_it(queue: Queue) {
     let t = token("panel-busy");
     queue
         .enqueue(Slow {
@@ -163,9 +158,7 @@ async fn busy_names_the_worker_and_the_screen_shows_it() {
     worker.shutdown(Duration::from_secs(5)).await.expect("stop");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_button_changes_the_queue_and_redirects() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_button_changes_the_queue_and_redirects(queue: Queue) {
     let t = token("panel-button");
     let id = queue
         .enqueue(Echo {
@@ -174,8 +167,8 @@ async fn a_button_changes_the_queue_and_redirects() {
         })
         .in_(Duration::from_secs(3600))
         .await
-        .expect("scheduled")
-        .id();
+        .expect("scheduled");
+    let id = id.id().expect("an id").clone();
 
     let a = admin(&queue, true);
     assert_eq!(queue.scheduled(10, 0).await.expect("scheduled").len(), 1);
@@ -191,9 +184,7 @@ async fn a_button_changes_the_queue_and_redirects() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_button_is_a_dp_post_that_removes_its_row() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_button_is_a_dp_post_that_removes_its_row(queue: Queue) {
     let t = token("panel-dp-post");
     let id = queue
         .enqueue(Echo {
@@ -202,8 +193,8 @@ async fn a_button_is_a_dp_post_that_removes_its_row() {
         })
         .in_(Duration::from_secs(3600))
         .await
-        .expect("scheduled")
-        .id();
+        .expect("scheduled");
+    let id = id.id().expect("an id").clone();
 
     let html = get(&admin(&queue, true), "/admin/jobs/scheduled");
     // The form keeps its `action`, so it posts with no script; `dp-post`
@@ -225,12 +216,11 @@ async fn a_button_is_a_dp_post_that_removes_its_row() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reader_who_may_not_act_is_not_shown_the_buttons() {
+async fn a_reader_who_may_not_act_is_not_shown_the_buttons(queue: Queue) {
     // The whole reason reading and acting are two policy questions. An
     // on-call engineer who may look at the dead letter must not be one
     // click from emptying it.
-    let (queue, _dir) = sqlite_queue().await;
+
     let t = token("panel-readonly");
     queue
         .enqueue(Echo {
@@ -247,7 +237,10 @@ async fn a_reader_who_may_not_act_is_not_shown_the_buttons() {
     assert!(!html.contains("Run now"), "and the button is not: {html}");
 
     // And pressing it anyway is refused rather than merely hidden.
-    let id = queue.scheduled(10, 0).await.expect("scheduled")[0].id;
+    let id = queue.scheduled(10, 0).await.expect("scheduled")[0]
+        .id
+        .0
+        .clone();
     assert_eq!(
         post(&readonly, &format!("/admin/jobs/scheduled/{id}/run")),
         403
@@ -259,9 +252,7 @@ async fn a_reader_who_may_not_act_is_not_shown_the_buttons() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_tab_renders() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn every_tab_renders(queue: Queue) {
     let a = admin(&queue, true);
     for path in ["", "/queues", "/busy", "/retries", "/scheduled", "/dead"] {
         let html = get(&a, &format!("/admin/jobs{path}"));
@@ -287,7 +278,7 @@ async fn every_tab_renders() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "prints a page, asserts nothing"]
 async fn show() {
-    let (queue, _dir) = sqlite_queue().await;
+    let queue = Queue::memory();
     let t = token("show");
     for n in 0..3 {
         queue
@@ -327,8 +318,8 @@ async fn show() {
 
 /// The panel holds `Arc<dyn DynInspect>` and nothing else, so anything that
 /// implements the contract draws the same screens. This is that claim as a
-/// test: the backend is `brocanth-queue`'s in-process one, which shares no
-/// code, no schema and no id type with the SQLite queue above.
+/// test: the backend is `brocanth-queue`'s in-process one, which is driven
+/// directly through the engine's contract, with no `Queue` at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_same_screens_render_over_another_queue_entirely() {
     use brocanth_queue::{Backend, ClaimRequest, JobFailure, NewJob, Settle, UniquenessKind};
@@ -599,3 +590,13 @@ async fn the_history_screen_plots_what_the_archive_kept() {
     .await
     .expect("drop");
 }
+
+on_every_backend!(
+    the_dashboard_counts_what_is_in_the_queue,
+    retries_and_scheduled_are_two_screens_of_one_table,
+    busy_names_the_worker_and_the_screen_shows_it,
+    a_button_changes_the_queue_and_redirects,
+    a_button_is_a_dp_post_that_removes_its_row,
+    a_reader_who_may_not_act_is_not_shown_the_buttons,
+    every_tab_renders,
+);

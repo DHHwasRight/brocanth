@@ -1,345 +1,77 @@
-//! The same guarantees, on Postgres, where the claim really does use
-//! `FOR UPDATE SKIP LOCKED`.
+//! What only Postgres has: the migration race, the move from the first
+//! queue's tables, the transactional enqueue and `LISTEN/NOTIFY`.
 //!
-//! Compiled with the `postgres` feature, which is the default, and skipped at
-//! run time unless `BROCANTH_JOBS_TEST_POSTGRES` or
+//! The behaviour suite (`queue.rs`, `recurring.rs`, `panel.rs`) already runs
+//! on Postgres through `common::on_every_backend!`. The tests here have no
+//! memory twin.
+//!
+//! Skipped at run time unless `BROCANTH_JOBS_TEST_POSTGRES` or
 //! `BROCANTH_TEST_DATABASE_URL` names a database:
 //!
 //! ```sh
 //! BROCANTH_JOBS_TEST_POSTGRES=postgres://localhost/brocanth_jobs_test \
-//!   cargo test -p brocanth-jobs --test postgres
+//!   cargo test -p brocanth-jobs
 //! ```
 //!
-//! Skipping rather than failing, because `cargo test -p brocanth-jobs` has to
-//! pass on a laptop with no server running — and because the suite in
-//! `queue.rs` already proves the behaviour on a real database. What these add
-//! is that the Postgres *dialect* of every statement is valid and that the
-//! locking claim behaves the same as the serialised one.
-//!
 //! Every skip prints a line naming the test, through a write that `cargo
-//! test`'s output capture does not swallow. Postgres is the default backend
-//! now, so a run where these quietly did nothing would be a run that tested
-//! the default path not at all, and it has to be visible that that is what
-//! happened.
+//! test`'s output capture does not swallow. Each test works in a schema of
+//! its own.
 
 #![cfg(feature = "postgres")]
 
+#[macro_use]
 mod common;
 
 use std::time::Duration;
 
-use brocanth_jobs::{Enqueued, Queue, Worker};
-use common::{log, token, wait_for, AlwaysFails, Echo, Nightly};
-
-/// The queue under test, or `None` when no database was named.
-///
-/// `migrate` runs once for the whole process, not once per test. Running it
-/// per test is what the suite used to do, and it deadlocks once there are
-/// enough tests: `CREATE INDEX IF NOT EXISTS` takes a `ShareLock` on the
-/// table, a concurrent `reclaim_orphans` holds `RowExclusiveLock` on it and
-/// wants the dead-letter table, and the two cross. The schema is the same
-/// for every test here, so creating it once is also what an application
-/// does.
-async fn postgres_queue() -> Option<Queue> {
-    use tokio::sync::OnceCell;
-    static MIGRATED: OnceCell<()> = OnceCell::const_new();
-
-    let url = common::postgres_url()?;
-    let queue = Queue::connect(&url).await.expect("connecting to Postgres");
-    MIGRATED
-        .get_or_init(|| async {
-            queue.migrate().await.expect("creating the tables");
-        })
-        .await;
-    // One database serves every test in this file, and they run in parallel,
-    // so nothing here truncates anything. Each test works inside its own queue
-    // name and its own token instead, which is what two applications sharing a
-    // database would do.
-    //
-    // One `cargo test` process at a time, though. `tick_schedules`,
-    // `reclaim_orphans` and `stats` are queue-wide by design — they are the
-    // operations an operator runs over the whole queue — so a second process
-    // on the same database fires the first one's schedules and reclaims its
-    // jobs. Two concurrent suites need two databases.
-    Some(queue)
-}
+use brocanth_jobs::{Queue, Worker};
+use common::{log, token, wait_for, Echo};
 
 macro_rules! queue_or_skip {
     () => {
-        match postgres_queue().await {
+        match common::postgres_queue().await {
             Some(queue) => queue,
             None => {
-                common::skipped(
-                    "no Postgres server; set BROCANTH_JOBS_TEST_POSTGRES or \
-                     BROCANTH_TEST_DATABASE_URL to run this",
-                );
+                common::skipped(common::NO_POSTGRES);
                 return;
             }
         }
     };
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_statement_is_valid_postgres() {
-    let queue = queue_or_skip!();
-    let t = token("pg-smoke");
-
-    let id = queue
-        .enqueue(Echo {
-            token: t.clone(),
-            n: 1,
-        })
-        .unique(format!("pg-smoke:{t}"))
-        .await
-        .expect("enqueue");
-    assert!(matches!(id, Enqueued::Inserted(_)));
-
-    queue.stats().await.expect("stats");
-    queue.inspect(id.id()).await.expect("inspect");
-    queue.dead_jobs(10, 0).await.expect("dead jobs");
-    // The three operator reads. Here and not only in `queue.rs`, because
-    // that suite runs on SQLite and this test's whole job is the dialect.
-    queue.retries(10, 0).await.expect("retries");
-    queue.scheduled(10, 0).await.expect("scheduled");
-    queue.busy(10, 0).await.expect("busy");
-    queue
-        .reclaim_orphans(Duration::from_secs(60))
-        .await
-        .expect("reclaim");
-    queue.tick_schedules().await.expect("tick");
-
-    let worker = Worker::builder(&queue)
-        .queues(["default"])
-        .poll_interval(Duration::from_millis(10))
-        .register::<Echo>()
-        .start()
-        .expect("start");
-    wait_for("the job to run", Duration::from_secs(10), || async {
-        log(&t) == vec!["ran 1"]
-    })
-    .await;
-    worker
-        .shutdown(Duration::from_secs(5))
-        .await
-        .expect("shutdown");
+macro_rules! pool_or_skip {
+    () => {
+        match common::postgres_pool().await {
+            Some(pool) => pool,
+            None => {
+                common::skipped(common::NO_POSTGRES);
+                return;
+            }
+        }
+    };
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn skip_locked_keeps_two_workers_off_the_same_row() {
-    let queue = queue_or_skip!();
-    let t = token("pg-skip-locked");
-    const JOBS: u32 = 60;
+// ---------------------------------------------------------------------------
+// The schema
+// ---------------------------------------------------------------------------
 
-    for n in 0..JOBS {
-        queue
-            .enqueue(Echo {
-                token: t.clone(),
-                n,
-            })
-            .queue(&t)
-            .await
-            .expect("enqueue");
-    }
-
-    let mut workers = Vec::new();
-    for i in 0..4 {
-        workers.push(
-            Worker::builder(&queue)
-                .id(format!("pg-{i}"))
-                .queues([t.clone()])
-                .concurrency(4)
-                .poll_interval(Duration::from_millis(5))
-                .register::<Echo>()
-                .start()
-                .expect("start"),
-        );
-    }
-
-    wait_for("every job to run", Duration::from_secs(30), || async {
-        log(&t).len() >= JOBS as usize
-    })
-    .await;
-    for worker in workers {
-        worker
-            .shutdown(Duration::from_secs(5))
-            .await
-            .expect("shutdown");
-    }
-
-    let ran = log(&t);
-    let unique: std::collections::HashSet<&String> = ran.iter().collect();
-    assert_eq!(unique.len(), JOBS as usize);
-    assert_eq!(ran.len(), JOBS as usize, "a row was claimed twice");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_dead_letter_works_on_postgres_too() {
-    let queue = queue_or_skip!();
-    let t = token("pg-dead");
-
-    queue
-        .enqueue(AlwaysFails { token: t.clone() })
-        .queue(&t)
-        .await
-        .expect("enqueue");
-
-    let worker = Worker::builder(&queue)
-        .queues([t.clone()])
-        .poll_interval(Duration::from_millis(10))
-        .register::<AlwaysFails>()
-        .start()
-        .expect("start");
-    wait_for("three attempts", Duration::from_secs(20), || async {
-        log(&t).len() >= 3
-    })
-    .await;
-    wait_for("the dead letter", Duration::from_secs(10), || async {
-        queue
-            .dead_jobs(50, 0)
-            .await
-            .expect("dead")
-            .iter()
-            .any(|d| d.payload.contains(&t))
-    })
-    .await;
-    worker
-        .shutdown(Duration::from_secs(5))
-        .await
-        .expect("shutdown");
-
-    let dead = queue.dead_jobs(50, 0).await.expect("dead");
-    let mine = dead.iter().find(|d| d.payload.contains(&t)).expect("mine");
-    assert_eq!(mine.attempts, 3);
-    assert_eq!(mine.failure_kind, "returned");
-    queue.discard_dead(mine.id).await.expect("discard");
-}
-
-/// Recurring schedules on Postgres.
+/// `CREATE TABLE IF NOT EXISTS` racing itself.
 ///
-/// `tests/recurring.rs` runs this path on SQLite only, and it is a different
-/// set of statements from the queue itself — an upsert on a unique name, a due
-/// lookup and a fired-marker write. A `ManualClock` moves the window, so the
-/// test takes no wall-clock time.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_recurring_schedule_fires_once_per_window_on_postgres() {
-    use brocanth_jobs::ManualClock;
-    use chrono::{TimeZone, Utc};
-
-    let queue = queue_or_skip!();
-    let t = token("pg-recurring");
-    let noon = Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
-    let clock = ManualClock::new(noon);
-    let queue = queue.with_clock(clock.clone());
-
-    queue
-        .recurring(&t, "0 * * * *", Nightly { token: t.clone() })
-        .queue(&t)
-        .install()
-        .await
-        .expect("install");
-
-    // The counts are read per queue, not from `tick_schedules`'s return value.
-    // That return value is queue-wide, and this test shares a database with
-    // the others and with whatever a previous run left behind.
-    async fn ready(queue: &Queue, name: &str) -> u64 {
-        queue
-            .stats()
-            .await
-            .expect("stats")
-            .queues
-            .iter()
-            .find(|q| q.queue == name)
-            .map_or(0, |q| q.ready)
-    }
-
-    // Nothing is due at noon: the next occurrence is 13:00.
-    queue.tick_schedules().await.expect("tick");
-    assert_eq!(ready(&queue, &t).await, 0);
-
-    // 13:00:10, ten seconds late and well inside the grace period.
-    clock.set(noon + chrono::Duration::seconds(3_610));
-    queue.tick_schedules().await.expect("tick");
-    assert_eq!(ready(&queue, &t).await, 1, "one firing");
-    queue.tick_schedules().await.expect("tick");
-    assert_eq!(
-        ready(&queue, &t).await,
-        1,
-        "the fired marker stuck, so the same window does not fire twice"
-    );
-
-    let worker = Worker::builder(&queue)
-        .queues([t.clone()])
-        .poll_interval(Duration::from_millis(10))
-        .register::<Nightly>()
-        .start()
-        .expect("start");
-    wait_for(
-        "the scheduled job to run",
-        Duration::from_secs(10),
-        || async { log(&t) == vec!["nightly ran"] },
-    )
-    .await;
-    worker
-        .shutdown(Duration::from_secs(5))
-        .await
-        .expect("shutdown");
-
-    // Take the schedule back out. It is the one row in this file that outlives
-    // its test, and a later run's `tick_schedules` would otherwise fire it.
-    assert!(queue.remove_recurring(&t).await.expect("remove"));
-}
-
-/// The regression test for the one bug in this crate that a laptop cannot see.
-///
-/// `CREATE TABLE IF NOT EXISTS` is not atomic on Postgres: the catalogue check
-/// and the create are separate steps. Eight sessions calling [`Queue::migrate`]
-/// at the same moment against a schema that does not yet exist is a rolling
-/// deploy in miniature, and before the advisory lock went in it failed with
-/// `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`.
-///
-/// It has to race against an **empty** schema, because once the tables are
-/// there `IF NOT EXISTS` short-circuits and there is nothing left to race. So
-/// the test makes a throwaway Postgres schema, points the queue at it through
-/// the `options=-c search_path=...` parameter, and drops it afterwards.
+/// On Postgres the catalogue check and the create are separate steps, so
+/// two sessions both decide to create and the loser fails with a
+/// `pg_class_relname_nsp_index` violation. It has to race against an
+/// **empty** schema, because once the tables are there `IF NOT EXISTS`
+/// short-circuits and there is nothing left to race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migrate_is_safe_from_several_connections_at_once() {
-    let Some(url) = common::postgres_url() else {
-        common::skipped(
-            "no Postgres server; set BROCANTH_JOBS_TEST_POSTGRES or \
-             BROCANTH_TEST_DATABASE_URL to run this",
-        );
-        return;
-    };
+    let pool = pool_or_skip!();
 
-    let schema = format!("brocanth_jobs_race_{}", std::process::id());
-    let admin = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .expect("connecting to Postgres");
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA IF EXISTS {schema} CASCADE"
-    )))
-    .execute(&admin)
-    .await
-    .expect("dropping any leftover schema");
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .expect("creating the throwaway schema");
-
-    let separator = if url.contains('?') { '&' } else { '?' };
-    let scoped = format!("{url}{separator}options=-c%20search_path%3D{schema}");
-
-    // Eight at once. Each opens its own pool, exactly as eight instances of an
-    // application booting together would.
+    // Eight at once, on one pool of six connections, so several really are
+    // in flight together.
     let mut racers = Vec::new();
     for _ in 0..8 {
-        let scoped = scoped.clone();
-        racers.push(tokio::spawn(async move {
-            let queue = Queue::connect(&scoped).await?;
-            queue.migrate().await
-        }));
+        let queue = Queue::from_pool(pool.clone());
+        racers.push(tokio::spawn(async move { queue.migrate().await }));
     }
     let mut failures = Vec::new();
     for racer in racers {
@@ -347,35 +79,206 @@ async fn migrate_is_safe_from_several_connections_at_once() {
             failures.push(e.to_string());
         }
     }
-
-    let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename",
-    )
-    .bind(&schema)
-    .fetch_all(&admin)
-    .await
-    .expect("listing the tables");
-
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP SCHEMA IF EXISTS {schema} CASCADE"
-    )))
-    .execute(&admin)
-    .await
-    .expect("dropping the throwaway schema");
-
     assert!(
         failures.is_empty(),
         "concurrent migrate() must not fail: {failures:?}"
     );
-    assert_eq!(
-        tables,
-        [
-            "brocanth_dead_jobs",
-            "brocanth_job_schedules",
-            "brocanth_jobs"
-        ],
-        "all three tables, created once"
+
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename::text FROM pg_tables \
+         WHERE schemaname = current_schema() ORDER BY tablename",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("listing the tables");
+    for table in [
+        "brocanth_job_schedules",
+        "queue_bulk",
+        "queue_dead",
+        "queue_outbox",
+        "queue_scheduled",
+    ] {
+        assert!(
+            tables.iter().any(|t| t == table),
+            "{table} is missing from {tables:?}"
+        );
+    }
+}
+
+/// An application that ran the first queue has rows in `brocanth_jobs`
+/// and `brocanth_dead_jobs`. `migrate` moves them into the engine's tables,
+/// so nothing waiting or dead is lost in the upgrade.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrate_moves_the_first_queues_rows_into_the_engine() {
+    let pool = pool_or_skip!();
+    let t = token("legacy");
+
+    for sql in [
+        "CREATE TABLE brocanth_jobs (
+            id BIGSERIAL PRIMARY KEY, queue TEXT NOT NULL, job_name TEXT NOT NULL,
+            payload TEXT NOT NULL, priority BIGINT NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'pending', attempts BIGINT NOT NULL DEFAULT 0,
+            max_attempts BIGINT NOT NULL, run_at BIGINT NOT NULL, created_at BIGINT NOT NULL,
+            unique_key TEXT, locked_by TEXT, locked_at BIGINT, heartbeat_at BIGINT,
+            last_error TEXT)",
+        "CREATE TABLE brocanth_dead_jobs (
+            id BIGSERIAL PRIMARY KEY, job_id BIGINT NOT NULL, queue TEXT NOT NULL,
+            job_name TEXT NOT NULL, payload TEXT NOT NULL, priority BIGINT NOT NULL,
+            attempts BIGINT NOT NULL, max_attempts BIGINT NOT NULL, unique_key TEXT,
+            error TEXT NOT NULL, failure_kind TEXT NOT NULL, backtrace TEXT,
+            enqueued_at BIGINT NOT NULL, failed_at BIGINT NOT NULL)",
+    ] {
+        sqlx::query(sql).execute(&pool).await.expect("an old table");
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let payload = format!(r#"{{"token":"{t}","n":1}}"#);
+    // One waiting job, and one a worker of the old version was running.
+    for state in ["pending", "running"] {
+        sqlx::query(
+            "INSERT INTO brocanth_jobs (queue, job_name, payload, state, attempts, \
+             max_attempts, run_at, created_at) VALUES ('default', 'echo', $1, $2, $3, 5, $4, $4)",
+        )
+        .bind(&payload)
+        .bind(state)
+        .bind(i64::from(state == "running"))
+        .bind(now_ms)
+        .execute(&pool)
+        .await
+        .expect("an old job");
+    }
+    sqlx::query(
+        "INSERT INTO brocanth_dead_jobs (job_id, queue, job_name, payload, priority, attempts, \
+         max_attempts, error, failure_kind, backtrace, enqueued_at, failed_at) \
+         VALUES (9, 'default', 'echo', $1, 0, 5, 5, 'smtp refused', 'panicked', 'frame 1', $2, $2)",
+    )
+    .bind(&payload)
+    .bind(now_ms)
+    .execute(&pool)
+    .await
+    .expect("an old dead job");
+
+    let queue = Queue::from_pool(pool.clone());
+    queue.migrate().await.expect("migrate");
+
+    let stats = queue.stats().await.expect("stats");
+    assert_eq!(stats.ready, 2, "both jobs are waiting again: {stats:?}");
+    assert_eq!(stats.dead, 1);
+    let dead = queue.dead_jobs(10, 0).await.expect("dead");
+    assert_eq!(dead[0].kind, "echo");
+    assert!(
+        dead[0].failure.contains("smtp refused"),
+        "{}",
+        dead[0].failure
     );
+    assert!(dead[0].failure.contains("frame 1"), "the backtrace travels");
+
+    // The old tables are left, empty, and a second migrate moves nothing twice.
+    queue.migrate().await.expect("migrate again");
+    assert_eq!(queue.stats().await.expect("stats").ready, 2);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM brocanth_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(left, 0);
+
+    // And the moved jobs run.
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    wait_for(
+        "both moved jobs to run",
+        Duration::from_secs(10),
+        || async { log(&t).len() == 2 },
+    )
+    .await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+}
+
+// ---------------------------------------------------------------------------
+// The transactional enqueue
+// ---------------------------------------------------------------------------
+
+/// A job enqueued in a transaction commits with it, and a worker's relay
+/// delivers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_enqueued_in_a_committed_transaction_runs() {
+    let queue = queue_or_skip!();
+    let pool = queue_pool(&queue).await;
+    let t = token("in-tx");
+
+    let mut tx = pool.begin().await.expect("begin");
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_tx(&mut tx)
+        .await
+        .expect("enqueue in the transaction");
+    assert_eq!(
+        queue.stats().await.expect("stats").ready,
+        0,
+        "nothing is visible before the commit"
+    );
+    tx.commit().await.expect("commit");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    wait_for(
+        "the relayed job to run",
+        Duration::from_secs(10),
+        || async { log(&t) == ["ran 1"] },
+    )
+    .await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+}
+
+/// A rollback takes the job with it: no relay ever sees it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rolled_back_transaction_takes_its_job_with_it() {
+    let queue = queue_or_skip!();
+    let pool = queue_pool(&queue).await;
+    let t = token("in-tx-rollback");
+
+    let mut tx = pool.begin().await.expect("begin");
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_tx(&mut tx)
+        .await
+        .expect("enqueue in the transaction");
+    tx.rollback().await.expect("rollback");
+
+    let worker = Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .register::<Echo>()
+        .start()
+        .expect("start");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    worker.shutdown(Duration::from_secs(5)).await.expect("stop");
+
+    assert!(log(&t).is_empty(), "the job ran: {:?}", log(&t));
+    let outbox: i64 = sqlx::query_scalar("SELECT count(*) FROM queue_outbox")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(outbox, 0);
+    assert_eq!(queue.stats().await.expect("stats").total(), 0);
+}
+
+/// The pool a test queue runs on, for a transaction in the same schema.
+async fn queue_pool(queue: &Queue) -> sqlx::PgPool {
+    queue.pg_pool().expect("a Postgres queue").clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -386,16 +289,13 @@ async fn migrate_is_safe_from_several_connections_at_once() {
 ///
 /// Both polls are set to a minute. A worker that polls cannot start this job
 /// inside the assertion window, so the only way the test passes is if the
-/// enqueue woke it. That is the point: a shorter poll here would make the
-/// test pass on either mechanism and prove nothing.
-#[tokio::test]
+/// enqueue woke it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
     let queue = queue_or_skip!();
     let token = token("notify-wakes");
-    let name = format!("q-{token}");
 
     let worker = Worker::builder(&queue)
-        .queues([name.clone()])
         .concurrency(1)
         // A minute each. Neither is allowed to be what makes this work.
         .poll_interval(Duration::from_secs(60))
@@ -405,8 +305,7 @@ async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
         .expect("the worker started");
 
     // Let it reach the idle branch and the listener attach before the row
-    // lands, which is the case the notification exists for. A job enqueued
-    // before the listener attaches is covered by the ring on connect.
+    // lands, which is the case the notification exists for.
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let started = std::time::Instant::now();
@@ -415,7 +314,6 @@ async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
             token: token.clone(),
             n: 1,
         })
-        .queue(&name)
         .await
         .expect("enqueued");
 
@@ -437,79 +335,16 @@ async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
         .expect("the worker stopped");
 }
 
-/// A scheduled job starts when it is due, not at the next tick after it.
-///
-/// The safety poll is a minute, so if the worker slept its whole cap this
-/// would take a minute. It does not, because an idle worker asks when the
-/// soonest job is due and sleeps until then.
-#[tokio::test]
-async fn a_worker_sleeps_until_the_next_job_is_due() {
-    let queue = queue_or_skip!();
-    let token = token("sleep-until-due");
-    let name = format!("q-{token}");
-
-    // Before the enqueue, not after it: `in_` counts from the moment the
-    // builder is made, and a contended database can take most of a second
-    // to accept the row. Measuring from after it would make this test fail
-    // when the machine is busy, which is a test measuring the wrong thing
-    // rather than a worker waking early.
-    let started = std::time::Instant::now();
-    queue
-        .enqueue(Echo {
-            token: token.clone(),
-            n: 1,
-        })
-        .queue(&name)
-        .in_(Duration::from_millis(1200))
-        .await
-        .expect("enqueued for later");
-
-    let worker = Worker::builder(&queue)
-        .queues([name.clone()])
-        .concurrency(1)
-        .poll_interval(Duration::from_secs(60))
-        .safety_poll(Duration::from_secs(60))
-        .register::<Echo>()
-        .start()
-        .expect("the worker started");
-
-    wait_for(
-        "the scheduled job to run",
-        Duration::from_secs(10),
-        || async { !log(&token).is_empty() },
-    )
-    .await;
-
-    let waited = started.elapsed();
-    assert_eq!(log(&token), ["ran 1"]);
-    assert!(
-        waited >= Duration::from_millis(1000),
-        "not before it was due: {waited:?}"
-    );
-    assert!(
-        waited < Duration::from_secs(10),
-        "and not a tick later: {waited:?}"
-    );
-
-    worker
-        .shutdown(Duration::from_secs(5))
-        .await
-        .expect("the worker stopped");
-}
-
 /// With the listener off, the poll is the mechanism again.
 ///
-/// The fallback has to work, because it is what a SQLite deployment runs and
-/// what a Postgres deployment runs when its connection limit cannot spare a
-/// session per worker.
-#[tokio::test]
+/// The fallback has to work, because it is what a Postgres deployment runs
+/// when its connection limit cannot spare a session per worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_told_not_to_listen_still_finds_the_work() {
     let queue = queue_or_skip!();
     let token = token("no-listen");
-    let name = format!("q-{token}");
 
     let worker = Worker::builder(&queue)
-        .queues([name.clone()])
         .concurrency(1)
         .listen(false)
         .poll_interval(Duration::from_millis(100))
@@ -522,7 +357,6 @@ async fn a_worker_told_not_to_listen_still_finds_the_work() {
             token: token.clone(),
             n: 7,
         })
-        .queue(&name)
         .await
         .expect("enqueued");
 

@@ -1,10 +1,11 @@
 //! The seven behaviours this queue is required to have, end to end.
 //!
-//! Every one of these runs on SQLite, against a real file, with real workers
-//! on a real Tokio runtime. There is no in-memory fake: a queue that is a
-//! different implementation in a test is the Rails trap in miniature, and a
-//! test that passes against a fake proves nothing about the SQL.
+//! Every one of these runs on the memory backend and, when a server is
+//! named, on Postgres (`common::on_every_backend!`), with real workers on a
+//! real Tokio runtime. The memory backend is not a fake: it is the engine's
+//! reference backend, which passes the same conformance suite as Postgres.
 
+#[macro_use]
 mod common;
 
 use std::time::Duration;
@@ -16,9 +17,7 @@ use common::*;
 // 1. A job round-trips through the queue and runs
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_job_goes_in_comes_out_and_runs() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_job_goes_in_comes_out_and_runs(queue: Queue) {
     let token = token("round-trip");
 
     let enqueued = queue
@@ -55,7 +54,7 @@ async fn a_job_goes_in_comes_out_and_runs() {
     assert_eq!(after.dead, 0);
     assert!(
         queue
-            .inspect(enqueued.id())
+            .inspect(enqueued.id().expect("an id"))
             .await
             .expect("inspect")
             .is_none(),
@@ -67,9 +66,7 @@ async fn a_job_goes_in_comes_out_and_runs() {
 // 2. A failing job retries with growing backoff, then lands in the dead letter
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter(queue: Queue) {
     let token = token("retries");
 
     queue
@@ -128,17 +125,17 @@ async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter() {
     let dead = queue.dead_jobs(10, 0).await.expect("dead jobs");
     assert_eq!(dead.len(), 1);
     let job = &dead[0];
-    assert_eq!(job.job_name, "always_fails");
+    assert_eq!(job.kind, "always_fails");
     assert_eq!(job.attempts, 3, "every attempt is accounted for");
-    assert_eq!(job.max_attempts, 3);
+    assert_eq!(job.max_attempts, Some(3));
     assert!(
-        job.error.contains("nope, attempt 3"),
+        job.failure.contains("nope, attempt 3"),
         "the dead letter holds the last error, not a placeholder: {}",
-        job.error
+        job.failure
     );
-    assert_eq!(job.failure_kind, "returned");
+    assert!(job.failure.starts_with("returned"), "{}", job.failure);
     assert!(
-        job.payload.contains(&token),
+        String::from_utf8_lossy(&job.payload).contains(&token),
         "the dead letter holds the payload, so the job can be replayed"
     );
     assert_eq!(
@@ -149,12 +146,12 @@ async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter() {
 
     // And it is not gone: it can be put back.
     let requeued = queue
-        .requeue_dead(job.id)
+        .requeue_dead(&job.id)
         .await
         .expect("requeue")
         .expect("a new row");
     let state = queue
-        .inspect(requeued)
+        .inspect(&requeued)
         .await
         .expect("inspect")
         .expect("the requeued row");
@@ -167,9 +164,7 @@ async fn a_failing_job_backs_off_and_then_lands_in_the_dead_letter() {
 // 3. Two workers never run the same job
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_workers_never_run_the_same_job() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn two_workers_never_run_the_same_job(queue: Queue) {
     let token = token("skip-locked");
     const JOBS: u32 = 40;
 
@@ -229,12 +224,10 @@ fn duplicates(entries: &[String]) -> Vec<&String> {
 }
 
 // ---------------------------------------------------------------------------
-// 4. A crashed worker's job is reclaimed once its heartbeat lapses
+// 4. A crashed worker's job runs again once its lease runs out
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_crashed_workers_job_is_reclaimed_and_finished_by_another() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_crashed_workers_job_runs_again_when_its_lease_runs_out(queue: Queue) {
     let token = token("orphan");
     let stale_after = Duration::from_millis(300);
 
@@ -245,28 +238,22 @@ async fn a_crashed_workers_job_is_reclaimed_and_finished_by_another() {
         .await
         .expect("enqueue");
 
-    // A worker that will be killed mid-job. Its maintenance tick is long
-    // enough that it cannot reclaim its own work before it dies.
-    let doomed = Worker::builder(&queue)
-        .id("doomed")
-        .concurrency(1)
-        .poll_interval(Duration::from_millis(10))
-        .heartbeat_interval(Duration::from_millis(50))
-        .stale_after(stale_after)
-        .maintenance_interval(Duration::from_secs(60))
-        .register::<HangsOnce>()
-        .start()
-        .expect("start");
-
-    wait_for(
-        "the job to be picked up",
-        Duration::from_secs(5),
-        || async { queue.stats().await.expect("stats").running == 1 },
-    )
-    .await;
-
-    // `kill -9`: no drain, no release. The row stays locked and `running`.
-    doomed.abort();
+    // A worker that claims the job and dies: the claim goes through the
+    // engine directly, and nothing ever settles it or renews its lease.
+    // Aborting a `Worker` task would not do: its guard gives the job back on
+    // the way down, which is the clean shutdown and not the crash.
+    let claimed = queue
+        .engine()
+        .claim(&brocanth_queue::ClaimRequest {
+            queue: "default".into(),
+            max: 1,
+            lease: stale_after,
+            kinds: None,
+            worker: "doomed".into(),
+        })
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
 
     let held = queue.stats().await.expect("stats");
     assert_eq!(
@@ -275,28 +262,10 @@ async fn a_crashed_workers_job_is_reclaimed_and_finished_by_another() {
     );
     assert_eq!(held.ready, 0);
 
-    // Too soon: the heartbeat has not lapsed yet, so nothing is taken.
-    let early = queue
-        .reclaim_orphans(Duration::from_secs(60))
-        .await
-        .expect("reclaim");
-    assert_eq!(
-        early.requeued, 0,
-        "a worker that merely went quiet for a moment keeps its jobs"
-    );
-
-    tokio::time::sleep(stale_after + Duration::from_millis(100)).await;
-
-    let reclaimed = queue.reclaim_orphans(stale_after).await.expect("reclaim");
-    assert_eq!(reclaimed.requeued, 1, "the orphan came back");
-    assert_eq!(reclaimed.dead_lettered, 0);
-
-    let state = queue.stats().await.expect("stats");
-    assert_eq!(state.ready, 1);
-    assert_eq!(state.running, 0);
-
-    // And a healthy worker finishes it, on the second attempt, because the
-    // first one was counted when it was claimed.
+    // Nothing reclaims it. The lease runs out, and a healthy worker finishes
+    // it on the second attempt, because the first one was counted when it
+    // was claimed.
+    tokio::time::sleep(stale_after).await;
     let rescuer = Worker::builder(&queue)
         .id("rescuer")
         .poll_interval(Duration::from_millis(10))
@@ -305,8 +274,8 @@ async fn a_crashed_workers_job_is_reclaimed_and_finished_by_another() {
         .expect("start");
 
     wait_for(
-        "the reclaimed job to finish",
-        Duration::from_secs(5),
+        "the orphaned job to finish",
+        Duration::from_secs(10),
         || async { log(&token).contains(&"finished on attempt 2".to_string()) },
     )
     .await;
@@ -322,9 +291,7 @@ async fn a_crashed_workers_job_is_reclaimed_and_finished_by_another() {
 // 5. A unique key prevents a duplicate
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_unique_key_prevents_a_duplicate() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_unique_key_prevents_a_duplicate(queue: Queue) {
     let token = token("unique");
 
     let first = queue
@@ -348,11 +315,6 @@ async fn a_unique_key_prevents_a_duplicate() {
     assert!(
         second.is_duplicate(),
         "the second enqueue folded into the first"
-    );
-    assert_eq!(
-        second.id(),
-        first.id(),
-        "and it reports the row that is actually queued"
     );
     assert_eq!(
         queue.stats().await.expect("stats").ready,
@@ -415,9 +377,7 @@ async fn a_unique_key_prevents_a_duplicate() {
 // 6. Shutdown finishes in-flight work and returns the rest
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_finishes_what_it_can_and_returns_the_rest() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn shutdown_finishes_what_it_can_and_returns_the_rest(queue: Queue) {
     let token = token("shutdown");
 
     let slow = queue
@@ -458,7 +418,11 @@ async fn shutdown_finishes_what_it_can_and_returns_the_rest() {
         log(&token)
     );
     assert!(
-        queue.inspect(slow.id()).await.expect("inspect").is_none(),
+        queue
+            .inspect(slow.id().expect("an id"))
+            .await
+            .expect("inspect")
+            .is_none(),
         "and its row is gone"
     );
 
@@ -467,7 +431,7 @@ async fn shutdown_finishes_what_it_can_and_returns_the_rest() {
         "the job that could not finish came back"
     );
     let state = queue
-        .inspect(hangs.id())
+        .inspect(hangs.id().expect("an id"))
         .await
         .expect("inspect")
         .expect("the hanging job's row");
@@ -483,9 +447,7 @@ async fn shutdown_finishes_what_it_can_and_returns_the_rest() {
 // 7. A scheduled job does not run early
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_scheduled_job_does_not_run_early() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_scheduled_job_does_not_run_early(queue: Queue) {
     let token = token("scheduled");
 
     let later = queue
@@ -515,7 +477,11 @@ async fn a_scheduled_job_does_not_run_early() {
         .expect("start");
 
     wait_for("the ready job to run", Duration::from_secs(5), || async {
-        queue.inspect(now.id()).await.expect("inspect").is_none()
+        queue
+            .inspect(now.id().expect("an id"))
+            .await
+            .expect("inspect")
+            .is_none()
     })
     .await;
     // Give a worker polling every 10 ms three hundred chances to get it wrong.
@@ -527,7 +493,7 @@ async fn a_scheduled_job_does_not_run_early() {
 
     assert_eq!(log(&token), vec!["ran 2"], "only the job that was due ran");
     let state = queue
-        .inspect(later.id())
+        .inspect(later.id().expect("an id"))
         .await
         .expect("inspect")
         .expect("the scheduled row");
@@ -540,9 +506,7 @@ async fn a_scheduled_job_does_not_run_early() {
 // The oldest-ready age, which is the number that says a queue is behind
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_stats_report_the_age_of_the_oldest_runnable_job() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn the_stats_report_the_age_of_the_oldest_runnable_job(queue: Queue) {
     let token = token("stats");
 
     assert!(queue
@@ -587,11 +551,9 @@ async fn the_stats_report_the_age_of_the_oldest_runnable_job() {
 // Events, which are how an application sees any of this
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_event_hook_reports_what_happened_without_choosing_a_log_crate() {
+async fn the_event_hook_reports_what_happened_without_choosing_a_log_crate(queue: Queue) {
     use std::sync::{Arc, Mutex};
 
-    let (queue, _dir) = sqlite_queue().await;
     let token = token("events");
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -643,85 +605,14 @@ async fn the_event_hook_reports_what_happened_without_choosing_a_log_crate() {
 // Queue is a context item, so a handler can enqueue
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn the_queue_reaches_a_handler_through_the_context() {
+async fn the_queue_reaches_a_handler_through_the_context(queue: Queue) {
     use brocanth::plugin_context::{Base, ContextBuilder, With};
 
-    let (queue, _dir) = sqlite_queue().await;
     let mut builder = ContextBuilder::new();
     builder.insert(queue.clone());
     let cx = builder.build::<With<Queue, Base>>();
 
-    assert_eq!(cx.get::<Queue, _>().backend(), "sqlite");
-}
-
-// ---------------------------------------------------------------------------
-// 8. The other half of the migration-concurrency guarantee
-// ---------------------------------------------------------------------------
-
-/// `CREATE TABLE IF NOT EXISTS` racing itself, on SQLite.
-///
-/// On Postgres this is a real bug: the catalogue check and the create are
-/// separate steps, so two sessions both decide to create and the loser fails
-/// with a `pg_class_relname_nsp_index` violation. `tests/postgres.rs` holds
-/// that race, and `Store::migrate` answers it with an advisory lock.
-///
-/// SQLite has no advisory locks, and the finding here is that it needs none:
-/// this passes with or without the transaction `Store::migrate` now takes,
-/// because SQLite holds one write lock for the whole file and no second writer
-/// can get between the check and the create. The transaction buys the other
-/// half — all three tables or none — not this half. Written down because
-/// "SQLite is probably fine" is the kind of claim that is worth a test rather
-/// than a sentence.
-///
-/// The pool is opened once first, on purpose, and that is a finding of its
-/// own. Opening eight *new* pools on a database file that does not exist yet
-/// fails intermittently with `SQLITE_BUSY`, in `Queue::connect` rather than in
-/// `migrate`: the switch into WAL mode needs an exclusive lock that
-/// `sqlite3_busy_timeout` explicitly cannot wait on, which sqlx documents on
-/// `SqliteConnectOptions::journal_mode`. That is a separate bug and this test
-/// deliberately does not cover it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn migrate_is_safe_from_several_connections_at_once() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let url = format!("sqlite://{}", dir.path().join("race.db").display());
-
-    // Create the file and settle its journal mode before anything races.
-    let first = Queue::connect(&url).await.expect("connect");
-
-    let mut racers = Vec::new();
-    for _ in 0..8 {
-        let url = url.clone();
-        racers.push(tokio::spawn(async move {
-            Queue::connect(&url).await.expect("connect").migrate().await
-        }));
-    }
-    for racer in racers {
-        racer
-            .await
-            .expect("the task did not panic")
-            .expect("concurrent migrate() must not fail");
-    }
-
-    // The queue works afterwards, which is the proof that the schema is whole
-    // rather than merely that nothing returned an error.
-    let t = token("sqlite-race");
-    first
-        .enqueue(Echo {
-            token: t.clone(),
-            n: 1,
-        })
-        .await
-        .expect("enqueue");
-    assert_eq!(first.stats().await.expect("stats").ready, 1);
-    first
-        .dead_jobs(1, 0)
-        .await
-        .expect("the dead letter is there");
-    first
-        .tick_schedules()
-        .await
-        .expect("the schedules are there");
+    assert_eq!(cx.get::<Queue, _>().backend(), queue.backend());
 }
 
 // ---------------------------------------------------------------------------
@@ -732,9 +623,7 @@ async fn migrate_is_safe_from_several_connections_at_once() {
 ///
 /// This is the test that pays for there being no fourth state. If a column
 /// could not tell these apart, the table would need one.
-#[tokio::test]
-async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts(queue: Queue) {
     let t = token("waiting");
 
     // Never run, due in an hour.
@@ -771,22 +660,19 @@ async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts() {
     assert_eq!(
         scheduled
             .iter()
-            .map(|j| j.job_name.as_str())
+            .map(|j| j.kind.as_str())
             .collect::<Vec<_>>(),
         ["echo"],
         "never run, so it is scheduled and not a retry"
     );
-    assert!(scheduled.iter().all(|j| j.attempts == 0));
+    assert!(scheduled.iter().all(|j| j.attempt == 0));
 
     assert_eq!(
-        retries
-            .iter()
-            .map(|j| j.job_name.as_str())
-            .collect::<Vec<_>>(),
+        retries.iter().map(|j| j.kind.as_str()).collect::<Vec<_>>(),
         ["always_fails"],
         "ran and failed, so it is a retry and not scheduled"
     );
-    assert!(retries[0].attempts > 0);
+    assert!(retries[0].attempt > 0);
     // And a retry carries why, which is the column the screen exists for.
     assert!(
         retries[0].last_error.is_some(),
@@ -796,9 +682,7 @@ async fn a_retry_and_a_scheduled_job_are_told_apart_by_attempts() {
 }
 
 /// A worker holding a job shows up as busy, and says which worker.
-#[tokio::test]
-async fn busy_names_the_worker_holding_each_job() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn busy_names_the_worker_holding_each_job(queue: Queue) {
     let t = token("busy");
 
     assert!(
@@ -829,22 +713,16 @@ async fn busy_names_the_worker_holding_each_job() {
 
     let busy = queue.busy(50, 0).await.expect("busy");
     assert_eq!(busy.len(), 1);
-    assert_eq!(busy[0].job_name, "slow");
-    assert_eq!(busy[0].attempts, 1, "the attempt that is running");
-    assert_eq!(busy[0].locked_by.as_deref(), Some("worker-under-test"));
-    assert!(busy[0].locked_at.is_some(), "how long it has been running");
-    assert!(
-        busy[0].heartbeat_at.is_some(),
-        "and whether it is still alive"
-    );
+    assert_eq!(busy[0].kind, "slow");
+    assert_eq!(busy[0].attempt, 1, "the attempt that is running");
+    assert_eq!(busy[0].claimed_by.as_deref(), Some("worker-under-test"));
+    assert!(busy[0].claimed_at.is_some(), "how long it has been running");
 
     worker.shutdown(Duration::from_secs(5)).await.expect("stop");
 }
 
 /// The operator's override, and the one thing it must not touch.
-#[tokio::test]
-async fn run_now_moves_a_waiting_job_and_leaves_a_running_one_alone() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn run_now_moves_a_waiting_job_and_leaves_a_running_one_alone(queue: Queue) {
     let t = token("run-now");
 
     let later = queue
@@ -854,8 +732,8 @@ async fn run_now_moves_a_waiting_job_and_leaves_a_running_one_alone() {
         })
         .in_(Duration::from_secs(3600))
         .await
-        .expect("scheduled")
-        .id();
+        .expect("scheduled");
+    let later = later.id().expect("an id");
 
     assert_eq!(queue.scheduled(50, 0).await.expect("scheduled").len(), 1);
     assert!(
@@ -886,20 +764,18 @@ async fn run_now_moves_a_waiting_job_and_leaves_a_running_one_alone() {
 
 /// Discarding is not dead-lettering, and the dead letter must not collect
 /// jobs somebody deliberately threw away.
-#[tokio::test]
-async fn discard_removes_a_waiting_job_without_a_dead_letter_row() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn discard_removes_a_waiting_job_without_a_dead_letter_row(queue: Queue) {
     let t = token("discard");
 
-    let id = queue
+    let enqueued = queue
         .enqueue(Echo {
             token: t.clone(),
             n: 1,
         })
         .in_(Duration::from_secs(3600))
         .await
-        .expect("scheduled")
-        .id();
+        .expect("scheduled");
+    let id = enqueued.id().expect("an id");
 
     assert!(queue.discard(id).await.expect("discard"));
     assert!(queue.scheduled(50, 0).await.expect("scheduled").is_empty());
@@ -914,9 +790,7 @@ async fn discard_removes_a_waiting_job_without_a_dead_letter_row() {
 /// claiming when the signal resolves, and a job still running at the
 /// deadline goes back to the queue with its attempt given back. It is not
 /// dead-lettered, and another worker runs it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again() {
-    let (queue, _dir) = sqlite_queue().await;
+async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again(queue: Queue) {
     let token = token("stop-when");
     let hangs = queue
         .enqueue(Hangs {
@@ -954,7 +828,7 @@ async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again() {
         .expect("finished");
     assert_eq!(report.returned, 1);
     let state = queue
-        .inspect(hangs.id())
+        .inspect(hangs.id().expect("an id"))
         .await
         .expect("inspect")
         .expect("the row is back");
@@ -974,3 +848,21 @@ async fn a_job_interrupted_by_stop_when_is_given_back_and_runs_again() {
     .await;
     again.abort();
 }
+
+on_every_backend!(
+    a_job_goes_in_comes_out_and_runs,
+    a_failing_job_backs_off_and_then_lands_in_the_dead_letter,
+    two_workers_never_run_the_same_job,
+    a_crashed_workers_job_runs_again_when_its_lease_runs_out,
+    a_unique_key_prevents_a_duplicate,
+    shutdown_finishes_what_it_can_and_returns_the_rest,
+    a_scheduled_job_does_not_run_early,
+    the_stats_report_the_age_of_the_oldest_runnable_job,
+    the_event_hook_reports_what_happened_without_choosing_a_log_crate,
+    the_queue_reaches_a_handler_through_the_context,
+    a_retry_and_a_scheduled_job_are_told_apart_by_attempts,
+    busy_names_the_worker_holding_each_job,
+    run_now_moves_a_waiting_job_and_leaves_a_running_one_alone,
+    discard_removes_a_waiting_job_without_a_dead_letter_row,
+    a_job_interrupted_by_stop_when_is_given_back_and_runs_again,
+);

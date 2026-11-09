@@ -54,8 +54,8 @@ tracing-opentelemetry = { version = "0.34", optional = true, default-features = 
 # `jobs`: a span per job run and the queue's gauges, from the events and the
 # `Stats` that `brocanth-jobs` already publishes. `brocanth-jobs` will not
 # compile without a driver, so the feature names one: `jobs` is Postgres,
-# the jobs default; `jobs-sqlite` is SQLite, for an application that turned
-# the default off.
+# the jobs default; `jobs-memory` is the memory backend, for tests and
+# development.
 brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", optional = true, default-features = false }
 
 # `scaffold`: the module `brocanth create` would offer under `observe`.
@@ -64,7 +64,7 @@ brocanth-scaffold = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "net", "io-util"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
-brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["sqlite"] }
+brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["memory"] }
 serde = { version = "1", features = ["derive"] }
 
 [features]
@@ -85,7 +85,7 @@ otel = [
     "dep:tracing-opentelemetry",
 ]
 jobs = ["_jobs", "brocanth-jobs/postgres"]
-jobs-sqlite = ["_jobs", "brocanth-jobs/sqlite"]
+jobs-memory = ["_jobs", "brocanth-jobs/memory"]
 # What the code is gated on. Not for an application to name.
 _jobs = ["runtime", "dep:brocanth-jobs"]
 scaffold = ["dep:brocanth-scaffold"]

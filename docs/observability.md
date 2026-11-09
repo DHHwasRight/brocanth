@@ -10,7 +10,7 @@ none of this.
 | Probes | `/up` (liveness), `/readyz` (each plugin's check, with latency) | always |
 | Metrics | `/metrics`, Prometheus text | `metrics` (default) |
 | Traces | A span per request and per job run, OTLP export, W3C `traceparent` | `otel` (off) |
-| Jobs | A span, a log line and a counter per job run; queue depth gauges | `jobs` / `jobs-sqlite` (off) |
+| Jobs | A span, a log line and a counter per job run; queue depth gauges | `jobs` / `jobs-memory` (off) |
 
 ## Where it attaches, and why a new crate
 

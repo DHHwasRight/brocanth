@@ -1,21 +1,19 @@
 //! Shared fixtures for the integration tests.
 //!
-//! Every test gets its own SQLite file in its own temporary directory, so the
-//! tests are parallel by default and cannot see each other's rows. Jobs report
-//! what they did through [`Recorder`], keyed by a token carried in the payload,
+//! Every behaviour test runs on every backend: [`on_every_backend!`] turns
+//! one `async fn name(queue: Queue)` into a `memory::name` test, which always
+//! runs, and a `postgres::name` test, which runs when
+//! `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL` names a
+//! server and says loudly on stderr when it did not. One suite, two
+//! backends: the suite that proves the memory backend is the suite that
+//! proves Postgres.
+//!
+//! Each Postgres test gets its own schema, so the tests run in parallel and
+//! never see each other's rows, and nothing is truncated. Jobs report what
+//! they did through [`record`], keyed by a token carried in the payload,
 //! which is how one job type serves several tests running at once.
-//!
-//! SQLite rather than Postgres because `cargo test` must pass on a laptop with
-//! no server running, and it stays that way now that `postgres` is the default
-//! feature: the crate carries a dev-dependency on itself with `sqlite` on, so
-//! this harness is always compiled for tests whatever the library build picks.
-//!
-//! That means the backend this suite runs on is **not** the default one, which
-//! is a real cost rather than a detail. `postgres.rs` is what pays it back,
-//! and only when `BROCANTH_JOBS_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL`
-//! names a server. Every test there that does not run says so on stderr.
 
-#![allow(dead_code)]
+#![allow(dead_code, unused_macros)]
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -25,21 +23,77 @@ use brocanth_jobs::{Job, JobContext, Queue};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// A database per test
+// A store per test
 // ---------------------------------------------------------------------------
 
-/// A queue on a fresh SQLite file, with its tables created.
-///
-/// Hold the returned [`tempfile::TempDir`] for as long as the queue is used;
-/// dropping it deletes the database.
-pub async fn sqlite_queue() -> (Queue, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = dir.path().join("jobs.db");
-    let queue = Queue::connect(&format!("sqlite://{}", path.display()))
-        .await
-        .expect("opening the queue");
+/// Runs each named `async fn(queue: Queue)` once per backend.
+macro_rules! on_every_backend {
+    ($($name:ident),* $(,)?) => {
+        mod memory {
+            $(
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn $name() {
+                    super::$name(super::common::memory_queue()).await;
+                }
+            )*
+        }
+        mod postgres {
+            $(
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn $name() {
+                    match super::common::postgres_queue().await {
+                        Some(queue) => super::$name(queue).await,
+                        None => super::common::skipped(super::common::NO_POSTGRES),
+                    }
+                }
+            )*
+        }
+    };
+}
+
+/// What a Postgres test says when it did not run.
+pub const NO_POSTGRES: &str =
+    "no Postgres server; set BROCANTH_JOBS_TEST_POSTGRES or BROCANTH_TEST_DATABASE_URL to run this";
+
+/// A queue in this process's memory.
+pub fn memory_queue() -> Queue {
+    Queue::memory()
+}
+
+/// A queue on the Postgres test server, in a schema of its own, with its
+/// tables created. `None` when no variable names a server.
+pub async fn postgres_queue() -> Option<Queue> {
+    let pool = postgres_pool().await?;
+    let queue = Queue::from_pool(pool);
     queue.migrate().await.expect("creating the tables");
-    (queue, dir)
+    Some(queue)
+}
+
+/// A pool on the Postgres test server whose `search_path` is a new, empty
+/// schema. `None` when no variable names a server.
+pub async fn postgres_pool() -> Option<sqlx::PgPool> {
+    use std::str::FromStr;
+
+    let url = postgres_url()?;
+    let schema = format!("jobs_{}", token("t").replace('-', "_"));
+    let admin = sqlx::PgPool::connect(&url)
+        .await
+        .expect("connecting to Postgres");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .expect("creating the test schema");
+    admin.close().await;
+    let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+        .expect("a Postgres URL")
+        .options([("search_path", schema.as_str())]);
+    Some(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(6)
+            .connect_with(options)
+            .await
+            .expect("connecting to Postgres"),
+    )
 }
 
 /// The Postgres test server's URL, or `None` when no variable names one.
