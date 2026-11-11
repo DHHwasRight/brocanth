@@ -2,7 +2,6 @@
 // migrations/rls.json records the schema; this file is the step to it.
 
 use brocanth_model::sea_orm_migration::prelude::*;
-use brocanth_model::sea_orm_migration::sea_orm::ConnectionTrait;
 
 pub struct Migration;
 
