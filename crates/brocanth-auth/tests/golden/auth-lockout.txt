@@ -4299,7 +4299,7 @@ mod tests {
     #[test]
     fn the_policy_in_the_module_file_is_valid() {
         if let Err(e) = super::policy() {
-            panic!("{e}\nhelp: change the values in src/modules/auth_lockout.rs");
+            panic!("{e}");
         }
     }
 }
