@@ -1964,9 +1964,11 @@ mod tests {
         let commands = m.draft.at("commands").expect("commands");
         m.set(commands, false);
         // Taller than the table, with room to spare. This test is about
-        // wrapping, and a height that exactly fits today's menu is a test
-        // that fails the next time a module joins it.
-        let screen = render(&m, None, 72, 90);
+        // wrapping, so the height grows with the menu: a module takes at
+        // most two rows (its own and an "inside" line), plus the headings
+        // and the chrome. A fixed height fails when modules join the menu.
+        let rows = m.draft.choices.len() * 2 + 40;
+        let screen = render(&m, None, 72, u16::try_from(rows).expect("height"));
         // Whichever choice the untick took with it, the note names it and
         // the sentence finishes. `commands` carries more than one now, and
         // the panel shows the last.
