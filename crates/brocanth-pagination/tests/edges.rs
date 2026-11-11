@@ -180,8 +180,11 @@ fn every_text_and_int_round_trips_through_a_link() {
 }
 
 #[test]
-fn links_keep_per_page_and_drop_every_page_and_after() {
-    let links = Links::new("/posts", "page=2&per_page=10&page=3&after=i1&p%61ge=9&q=x");
+fn links_keep_per_page_and_drop_every_page_and_cursor() {
+    let links = Links::new(
+        "/posts",
+        "page=2&per_page=10&page=3&after=i1&before=i2&p%61ge=9&q=x",
+    );
     assert_eq!(links.page(5), "/posts?per_page=10&q=x&page=5");
     assert_eq!(links.first(), "/posts?per_page=10&q=x");
     assert_eq!(links.page(0), links.first(), "page zero links to page one");
@@ -253,11 +256,27 @@ fn a_keyset_page_with_a_limit_of_zero_shows_one_row() {
 #[test]
 fn a_keyset_pager_on_a_middle_page_links_both_ways() {
     let links = Links::new("/feed", "after=i3&tag=a%20b");
-    let pager = KeysetPager::new(
-        &links,
-        Some(&Cursor::new([Key::Int(3)])),
-        Some(&Cursor::new([Key::Int(6)])),
-    );
+    let page = KeysetPage::after(vec![4, 5, 6, 7], 3, |n| Cursor::new([Key::Int(*n)]));
+    let pager = KeysetPager::new(&links, Some(&Cursor::new([Key::Int(3)])), &page);
     assert_eq!(pager.first.as_deref(), Some("/feed?tag=a%20b"));
+    assert_eq!(pager.previous.as_deref(), Some("/feed?tag=a%20b&before=i4"));
     assert_eq!(pager.next.as_deref(), Some("/feed?tag=a%20b&after=i6"));
+}
+
+#[test]
+fn a_keyset_page_read_backwards_is_put_back_in_order() {
+    let key = |n: &i64| Cursor::new([Key::Int(*n)]);
+    // Before 7, nearest first, one row more than the page: 6, 5, 4, 3.
+    let page = KeysetPage::before(vec![6, 5, 4, 3], 3, key);
+    assert_eq!(page.items, vec![4, 5, 6]);
+    assert_eq!(page.previous, Some(key(&4)));
+    assert_eq!(page.next, Some(key(&6)));
+    // No extra row: the first page, reached backwards.
+    let first = KeysetPage::before(vec![2, 1], 3, key);
+    assert_eq!(first.items, vec![1, 2]);
+    assert_eq!(first.previous, None);
+    assert_eq!(first.next, Some(key(&2)));
+    // Nothing before the cursor.
+    let empty = KeysetPage::<i64>::before(Vec::new(), 3, key);
+    assert_eq!((empty.previous, empty.next), (None, None));
 }

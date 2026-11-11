@@ -162,7 +162,8 @@ shutdown_grace_secs` has a flag and a variable in every project
    (offset and keyset) that the admin and `resource` use. The admin's
    `per_page` stops at a ceiling (`ModelAdmin::max_per_page`, default 100).
    A keyset cursor of the wrong type is a 400 (`brocanth_policy::Sortable`).
-   Open: a keyset page has no previous link.
+   A keyset page has a previous link (`before=<cursor>`, `Keyset::before`,
+   `KeysetPage::before`).
 
 ### 3. Module system
 

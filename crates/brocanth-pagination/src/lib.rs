@@ -37,7 +37,9 @@ pub use cursor::{Cursor, CursorError, Key, KeysetPage};
 #[cfg(feature = "policy")]
 pub use keyset::Keyset;
 #[cfg(feature = "runtime")]
-pub use links::{KeysetPager, Links, PageLink, Pager, ParamError, Params, AFTER, PAGE, PER_PAGE};
+pub use links::{
+    KeysetPager, Links, PageLink, Pager, ParamError, Params, AFTER, BEFORE, PAGE, PER_PAGE,
+};
 #[cfg(feature = "runtime")]
 pub use page::{Limits, Page};
 

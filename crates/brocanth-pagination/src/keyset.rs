@@ -61,6 +61,18 @@ impl<C: brocanth_policy::Column> Keyset<C> {
         }
     }
 
+    /// The same order, run the other way. A `before=` page reads with it:
+    /// its `ORDER BY` puts the rows nearest the cursor first.
+    pub fn reversed(&self) -> Self {
+        Keyset {
+            direction: match self.direction {
+                Direction::Ascending => Direction::Descending,
+                Direction::Descending => Direction::Ascending,
+            },
+            ..*self
+        }
+    }
+
     /// The columns a cursor holds a key for, in order.
     fn columns(&self) -> Vec<C> {
         if self.width() == 1 {
@@ -150,6 +162,20 @@ impl<C: Sortable> Keyset<C> {
             ]),
             _ => unreachable!("`expect` checked the width"),
         })
+    }
+
+    /// The rows before `cursor`, as a predicate: the previous page.
+    ///
+    /// Read them in [`Keyset::reversed`]'s order, so the rows nearest the
+    /// cursor come first, with `LIMIT` [`Keyset::fetch`], and build the page
+    /// with [`KeysetPage::before`](crate::KeysetPage::before), which puts
+    /// them back in this order.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Keyset::after`].
+    pub fn before(&self, cursor: &Cursor) -> Result<Pred<C>, CursorError> {
+        self.reversed().after(Some(cursor))
     }
 }
 

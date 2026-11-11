@@ -5,8 +5,9 @@
 //! gets is the way a page reads it:
 //!
 //! - `ctx.page_params()` and `ctx.links()` on the context, in
-//!   `src/pages/mod.rs`, so a list reads `page`, `per_page` and `after` with
-//!   a 400 for a bad value, and writes links that keep its filters;
+//!   `src/pages/mod.rs`, so a list reads `page`, `per_page`, `after` and
+//!   `before` with a 400 for a bad value, and writes links that keep its
+//!   filters;
 //! - with `rsx`, `src/pages/parts/pager.rsx`: two components that draw an
 //!   offset pager and a keyset pager;
 //! - with `jt`, `src/pages/parts/pager.jt`: the same links as JSON;
@@ -74,16 +75,16 @@ const CTX_PAGES: &str = r#"/// The page a list was asked for, and the links it a
 /// none.
 #[allow(dead_code)]
 impl Ctx {
-    /// `page`, `per_page` and `after` from the query string. A value that is
-    /// not a number, or a cursor that does not parse, is a 400 with a `help:`
-    /// line, not page one.
+    /// `page`, `per_page`, `after` and `before` from the query string. A
+    /// value that is not a number, or a cursor that does not parse, is a 400
+    /// with a `help:` line, not page one.
     pub fn page_params(&self) -> Result<brocanth_pagination::Params, Error> {
         brocanth_pagination::Params::parse(&self.query).map_err(|e| Error::new(400, e.to_string()))
     }
 
     /// The links of the list at this path. Each keeps every key of the query
-    /// string but `page` and `after`, so a filter set on page one is still
-    /// set on page three.
+    /// string but `page`, `after` and `before`, so a filter set on page one
+    /// is still set on page three.
     pub fn links(&self) -> brocanth_pagination::Links {
         brocanth_pagination::Links::new(&self.path, &self.query)
     }
@@ -167,12 +168,15 @@ pub fn PageNav(pager: &brocanth_pagination::Pager) -> Element {
     }
 }
 
-/// A keyset pager: back to the first page, and on to the next. A keyset page
-/// has no numbers and no previous link.
+/// A keyset pager: the first page, the previous one and the next one. A
+/// keyset page has no numbers.
 pub fn KeysetNav(pager: &brocanth_pagination::KeysetPager) -> Element {
     <nav aria-label="Pages">
         if let Some(href) = &pager.first {
             <a href={href} rel="first">First</a>
+        }
+        if let Some(href) = &pager.previous {
+            <a href={href} rel="prev">Previous</a>
         }
         if let Some(href) = &pager.next {
             <a href={href} rel="next">Next</a>
@@ -197,9 +201,10 @@ pub fn PageLinks(pager: &brocanth_pagination::Pager) -> Json {
     "next"?: pager.next.as_deref(),
 }
 
-/// A keyset page: the first page, and the next.
+/// A keyset page: the first page, the previous one and the next one.
 pub fn KeysetLinks(pager: &brocanth_pagination::KeysetPager) -> Json {
     "first"?: pager.first.as_deref(),
+    "previous"?: pager.previous.as_deref(),
     "next"?: pager.next.as_deref(),
 }
 "#;
@@ -216,7 +221,10 @@ fn agents(project: &Project) -> String {
          \x20 `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so\n\
          \x20 a forged cursor only moves the window inside the rule. The column\n\
          \x20 enum implements `brocanth_policy::Sortable`, so a cursor key of the\n\
-         \x20 wrong type is a 400 and not a database error.\n"
+         \x20 wrong type is a 400 and not a database error.\n\
+         - A `before=<cursor>` page (the previous link) reads with\n\
+         \x20 `keyset.before(&cursor)?` and `keyset.reversed().order_by()`, then\n\
+         \x20 `KeysetPage::before` puts the rows back in order.\n"
     } else {
         ""
     };

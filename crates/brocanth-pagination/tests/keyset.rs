@@ -87,6 +87,115 @@ fn walk(direction: Direction, limit: u64) -> Vec<(i64, i64)> {
     seen
 }
 
+/// The rows `pred` admits, sorted by `keyset`'s order in `direction`, and
+/// cut to `Keyset::fetch(limit)`: what the database returns.
+fn select(pred: &Pred<PostColumn>, direction: Direction, limit: u64) -> Vec<(i64, i64)> {
+    let mut admitted: Vec<(i64, i64)> = rows()
+        .into_iter()
+        .filter(|(id, score)| pred.admits(&row(*id, *score)).expect("no opaque part"))
+        .collect();
+    admitted.sort_by_key(|(id, score)| (*score, *id));
+    if direction == Direction::Descending {
+        admitted.reverse();
+    }
+    admitted.truncate(usize::try_from(Keyset::<PostColumn>::fetch(limit)).unwrap());
+    admitted
+}
+
+fn key(row: &(i64, i64)) -> Cursor {
+    Cursor::new([Key::Int(row.1), Key::Int(row.0)])
+}
+
+/// Every page, forward from the first, as a handler reads them: the first
+/// with no cursor, each next one `after` the last page's `next`.
+fn forward(
+    keyset: &Keyset<PostColumn>,
+    direction: Direction,
+    limit: u64,
+) -> Vec<KeysetPage<(i64, i64)>> {
+    let first = KeysetPage::from_rows(
+        select(&keyset.after(None).unwrap(), direction, limit),
+        limit,
+        key,
+    );
+    let mut pages = vec![first];
+    while let Some(next) = pages.last().unwrap().next.clone() {
+        let rows = select(&keyset.after(Some(&next)).unwrap(), direction, limit);
+        pages.push(KeysetPage::after(rows, limit, key));
+    }
+    pages
+}
+
+/// The page before `cursor`: read in the reversed order, then put back.
+fn backward(
+    keyset: &Keyset<PostColumn>,
+    direction: Direction,
+    cursor: &Cursor,
+    limit: u64,
+) -> KeysetPage<(i64, i64)> {
+    let reversed = match direction {
+        Direction::Ascending => Direction::Descending,
+        Direction::Descending => Direction::Ascending,
+    };
+    assert_eq!(
+        keyset.reversed(),
+        Keyset::new(PostColumn::Score, PostColumn::Id, reversed)
+    );
+    let rows = select(&keyset.before(cursor).unwrap(), reversed, limit);
+    KeysetPage::before(rows, limit, key)
+}
+
+#[test]
+fn a_previous_link_reads_back_the_same_pages_through_the_ties() {
+    // Scores 0 to 4, each held by four or five rows: every page edge for
+    // these limits falls inside a tie somewhere.
+    for direction in [Direction::Ascending, Direction::Descending] {
+        let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, direction);
+        for limit in [1, 2, 3, 4, 5, 7, 22, 23, 50] {
+            let pages = forward(&keyset, direction, limit);
+            let label = format!("{direction:?}, limit {limit}");
+
+            // First page: no previous link. Last page: no next link.
+            assert_eq!(pages[0].previous, None, "{label}");
+            assert_eq!(pages.last().unwrap().next, None, "{label}");
+            // Every page after the first links back.
+            for page in &pages[1..] {
+                assert!(page.previous.is_some(), "{label}");
+            }
+
+            // Walk back from the last page: each previous page is the page
+            // that came before it going forward, with the same links.
+            for index in (1..pages.len()).rev() {
+                let cursor = pages[index].previous.as_ref().unwrap();
+                let back = backward(&keyset, direction, cursor, limit);
+                assert_eq!(back.items, pages[index - 1].items, "{label}, page {index}");
+                assert_eq!(back.next, Some(key(pages[index - 1].items.last().unwrap())));
+                if index == 1 {
+                    assert_eq!(back.previous, None, "{label}: back on the first page");
+                } else {
+                    assert_eq!(
+                        back.previous,
+                        pages[index - 1].previous,
+                        "{label}, page {index}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cursor_on_the_first_row_has_nothing_before_it() {
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    // (5, 0) is the first row: score 0, the lowest id among the zeros.
+    let first_row = Cursor::new([Key::Int(0), Key::Int(5)]);
+    let back = backward(&keyset, Direction::Ascending, &first_row, 3);
+    assert!(back.items.is_empty());
+    assert_eq!((back.previous, back.next), (None, None));
+    // A mistyped cursor is refused going back too.
+    assert!(keyset.before(&Cursor::parse("t61.i1").unwrap()).is_err());
+}
+
 #[test]
 fn every_row_once_in_either_direction() {
     for limit in [1, 2, 4, 5, 23, 50] {

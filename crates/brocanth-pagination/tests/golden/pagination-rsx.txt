@@ -1364,16 +1364,16 @@ impl Ctx {
 /// none.
 #[allow(dead_code)]
 impl Ctx {
-    /// `page`, `per_page` and `after` from the query string. A value that is
-    /// not a number, or a cursor that does not parse, is a 400 with a `help:`
-    /// line, not page one.
+    /// `page`, `per_page`, `after` and `before` from the query string. A
+    /// value that is not a number, or a cursor that does not parse, is a 400
+    /// with a `help:` line, not page one.
     pub fn page_params(&self) -> Result<brocanth_pagination::Params, Error> {
         brocanth_pagination::Params::parse(&self.query).map_err(|e| Error::new(400, e.to_string()))
     }
 
     /// The links of the list at this path. Each keeps every key of the query
-    /// string but `page` and `after`, so a filter set on page one is still
-    /// set on page three.
+    /// string but `page`, `after` and `before`, so a filter set on page one
+    /// is still set on page three.
     pub fn links(&self) -> brocanth_pagination::Links {
         brocanth_pagination::Links::new(&self.path, &self.query)
     }
@@ -2368,12 +2368,15 @@ pub fn PageNav(pager: &brocanth_pagination::Pager) -> Element {
     }
 }
 
-/// A keyset pager: back to the first page, and on to the next. A keyset page
-/// has no numbers and no previous link.
+/// A keyset pager: the first page, the previous one and the next one. A
+/// keyset page has no numbers.
 pub fn KeysetNav(pager: &brocanth_pagination::KeysetPager) -> Element {
     <nav aria-label="Pages">
         if let Some(href) = &pager.first {
             <a href={href} rel="first">First</a>
+        }
+        if let Some(href) = &pager.previous {
+            <a href={href} rel="prev">Previous</a>
         }
         if let Some(href) = &pager.next {
             <a href={href} rel="next">Next</a>
@@ -2835,6 +2838,9 @@ from `ctx.links()`, which keeps the filters and the sort.
   a forged cursor only moves the window inside the rule. The column
   enum implements `brocanth_policy::Sortable`, so a cursor key of the
   wrong type is a 400 and not a database error.
+- A `before=<cursor>` page (the previous link) reads with
+  `keyset.before(&cursor)?` and `keyset.reversed().order_by()`, then
+  `KeysetPage::before` puts the rows back in order.
 
 ## Decisions that belong to the person
 
@@ -2860,7 +2866,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 8a4190f9d657cc00 -->
+<!-- brocanth-digest: 205f2fde9b038af5 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

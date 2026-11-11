@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use brocanth_db::sqlx::{self, AssertSqlSafe, Row as _};
 use brocanth_db::{Db, DbConfig};
-use brocanth_pagination::{Cursor, Direction, Keyset, Params};
+use brocanth_pagination::{Cursor, Direction, Key, Keyset, KeysetPage, Params};
 use brocanth_policy::{Column, Dialect, Entity, Ident, Pred, SortKind, Sortable, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,6 +133,62 @@ async fn a_cursor_from_the_query_string_reads_the_rows_after_it() {
     let pred = keyset.after(params.after.as_ref()).unwrap();
     let rows = read(&db, &keyset, pred, 10).await.expect("the query runs");
     assert_eq!(rows, [(4, 2), (5, 3), (6, 3)]);
+
+    exec(&admin, &format!("DROP SCHEMA {schema} CASCADE")).await;
+}
+
+#[tokio::test]
+async fn a_previous_link_reads_back_the_page_before_through_a_tie() {
+    let Some(url) = url() else {
+        skipped();
+        return;
+    };
+    let (admin, db, schema) = schema(&url).await;
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    let key = |row: &(i64, i64)| Cursor::new([Key::Int(row.1), Key::Int(row.0)]);
+    let fetch = Keyset::<PostColumn>::fetch(2);
+
+    // Forward: [1, 2], [3, 4], [5, 6]. The second page ends inside the tie
+    // on score 2.
+    let first = read(&db, &keyset, keyset.after(None).unwrap(), fetch)
+        .await
+        .unwrap();
+    let first = KeysetPage::from_rows(first, 2, key);
+    let next = first.next.clone().unwrap();
+    let rows = read(&db, &keyset, keyset.after(Some(&next)).unwrap(), fetch)
+        .await
+        .unwrap();
+    let second = KeysetPage::after(rows, 2, key);
+    assert_eq!(second.items, [(3, 2), (4, 2)]);
+    let next = second.next.clone().unwrap();
+    let rows = read(&db, &keyset, keyset.after(Some(&next)).unwrap(), fetch)
+        .await
+        .unwrap();
+    let third = KeysetPage::after(rows, 2, key);
+    assert_eq!(
+        (third.items.as_slice(), &third.next),
+        (&[(5, 3), (6, 3)][..], &None)
+    );
+
+    // Back: before the third page's first row, in the reversed order.
+    let reversed = keyset.reversed();
+    let previous = third.previous.clone().unwrap();
+    let rows = read(&db, &reversed, keyset.before(&previous).unwrap(), fetch)
+        .await
+        .unwrap();
+    let back = KeysetPage::before(rows, 2, key);
+    assert_eq!(back, second);
+    let rows = read(
+        &db,
+        &reversed,
+        keyset.before(back.previous.as_ref().unwrap()).unwrap(),
+        fetch,
+    )
+    .await
+    .unwrap();
+    let home = KeysetPage::before(rows, 2, key);
+    assert_eq!(home.items, first.items);
+    assert_eq!(home.previous, None, "the first page, reached backwards");
 
     exec(&admin, &format!("DROP SCHEMA {schema} CASCADE")).await;
 }

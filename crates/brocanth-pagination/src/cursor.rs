@@ -13,11 +13,15 @@
 //! window: the policy's condition stays in the `WHERE` beside the cursor's,
 //! so a forged cursor never reaches a row the subject may not list.
 //!
-//! # Next, and no previous
+//! # Next and previous
 //!
-//! A page links to the next one and back to the first. A previous link needs
-//! the query run backwards and the rows reversed, and the people who read a
-//! feed backwards are few. pagy's keyset does the same.
+//! A page links to the next one (`after=` the key of its last row), to the
+//! previous one (`before=` the key of its first row), and back to the
+//! first. The previous page is the same query run the other way: the
+//! comparison and the `ORDER BY` reversed, the nearest rows read, then put
+//! back in the list's order. So `before` costs one index seek, like
+//! `after`, and a page reached backwards holds the same rows as the page
+//! reached forwards.
 
 use std::fmt;
 
@@ -218,27 +222,66 @@ impl fmt::Display for Cursor {
     }
 }
 
-/// One keyset page: the rows, and the cursor of the next page.
+/// One keyset page: the rows, and the cursors of the pages on either side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeysetPage<R> {
-    /// The rows, at most the limit.
+    /// The rows, at most the limit, in the list's order.
     pub items: Vec<R>,
-    /// Where the next page starts. `None` on the last page.
+    /// Where the previous page ends: the key of the first row, for a
+    /// `before=` link. `None` on the first page.
+    pub previous: Option<Cursor>,
+    /// Where the next page starts: the key of the last row, for an `after=`
+    /// link. `None` on the last page.
     pub next: Option<Cursor>,
 }
 
 impl<R> KeysetPage<R> {
-    /// Builds a page from rows read with `LIMIT limit + 1`.
+    /// The first page, from rows read with no cursor and `LIMIT limit + 1`.
     ///
     /// The extra row is how a keyset page knows there is a next one without
     /// a count. It is dropped here, and the cursor is the key of the last row
     /// that stays.
-    pub fn from_rows(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+    pub fn from_rows(rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+        let mut page = Self::after(rows, limit, &key);
+        page.previous = None;
+        page
+    }
+
+    /// The page after a cursor, from rows read with
+    /// `Keyset::after` and `LIMIT limit + 1`.
+    ///
+    /// A page after a cursor has rows before it, so it has a previous link:
+    /// the key of its first row. An empty page has none; its first link goes
+    /// home.
+    pub fn after(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
         let limit = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
         let more = rows.len() > limit;
         rows.truncate(limit);
-        let next = if more { rows.last().map(key) } else { None };
-        KeysetPage { items: rows, next }
+        KeysetPage {
+            previous: rows.first().map(&key),
+            next: if more { rows.last().map(&key) } else { None },
+            items: rows,
+        }
+    }
+
+    /// The page before a cursor, from rows read with
+    /// `Keyset::before`, in the reversed order
+    /// (`Keyset::reversed`), and `LIMIT limit + 1`.
+    ///
+    /// The rows come nearest-first, so the extra row is the one furthest
+    /// back: it says there is a previous page. They are put back in the
+    /// list's order here. The page came from the one after it, so it always
+    /// has a next link, unless it is empty.
+    pub fn before(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+        let limit = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        rows.reverse();
+        KeysetPage {
+            previous: if more { rows.first().map(&key) } else { None },
+            next: rows.last().map(&key),
+            items: rows,
+        }
     }
 }
 
