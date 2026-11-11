@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! Mail for brocanth: one trait, a backend that records what it was given,
 //! an SMTP backend behind a feature that is off, and headers that cannot carry
@@ -139,13 +139,25 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "runtime")]
 pub mod address;
+#[cfg(feature = "runtime")]
+pub mod dev;
+#[cfg(feature = "runtime")]
 pub mod error;
+#[cfg(feature = "runtime")]
 pub mod header;
+#[cfg(feature = "runtime")]
 pub mod mailer;
+#[cfg(feature = "runtime")]
 pub mod memory;
+#[cfg(feature = "runtime")]
 pub mod message;
+#[cfg(feature = "runtime")]
 pub mod plugin;
+
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
 
 #[cfg(feature = "smtp")]
 pub mod smtp;
@@ -153,17 +165,25 @@ pub mod smtp;
 #[cfg(feature = "serde")]
 mod serde_wire;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod rt;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests;
 
+#[cfg(feature = "runtime")]
 pub use address::{Address, MAX_ADDRESS, MAX_DISPLAY_NAME, MAX_DOMAIN, MAX_LOCAL_PART};
+#[cfg(feature = "runtime")]
+pub use dev::{Folder, Log};
+#[cfg(feature = "runtime")]
 pub use error::MailError;
+#[cfg(feature = "runtime")]
 pub use mailer::Mailer;
+#[cfg(feature = "runtime")]
 pub use memory::{Memory, Sent};
+#[cfg(feature = "runtime")]
 pub use message::{Message, MessageBuilder, Subject, MAX_SUBJECT};
+#[cfg(feature = "runtime")]
 pub use plugin::{Mail, MailConfig, MailPlugin};
 
 #[cfg(feature = "smtp")]

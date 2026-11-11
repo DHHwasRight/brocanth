@@ -75,8 +75,11 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`cache-redis`](cache-redis.md) | the cache on Redis or Valkey instead of Postgres; one more server to run | Enhancer |  |
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |
 | [`jobs-memory`](jobs-memory.md) | the queue in this process's memory; for development and tests, gone at restart | Enhancer | jobs |
+| [`mail`](mail.md) | send mail through SMTP, or to the log or a folder in development | Enhancer |  |
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
 | [`auth-oauth`](auth-oauth.md) | sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Routes, Enhancer | auth |
+| [`auth-screens`](auth-screens.md) | sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account | Routes, Enhancer | auth |
+| [`auth-lockout`](auth-lockout.md) | locks an account for minutes after too many wrong passwords | Enhancer | auth |
 | [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
 | [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
@@ -90,6 +93,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`middleware-rate-limit`](middleware-rate-limit.md) | a fixed window per address, session or user, per group of routes; 429 with Retry-After | Middleware | middleware |
 | [`middleware-conditional-get`](middleware-conditional-get.md) | a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since | Middleware | middleware |
 | [`middleware-compression`](middleware-compression.md) | gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream | Middleware | middleware |
+| [`flash`](flash.md) | one-shot messages across a redirect, in a signed cookie, drawn into the layout | Middleware |  |
 | [`i18n`](i18n.md) | translations checked at build time; a locale per request from the query, a cookie or Accept-Language | Middleware |  |
 | [`gtag`](gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts | Middleware |  |
 | [`openapi`](openapi.md) | an OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Routes, Enhancer |  |

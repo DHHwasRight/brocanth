@@ -18,14 +18,16 @@ brocanth-mail = { git = "https://github.com/DHHwasRight/brocanth", branch = "mai
 
 | Feature | Default | Adds |
 |---|---|---|
+| `runtime` | on | Everything an application runs. Off only in the brocanth CLI. |
+| `scaffold` | off | The `mail` module that `brocanth create` offers. Only the CLI turns it on. |
 | `smtp` | off | `Smtp`, `SmtpConfig`, `Security` (`lettre`, with rustls and a pool) |
 | `serde` | off | `Serialize` and `Deserialize` on `Message`, `Address` and `Subject`, so a message can be a job payload. Deserialising runs every check again. |
 
-This crate has no `scaffold` feature and no module key: `brocanth create
---with mail` and `brocanth add mail` do not exist. Register `MailPlugin` by
-hand in the application (see below). The plugin reads no environment and no
-config section, so the application builds the `Mailer` and the sender in its
-own `main`.
+`brocanth create --with mail` and `brocanth add mail` write a plugin into
+the project that reads `[mail]`: the transport, the sender and the relay.
+See `docs/modules/mail.md`. Without the module, register `MailPlugin` by
+hand (see below): it reads no environment and no config section, so the
+application builds the `Mailer` and the sender in its own `main`.
 
 An SMTP password is a secret. Read it from the environment or from a config
 file, never from a command-line flag: every user on the host can read a
@@ -122,6 +124,27 @@ let app = AppBuilder::new()
     }))
     .build()?;
 # let _ = app;
+# Ok(())
+# }
+```
+
+### Look at mail in development
+
+`Folder` writes each message as an `.eml` file, and `Log` hands each message
+to a function. Neither one delivers anything, so a development
+configuration that reaches production sends no mail to real people.
+
+```rust
+use std::sync::Arc;
+use brocanth_mail::{Address, Folder, Log, Mail, Mailer};
+
+# fn main() -> Result<(), brocanth_mail::MailError> {
+let folder: Arc<dyn Mailer> = Arc::new(Folder::new("tmp/mail"));
+let log: Arc<dyn Mailer> = Arc::new(Log::new(|message| {
+    eprintln!("mail to {:?}: {}", message.to(), message.subject().as_str());
+}));
+let mail = Mail::new(log, Address::parse("no-reply@example.test")?);
+# let _ = (folder, mail);
 # Ok(())
 # }
 ```

@@ -18,9 +18,9 @@ then what the module unblocks. Both scans put `mail` first.
 
 | # | Key | What it does | Maps to | Effort |
 |---|---|---|---|---|
-| 1 | `mail` | Sends mail from a project; `deliver_later` through `jobs`. The `brocanth-mail` crate exists; no module adds it. | Action Mailer, django.core.mail, react-email, PocketBase mail | S |
-| 2 | `flash` | Messages that survive a redirect after a form POST | contrib.messages, Rails flash | S |
-| 3 | `auth-screens` | Sign-up, sign-in, reset, verify, TOTP screens over `brocanth-auth`, which has the flows and no pages. Needs `mail` and `flash`. | Devise, allauth, Rails 8 auth generator | M |
+| 1 | `mail` | **Built** ([page](modules/mail.md)). Sends mail from a project; `deliver_later` through `jobs`. | Action Mailer, django.core.mail, react-email, PocketBase mail | S |
+| 2 | `flash` | **Built** ([page](modules/flash.md)). Messages that survive a redirect after a form POST | contrib.messages, Rails flash | S |
+| 3 | `auth-screens` | **Built** ([page](modules/auth-screens.md)). Sign-up, sign-in, reset, verify, TOTP screens over `brocanth-auth`, which has the flows and no pages. Needs `mail` and `flash`. | Devise, allauth, Rails 8 auth generator | M |
 | 4 | `auth-oauth` | **Built** ([page](modules/auth-oauth.md)). Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |
 | 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. **Built:** `brocanth-meta`, `docs/modules/meta.md`. | Next.js metadata, next-seo, django-meta | M |
 | 6 | `storage-routes` | **Built** ([page](modules/storage-routes.md)). Upload and download routes, `?thumb=`, protected file tokens over `storage` | Active Storage, uploadthing, PocketBase files | S |
@@ -31,7 +31,7 @@ then what the module unblocks. Both scans put `mail` first.
 | 11 | `webhooks-in` | **Built** ([page](modules/webhooks-in.md)). Incoming webhooks: signature check, replay window, idempotency key | Stripe/svix receivers, PocketHost | S |
 | 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown. **Built**: crate `brocanth-sanitize`. | bleach/nh3, Rails sanitize | S |
 | 13 | `pagination` | One public paginator, offset and keyset. **Built** (`brocanth-pagination`); admin and `resource` page with it. | pagy, kaminari, Django Paginator | S |
-| 14 | `auth-lockout` | Locks an account after failed logins | django-axes, Devise lockable | S |
+| 14 | `auth-lockout` | **Built** ([page](modules/auth-lockout.md)). Locks an account after failed logins | django-axes, Devise lockable | S |
 | 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed. **Built:** in `brocanth-i18n`, `docs/modules/i18n-routing.md`. | next-intl, i18n_patterns | S |
 | 16 | `search` | Postgres full-text and trigram search, with a migration and a search page. **Built** (`brocanth-search`). | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
 | 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE`. **Built** (`brocanth-filters`). | django-filter, ransack | M |

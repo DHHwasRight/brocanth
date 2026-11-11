@@ -3,7 +3,7 @@
 Authentication for brocanth: local accounts with argon2id, server-side
 sessions in a signed cookie, OAuth 2.0 and OIDC with mandatory PKCE,
 explicit identity linking, second factors (TOTP, recovery codes), one-time
-codes, login alerts and impersonation. A provider is data, not code: a
+codes, login alerts, account lockout and impersonation. A provider is data, not code: a
 struct literal in `providers`. Login, registration, password reset and
 one-time codes do not reveal whether an address exists. A sign-in that
 skipped the second-factor policy does not compile. Use it when the
@@ -41,6 +41,17 @@ services on the context (`cx.extract::<crate::plugins::auth::Services>()`).
 It starts on `MemoryStore`. With `jobs` or `cache` in the project, it uses
 `PgStore` and turns on the `postgres` feature. It writes no provider, no
 second factor and no sign-in page.
+
+Two modules from this crate go beside it, off until you tick them:
+
+```text
+brocanth add auth-screens   # sign-up, sign-in, reset, verify and TOTP pages
+brocanth add auth-lockout   # an account locks for minutes after wrong passwords
+```
+
+`auth-screens` needs `rsx`, `input`, `middleware-csrf`, `mail` and
+`flash`. See `docs/modules/auth-screens.md` and
+`docs/modules/auth-lockout.md`.
 
 Settings (section `auth`; see `docs/module-flags.md`):
 
@@ -159,9 +170,10 @@ let _ = app;
 
 A handler then reads it with `let auth: &Auth<_, _, _> = cx.extract();`
 and calls `auth.accounts()`, `auth.sessions()`, `auth.linking()` or
-`auth.oauth()`. Second factors, one-time codes and login alerts are not on
-`Auth`. Each needs its own store trait, so an application builds `Mfa`,
-`Otp` or `LoginAlerts` from the same `Arc<S>` when it wants one.
+`auth.oauth()`. Second factors, one-time codes, login alerts and the
+lockout each need their own store trait. `auth.mfa()` and
+`auth.lockout(policy)` build `Mfa` and `Lockout` when the store has the
+trait. An application builds `Otp` or `LoginAlerts` from the same `Arc<S>`.
 
 ## Testing
 

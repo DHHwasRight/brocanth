@@ -105,11 +105,20 @@ pub const ALL: &[&dyn Module] = &[
     // The change history: the model layer's changes and the admin's
     // writes, in a table of the `db` database.
     &brocanth_audit::scaffold::Audit,
+    // Mail, from the crate that is the mail. After the queue, because
+    // `deliver_later` rides on it when it is there.
+    &brocanth_mail::scaffold::Mail,
     // Accounts, from the crate that is the accounts. The local path; the
     // providers are a child, which turns on the HTTP client feature of the
     // same crate (dependencies merge by name).
     &brocanth_auth::scaffold::Auth,
     &brocanth_auth::scaffold::AuthOauth,
+    // The pages over those services, from the same crate. Off with its
+    // parent: it needs five other modules, and it writes eight pages.
+    &brocanth_auth::scaffold::AuthScreens,
+    // Wrong passwords counted per account, from the same crate. Off with
+    // its parent: a lock costs the owner minutes.
+    &brocanth_auth::scaffold::AuthLockout,
     // The people who operate the application: superusers, who pass every
     // admin check, and roles that grant permissions.
     &brocanth_auth::scaffold::Superuser,
@@ -142,6 +151,9 @@ pub const ALL: &[&dyn Module] = &[
     // Both wait to be asked for: a CDN in front often does both.
     &brocanth_middleware::scaffold::ConditionalGet,
     &brocanth_middleware::scaffold::Compression,
+    // Messages across a redirect. A hook pair in the same crate, and a
+    // choice of its own: it is about forms, not about the network.
+    &brocanth_middleware::scaffold::Flash,
     // Google Analytics behind a consent banner. A response hook, so it
     // reaches every HTML page whatever renders it, and the static export.
     &brocanth_gtag::scaffold::Gtag,

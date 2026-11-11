@@ -394,6 +394,11 @@ impl Plugin for Jobs {{
 {ready}
         // So the admin's jobs tab, which mounts before this runs, finds it.
         queue.install();
+
+        // In the services too, for a plugin that runs a worker of its own on
+        // this queue: the mail plugin sends `deliver_later` mail that way.
+        // Every `before_start` runs before any `start`, so it finds it there.
+        lc.services_mut().insert(queue.clone());
         self.queue = Some(queue);
         Ok(())
     }}

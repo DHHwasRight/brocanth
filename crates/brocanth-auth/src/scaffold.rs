@@ -83,10 +83,14 @@
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
+mod lockout;
 mod oauth;
+mod screens;
 mod staff;
 
+pub use lockout::AuthLockout;
 pub use oauth::AuthOauth;
+pub use screens::AuthScreens;
 pub use staff::{Roles, Superuser};
 
 /// Accounts, as a choice on the `brocanth create` menu.

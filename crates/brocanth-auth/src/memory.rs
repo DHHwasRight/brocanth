@@ -16,9 +16,9 @@ use crate::identity::{Account, AccountId, EmailAddress, ProviderLink};
 use crate::otp::OtpChallengeId;
 use crate::session::SessionId;
 use crate::storage::{
-    AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError, TokenRecord,
-    TotpSecretRecord,
+    AccountDirectory, AuthStore, LockoutStore, MfaStore, NewAccount, NewProviderLink,
+    OtpChallengeRecord, OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError,
+    TokenRecord, TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -36,6 +36,15 @@ struct State {
     superusers: BTreeSet<AccountId>,
     roles: BTreeMap<String, BTreeSet<String>>,
     assignments: BTreeSet<(AccountId, String)>,
+    failed_logins: HashMap<AccountId, FailedLogins>,
+}
+
+/// One account's row for [`LockoutStore`].
+#[derive(Clone, Copy)]
+struct FailedLogins {
+    failures: u32,
+    since: UnixTime,
+    locked_until: Option<UnixTime>,
 }
 
 /// An [`AuthStore`] in a `Mutex<HashMap>`.
@@ -673,5 +682,65 @@ impl StaffStore for MemoryStore {
             .flatten()
             .cloned()
             .collect())
+    }
+}
+
+#[async_trait]
+impl LockoutStore for MemoryStore {
+    async fn record_failed_login(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        let row = state
+            .failed_logins
+            .entry(account.clone())
+            .or_insert(FailedLogins {
+                failures: 0,
+                since: at,
+                locked_until: None,
+            });
+        if row.since < window_start {
+            row.failures = 0;
+            row.since = at;
+        }
+        row.failures = row.failures.saturating_add(1);
+        Ok(row.failures)
+    }
+
+    async fn lock_account(&self, account: &AccountId, until: UnixTime) -> Result<(), StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        let row = state
+            .failed_logins
+            .entry(account.clone())
+            .or_insert(FailedLogins {
+                failures: 0,
+                since: until,
+                locked_until: None,
+            });
+        row.failures = 0;
+        row.locked_until = Some(until);
+        Ok(())
+    }
+
+    async fn locked_until(&self, account: &AccountId) -> Result<Option<UnixTime>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .failed_logins
+            .get(account)
+            .and_then(|row| row.locked_until))
+    }
+
+    async fn clear_failed_logins(&self, account: &AccountId) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .failed_logins
+            .remove(account);
+        Ok(())
     }
 }

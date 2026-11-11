@@ -631,6 +631,37 @@ pub trait StaffStore: AuthStore {
     async fn permissions_of(&self, account: &AccountId) -> Result<BTreeSet<String>, StoreError>;
 }
 
+/// Failed sign-ins per account, for [`crate::lockout`].
+///
+/// One row per account: the failures in the current window, when that
+/// window began, and the time a lock ends, if there is one.
+#[async_trait]
+pub trait LockoutStore: AuthStore {
+    /// Counts one failed sign-in at `at`, and answers the count in the
+    /// window. A window that began before `window_start` is over: the count
+    /// starts again at 1 from `at`.
+    ///
+    /// This is an upsert and it must be atomic, so that ten failures at once
+    /// count ten.
+    async fn record_failed_login(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError>;
+
+    /// Locks the account until `until`, and sets its count back to 0, so
+    /// that the first failure after the lock does not lock it again.
+    async fn lock_account(&self, account: &AccountId, until: UnixTime) -> Result<(), StoreError>;
+
+    /// When the lock of the account ends, or `None` when it has none. A time
+    /// in the past is a lock that is over.
+    async fn locked_until(&self, account: &AccountId) -> Result<Option<UnixTime>, StoreError>;
+
+    /// Forgets the failures and the lock of the account.
+    async fn clear_failed_logins(&self, account: &AccountId) -> Result<(), StoreError>;
+}
+
 impl From<StoreError> for crate::error::AuthError {
     fn from(e: StoreError) -> Self {
         crate::error::AuthError::Store(e.to_string())

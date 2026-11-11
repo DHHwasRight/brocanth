@@ -514,7 +514,7 @@ fn mint() -> Result<String, PluginError> {
 ///
 /// `==` on two slices returns at the first byte that differs, and a
 /// caller who can time the answer recovers a token one byte at a time.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     fold(a, b).0 == 0
 }
 

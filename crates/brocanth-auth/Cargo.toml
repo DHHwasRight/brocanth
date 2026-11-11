@@ -157,8 +157,10 @@ brocanth-auth = { path = ".", features = ["admin", "conformance", "policy"] }
 brocanth-test.workspace = true
 
 # `tests/scaffold.rs`: the modules this crate writes (`auth-oauth`,
-# `superuser`, `roles`), generated into a project by the CLI and compared
-# with `tests/golden/`. The CLI also turns this crate's `scaffold` on.
+# `superuser`, `roles`, `auth-screens`, `auth-lockout`), generated into a
+# project by the CLI's own generator and checked with `tests/golden/` and
+# `brocanth_scaffold::testing`. A cycle through dev-dependencies, which
+# cargo allows: the CLI takes this crate's `scaffold` side.
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 

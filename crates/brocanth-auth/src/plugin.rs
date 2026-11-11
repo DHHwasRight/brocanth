@@ -37,6 +37,11 @@
 //! own `main`, where the decision is visible — which is what §8 asks for
 //! everywhere else too.
 //!
+//! Two of them are methods instead of fields: [`Auth::mfa`] and
+//! [`Auth::lockout`] exist only when `S` implements the trait, so they add no
+//! bound to `AuthConfig`. Each is cheap to build, so a page builds one per
+//! request.
+//!
 //! [`Mfa`]: crate::mfa::Mfa
 //! [`Otp`]: crate::otp::Otp
 //! [`LoginAlerts`]: crate::alerts::LoginAlerts
@@ -62,11 +67,14 @@ use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::http_client::HttpClient;
 use crate::linking::Linking;
+use crate::lockout::{Lockout, LockoutPolicy};
+use crate::mfa::Mfa;
 use crate::oauth::{ClientConfig, OauthClient};
 use crate::password::Passwords;
 use crate::providers::Provider;
 use crate::session::{SessionConfig, Sessions, SigningKey};
 use crate::storage::AuthStore;
+use crate::storage::{LockoutStore, MfaStore};
 
 /// One provider, configured for this application.
 #[derive(Clone, Debug)]
@@ -121,6 +129,32 @@ pub struct Auth<S: AuthStore, H: HttpClient, C: Clock>(Arc<Inner<S, H, C>>);
 impl<S: AuthStore, H: HttpClient, C: Clock> Clone for Auth<S, H, C> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
+    }
+}
+
+impl<S: MfaStore, H: HttpClient, C: Clock> Auth<S, H, C> {
+    /// Second factors over the same store and clock as the rest.
+    ///
+    /// Not a field: [`Auth`] asks only for an [`AuthStore`], and an
+    /// application with no TOTP table must still build one. A store that
+    /// has the table gets this method. Each call draws the dummy secret a
+    /// missing factor is checked against, so build one per request.
+    ///
+    /// # Errors
+    /// Fails when the OS has no randomness.
+    pub fn mfa(&self) -> Result<Mfa<S, C>, AuthError> {
+        Mfa::new(self.0.store.clone(), self.0.clock.clone())
+    }
+}
+
+impl<S: LockoutStore, H: HttpClient, C: Clock> Auth<S, H, C> {
+    /// Password sign-in that counts failures, over the same store and
+    /// clock. Call [`Lockout::login`] with [`Auth::accounts`].
+    ///
+    /// Not a field, for the reason [`Auth::mfa`] is not one. It holds no
+    /// state of its own, so build one per request.
+    pub fn lockout(&self, policy: LockoutPolicy) -> Lockout<S, C> {
+        Lockout::new(self.0.store.clone(), self.0.clock.clone(), policy)
     }
 }
 
@@ -197,8 +231,10 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Auth<S, H, C> {
 
     /// The store the services share.
     ///
-    /// For the stores that are not on `Auth`: build `Mfa`, `Otp` or read a
-    /// [`StaffStore`](crate::storage::StaffStore) over the same rows.
+    /// For a read the services do not wrap (the account a session belongs
+    /// to, say), and for the stores that are not on `Auth`: build `Mfa`,
+    /// `Otp` or read a [`StaffStore`](crate::storage::StaffStore) over the
+    /// same rows.
     pub fn store(&self) -> &Arc<S> {
         &self.0.store
     }

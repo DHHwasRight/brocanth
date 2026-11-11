@@ -5455,6 +5455,10 @@ mod tests {
                 "gtag",
                 vec!["middleware", "middleware-security-headers", "gtag"],
             ),
+            // The flash with rsx and no config file: the literal branch of
+            // its hooking plugin, and the element the root layout carries
+            // for it.
+            ("flash", vec!["rsx", "flash"]),
             // Translations with the consent banner and rsx, and no config
             // file: a `build.rs`, a `[build-dependencies]` table, the
             // banner's keys in the catalogs and `gtag`'s `i18n` feature.

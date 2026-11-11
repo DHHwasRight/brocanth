@@ -191,7 +191,7 @@ puts the crate in a new project.
 | [`brocanth-queue-postgres`](crates/brocanth-queue-postgres/README.md) | The Postgres backend: `FOR UPDATE SKIP LOCKED`, outbox relay, partitioned archive | |
 | [`brocanth-queue-memory`](crates/brocanth-queue-memory/README.md) | The in-process backend, the reference for the suite | |
 | [`brocanth-queue-conformance`](crates/brocanth-queue-conformance/README.md) | The contract as a test suite for any backend | |
-| [`brocanth-mail`](crates/brocanth-mail/README.md) | Mail: one trait, an in-memory backend, SMTP behind a feature | |
+| [`brocanth-mail`](crates/brocanth-mail/README.md) | Mail: one trait, an in-memory backend, SMTP behind a feature, a log and a folder for development | `mail` |
 | [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` and `realtime-websocket` carry it to a browser | `realtime` |
 | [`brocanth-static`](crates/brocanth-static/README.md) | Writes the application to files: every GET page, partials per layout depth, the assets | `static` |
 | [`brocanth-webhooks`](crates/brocanth-webhooks/README.md) | Webhooks in both directions: verified, deduplicated deliveries in; signed, retried events out | `webhooks`, `webhooks-in`, `webhooks-out` |

@@ -13,7 +13,7 @@ The wizard calls it: *Templates compiled into the binary*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`rsx-tailwind`](rsx-tailwind.md), [`rsx-htmx`](rsx-htmx.md), [`meta`](meta.md) |
+| Adapts to | [`rsx-tailwind`](rsx-tailwind.md), [`rsx-htmx`](rsx-htmx.md), [`meta`](meta.md), [`flash`](flash.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `rsx` |

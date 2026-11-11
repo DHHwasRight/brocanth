@@ -40,6 +40,7 @@ nothing holds this page.
 | [`middleware-rate-limit`](modules/middleware-rate-limit.md) | A fixed window per address, session or user, per group of routes; 429 with Retry-After |  |  | part of `middleware`, off until you tick it |  |
 | [`middleware-conditional-get`](modules/middleware-conditional-get.md) | A weak ETag over every page, and 304 for If-None-Match or If-Modified-Since |  |  | part of `middleware`, off until you tick it |  |
 | [`middleware-compression`](modules/middleware-compression.md) | gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream |  |  | part of `middleware`, off until you tick it | behind a CDN that compresses, leave it off |
+| [`flash`](modules/flash.md) | One-shot messages across a redirect, in a signed cookie, drawn into the layout |  |  |  | with `rsx`: the root layout carries `<div id="flash">` |
 | [`middleware-security-headers`](modules/middleware-security-headers.md) | HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash |  | yes | part of `middleware`, ticked with its parent |  |
 | [`observability`](modules/observability.md) | A request id on every request and a SIGTERM that fails /readyz first; logs, probes, metrics and traces below | Enhancer, Routes | yes |  |  |
 | [`observability-logs`](modules/observability-logs.md) | A JSON line per request on stdout in production, text elsewhere; `tracing` and nothing else |  | yes | part of `observability`, ticked with its parent |  |
@@ -70,6 +71,7 @@ nothing holds this page.
 | [`admin`](modules/admin.md) | A Django-shaped backoffice at /admin, locked until you say who may in | Enhancer |  |  |  |
 | [`admin-model`](modules/admin-model.md) | The admin's rows over SeaORM, one line per entity |  |  | part of `admin`, off until you tick it; needs `model`: it reads rows through the ORM, and without `model` there is none |  |
 | [`auth-oauth`](modules/auth-oauth.md) | Sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Enhancer |  | part of `auth`, off until you tick it |  |
+| [`auth-screens`](modules/auth-screens.md) | Sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account | Enhancer |  | part of `auth`, off until you tick it | needs `rsx`, `input`, `middleware-csrf`, `mail`, `flash` |
 | [`observability-health`](modules/observability-health.md) | /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM |  | yes | part of `observability`, ticked with its parent |  |
 | [`observability-metrics`](modules/observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues |  | yes | part of `observability`, ticked with its parent |  |
 | [`openapi`](modules/openapi.md) | An OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Enhancer |  |  |  |
@@ -96,6 +98,8 @@ nothing holds this page.
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | not for production |
+| [`mail`](modules/mail.md) | Send mail through SMTP, or to the log or a folder in development |  |  |  | with `jobs`: `deliver_later` goes on the `mail` queue |
+| [`auth-lockout`](modules/auth-lockout.md) | Locks an account for minutes after too many wrong passwords |  |  | part of `auth`, off until you tick it | with `auth-screens`: sign-in counts wrong passwords |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
 | [`roles`](modules/roles.md) | Roles that grant permissions, stored with the accounts, for staff and the admin |  |  | needs `superuser`: only a superuser gives a role, and `superuser` reads the signed-in member of staff |  |

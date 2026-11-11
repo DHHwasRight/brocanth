@@ -126,6 +126,7 @@ brocanth_auth::mfa_store_conformance!(fresh);
 brocanth_auth::otp_store_conformance!(fresh);
 brocanth_auth::sign_in_location_store_conformance!(fresh);
 brocanth_auth::staff_store_conformance!(fresh);
+brocanth_auth::lockout_store_conformance!(fresh);
 
 /// Runs a body against a scoped store, and drops the schema afterwards.
 macro_rules! with_store {
