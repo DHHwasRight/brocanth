@@ -25,7 +25,7 @@
 //!    So the error names the real problem: the rule does not say what
 //!    absence means. PLAN.md §9 is the reason.
 
-use crate::entity::Column;
+use crate::entity::{Column, SortKind};
 use crate::value::{Bound, Missing, Value};
 
 /// The kind of value a column holds: [`Int`], [`Float`], [`Text`], [`Bool`]
@@ -33,6 +33,10 @@ use crate::value::{Bound, Missing, Value};
 pub trait Kind {
     /// The name in an error message.
     const NAME: &'static str;
+
+    /// What a keyset cursor holds for a column of this kind. `None` when a
+    /// cursor cannot carry it. `policy!` writes [`crate::Sortable`] from it.
+    const SORT: Option<SortKind> = None;
 }
 
 /// Integer columns.
@@ -48,12 +52,14 @@ pub enum Bytes {}
 
 impl Kind for Int {
     const NAME: &'static str = "integer";
+    const SORT: Option<SortKind> = Some(SortKind::Int);
 }
 impl Kind for Float {
     const NAME: &'static str = "float";
 }
 impl Kind for Text {
     const NAME: &'static str = "text";
+    const SORT: Option<SortKind> = Some(SortKind::Text);
 }
 impl Kind for Bool {
     const NAME: &'static str = "bool";

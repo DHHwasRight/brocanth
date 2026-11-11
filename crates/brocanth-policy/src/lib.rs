@@ -129,7 +129,7 @@ pub mod typed;
 pub mod value;
 
 pub use audience::{Audience, NotInvertible};
-pub use entity::{Column, Entity, Ident};
+pub use entity::{Column, Entity, Ident, SortKind, Sortable};
 pub use errors::{CompileError, Denied, EvalError};
 pub use eval::{MapRow, RowView, Truth};
 pub use mask::{FieldMask, MaskViolation};

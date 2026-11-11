@@ -5,7 +5,7 @@
 //! the two readings agree; this file proves the predicate is the right one.
 
 use brocanth_pagination::{Cursor, Direction, Key, Keyset, KeysetPage};
-use brocanth_policy::{Column, Dialect, Entity, Ident, MapRow, Pred};
+use brocanth_policy::{Column, Dialect, Entity, Ident, MapRow, Pred, SortKind, Sortable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PostColumn {
@@ -21,6 +21,12 @@ impl Column for PostColumn {
             Self::Id => "id",
             Self::Score => "score",
         }
+    }
+}
+
+impl Sortable for PostColumn {
+    fn sort_kind(&self) -> Option<SortKind> {
+        Some(SortKind::Int)
     }
 }
 
@@ -79,6 +85,115 @@ fn walk(direction: Direction, limit: u64) -> Vec<(i64, i64)> {
         }
     }
     seen
+}
+
+/// The rows `pred` admits, sorted by `keyset`'s order in `direction`, and
+/// cut to `Keyset::fetch(limit)`: what the database returns.
+fn select(pred: &Pred<PostColumn>, direction: Direction, limit: u64) -> Vec<(i64, i64)> {
+    let mut admitted: Vec<(i64, i64)> = rows()
+        .into_iter()
+        .filter(|(id, score)| pred.admits(&row(*id, *score)).expect("no opaque part"))
+        .collect();
+    admitted.sort_by_key(|(id, score)| (*score, *id));
+    if direction == Direction::Descending {
+        admitted.reverse();
+    }
+    admitted.truncate(usize::try_from(Keyset::<PostColumn>::fetch(limit)).unwrap());
+    admitted
+}
+
+fn key(row: &(i64, i64)) -> Cursor {
+    Cursor::new([Key::Int(row.1), Key::Int(row.0)])
+}
+
+/// Every page, forward from the first, as a handler reads them: the first
+/// with no cursor, each next one `after` the last page's `next`.
+fn forward(
+    keyset: &Keyset<PostColumn>,
+    direction: Direction,
+    limit: u64,
+) -> Vec<KeysetPage<(i64, i64)>> {
+    let first = KeysetPage::from_rows(
+        select(&keyset.after(None).unwrap(), direction, limit),
+        limit,
+        key,
+    );
+    let mut pages = vec![first];
+    while let Some(next) = pages.last().unwrap().next.clone() {
+        let rows = select(&keyset.after(Some(&next)).unwrap(), direction, limit);
+        pages.push(KeysetPage::after(rows, limit, key));
+    }
+    pages
+}
+
+/// The page before `cursor`: read in the reversed order, then put back.
+fn backward(
+    keyset: &Keyset<PostColumn>,
+    direction: Direction,
+    cursor: &Cursor,
+    limit: u64,
+) -> KeysetPage<(i64, i64)> {
+    let reversed = match direction {
+        Direction::Ascending => Direction::Descending,
+        Direction::Descending => Direction::Ascending,
+    };
+    assert_eq!(
+        keyset.reversed(),
+        Keyset::new(PostColumn::Score, PostColumn::Id, reversed)
+    );
+    let rows = select(&keyset.before(cursor).unwrap(), reversed, limit);
+    KeysetPage::before(rows, limit, key)
+}
+
+#[test]
+fn a_previous_link_reads_back_the_same_pages_through_the_ties() {
+    // Scores 0 to 4, each held by four or five rows: every page edge for
+    // these limits falls inside a tie somewhere.
+    for direction in [Direction::Ascending, Direction::Descending] {
+        let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, direction);
+        for limit in [1, 2, 3, 4, 5, 7, 22, 23, 50] {
+            let pages = forward(&keyset, direction, limit);
+            let label = format!("{direction:?}, limit {limit}");
+
+            // First page: no previous link. Last page: no next link.
+            assert_eq!(pages[0].previous, None, "{label}");
+            assert_eq!(pages.last().unwrap().next, None, "{label}");
+            // Every page after the first links back.
+            for page in &pages[1..] {
+                assert!(page.previous.is_some(), "{label}");
+            }
+
+            // Walk back from the last page: each previous page is the page
+            // that came before it going forward, with the same links.
+            for index in (1..pages.len()).rev() {
+                let cursor = pages[index].previous.as_ref().unwrap();
+                let back = backward(&keyset, direction, cursor, limit);
+                assert_eq!(back.items, pages[index - 1].items, "{label}, page {index}");
+                assert_eq!(back.next, Some(key(pages[index - 1].items.last().unwrap())));
+                if index == 1 {
+                    assert_eq!(back.previous, None, "{label}: back on the first page");
+                } else {
+                    assert_eq!(
+                        back.previous,
+                        pages[index - 1].previous,
+                        "{label}, page {index}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cursor_on_the_first_row_has_nothing_before_it() {
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    // (5, 0) is the first row: score 0, the lowest id among the zeros.
+    let first_row = Cursor::new([Key::Int(0), Key::Int(5)]);
+    let back = backward(&keyset, Direction::Ascending, &first_row, 3);
+    assert!(back.items.is_empty());
+    assert_eq!((back.previous, back.next), (None, None));
+    // A mistyped cursor is refused going back too.
+    assert!(keyset.before(&Cursor::parse("t61.i1").unwrap()).is_err());
 }
 
 #[test]
@@ -195,7 +310,64 @@ fn a_cursor_from_the_query_string_of_the_wrong_width_is_a_help_line() {
     let params = Params::parse("after=i3").unwrap();
     let error = keyset.after(params.after.as_ref()).unwrap_err();
     assert!(error.to_string().contains("2 key(s)"));
+    assert_eq!(error.status(), 400);
     assert!(error.to_string().contains("help:"));
     let params = Params::parse("after=i3.i4.i5").unwrap();
     assert!(keyset.after(params.after.as_ref()).is_err());
+}
+
+#[test]
+fn a_cursor_key_of_the_wrong_kind_is_not_a_cursor() {
+    // Text where the score is an integer, and an integer where the id is:
+    // each one would reach the database as `bigint > text` and fail there.
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    for token in ["t61.i1", "i1.t61", "t61.t62"] {
+        let cursor = Cursor::parse(token).unwrap();
+        let error = keyset.after(Some(&cursor)).unwrap_err();
+        assert!(
+            error.to_string().contains("is not a cursor"),
+            "{token}: {error}"
+        );
+        assert!(error.to_string().contains("help:"), "{token}");
+        assert_eq!(error.status(), 400, "{token}: the client's mistake");
+    }
+    assert!(keyset.after(Some(&Cursor::parse("i1.i1").unwrap())).is_ok());
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PriceColumn {
+    Id,
+    Price,
+}
+
+impl Column for PriceColumn {
+    const ALL: &'static [Self] = &[Self::Id, Self::Price];
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Price => "price",
+        }
+    }
+}
+
+impl Sortable for PriceColumn {
+    fn sort_kind(&self) -> Option<SortKind> {
+        match self {
+            Self::Id => Some(SortKind::Int),
+            Self::Price => None,
+        }
+    }
+}
+
+#[test]
+fn an_order_on_a_column_a_cursor_cannot_carry_fails_on_the_first_page() {
+    let keyset = Keyset::new(PriceColumn::Price, PriceColumn::Id, Direction::Ascending);
+    let error = keyset.after(None).unwrap_err();
+    assert!(error.to_string().contains("`price`"), "{error}");
+    assert!(error.to_string().contains("help:"), "{error}");
+    assert_eq!(error.status(), 500, "the list's bug, not the client's");
+    assert!(Keyset::by_key(PriceColumn::Id, Direction::Ascending)
+        .after(None)
+        .is_ok());
 }

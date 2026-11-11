@@ -38,7 +38,7 @@ use crate::identity::{AccountId, EmailAddress};
 use crate::staff::Staff;
 use crate::storage::{AccountDirectory, Role, StaffStore};
 
-use super::{encode, failed};
+use super::failed;
 
 /// The roles tab's key, and the subject of its policy questions.
 pub const ROLES_KEY: &str = "roles";
@@ -189,7 +189,10 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
             volatile: !store.is_durable(),
             can_act: r.can_act,
             action: r.url(""),
-            error: r.param("error"),
+            error: r
+                .param("error")
+                .and_then(|code| Refusal::from_code(&code))
+                .map(|refusal| refusal.message().to_string()),
             roles: rows,
         };
         let view = |ctx: &RolesCtx, w: &mut rsx::Writer<'_>| {
@@ -203,19 +206,15 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
     async fn act(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
         let store = self.store()?;
         let field = |name: &str| r.submission.get(name).unwrap_or("").trim().to_string();
-        let back = |error: Option<&str>| match error {
+        let back = |refusal: Option<Refusal>| match refusal {
             None => PanelPage::redirect(r.url("")),
-            Some(message) => {
-                PanelPage::redirect(format!("{}?error={}", r.url(""), encode(message)))
-            }
+            Some(refusal) => PanelPage::redirect(format!("{}?error={}", r.url(""), refusal.code())),
         };
         let name = field("role");
         match field("do").as_str() {
             "define" => {
                 if !valid_name(&name) {
-                    return Ok(back(Some(
-                        "a role name is letters, digits, dots, dashes and underscores",
-                    )));
+                    return Ok(back(Some(Refusal::BadName)));
                 }
                 let permissions = field("permissions");
                 let role = Role::new(
@@ -231,26 +230,79 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
             }
             "assign" => {
                 let Ok(address) = EmailAddress::parse(&field("email")) else {
-                    return Ok(back(Some("that is not an email address")));
+                    return Ok(back(Some(Refusal::NotAnAddress)));
                 };
                 let Some(account) = store.account_by_email(&address).await.map_err(failed)? else {
-                    return Ok(back(Some("no account has that address")));
+                    return Ok(back(Some(Refusal::NoAccount)));
                 };
                 if !store
                     .assign_role(&account.id, &name)
                     .await
                     .map_err(failed)?
                 {
-                    return Ok(back(Some("no role has that name")));
+                    return Ok(back(Some(Refusal::NoRole)));
                 }
             }
             "unassign" => {
                 let account = AccountId::new(field("account"));
                 store.unassign_role(&account, &name).await.map_err(failed)?;
             }
-            _ => return Ok(back(Some("the form named no action"))),
+            _ => return Ok(back(Some(Refusal::NoAction))),
         }
         Ok(back(None))
+    }
+}
+
+/// Why a button did nothing, carried to the tab by the redirect.
+///
+/// The redirect carries a code, not the message. A message in the query
+/// string is text that any link can set, and the tab would show it to a
+/// member of staff as if the admin had written it: "your session expired,
+/// sign in at …". With a code, the tab shows only its own sentences, and a
+/// code it does not know shows nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    BadName,
+    NotAnAddress,
+    NoAccount,
+    NoRole,
+    NoAction,
+}
+
+impl Refusal {
+    const ALL: [Refusal; 5] = [
+        Refusal::BadName,
+        Refusal::NotAnAddress,
+        Refusal::NoAccount,
+        Refusal::NoRole,
+        Refusal::NoAction,
+    ];
+
+    /// What the redirect carries in `error=`.
+    fn code(self) -> &'static str {
+        match self {
+            Refusal::BadName => "bad-name",
+            Refusal::NotAnAddress => "not-an-address",
+            Refusal::NoAccount => "no-account",
+            Refusal::NoRole => "no-role",
+            Refusal::NoAction => "no-action",
+        }
+    }
+
+    /// The refusal a code names, or `None` for a code the tab did not write.
+    fn from_code(code: &str) -> Option<Refusal> {
+        Refusal::ALL.into_iter().find(|r| r.code() == code)
+    }
+
+    /// What the tab shows.
+    fn message(self) -> &'static str {
+        match self {
+            Refusal::BadName => "a role name is letters, digits, dots, dashes and underscores",
+            Refusal::NotAnAddress => "that is not an email address",
+            Refusal::NoAccount => "no account has that address",
+            Refusal::NoRole => "no role has that name",
+            Refusal::NoAction => "the form named no action",
+        }
     }
 }
 
@@ -275,7 +327,9 @@ pub struct RolesCtx {
     pub can_act: bool,
     /// Where every form posts.
     pub action: String,
-    /// What the last button got wrong, from the redirect.
+    /// What the last button got wrong: the tab's own sentence for the code
+    /// the redirect carried. `None` for no code, or one the tab did not
+    /// write.
     pub error: Option<String>,
     /// Every role, by name.
     pub roles: Vec<RoleRow>,

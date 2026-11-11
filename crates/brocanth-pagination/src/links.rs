@@ -2,12 +2,12 @@
 //!
 //! A link to page 3 must keep everything else the request carried: the
 //! search, the filters, the sort. [`Links`] holds the query string without
-//! `page` and `after`, and writes each link from it, so a filter set on page
+//! `page`, `after` and `before`, and writes each link from it, so a filter set on page
 //! one is still set on page three.
 
 use std::fmt;
 
-use crate::cursor::{Cursor, CursorError};
+use crate::cursor::{Cursor, CursorError, KeysetPage};
 use crate::page::Page;
 use crate::query;
 
@@ -15,18 +15,23 @@ use crate::query;
 pub const PAGE: &str = "page";
 /// The page size.
 pub const PER_PAGE: &str = "per_page";
-/// The keyset cursor.
+/// The keyset cursor of a next page.
 pub const AFTER: &str = "after";
+/// The keyset cursor of a previous page.
+pub const BEFORE: &str = "before";
 
-/// What a request asked for: `page`, `per_page` and `after`.
+/// What a request asked for: `page`, `per_page`, and `after` or `before`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Params {
     /// The page, counting from one. One when absent.
     pub page: u64,
     /// The page size, or `None` for the list's default.
     pub per_page: Option<u64>,
-    /// The keyset cursor, for a keyset list.
+    /// The keyset cursor of a next page: read the rows after it.
     pub after: Option<Cursor>,
+    /// The keyset cursor of a previous page: read the rows before it. Never
+    /// set together with `after`.
+    pub before: Option<Cursor>,
 }
 
 /// A value in the query string that is not what its key needs.
@@ -39,8 +44,10 @@ pub enum ParamError {
         /// What it held.
         value: String,
     },
-    /// `after` is not a cursor.
+    /// `after` or `before` is not a cursor.
     Cursor(CursorError),
+    /// `after` and `before` are both set: a page cannot go both ways.
+    BothCursors,
 }
 
 impl fmt::Display for ParamError {
@@ -52,6 +59,10 @@ impl fmt::Display for ParamError {
                  help: write `{key}=2`, or drop `{key}` to get the default"
             ),
             ParamError::Cursor(error) => error.fmt(f),
+            ParamError::BothCursors => f.write_str(
+                "`after` and `before` are both set\n\
+                 help: follow the `next` or the `previous` link of a page; each sets one of them",
+            ),
         }
     }
 }
@@ -59,7 +70,7 @@ impl fmt::Display for ParamError {
 impl std::error::Error for ParamError {}
 
 impl Params {
-    /// Reads `page`, `per_page` and `after` from a query string.
+    /// Reads `page`, `per_page`, `after` and `before` from a query string.
     ///
     /// A number that is not a number is an error, not page one: serving page
     /// one to somebody who asked for page `two` is the quiet repair that makes
@@ -79,22 +90,28 @@ impl Params {
                     .map_err(|_| ParamError::NotANumber { key, value }),
             }
         };
-        let after = match query::param(query_string, AFTER) {
+        let cursor = |key: &str| match query::param(query_string, key) {
             Some(token) if !token.is_empty() => {
-                Some(Cursor::parse(&token).map_err(ParamError::Cursor)?)
+                Cursor::parse(&token).map(Some).map_err(ParamError::Cursor)
             }
-            _ => None,
+            _ => Ok(None),
         };
+        let after = cursor(AFTER)?;
+        let before = cursor(BEFORE)?;
+        if after.is_some() && before.is_some() {
+            return Err(ParamError::BothCursors);
+        }
         Ok(Params {
             page: number(PAGE)?.unwrap_or(1).max(1),
             per_page: number(PER_PAGE)?,
             after,
+            before,
         })
     }
 }
 
 /// The base every link of one list is written from: the path, and the query
-/// string without `page` and `after`.
+/// string without `page`, `after` and `before`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Links {
     path: String,
@@ -103,13 +120,13 @@ pub struct Links {
 
 impl Links {
     /// The links of the list at `path`, keeping every key of `query_string`
-    /// but `page` and `after`.
+    /// but `page`, `after` and `before`.
     pub fn new(path: &str, query_string: &str) -> Links {
         Links {
             path: path.to_string(),
             kept: query::pairs(query_string)
                 .into_iter()
-                .filter(|(key, _)| key != PAGE && key != AFTER)
+                .filter(|(key, _)| key != PAGE && key != AFTER && key != BEFORE)
                 .collect(),
         }
     }
@@ -146,6 +163,11 @@ impl Links {
     /// The keyset page that starts after `cursor`.
     pub fn after(&self, cursor: &Cursor) -> String {
         self.with(Some((AFTER, &cursor.token())))
+    }
+
+    /// The keyset page that ends before `cursor`.
+    pub fn before(&self, cursor: &Cursor) -> String {
+        self.with(Some((BEFORE, &cursor.token())))
     }
 }
 
@@ -213,23 +235,26 @@ impl Pager {
     }
 }
 
-/// Everything a template needs to draw a keyset pager: a link to the next
-/// page, and one back to the first.
+/// Everything a template needs to draw a keyset pager: the first page, the
+/// previous one and the next one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeysetPager {
     /// The first page, when this is not it.
     pub first: Option<String>,
+    /// The previous page, when there is one.
+    pub previous: Option<String>,
     /// The next page, when there is one.
     pub next: Option<String>,
 }
 
 impl KeysetPager {
-    /// The links of a keyset page. `current` is the cursor this page was read
-    /// after, `None` on the first page; `next` is the cursor of the next.
-    pub fn new(links: &Links, current: Option<&Cursor>, next: Option<&Cursor>) -> KeysetPager {
+    /// The links of a keyset page. `read_with` is the cursor the page was
+    /// read with (`after` or `before`), `None` on the first page.
+    pub fn new<R>(links: &Links, read_with: Option<&Cursor>, page: &KeysetPage<R>) -> KeysetPager {
         KeysetPager {
-            first: current.map(|_| links.first()),
-            next: next.map(|cursor| links.after(cursor)),
+            first: read_with.map(|_| links.first()),
+            previous: page.previous.as_ref().map(|cursor| links.before(cursor)),
+            next: page.next.as_ref().map(|cursor| links.after(cursor)),
         }
     }
 }
@@ -282,13 +307,27 @@ mod tests {
     }
 
     #[test]
-    fn a_keyset_pager_links_forward_and_home() {
-        let links = Links::new("/feed", "after=i3");
-        let first = KeysetPager::new(&links, None, Some(&Cursor::new([Key::Int(3)])));
+    fn a_keyset_pager_links_both_ways_and_home() {
+        let key = |n: &i64| Cursor::new([Key::Int(*n)]);
+        let links = Links::new("/feed", "after=i3&before=i1");
+        let first = KeysetPager::new(&links, None, &KeysetPage::from_rows(vec![1, 2, 3], 2, key));
         assert_eq!(first.first, None);
-        assert_eq!(first.next.as_deref(), Some("/feed?after=i3"));
-        let last = KeysetPager::new(&links, Some(&Cursor::new([Key::Int(3)])), None);
+        assert_eq!(first.previous, None);
+        assert_eq!(first.next.as_deref(), Some("/feed?after=i2"));
+        let after = Cursor::new([Key::Int(2)]);
+        let last = KeysetPager::new(&links, Some(&after), &KeysetPage::after(vec![3], 2, key));
         assert_eq!(last.first.as_deref(), Some("/feed"));
+        assert_eq!(last.previous.as_deref(), Some("/feed?before=i3"));
         assert_eq!(last.next, None);
+    }
+
+    #[test]
+    fn after_and_before_together_are_an_error() {
+        let error = Params::parse("after=i1&before=i2").unwrap_err();
+        assert_eq!(error, ParamError::BothCursors);
+        assert!(error.to_string().contains("help:"));
+        let params = Params::parse("before=i2").unwrap();
+        assert_eq!(params.before, Some(Cursor::new([Key::Int(2)])));
+        assert!(Params::parse("before=nope").is_err());
     }
 }

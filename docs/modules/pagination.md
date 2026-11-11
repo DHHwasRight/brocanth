@@ -29,7 +29,7 @@ Files:
 Slots:
 
 - src/pages/mod.rs (items): `ctx.page_params()`, which reads `page`,
-  `per_page` and `after` and answers a bad value with a 400; `ctx.links()`,
+  `per_page`, `after` and `before` and answers a bad value with a 400; `ctx.links()`,
   which writes links that keep every other key of the query string
 - src/pages/mod.rs (items, without `rsx`): `pager_html(&pager)`, the offset
   pager as escaped HTML
@@ -46,8 +46,14 @@ None. The module file `src/modules/pagination.rs` has no field.
   reaches every list.
 - **A bad number is a 400, not page one.** Page one for `page=two` is a
   quiet repair that makes a paginator untrustworthy.
-- **Keyset pages link forward and to the first page only.** A previous
-  link needs the query run backwards. pagy's keyset does the same.
+- **A keyset page links to the next, the previous and the first page.**
+  The previous link is `before=<cursor>`: the same query with the
+  comparison and the `ORDER BY` reversed, one index seek, and the rows put
+  back in order. A stack of cursors in the URL would grow with every page.
+- **A cursor key of the wrong kind is a 400.** `Keyset::after` needs the
+  column enum to implement `brocanth_policy::Sortable`, and checks each key
+  against its column before the query. Without the check, text against an
+  integer column is a database error on PostgreSQL, a 500.
 
 ## Read more
 

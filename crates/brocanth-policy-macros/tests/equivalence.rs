@@ -347,3 +347,26 @@ fn an_anonymous_visitor_owns_nothing_and_the_rule_says_so() {
     assert!(by_macro::PostPolicy.create(&anonymous).is_never());
     assert!(list.audience().is_ok(), "the rule still inverts");
 }
+
+mod sortable {
+    brocanth_policy::policy! {
+        pub entity Item in "items" {
+            #[key] id: i64,
+            rank: Option<i32>,
+            slug: String,
+            price: f64,
+            live: bool,
+        }
+    }
+}
+
+#[test]
+fn the_macro_entity_says_what_a_cursor_holds_for_each_column() {
+    use brocanth_policy::{SortKind, Sortable};
+    use sortable::ItemColumn;
+    assert_eq!(ItemColumn::Id.sort_kind(), Some(SortKind::Int));
+    assert_eq!(ItemColumn::Rank.sort_kind(), Some(SortKind::Int));
+    assert_eq!(ItemColumn::Slug.sort_kind(), Some(SortKind::Text));
+    assert_eq!(ItemColumn::Price.sort_kind(), None);
+    assert_eq!(ItemColumn::Live.sort_kind(), None);
+}

@@ -14,8 +14,17 @@
 //! `NULL > $1` is unknown, so a row with a null sort key is never "after"
 //! any cursor and drops out of every page but the first. Sort on a
 //! `NOT NULL` column, or on the key alone.
+//!
+//! # A cursor value has its column's kind
+//!
+//! A client can write `after=t61` (text) for a list sorted on an integer.
+//! PostgreSQL then refuses `bigint > text` and the request is a 500. So
+//! [`Keyset::after`] needs `C: Sortable`, which says what each column holds,
+//! and refuses a key of the wrong kind as "not a cursor", a 400. The check
+//! is here and not in the database because the database's answer is an
+//! error the handler cannot tell from an outage.
 
-use brocanth_policy::{CompileError, Entity, Pred, Value};
+use brocanth_policy::{CompileError, Entity, Pred, SortKind, Sortable, Value};
 
 use crate::cursor::{Cursor, CursorError, Key};
 use crate::Direction;
@@ -52,36 +61,25 @@ impl<C: brocanth_policy::Column> Keyset<C> {
         }
     }
 
-    /// The rows after `cursor`, as a predicate. [`Pred::Always`] with no
-    /// cursor: the first page.
-    ///
-    /// `AND` it with the policy's rule before you compile: the cursor narrows
-    /// the window, and the rule still decides what is in it.
-    ///
-    /// # Errors
-    ///
-    /// [`CursorError`] when the cursor holds the wrong number of keys.
-    pub fn after(&self, cursor: Option<&Cursor>) -> Result<Pred<C>, CursorError> {
-        let Some(cursor) = cursor else {
-            return Ok(Pred::Always);
-        };
-        let cursor = cursor.clone().expect(self.width())?;
-        let values: Vec<Value> = cursor.keys().iter().map(value).collect();
-        let beyond = |column: C, value: Value| match self.direction {
-            Direction::Ascending => Pred::gt(column, value),
-            Direction::Descending => Pred::lt(column, value),
-        };
-        Ok(match values.as_slice() {
-            [only] => beyond(self.key, only.clone()),
-            [first, second] => Pred::any([
-                beyond(self.column, first.clone()),
-                Pred::all([
-                    Pred::eq(self.column, first.clone()),
-                    beyond(self.key, second.clone()),
-                ]),
-            ]),
-            _ => unreachable!("`expect` checked the width"),
-        })
+    /// The same order, run the other way. A `before=` page reads with it:
+    /// its `ORDER BY` puts the rows nearest the cursor first.
+    pub fn reversed(&self) -> Self {
+        Keyset {
+            direction: match self.direction {
+                Direction::Ascending => Direction::Descending,
+                Direction::Descending => Direction::Ascending,
+            },
+            ..*self
+        }
+    }
+
+    /// The columns a cursor holds a key for, in order.
+    fn columns(&self) -> Vec<C> {
+        if self.width() == 1 {
+            vec![self.key]
+        } else {
+            vec![self.column, self.key]
+        }
     }
 
     /// The `ORDER BY` list, with the table name, as the condition writes its
@@ -115,9 +113,77 @@ impl<C: brocanth_policy::Column> Keyset<C> {
     }
 }
 
-fn value(key: &Key) -> Value {
-    match key {
-        Key::Int(n) => Value::Int(*n),
-        Key::Text(text) => Value::Text(text.clone()),
+/// The cursor half: it needs to know what each column holds, so a cursor
+/// value of the wrong kind stops here and never reaches the database.
+impl<C: Sortable> Keyset<C> {
+    /// The rows after `cursor`, as a predicate. [`Pred::Always`] with no
+    /// cursor: the first page.
+    ///
+    /// `AND` it with the policy's rule before you compile: the cursor narrows
+    /// the window, and the rule still decides what is in it.
+    ///
+    /// # Errors
+    ///
+    /// [`CursorError`] when the cursor holds the wrong number of keys, or a
+    /// key that is not its column's kind: text for an integer column, an
+    /// integer for a text column. Both are "not a cursor", a 400. Also when
+    /// the order sorts on a column a cursor cannot carry (a float, a
+    /// boolean), on the first page too, so the mistake shows at once.
+    pub fn after(&self, cursor: Option<&Cursor>) -> Result<Pred<C>, CursorError> {
+        let columns = self.columns();
+        for column in &columns {
+            if column.sort_kind().is_none() {
+                let token = cursor.map(Cursor::token).unwrap_or_default();
+                return Err(CursorError::unsortable(token, column.name()));
+            }
+        }
+        let Some(cursor) = cursor else {
+            return Ok(Pred::Always);
+        };
+        let cursor = cursor.clone().expect(self.width())?;
+        let values = columns
+            .iter()
+            .zip(cursor.keys())
+            .map(|(column, key)| value(*column, key))
+            .collect::<Option<Vec<Value>>>()
+            .ok_or_else(|| CursorError::not_a_cursor(cursor.token()))?;
+        let beyond = |column: C, value: Value| match self.direction {
+            Direction::Ascending => Pred::gt(column, value),
+            Direction::Descending => Pred::lt(column, value),
+        };
+        Ok(match values.as_slice() {
+            [only] => beyond(self.key, only.clone()),
+            [first, second] => Pred::any([
+                beyond(self.column, first.clone()),
+                Pred::all([
+                    Pred::eq(self.column, first.clone()),
+                    beyond(self.key, second.clone()),
+                ]),
+            ]),
+            _ => unreachable!("`expect` checked the width"),
+        })
+    }
+
+    /// The rows before `cursor`, as a predicate: the previous page.
+    ///
+    /// Read them in [`Keyset::reversed`]'s order, so the rows nearest the
+    /// cursor come first, with `LIMIT` [`Keyset::fetch`], and build the page
+    /// with [`KeysetPage::before`](crate::KeysetPage::before), which puts
+    /// them back in this order.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Keyset::after`].
+    pub fn before(&self, cursor: &Cursor) -> Result<Pred<C>, CursorError> {
+        self.reversed().after(Some(cursor))
+    }
+}
+
+/// The bind for `key` in `column`, or `None` when the kinds differ.
+fn value<C: Sortable>(column: C, key: &Key) -> Option<Value> {
+    match (column.sort_kind()?, key) {
+        (SortKind::Int, Key::Int(n)) => Some(Value::Int(*n)),
+        (SortKind::Text, Key::Text(text)) => Some(Value::Text(text.clone())),
+        _ => None,
     }
 }

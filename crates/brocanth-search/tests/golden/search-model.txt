@@ -1248,16 +1248,16 @@ impl Ctx {
 /// none.
 #[allow(dead_code)]
 impl Ctx {
-    /// `page`, `per_page` and `after` from the query string. A value that is
-    /// not a number, or a cursor that does not parse, is a 400 with a `help:`
-    /// line, not page one.
+    /// `page`, `per_page`, `after` and `before` from the query string. A
+    /// value that is not a number, or a cursor that does not parse, is a 400
+    /// with a `help:` line, not page one.
     pub fn page_params(&self) -> Result<brocanth_pagination::Params, Error> {
         brocanth_pagination::Params::parse(&self.query).map_err(|e| Error::new(400, e.to_string()))
     }
 
     /// The links of the list at this path. Each keeps every key of the query
-    /// string but `page` and `after`, so a filter set on page one is still
-    /// set on page three.
+    /// string but `page`, `after` and `before`, so a filter set on page one
+    /// is still set on page three.
     pub fn links(&self) -> brocanth_pagination::Links {
         brocanth_pagination::Links::new(&self.path, &self.query)
     }

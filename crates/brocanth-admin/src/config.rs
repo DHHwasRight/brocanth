@@ -22,6 +22,14 @@ use crate::view::{DeleteCtx, DetailCtx, FormCtx, ListCtx, View, Views};
 /// How many rows a list screen shows when nothing says otherwise.
 pub const DEFAULT_PER_PAGE: usize = 25;
 
+/// The most rows a list screen shows, whatever `per_page=` in the link asks
+/// for, when nothing says otherwise.
+///
+/// A link is text anybody can write, and `per_page=10000000` would read a
+/// whole table into one page. The ask is clamped, not refused, as every
+/// paginated API does (`brocanth_pagination::Limits`).
+pub const DEFAULT_MAX_PER_PAGE: usize = 100;
+
 /// How many records a foreign-key picker offers when nothing says otherwise.
 pub const DEFAULT_CHOICE_LIMIT: usize = 200;
 
@@ -43,6 +51,7 @@ pub struct ModelAdmin {
     readonly_columns: Vec<String>,
     excluded_columns: Vec<String>,
     per_page: usize,
+    max_per_page: usize,
     choice_limit: usize,
     label: Option<LabelFn>,
     widgets: BTreeMap<String, Widget>,
@@ -94,6 +103,7 @@ impl ModelAdmin {
             readonly_columns: Vec::new(),
             excluded_columns: Vec::new(),
             per_page: DEFAULT_PER_PAGE,
+            max_per_page: DEFAULT_MAX_PER_PAGE,
             choice_limit: DEFAULT_CHOICE_LIMIT,
             label: None,
             widgets: BTreeMap::new(),
@@ -194,6 +204,14 @@ impl ModelAdmin {
     /// Rows per page.
     pub fn per_page(mut self, per_page: usize) -> Self {
         self.per_page = per_page.max(1);
+        self
+    }
+
+    /// The most rows per page that `per_page=` in a link can ask for.
+    /// [`DEFAULT_MAX_PER_PAGE`] when not set. A ceiling below
+    /// [`ModelAdmin::per_page`] is raised to it.
+    pub fn max_per_page(mut self, max: usize) -> Self {
+        self.max_per_page = max.max(1);
         self
     }
 
@@ -377,6 +395,11 @@ impl ModelAdmin {
     /// Rows per page.
     pub fn page_size(&self) -> usize {
         self.per_page
+    }
+
+    /// The page size, and the ceiling on what a link may ask for.
+    pub fn page_limits(&self) -> brocanth_pagination::Limits {
+        brocanth_pagination::Limits::new(self.per_page as u64, self.max_per_page as u64)
     }
 
     /// How many choices a picker pointing here offers.

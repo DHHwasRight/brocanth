@@ -215,6 +215,52 @@ fn routing_reaches_every_screen() {
 }
 
 #[test]
+fn per_page_in_a_link_stops_at_the_ceiling() {
+    // Two posts, a ceiling of one: `per_page=1000000` still shows one row
+    // a page, so a link cannot read a whole table into one screen.
+    let admin = blog(AdminConfig::new().model("post", |m| m.per_page(1).max_per_page(1)));
+    let response = block_on(admin.dispatch(
+        Principal::anonymous(),
+        "GET",
+        "/admin/post",
+        "per_page=1000000",
+        &Submission::new(),
+    ))
+    .unwrap();
+    let page = html(response);
+    assert!(page.contains("page 1 of 2"), "{page}");
+    assert!(!page.contains("Compilers"), "page one holds one row");
+
+    // Under the ceiling, the ask stands.
+    let admin = blog(AdminConfig::new().model("post", |m| m.per_page(1).max_per_page(5)));
+    let response = block_on(admin.dispatch(
+        Principal::anonymous(),
+        "GET",
+        "/admin/post",
+        "per_page=2",
+        &Submission::new(),
+    ))
+    .unwrap();
+    assert!(html(response).contains("page 1 of 1"));
+}
+
+#[test]
+fn the_default_ceiling_is_a_hundred_rows() {
+    let limits = brocanth_admin::ModelAdmin::new("post").page_limits();
+    assert_eq!(limits.per_page(Some(1_000_000)), 100);
+    assert_eq!(limits.per_page(None), 25);
+    let raised = brocanth_admin::ModelAdmin::new("post")
+        .per_page(500)
+        .max_per_page(10)
+        .page_limits();
+    assert_eq!(
+        raised.per_page(None),
+        500,
+        "a ceiling below the default is raised to it"
+    );
+}
+
+#[test]
 fn dispatch_carries_the_query_string_through() {
     let admin = blog(AdminConfig::new().model("post", |m| m.per_page(1)));
     let response = block_on(admin.dispatch(

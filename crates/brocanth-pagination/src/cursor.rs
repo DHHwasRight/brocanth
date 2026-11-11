@@ -13,11 +13,15 @@
 //! window: the policy's condition stays in the `WHERE` beside the cursor's,
 //! so a forged cursor never reaches a row the subject may not list.
 //!
-//! # Next, and no previous
+//! # Next and previous
 //!
-//! A page links to the next one and back to the first. A previous link needs
-//! the query run backwards and the rows reversed, and the people who read a
-//! feed backwards are few. pagy's keyset does the same.
+//! A page links to the next one (`after=` the key of its last row), to the
+//! previous one (`before=` the key of its first row), and back to the
+//! first. The previous page is the same query run the other way: the
+//! comparison and the `ORDER BY` reversed, the nearest rows read, then put
+//! back in the list's order. So `before` costs one index seek, like
+//! `after`, and a page reached backwards holds the same rows as the page
+//! reached forwards.
 
 use std::fmt;
 
@@ -59,23 +63,74 @@ pub struct Cursor(Vec<Key>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorError {
     token: String,
-    expected: Option<usize>,
+    reason: Reason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reason {
+    /// Not a token, or a key of the wrong kind for its column.
+    NotACursor,
+    /// A token with another number of keys.
+    Width(usize),
+    /// The order sorts on a column that a cursor cannot carry. The list's
+    /// fault, not the client's. Only `Keyset` (feature `policy`) finds it.
+    #[cfg(feature = "policy")]
+    Unsortable(&'static str),
+}
+
+impl CursorError {
+    /// `token` is not a cursor: it does not parse, or a key does not have its
+    /// column's kind.
+    pub(crate) fn not_a_cursor(token: String) -> Self {
+        CursorError {
+            token,
+            reason: Reason::NotACursor,
+        }
+    }
+
+    /// The HTTP status to answer with: 400 for a cursor the client sent
+    /// wrong, 500 for an order that no cursor can carry (the list's bug).
+    ///
+    /// A handler's blanket `From` makes every error a 500, so map this one
+    /// by hand: `.map_err(|e| Error::new(e.status(), e.to_string()))?`.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        match self.reason {
+            Reason::NotACursor | Reason::Width(_) => 400,
+            #[cfg(feature = "policy")]
+            Reason::Unsortable(_) => 500,
+        }
+    }
+
+    #[cfg(feature = "policy")]
+    pub(crate) fn unsortable(token: String, column: &'static str) -> Self {
+        CursorError {
+            token,
+            reason: Reason::Unsortable(column),
+        }
+    }
 }
 
 impl fmt::Display for CursorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.expected {
-            Some(n) => write!(
+        match self.reason {
+            Reason::Width(n) => write!(
                 f,
                 "the cursor `{}` does not hold {n} key(s)\n\
                  help: follow the `next` link of the previous page; do not write a cursor by hand",
                 self.token
             ),
-            None => write!(
+            Reason::NotACursor => write!(
                 f,
                 "`{}` is not a cursor\n\
                  help: follow the `next` link of the previous page, or drop `after` to start at the first page",
                 self.token
+            ),
+            #[cfg(feature = "policy")]
+            Reason::Unsortable(column) => write!(
+                f,
+                "the list sorts on `{column}`, and a cursor cannot carry its values\n\
+                 help: sort a keyset list on an integer or text column, or use offset pages"
             ),
         }
     }
@@ -124,10 +179,7 @@ impl Cursor {
     ///
     /// [`CursorError`] when the token is not one [`Cursor::token`] writes.
     pub fn parse(token: &str) -> Result<Cursor, CursorError> {
-        let bad = || CursorError {
-            token: token.to_string(),
-            expected: None,
-        };
+        let bad = || CursorError::not_a_cursor(token.to_string());
         if token.is_empty() {
             return Err(bad());
         }
@@ -168,7 +220,7 @@ impl Cursor {
         } else {
             Err(CursorError {
                 token: self.token(),
-                expected: Some(n),
+                reason: Reason::Width(n),
             })
         }
     }
@@ -186,27 +238,66 @@ impl fmt::Display for Cursor {
     }
 }
 
-/// One keyset page: the rows, and the cursor of the next page.
+/// One keyset page: the rows, and the cursors of the pages on either side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeysetPage<R> {
-    /// The rows, at most the limit.
+    /// The rows, at most the limit, in the list's order.
     pub items: Vec<R>,
-    /// Where the next page starts. `None` on the last page.
+    /// Where the previous page ends: the key of the first row, for a
+    /// `before=` link. `None` on the first page.
+    pub previous: Option<Cursor>,
+    /// Where the next page starts: the key of the last row, for an `after=`
+    /// link. `None` on the last page.
     pub next: Option<Cursor>,
 }
 
 impl<R> KeysetPage<R> {
-    /// Builds a page from rows read with `LIMIT limit + 1`.
+    /// The first page, from rows read with no cursor and `LIMIT limit + 1`.
     ///
     /// The extra row is how a keyset page knows there is a next one without
     /// a count. It is dropped here, and the cursor is the key of the last row
     /// that stays.
-    pub fn from_rows(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+    pub fn from_rows(rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+        let mut page = Self::after(rows, limit, &key);
+        page.previous = None;
+        page
+    }
+
+    /// The page after a cursor, from rows read with
+    /// `Keyset::after` and `LIMIT limit + 1`.
+    ///
+    /// A page after a cursor has rows before it, so it has a previous link:
+    /// the key of its first row. An empty page has none; its first link goes
+    /// home.
+    pub fn after(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
         let limit = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
         let more = rows.len() > limit;
         rows.truncate(limit);
-        let next = if more { rows.last().map(key) } else { None };
-        KeysetPage { items: rows, next }
+        KeysetPage {
+            previous: rows.first().map(&key),
+            next: if more { rows.last().map(&key) } else { None },
+            items: rows,
+        }
+    }
+
+    /// The page before a cursor, from rows read with
+    /// `Keyset::before`, in the reversed order
+    /// (`Keyset::reversed`), and `LIMIT limit + 1`.
+    ///
+    /// The rows come nearest-first, so the extra row is the one furthest
+    /// back: it says there is a previous page. They are put back in the
+    /// list's order here. The page came from the one after it, so it always
+    /// has a next link, unless it is empty.
+    pub fn before(mut rows: Vec<R>, limit: u64, key: impl Fn(&R) -> Cursor) -> Self {
+        let limit = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        rows.reverse();
+        KeysetPage {
+            previous: if more { rows.first().map(&key) } else { None },
+            next: rows.last().map(&key),
+            items: rows,
+        }
     }
 }
 

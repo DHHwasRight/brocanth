@@ -13,8 +13,9 @@
 //! The code an application writes by hand today, and nothing else:
 //!
 //! * `entity Post in "posts" { … }` emits `struct Post`, `enum PostColumn`,
-//!   `impl Column for PostColumn`, `impl Entity for Post`, and
-//!   `impl typed::TypedColumn for PostColumn`.
+//!   `impl Column for PostColumn`, `impl Entity for Post`,
+//!   `impl typed::TypedColumn for PostColumn`, and
+//!   `impl Sortable for PostColumn` (the kind a keyset cursor checks).
 //! * `policy PostPolicy(who: &Visitor) for Post { … }` emits
 //!   `struct PostPolicy` and `impl Policy for PostPolicy`. Each rule is the
 //!   method of the same name. A guard `cond => pred,` is
@@ -966,6 +967,11 @@ fn expand_entity(entity: &EntityDecl) -> TokenStream2 {
         let ty = &c.ty;
         quote_spanned!(ty.span()=> Self::#variant => <#ty as ::brocanth_policy::typed::ColumnType>::key(n))
     });
+    let sorts = columns.iter().map(|c| {
+        let variant = c.variant();
+        let ty = &c.ty;
+        quote_spanned!(ty.span()=> Self::#variant => <<#ty as ::brocanth_policy::typed::ColumnType>::Kind as ::brocanth_policy::typed::Kind>::SORT)
+    });
     let key = columns
         .iter()
         .find(|c| c.key)
@@ -1027,6 +1033,14 @@ fn expand_entity(entity: &EntityDecl) -> TokenStream2 {
             fn key(&self, n: i64) -> ::brocanth_policy::Value {
                 match self {
                     #(#keys,)*
+                }
+            }
+        }
+
+        impl ::brocanth_policy::Sortable for #column {
+            fn sort_kind(&self) -> ::std::option::Option<::brocanth_policy::SortKind> {
+                match self {
+                    #(#sorts,)*
                 }
             }
         }

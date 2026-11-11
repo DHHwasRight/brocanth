@@ -25,6 +25,10 @@ brocanth-scaffold = { workspace = true, optional = true }
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 brocanth-pagination = { path = ".", features = ["policy"] }
+# `tests/postgres.rs`: a keyset `WHERE` run on a real PostgreSQL, because a
+# cursor of the wrong type fails there and nowhere else.
+brocanth-db.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = ["runtime"]

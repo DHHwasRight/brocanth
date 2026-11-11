@@ -1247,9 +1247,11 @@ name = "brocanth-pagination"
 version = "0.1.0"
 dependencies = [
  "brocanth-cli",
+ "brocanth-db",
  "brocanth-pagination",
  "brocanth-policy",
  "brocanth-scaffold",
+ "tokio",
 ]
 
 [[package]]
