@@ -104,7 +104,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | Candidate | What it does | Django / Rails | Covered | Category | Effort | Value | Reason |
 |---|---|---|---|---|---|---|---|
 | `jobs` | Postgres queue, retries, cron, panel | Celery, celery-beat, flower; Active Job, Solid Queue, Sidekiq, good_job, mission_control-jobs | yes (`jobs`) | Enhancer | – | 5 | Goes further than Solid Queue: cron and dead letter built in |
-| `cache` | Postgres cache, tags, route and fragment cache | Django cache, `cache_page`; Solid Cache, fragment caching | yes (`cache`) | Enhancer | – | 5 | Done (G8) |
+| `cache` | Postgres cache, tags, route and fragment cache | Django cache, `cache_page`; Solid Cache, fragment caching | yes (`cache`, `cache-memory`, `cache-redis`) | Enhancer | – | 5 | Done (G8). Backends built: memory for tests and development, Redis/Valkey; one conformance suite |
 | `realtime` | Broker plus SSE and WebSocket | Channels; Action Cable, Solid Cable, Turbo Streams | yes (`realtime-*`) | Enhancer | – | 4 | Done (G1) |
 | `admin` | Backoffice over the models | contrib.admin; rails_admin, Avo, ActiveAdmin, Administrate | yes (`admin`, `admin-model`) | Routes | – | 5 | Missing: actions, inlines, history (see `audit`, `admin-actions` below) |
 | `middleware` CORS | CORS headers | django-cors-headers; rack-cors | yes (`middleware`) | Middleware | – | 3 | Done |

@@ -10,6 +10,8 @@ members = [
     "crates/brocanth-bundle",
     "crates/brocanth-auth",
     "crates/brocanth-cache",
+    "crates/brocanth-cache-conformance",
+    "crates/brocanth-cache-redis",
     "crates/brocanth-cli",
     "crates/brocanth-config",
     "crates/brocanth-db",

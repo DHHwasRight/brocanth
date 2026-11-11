@@ -159,6 +159,8 @@
 //! * [`route`] — the route cache, and every reason it refuses to store.
 //! * [`CacheExt::fragment`] — a rendered fragment, under the same lease as
 //!   `fetch`.
+//! * [`memory`] — the in-memory backend, for tests and development, and why
+//!   it exists now.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -180,6 +182,8 @@ pub mod error;
 pub mod fetch;
 #[cfg(feature = "runtime")]
 pub mod key;
+#[cfg(feature = "runtime")]
+pub mod memory;
 #[cfg(feature = "runtime")]
 pub mod plugin;
 #[cfg(feature = "runtime")]
@@ -226,6 +230,8 @@ pub use error::{CacheError, Result};
 pub use fetch::{CacheExt, FetchError, FetchPolicy};
 #[cfg(feature = "runtime")]
 pub use key::{Key, Namespace, MAX_KEY_BYTES, MAX_NAMESPACE_BYTES};
+#[cfg(feature = "runtime")]
+pub use memory::MemoryCache;
 #[cfg(feature = "runtime")]
 pub use plugin::{CacheConfig, CacheHandle, CachePlugin};
 #[cfg(feature = "runtime")]

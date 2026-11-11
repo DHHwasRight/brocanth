@@ -47,7 +47,7 @@ and only after every module named in its `after` list.
 
 ### The manifest
 
-`Manifest` (`lib.rs:81`) has 19 fields. Build it with `Manifest::new(key,
+`Manifest` (`lib.rs:81`) has 23 fields. Build it with `Manifest::new(key,
 gist)` and the builder methods. Do not set the fields directly: some
 builders set two fields at once on purpose.
 
@@ -72,6 +72,7 @@ builders set two fields at once on purpose.
 | `adapts_to` | `adapts_to(k, what_changes)` | It writes different code when `k` is chosen: the optional dependency. Every `project.has(k)` in `contribute` must be declared here, in `needs`, or be the parent. A test checks both directions. |
 | `recommends` | `recommends(k, why)` | A deployed project with this module usually wants `k`. Advice only: nothing refuses. `create` and `add` warn when `k` is absent, `brocanth check` warns (`check/recommended`), and `--questions` lists the edge. `why` names the cost in production. Not for a module already in `needs`. |
 | `version` | `version(env!("CARGO_PKG_VERSION"))` | The version of the code that writes the module. `brocanth.toml` records it, and `brocanth check` warns (`check/module-version`) when the installed CLI has another. `None` is the CLI's version, which is right for a crate in the brocanth workspace: they all take the workspace version. A module from another repository sets it. |
+| `development_only` | `development_only(why)` | The module is for tests and development: a memory backend, for example. `brocanth check --deploy` reports it as an error (`deploy/development-only`) and prints `why`. A deploy that is not production passes `--env development` or `--allow deploy/development-only`. |
 
 `Dep` (`lib.rs:313`) names a crate and leaves the source to the CLI for
 brocanth's own crates:
@@ -81,6 +82,12 @@ Dep::brocanth("brocanth-cache")                       // the CLI picks git or --
 Dep::git("jt", "https://github.com/DHHwasRight/jt", "main")
 Dep::version("serde", "1").feature("derive").no_default_features().note("why it is here")
 ```
+
+`.feature_with(k, f)` turns `f` on only when module `k` is chosen.
+`.feature_unless(k, f)` turns `f` on unless `k` is chosen: a child that
+replaces its parent's default backend turns off the default's driver.
+`brocanth-cache` takes `postgres` unless `cache-memory` or `cache-redis`
+is chosen. List a feature once per key that replaces it.
 
 `.for_build()` puts the line in `[build-dependencies]`, for a `build.rs`
 the module writes with `s.file`. One crate may appear twice, once per

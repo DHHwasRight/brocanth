@@ -15,7 +15,10 @@
 //!   those files. The values in the module files are the project's own
 //!   check (`docs/module-config.md`, section 3.3): a bad flag name stops
 //!   every command of the binary, `check` included, because each one
-//!   builds the flags.
+//!   builds the flags. `deploy/development-only`, with `--deploy`: a
+//!   module for tests and development (`cache-memory`) is in a project
+//!   about to run in production. An error: the project runs,
+//!   and loses what that module holds at every restart.
 //! * **The configuration and source checks are the project's.** A project
 //!   with `config` and `commands` has a `check` command that loads the
 //!   configuration the way the application does (`brocanth_config::check`
@@ -58,6 +61,12 @@ pub struct CheckArgs {
 }
 
 impl CheckArgs {
+    /// Whether this run checks a production deploy: `--deploy` with no
+    /// `--env`, or with an environment other than development and test.
+    fn for_production(&self) -> bool {
+        self.deploy && !matches!(self.env.as_deref(), Some("development" | "test"))
+    }
+
     /// The same arguments, for the project's own `check`.
     fn forwarded(&self) -> Vec<OsString> {
         let mut out: Vec<OsString> = vec!["check".into()];
@@ -84,20 +93,30 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
 
     let mut findings = modules(&project);
     findings.extend(module_files(&project));
+    if args.for_production() {
+        findings.extend(development_only(&project));
+    }
     findings.retain(|d| !d.code.as_ref().is_some_and(|c| args.allow.contains(c)));
     for d in &findings {
         ui.diagnostic(d);
     }
-    // Every module finding is a warning: the project builds and runs
-    // without a recommended module, and leaving it out is the person's call.
-    let mut failed = args.strict && !findings.is_empty();
+    // A recommendation is a warning: the project builds and runs without
+    // the module, and leaving it out is the person's call. A development
+    // module in production is an error.
+    let errors = findings
+        .iter()
+        .filter(|d| d.severity == crate::ui::Severity::Error)
+        .count();
+    let mut failed = errors > 0 || (args.strict && !findings.is_empty());
     if findings.is_empty() {
         ui.done("module checks pass");
     } else {
+        let warnings = findings.len() - errors;
+        let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
         ui.note(format!(
-            "module checks: {} warning{}",
-            findings.len(),
-            if findings.len() == 1 { "" } else { "s" }
+            "module checks: {}, {}",
+            count(errors, "error"),
+            count(warnings, "warning")
         ));
     }
 
@@ -214,6 +233,30 @@ pub fn module_files(project: &Project) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// Every chosen module that declares itself for tests and development
+/// only. Asked only for a production deploy.
+pub fn development_only(project: &Project) -> Vec<Diagnostic> {
+    project
+        .modules
+        .iter()
+        .filter_map(|key| {
+            let why = crate::modules::find(key)?.manifest().development_only?;
+            Some(
+                Diagnostic::error(
+                    "deploy/development-only",
+                    format!("`{key}` is for tests and development, not production"),
+                )
+                .note(why)
+                .help(format!(
+                    "run `brocanth remove {key}` before you deploy, or pass \
+                     `--allow deploy/development-only` for a deploy that is not production"
+                ))
+                .at("brocanth.toml"),
+            )
+        })
+        .collect()
+}
+
 /// The note for a project that has no `check` command of its own.
 fn skipped(project: &Project) -> Diagnostic {
     let missing: Vec<&str> = ["config", "commands"]
@@ -296,6 +339,33 @@ mod tests {
                 "--strict"
             ]
         );
+    }
+
+    #[test]
+    fn a_development_module_is_an_error_for_a_production_deploy() {
+        let p = project(&["config", "cache", "cache-memory"]);
+        let found = development_only(&p);
+        let ids: Vec<&str> = found.iter().filter_map(|d| d.code.as_deref()).collect();
+        assert_eq!(ids, ["deploy/development-only"]);
+        assert_eq!(found[0].severity, crate::ui::Severity::Error);
+        let said = found[0].render();
+        assert!(said.contains("`cache-memory`"), "{said}");
+        assert!(
+            said.contains("run `brocanth remove cache-memory`"),
+            "{said}"
+        );
+        assert!(development_only(&project(&["config", "cache"])).is_empty());
+
+        let args = |deploy: bool, env: Option<&str>| CheckArgs {
+            deploy,
+            env: env.map(str::to_owned),
+            allow: Vec::new(),
+            strict: false,
+        };
+        assert!(args(true, None).for_production());
+        assert!(args(true, Some("staging")).for_production());
+        assert!(!args(true, Some("development")).for_production());
+        assert!(!args(false, None).for_production());
     }
 
     #[test]

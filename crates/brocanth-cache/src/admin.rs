@@ -47,6 +47,7 @@ use brocanth_admin::view::render;
 use crate::cache::Cache;
 use crate::error::CacheError;
 use crate::key::Namespace;
+use crate::plugin::CacheHandle;
 
 /// The panel's stylesheet, built from `style/panel.css`. Inlined by the
 /// screen. See `style/README.md`.
@@ -67,18 +68,41 @@ pub const DEFAULT_PURGE_LIMIT: u64 = 1_000;
 /// AdminConfig::new().panel(CachePanel::new(cache.clone()).namespace(PAGES.clone()))
 /// ```
 pub struct CachePanel {
-    cache: Arc<dyn Cache>,
+    source: Source,
     namespaces: Vec<Namespace>,
     purge_limit: u64,
     key: String,
     label: String,
 }
 
+/// Where the panel finds its cache.
+enum Source {
+    /// Handed over at build time.
+    Given(Arc<dyn Cache>),
+    /// [`CacheHandle::installed`], read when the panel renders.
+    Installed,
+}
+
 impl CachePanel {
     /// The panel, at `cache`, labelled "Cache", with nothing clearable yet.
     pub fn new(cache: Arc<dyn Cache>) -> Self {
+        Self::from_source(Source::Given(cache))
+    }
+
+    /// The panel over the cache the process installed
+    /// ([`CacheHandle::install`]), read each time it renders.
+    ///
+    /// For an admin built before the cache opens: a generated project
+    /// builds its admin with the route table, and its cache plugin opens
+    /// the cache at `before_start`, after that. Before any cache is
+    /// installed, the tab says so.
+    pub fn installed() -> Self {
+        Self::from_source(Source::Installed)
+    }
+
+    fn from_source(source: Source) -> Self {
         Self {
-            cache,
+            source,
             namespaces: Vec::new(),
             purge_limit: DEFAULT_PURGE_LIMIT,
             key: "cache".to_string(),
@@ -130,6 +154,21 @@ impl CachePanel {
         self
     }
 
+    /// The cache, or the reason there is none yet.
+    fn cache(&self) -> Result<Arc<dyn Cache>, AdminError> {
+        match &self.source {
+            Source::Given(cache) => Ok(Arc::clone(cache)),
+            Source::Installed => CacheHandle::installed()
+                .map(|handle| Arc::clone(handle.inner()))
+                .ok_or_else(|| {
+                    AdminError::Render(rsx::Error::custom(
+                        "no cache is installed in this process\n\
+                         help: register the cache plugin; it installs its cache at startup",
+                    ))
+                }),
+        }
+    }
+
     // ------------------------------------------------------------- screen
 
     fn index(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
@@ -146,7 +185,7 @@ impl CachePanel {
                 .collect(),
             purge_href: r.url("purge"),
             purge_limit: self.purge_limit,
-            max_value_bytes: bytes(self.cache.max_value_bytes()),
+            max_value_bytes: bytes(self.cache()?.max_value_bytes()),
         };
         let html = render(
             &|ctx: &IndexCtx, w: &mut rsx::Writer<'_>| {
@@ -192,7 +231,7 @@ impl CachePanel {
         match r.path.split_once('/') {
             None if r.path == "purge" => {
                 let removed = self
-                    .cache
+                    .cache()?
                     .purge_expired(self.purge_limit)
                     .await
                     .map_err(failed)?;
@@ -209,7 +248,7 @@ impl CachePanel {
                 let Some(namespace) = self.namespaces.iter().find(|n| n.as_str() == name) else {
                     return Ok(None);
                 };
-                let removed = self.cache.clear(namespace).await.map_err(failed)?;
+                let removed = self.cache()?.clear(namespace).await.map_err(failed)?;
                 Ok(Some(PanelPage::redirect(format!(
                     "{}?cleared={name}&rows={removed}",
                     r.url("")

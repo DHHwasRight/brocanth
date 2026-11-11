@@ -1,0 +1,60 @@
+[package]
+name = "brocanth-cache-redis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A brocanth-cache backend on Redis or Valkey, for a cache that outgrew a Postgres table."
+readme = "README.md"
+
+# A crate of its own, as `brocanth-cache/Cargo.toml` asks of every backend
+# other than Postgres: an application that caches in Postgres links no Redis
+# client, and the CLI, which takes only `scaffold`, links neither.
+[dependencies]
+brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, optional = true }
+
+# The client. `redis` (redis-rs) and not `fred`:
+# - It is the client the Redis project itself now maintains, with the most
+#   users of any Rust client, so a bug in it is found by someone else first.
+# - Valkey speaks the same protocol, and redis-rs tests against it.
+# - `ConnectionManager` reconnects by itself and is `Clone`, so one value
+#   serves every request, and `new_lazy_with_config` opens nothing until the
+#   first command, which is what a synchronous startup stage needs.
+# - `Script` runs Lua by hash and loads it again after a server restart.
+# `fred` has more features (cluster routing, pools, a mock) that this crate
+# does not use, and one maintainer.
+redis = { version = "1.8", default-features = false, features = [
+    "tokio-comp",
+    "connection-manager",
+    "script",
+], optional = true }
+# `Cache` is an `async_trait`, so an implementation uses the same macro.
+async-trait = { version = "0.1", optional = true }
+
+# `src/scaffold.rs`: the `cache-redis` module. Off by default; see
+# `brocanth-cache/Cargo.toml` for why the generator is the CLI's business.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
+brocanth-cache-conformance = { path = "../brocanth-cache-conformance" }
+brocanth-cache = { path = "../brocanth-cache", version = "0.1.0", default-features = false, features = ["runtime"] }
+# `tests/scaffold.rs`: the `cache-redis` module through the CLI's generator.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime"]
+# The backend. The CLI turns it off and takes `scaffold` alone, so
+# `brocanth create` links no Redis client.
+runtime = [
+    "dep:brocanth-cache",
+    "brocanth-cache/runtime",
+    "dep:redis",
+    "dep:async-trait",
+]
+# The module writes its plugin through `brocanth_cache::scaffold`, so the
+# parent's generator comes too, and still no runtime.
+scaffold = ["dep:brocanth-scaffold", "dep:brocanth-cache", "brocanth-cache/scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

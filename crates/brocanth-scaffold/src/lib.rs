@@ -258,6 +258,13 @@ pub struct Manifest {
     /// Compile-time values a project may change in its module file, such
     /// as the admin's mount point. Set with [`Manifest::option`].
     pub options: Vec<Opt>,
+    /// Why this module must not run in production, when it must not. Set
+    /// with [`Manifest::development_only`].
+    ///
+    /// `brocanth check --deploy` reports a chosen module with a reason as
+    /// an error: a memory backend in a deployed project loses its data at
+    /// every restart and is not shared between processes.
+    pub development_only: Option<&'static str>,
 }
 
 impl Manifest {
@@ -286,6 +293,7 @@ impl Manifest {
             hooks: Vec::new(),
             integrations: Vec::new(),
             options: Vec::new(),
+            development_only: None,
         }
     }
 
@@ -322,6 +330,14 @@ impl Manifest {
     /// The hooks a module file may turn off, in declaration order.
     pub fn hook_toggles(&self) -> impl Iterator<Item = &(&'static str, &'static str, Hook)> {
         self.hooks.iter().filter(|(_, _, hook)| !hook.required)
+    }
+
+    /// Mark this module as one for tests and development, and say what
+    /// goes wrong in production. `brocanth check --deploy` reports it as
+    /// an error that prints `why`.
+    pub fn development_only(mut self, why: &'static str) -> Self {
+        self.development_only = Some(why);
+        self
     }
 
     /// The version of the code that writes this module. Pass
@@ -750,6 +766,10 @@ pub struct Dep {
     /// Features turned on only when another module is chosen, as
     /// `(module key, feature)`. Set with [`Dep::feature_with`].
     pub with: Vec<(&'static str, &'static str)>,
+    /// Features turned on unless another module is chosen, as
+    /// `(module key, feature)`. A feature listed with several keys is on
+    /// only when none of them is chosen. Set with [`Dep::feature_unless`].
+    pub unless: Vec<(&'static str, &'static str)>,
     /// Whether `default-features = false` is written.
     pub defaults: bool,
     /// A trailing comment on the dependency line. Short, and about why this
@@ -799,6 +819,7 @@ impl Dep {
             source,
             features: Vec::new(),
             with: Vec::new(),
+            unless: Vec::new(),
             defaults: true,
             note: None,
             build: false,
@@ -819,6 +840,17 @@ impl Dep {
     /// the feature would put a parser in a project that asked for none.
     pub fn feature_with(mut self, key: &'static str, feature: &'static str) -> Self {
         self.with.push((key, feature));
+        self
+    }
+
+    /// Turn a feature on unless the project also has the module `key`.
+    ///
+    /// The other side of [`Dep::feature_with`]: a child module that
+    /// replaces its parent's default backend turns the default's driver
+    /// off. `brocanth-cache` takes `postgres` unless `cache-memory` or
+    /// `cache-redis` is chosen, so a project on Redis links no SQL driver.
+    pub fn feature_unless(mut self, key: &'static str, feature: &'static str) -> Self {
+        self.unless.push((key, feature));
         self
     }
 

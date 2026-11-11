@@ -1677,6 +1677,11 @@ fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
                             held.with.push(with);
                         }
                     }
+                    for unless in dep.unless {
+                        if !held.unless.contains(&unless) {
+                            held.unless.push(unless);
+                        }
+                    }
                     held.defaults = held.defaults || dep.defaults;
                     held.note = held.note.or(dep.note);
                 }
@@ -1735,6 +1740,17 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
         // A feature that exists for another module, on when that module is.
         for (key, feature) in dep.with.clone() {
             if a.has(key) && !dep.features.contains(&feature) {
+                dep = dep.feature(feature);
+            }
+        }
+        // A feature for the default a child module replaces: on unless one
+        // of the keys listed with it is chosen.
+        for (_, feature) in dep.unless.clone() {
+            let replaced = dep
+                .unless
+                .iter()
+                .any(|(key, f)| *f == feature && a.has(key));
+            if !replaced && !dep.features.contains(&feature) {
                 dep = dep.feature(feature);
             }
         }
@@ -5366,12 +5382,13 @@ mod tests {
     /// Every module that can stand together. `logging` is the one module
     /// `observability-logs` replaces, and `static` refuses every module that
     /// needs a server, so neither is in it, nor `beacon`, which counts what
-    /// `analytics` counts. `available()` is not a project:
+    /// `analytics` counts, nor `cache-memory`, which `cache-redis` excludes:
+    /// a project has one cache backend. `available()` is not a project:
     /// the generator refuses it.
     fn everything() -> Vec<&'static str> {
         available()
             .into_iter()
-            .filter(|key| !["logging", "static", "beacon"].contains(key))
+            .filter(|key| !["logging", "static", "beacon", "cache-memory"].contains(key))
             .collect()
     }
 
@@ -6513,7 +6530,7 @@ mod tests {
         }
 
         // And the opposite end: with everything that can stand together
-        // chosen, the brief names only the two modules that cannot, and
+        // chosen, the brief names only the modules that cannot, and
         // invents no other gap.
         let everything = written(&everything());
         let full = &everything
@@ -6522,7 +6539,7 @@ mod tests {
             .expect("an agent brief")
             .1;
         assert!(
-            full.contains("**Absent:** `logging`, `beacon`, `static` —"),
+            full.contains("**Absent:** `logging`, `beacon`, `cache-memory`, `static` —"),
             "{full}"
         );
     }

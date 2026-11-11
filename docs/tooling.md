@@ -205,6 +205,7 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 |---|---|---|
 | `check/recommended` | warning | a module in the project recommends one it lacks (the CLI's half) |
 | `check/module-version` | warning | the installed CLI writes a module at another version than `brocanth.toml` records, or no version is recorded (the CLI's half) |
+| `deploy/development-only` | error | `--deploy` for production, and the project has a module for tests and development only, such as `cache-memory` (the CLI's half) |
 | `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` (every environment) |
 | `deploy/env` | warning | `--deploy` reads `development` or `test` |
 | `deploy/no-config` | warning | no file and no variable configures the environment |

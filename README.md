@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 43 crates under `crates/` and two examples under
+A Cargo workspace of 44 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -174,7 +174,9 @@ puts the crate in a new project.
 | [`brocanth-migrate`](crates/brocanth-migrate/README.md) | Stable field ids, a schema snapshot and a rename-aware migration diff | the `migrate` tool, with `model` |
 | [`brocanth-events`](crates/brocanth-events/README.md) | `Change` and `ChangeSink`: the seam between writes and subscribers | with `model` |
 | [`brocanth-resource`](crates/brocanth-resource/README.md) | Typed CRUD routes over one table, with the policy in the `WHERE` | `resource` |
-| [`brocanth-cache`](crates/brocanth-cache/README.md) | A cache on unlogged Postgres tables, with tags | `cache` |
+| [`brocanth-cache`](crates/brocanth-cache/README.md) | A cache on unlogged Postgres tables, with tags; `MemoryCache` for tests and development | `cache`, `cache-memory` |
+| [`brocanth-cache-redis`](crates/brocanth-cache-redis/README.md) | The cache on Redis or Valkey, behind the same `Cache` trait | `cache-redis` |
+| [`brocanth-cache-conformance`](crates/brocanth-cache-conformance/README.md) | The `Cache` contract as a test suite for any backend | |
 | [`brocanth-storage`](crates/brocanth-storage/README.md) | File storage: one trait, local disk, content-addressed names, image variants | `storage` |
 | [`brocanth-auth`](crates/brocanth-auth/README.md) | argon2id accounts, server-side sessions, OAuth 2.0 and OIDC with PKCE | `auth` |
 | [`brocanth-policy`](crates/brocanth-policy/README.md) | Typed predicates: SQL for a list, evaluation for one row | `policy` |

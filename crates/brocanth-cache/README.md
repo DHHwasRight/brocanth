@@ -173,9 +173,10 @@ The three `no_run` blocks need a Postgres server. They compile in every
 cargo test -p brocanth-cache
 ```
 
-The crate is Postgres only and has no in-memory backend, on purpose: a second
-implementation would test SQL that nobody deploys. Without a database, every
-Postgres test skips and prints a banner. Do not read a green run without the
+`MemoryCache` is for tests and development. It passes the same conformance
+suite as `PgCache` (`brocanth-cache-conformance`), so the trait's promises
+hold on it, but it tests no SQL. The SQL is tested against Postgres. Without
+a database, every Postgres test skips and prints a banner. Do not read a green run without the
 variable as a pass. To run them:
 
 ```sh
