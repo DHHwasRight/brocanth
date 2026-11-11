@@ -148,6 +148,38 @@ pub trait Column: Copy + Eq + Hash + fmt::Debug + 'static {
     }
 }
 
+/// The kind of value a sort column holds: what a keyset cursor carries.
+///
+/// Two kinds, because a cursor writes two: an integer (an id, a time in
+/// seconds) and text (a slug, an ISO 8601 time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SortKind {
+    /// An integer column.
+    Int,
+    /// A text column.
+    Text,
+}
+
+/// A column enum that says what each column holds, so a list can sort on it
+/// with a cursor.
+///
+/// # Why a cursor needs the type
+///
+/// A cursor comes from the query string, so a client can write any value in
+/// it. Text compared with an integer column is a database error on
+/// PostgreSQL, a 500. With this trait, `brocanth-pagination`'s `Keyset`
+/// checks each cursor value against its column before the query, and a value
+/// of the wrong kind is "not a cursor", a 400.
+///
+/// A separate trait and not a method of [`Column`], so only a list that
+/// pages with a cursor writes it. The `policy!` macro implements it from the
+/// declared column types.
+pub trait Sortable: Column {
+    /// What `self` holds. `None` for a column a cursor cannot carry: a float,
+    /// a boolean, a blob.
+    fn sort_kind(&self) -> Option<SortKind>;
+}
+
 /// A table, and the column enum a policy over it is written in.
 pub trait Entity: 'static {
     /// The column enum.

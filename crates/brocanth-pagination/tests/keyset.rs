@@ -5,7 +5,7 @@
 //! the two readings agree; this file proves the predicate is the right one.
 
 use brocanth_pagination::{Cursor, Direction, Key, Keyset, KeysetPage};
-use brocanth_policy::{Column, Dialect, Entity, Ident, MapRow, Pred};
+use brocanth_policy::{Column, Dialect, Entity, Ident, MapRow, Pred, SortKind, Sortable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PostColumn {
@@ -21,6 +21,12 @@ impl Column for PostColumn {
             Self::Id => "id",
             Self::Score => "score",
         }
+    }
+}
+
+impl Sortable for PostColumn {
+    fn sort_kind(&self) -> Option<SortKind> {
+        Some(SortKind::Int)
     }
 }
 
@@ -198,4 +204,58 @@ fn a_cursor_from_the_query_string_of_the_wrong_width_is_a_help_line() {
     assert!(error.to_string().contains("help:"));
     let params = Params::parse("after=i3.i4.i5").unwrap();
     assert!(keyset.after(params.after.as_ref()).is_err());
+}
+
+#[test]
+fn a_cursor_key_of_the_wrong_kind_is_not_a_cursor() {
+    // Text where the score is an integer, and an integer where the id is:
+    // each one would reach the database as `bigint > text` and fail there.
+    let keyset = Keyset::new(PostColumn::Score, PostColumn::Id, Direction::Ascending);
+    for token in ["t61.i1", "i1.t61", "t61.t62"] {
+        let cursor = Cursor::parse(token).unwrap();
+        let error = keyset.after(Some(&cursor)).unwrap_err();
+        assert!(
+            error.to_string().contains("is not a cursor"),
+            "{token}: {error}"
+        );
+        assert!(error.to_string().contains("help:"), "{token}");
+    }
+    assert!(keyset.after(Some(&Cursor::parse("i1.i1").unwrap())).is_ok());
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PriceColumn {
+    Id,
+    Price,
+}
+
+impl Column for PriceColumn {
+    const ALL: &'static [Self] = &[Self::Id, Self::Price];
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Price => "price",
+        }
+    }
+}
+
+impl Sortable for PriceColumn {
+    fn sort_kind(&self) -> Option<SortKind> {
+        match self {
+            Self::Id => Some(SortKind::Int),
+            Self::Price => None,
+        }
+    }
+}
+
+#[test]
+fn an_order_on_a_column_a_cursor_cannot_carry_fails_on_the_first_page() {
+    let keyset = Keyset::new(PriceColumn::Price, PriceColumn::Id, Direction::Ascending);
+    let error = keyset.after(None).unwrap_err();
+    assert!(error.to_string().contains("`price`"), "{error}");
+    assert!(error.to_string().contains("help:"), "{error}");
+    assert!(Keyset::by_key(PriceColumn::Id, Direction::Ascending)
+        .after(None)
+        .is_ok());
 }

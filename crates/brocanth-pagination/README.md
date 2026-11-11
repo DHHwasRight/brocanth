@@ -97,6 +97,12 @@ let order = keyset.order_by::<Post>()?; // "posts"."created_at" DESC, "posts"."i
 A cursor is not a secret and not a permission. A client can forge one; it
 only moves the window, because the rule stays in the `WHERE`.
 
+`Keyset::after` needs the column enum to implement
+`brocanth_policy::Sortable`, which says what each column holds
+(`SortKind::Int` or `SortKind::Text`). A cursor key of another kind, such
+as text for an integer sort, is "not a cursor", a 400. `policy!` writes
+`Sortable` from the column types; a hand-written enum writes one `match`.
+
 ## Decisions
 
 - **One crate, no dependency.** The admin and `brocanth-resource` had a
@@ -112,6 +118,11 @@ only moves the window, because the rule stays in the `WHERE`.
 - **Keyset pages link forward and to the first page only.** A previous
   link runs the query backwards and reverses the rows; few people read a
   feed backwards. pagy's keyset does the same.
+- **A cursor key is checked against its column before the query.** On
+  PostgreSQL, `bigint > text` is a database error, a 500 that a handler
+  cannot tell from an outage. A `Column` has no type, so the type is a
+  separate trait, `Sortable`, that only a keyset list needs. It lives in
+  `brocanth-policy` so that `policy!` can write it from the declared types.
 - **The keyset tie-breaker is the primary key**, and the sort column must
   not be null: `NULL > $1` is unknown, so a null row drops out of every
   page after the first.

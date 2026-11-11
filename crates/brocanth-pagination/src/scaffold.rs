@@ -214,7 +214,9 @@ fn agents(project: &Project) -> String {
     let keyset = if project.has("policy") {
         "- Build the keyset `WHERE` with `brocanth_pagination::Keyset`:\n\
          \x20 `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so\n\
-         \x20 a forged cursor only moves the window inside the rule.\n"
+         \x20 a forged cursor only moves the window inside the rule. The column\n\
+         \x20 enum implements `brocanth_policy::Sortable`, so a cursor key of the\n\
+         \x20 wrong type is a 400 and not a database error.\n"
     } else {
         ""
     };

@@ -48,6 +48,10 @@ None. The module file `src/modules/pagination.rs` has no field.
   quiet repair that makes a paginator untrustworthy.
 - **Keyset pages link forward and to the first page only.** A previous
   link needs the query run backwards. pagy's keyset does the same.
+- **A cursor key of the wrong kind is a 400.** `Keyset::after` needs the
+  column enum to implement `brocanth_policy::Sortable`, and checks each key
+  against its column before the query. Without the check, text against an
+  integer column is a database error on PostgreSQL, a 500.
 
 ## Read more
 

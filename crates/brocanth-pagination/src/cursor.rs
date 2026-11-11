@@ -59,23 +59,58 @@ pub struct Cursor(Vec<Key>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorError {
     token: String,
-    expected: Option<usize>,
+    reason: Reason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reason {
+    /// Not a token, or a key of the wrong kind for its column.
+    NotACursor,
+    /// A token with another number of keys.
+    Width(usize),
+    /// The order sorts on a column that a cursor cannot carry. The list's
+    /// fault, not the client's.
+    Unsortable(&'static str),
+}
+
+impl CursorError {
+    /// `token` is not a cursor: it does not parse, or a key does not have its
+    /// column's kind.
+    pub(crate) fn not_a_cursor(token: String) -> Self {
+        CursorError {
+            token,
+            reason: Reason::NotACursor,
+        }
+    }
+
+    #[cfg(feature = "policy")]
+    pub(crate) fn unsortable(token: String, column: &'static str) -> Self {
+        CursorError {
+            token,
+            reason: Reason::Unsortable(column),
+        }
+    }
 }
 
 impl fmt::Display for CursorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.expected {
-            Some(n) => write!(
+        match self.reason {
+            Reason::Width(n) => write!(
                 f,
                 "the cursor `{}` does not hold {n} key(s)\n\
                  help: follow the `next` link of the previous page; do not write a cursor by hand",
                 self.token
             ),
-            None => write!(
+            Reason::NotACursor => write!(
                 f,
                 "`{}` is not a cursor\n\
                  help: follow the `next` link of the previous page, or drop `after` to start at the first page",
                 self.token
+            ),
+            Reason::Unsortable(column) => write!(
+                f,
+                "the list sorts on `{column}`, and a cursor cannot carry its values\n\
+                 help: sort a keyset list on an integer or text column, or use offset pages"
             ),
         }
     }
@@ -124,10 +159,7 @@ impl Cursor {
     ///
     /// [`CursorError`] when the token is not one [`Cursor::token`] writes.
     pub fn parse(token: &str) -> Result<Cursor, CursorError> {
-        let bad = || CursorError {
-            token: token.to_string(),
-            expected: None,
-        };
+        let bad = || CursorError::not_a_cursor(token.to_string());
         if token.is_empty() {
             return Err(bad());
         }
@@ -168,7 +200,7 @@ impl Cursor {
         } else {
             Err(CursorError {
                 token: self.token(),
-                expected: Some(n),
+                reason: Reason::Width(n),
             })
         }
     }

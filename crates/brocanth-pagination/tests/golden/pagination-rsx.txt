@@ -2832,7 +2832,9 @@ from `ctx.links()`, which keeps the filters and the sort.
   offset: it reads one index seek, not every row before it.
 - Build the keyset `WHERE` with `brocanth_pagination::Keyset`:
   `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so
-  a forged cursor only moves the window inside the rule.
+  a forged cursor only moves the window inside the rule. The column
+  enum implements `brocanth_policy::Sortable`, so a cursor key of the
+  wrong type is a 400 and not a database error.
 
 ## Decisions that belong to the person
 
@@ -2858,7 +2860,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b701a299a08361ba -->
+<!-- brocanth-digest: 8a4190f9d657cc00 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
