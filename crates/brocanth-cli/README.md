@@ -329,9 +329,9 @@ module with what it costs.
 
 | Category | Hooks in through | Modules |
 |---|---|---|
-| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `i18n`, `i18n-routing`, `gtag`, `audit` |
+| Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `i18n`, `i18n-routing`, `gtag`, `audit`, `storage-routes`, `webhooks-in` |
 | Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `admin`, `admin-model`, `realtime-sse`, `realtime-websocket`, `robots`, `sitemap`, `search` |
-| Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `model`, `cache`, `jobs`, `jobs-memory`, `storage`, `realtime`, `input`, `client`, `commands`, `flags`, `admin-actions` |
+| Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `model`, `cache`, `jobs`, `jobs-memory`, `storage`, `realtime`, `input`, `client`, `commands`, `flags`, `admin-actions`, `webhooks`, `webhooks-out` |
 | Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt`, `sanitize`, `pagination`, `filters`, `meta`, `errors` |
 | External | files only: build, ship, check | `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` |
 

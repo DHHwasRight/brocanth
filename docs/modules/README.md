@@ -78,6 +78,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |
+| [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails | Middleware | storage |
 | [`input`](input.md) | a form or a JSON body, read into a struct, with every fault at once | Enhancer, Renderer |  |
 | [`client`](client.md) | a subcommand that calls this application's own API, built from its routes | Enhancer |  |
 | [`middleware`](middleware.md) | proxy headers, method override, canonical host, content types, CORS | Middleware |  |
@@ -94,6 +95,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`admin`](admin.md) | a Django-shaped backoffice at /admin, locked until you say who may in | Routes |  |
 | [`admin-model`](admin-model.md) | the admin's rows over SeaORM, one line per entity | Routes | admin |
 | [`admin-actions`](admin-actions.md) | "Delete selected" on every admin list, with a confirmation page | Enhancer | admin |
+| [`webhooks`](webhooks.md) | signed webhooks: verified deliveries in, signed events out; pick a direction below | Enhancer |  |
+| [`webhooks-in`](webhooks-in.md) | POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler | Middleware | webhooks |
+| [`webhooks-out`](webhooks-out.md) | signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs | Enhancer | webhooks |
 | [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber | Enhancer, Middleware |  |
 | [`realtime-sse`](realtime-sse.md) | one long response per subscriber, frames written as they are made | Routes | realtime |
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |

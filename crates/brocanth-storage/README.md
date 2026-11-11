@@ -5,9 +5,10 @@ Postgres backend behind a feature, content-addressed names, signed download
 tokens and derived image variants. An object's address is a 32-byte hash of
 its content, so a path cannot contain `..` or a slash, and no filename from a
 client reaches the filesystem. The stored media type comes from the bytes, not
-from the client. Use this crate to keep uploads. It does not depend on
-`brocanth`, has no routes and parses no multipart body: the upload route, the
-download route and the policy that guards them belong to the application. It
+from the client. Use this crate to keep uploads. Without the `routes` feature it does not
+depend on `brocanth`, has no routes and parses no multipart body. With
+`routes`, it answers an upload route and a download route as request hooks;
+who may upload stays the application's decision, as an `UploadGuard`. It
 has no S3 backend. An object store is a separate crate that implements the
 same trait.
 
@@ -21,8 +22,9 @@ brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth", branch = "
 | Feature | Default | Adds |
 |---|---|---|
 | `variants` | off | `derive_variant` and `render`, with the png, jpeg, gif and webp decoders (`image`) |
+| `routes` | off | `routes::FileRoutes`: `POST /files` and `GET /files/{address}?token=` as request hooks (`brocanth`, `brocanth-input`) |
 | `postgres` | off | `Postgres`, objects in `bytea` columns (`sqlx`, `tokio`) |
-| `scaffold` | off | the `storage` module for `brocanth create`; only the CLI turns it on |
+| `scaffold` | off | the `storage` and `storage-routes` modules for `brocanth create`; only the CLI turns it on |
 
 With no feature, the build has no SQL driver, no async runtime and no image
 codec. Leave `variants` off when the application stores documents: it points
@@ -37,8 +39,9 @@ brocanth add storage                           # an existing project
 
 The module writes `src/plugins/storage/mod.rs`, which opens a `LocalDisk`,
 keys it with the secret, and puts a `FileStore` (the store and a `FileTokens`)
-on the context. It adds `/var/uploads` to `.gitignore`. It writes no upload
-route and no download route.
+on the context. It adds `/var/uploads` to `.gitignore`. The child module
+`storage-routes` writes the upload and download routes; see
+[`docs/modules/storage-routes.md`](../../docs/modules/storage-routes.md).
 
 Settings, section `[storage]`:
 

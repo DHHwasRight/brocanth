@@ -911,6 +911,7 @@ dependencies = [
  "brocanth-schema",
  "brocanth-search",
  "brocanth-storage",
+ "brocanth-webhooks",
  "cargo_metadata",
  "clap",
  "ratatui",
@@ -1447,9 +1448,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "brocanth",
+ "brocanth-cli",
+ "brocanth-input",
+ "brocanth-middleware",
  "brocanth-scaffold",
+ "brocanth-storage",
+ "brocanth-test",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "http",
  "image",
  "sha2 0.11.0",
  "sqlx",
@@ -1467,6 +1475,34 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "http",
+]
+
+[[package]]
+name = "brocanth-webhooks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "brocanth",
+ "brocanth-admin",
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-events",
+ "brocanth-jobs",
+ "brocanth-middleware",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "brocanth-webhooks",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "tokio",
+ "url",
 ]
 
 [[package]]

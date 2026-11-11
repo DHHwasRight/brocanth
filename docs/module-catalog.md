@@ -46,7 +46,9 @@ nothing holds this page.
 | [`observability-tracing`](modules/observability-tracing.md) | An OTLP span per request and per job, W3C traceparent in and out; needs a collector |  |  | part of `observability`, off until you tick it |  |
 | [`policy`](modules/policy.md) | Typed predicates over an entity's columns; no ORM, no driver, no core |  |  |  |  |
 | [`sessions`](modules/sessions.md) | A cookie, and a `Session` the context hands a handler |  |  |  |  |
+| [`storage-routes`](modules/storage-routes.md) | Upload and download routes: uploads your guard allows, downloads behind a file token, `?thumb=WxH` |  |  | part of `storage`, off until you tick it |  |
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
+| [`webhooks-in`](modules/webhooks-in.md) | `POST /webhooks/{source}`: signature, replay window, idempotency key, then a typed handler; before the CSRF check |  |  | part of `webhooks`, ticked with its parent | with `db`: the idempotency keys are rows |
 
 ### Renderer (6)
 
@@ -96,6 +98,8 @@ nothing holds this page.
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
+| [`webhooks`](modules/webhooks.md) | Signed webhooks in both directions; pick a direction below |  |  |  |  |
+| [`webhooks-out`](modules/webhooks-out.md) | Signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs |  |  | part of `webhooks`, off until you tick it; needs `db`: the endpoints and the log are rows; `jobs`: a delivery is a job | with `admin`: a deliveries tab |
 
 ### External (6)
 

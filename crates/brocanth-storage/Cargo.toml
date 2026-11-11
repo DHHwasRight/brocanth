@@ -83,6 +83,14 @@ tokio = { version = "1", default-features = false, features = [
 # new project is never linked into an application that merely has one.
 brocanth-scaffold = { workspace = true, optional = true }
 
+# `routes`: the HTTP edge, an upload route and a download route as request
+# hooks. The one feature that reaches the core, and it is off: a store used
+# from a job or a command links no server. `brocanth-input` reads the
+# multipart body, so this crate parses none of its own.
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+brocanth-input = { workspace = true, optional = true }
+
 [dev-dependencies]
 # A real directory for the disk tests, removed when the test ends. Nothing
 # else: the tests drive the async trait through a twenty-line executor in
@@ -93,6 +101,16 @@ brocanth-scaffold = { workspace = true, optional = true }
 # dev-dependency cannot be optional, and one declared here would be compiled by
 # every `cargo test` in a tree that asked for no database.
 tempfile = "3"
+# This crate with the routes and the image codecs on, so `cargo test -p
+# brocanth-storage` runs the route tests and the thumbnail tests. The route
+# tests drive the hooks with the same kind of thirty-line executor, so no
+# runtime joins the tree here either.
+brocanth-storage = { path = ".", features = ["routes", "variants", "scaffold"] }
+# The generator, for the module's own goldens (`tests/scaffold.rs`).
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-test.workspace = true
+brocanth-middleware.workspace = true
 
 [features]
 # Empty, and that is the rule rather than an oversight. Parsing a size
@@ -100,6 +118,9 @@ tempfile = "3"
 # the feature off; only the pixels need `image`.
 default = []
 variants = ["dep:image"]
+
+# The upload and download routes, as request hooks. See `crate::routes`.
+routes = ["dep:brocanth", "dep:http", "dep:brocanth-input"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's

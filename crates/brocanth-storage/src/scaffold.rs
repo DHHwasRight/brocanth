@@ -12,13 +12,14 @@
 //!
 //! # What it does not write
 //!
-//! **An upload route, a download route, or the policy that guards them.**
-//! This crate parses no multipart body and knows nothing about HTTP, and the
-//! generator does not invent what the crate refuses: minting a file token is
-//! a decision about *this* application's policy, and a generated route that
-//! guessed it would be a generated hole. The plugin puts the store and the
-//! token service on the context, and the generated file's own header says
-//! what the two calls are.
+//! **An upload route or a download route.** Those are the child
+//! [`StorageRoutes`], `storage-routes`, which a project asks for. Minting a
+//! file token stays a decision about *this* application's policy, and so
+//! does who may upload: the child writes an `UploadGuard` that answers no
+//! until the project edits it, and no route mints a token on its own. The
+//! plugin puts the store and the token service on the context and on the
+//! services, and the generated file's own header says what the two calls
+//! are.
 //!
 //! **Image variants.** `variants` pulls four image decoders in, and §8.2 asks
 //! that a feature which is off means the code is absent. A project that
@@ -35,8 +36,12 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::snippet::{
+    configurable, configurable_hooking, module_ref, settings_derive, Hooking, PLUGIN_TRAIT_USE,
+};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
+};
 
 /// File storage, as a choice on the `brocanth create` menu.
 ///
@@ -279,7 +284,7 @@ impl Plugin for Files {{
         }}
     }}
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         if self.settings.root.is_empty() {{
             return Err(PluginError::new(
                 "[storage] root is required; there is no default directory",
@@ -306,11 +311,16 @@ impl Plugin for Files {{
                 PluginError::new(format!("[storage] opening {{:?}}: {{e}}", self.settings.root))
             }})?
             .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
-        self.store = Some(Arc::new(disk));
-        self.tokens = Some(
-            FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
-                .with_ttl(self.settings.token_ttl),
-        );
+        let store: Arc<dyn Storage> = Arc::new(disk);
+        let tokens = FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
+            .with_ttl(self.settings.token_ttl);
+        // On the services too, where a plugin registered after this one
+        // reads them at its own `configure`: the upload and download routes
+        // of `storage-routes` do.
+        lc.services_mut().insert(Arc::clone(&store));
+        lc.services_mut().insert(tokens.clone());
+        self.store = Some(store);
+        self.tokens = Some(tokens);
         Ok(())
     }}
 
@@ -328,3 +338,307 @@ impl Plugin for Files {{
 "##
     )
 }
+
+/// The HTTP edge of the store: `storage-routes`, a child of `storage`.
+///
+/// It writes `src/plugins/storage_routes/mod.rs`: the settings, the
+/// project's `may_upload` guard, and a plugin that installs the crate's
+/// [`FileRoutes`](crate::routes::FileRoutes) as two request hooks around the
+/// CSRF check. Off when `storage` is chosen: a project that stores files
+/// from a job or a handler needs no route.
+pub struct StorageRoutes;
+
+impl Module for StorageRoutes {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "storage-routes",
+            "POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails",
+        )
+        .category(Category::Middleware)
+        .part_of_but_off("storage")
+        .because("it is the HTTP edge of `brocanth-storage`, which the parent brings")
+        .asked_in("data", "Upload and download routes, file tokens and thumbnails")
+        .adapts_to(
+            "config",
+            "its settings are read from the config file, not written as a literal",
+        )
+        // `routes` is the HTTP edge; `variants` renders a thumbnail the
+        // first time a size is asked for. Image decoders are what
+        // `?thumb=` costs, and this module is asked for, never ticked by
+        // default.
+        .krate(
+            Dep::brocanth("brocanth-storage")
+                .feature("routes")
+                .feature("variants"),
+        )
+        // The plugin reads the store and the token service from the
+        // services the storage plugin fills, at its own `configure`.
+        .after("storage")
+        .after("config")
+        .hook(
+            "answer",
+            "answer POST {path} and GET {path}/{address}",
+            Hook::required(),
+        )
+        .hook(
+            "lift",
+            "copy an upload form's CSRF field into the header the CSRF check reads",
+            Hook::on(),
+        )
+        .option(Opt::text(
+            "path",
+            "/files",
+            "Where the routes answer: uploads at {path}, files at {path}/{address}.",
+        ))
+        .option(Opt::bool(
+            "public",
+            false,
+            "Serve a file to a request with no token. Off, every download needs a token.",
+        ))
+        .option(Opt::bool(
+            "thumbnails",
+            true,
+            "Answer ?thumb=WxH with a thumbnail, rendered once per size.",
+        ))
+        .absent(
+            "storage-routes",
+            "no upload or download route; a handler stores and serves each file itself",
+        )
+    }
+
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        s.file("src/plugins/storage_routes/mod.rs", routes_rs(project));
+        s.at(Slot::PluginsMod).line("pub mod storage_routes;");
+        configurable_hooking(
+            s,
+            project,
+            Hooking {
+                key: "storage-routes",
+                section: "storage_routes",
+                ty: "crate::plugins::storage_routes::StorageRoutes",
+                config_ty: "crate::plugins::storage_routes::Settings",
+                prelude: ROUTES_COMMENT.to_string(),
+                adjust: None,
+            },
+            routes_settings(),
+        );
+        s.at(Slot::AgentsSections).block(ROUTES_AGENTS.to_string());
+    }
+}
+
+const ROUTES_COMMENT: &str = "
+        // -- file routes ---------------------------------------------------
+        //
+        // POST /files stores the `file` part of a form, if `may_upload` in
+        // src/plugins/storage_routes/mod.rs says yes. GET /files/{address}
+        // serves it to a request with a token the application minted.
+        //
+";
+
+const ROUTES_AGENTS: &str = "\n\
+    ## File routes\n\
+    \n\
+    Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It\n\
+    answers no until you change it; ask the policy there, not in a page. A\n\
+    download needs a token: mint it with `FileStore::tokens` after your policy\n\
+    allowed the read, and never log the URL. Do not write an upload or\n\
+    download page beside these routes.\n";
+
+fn routes_settings() -> Vec<Setting> {
+    vec![
+        Setting::integer(
+            "max_bytes",
+            2_097_152,
+            "The largest file accepted, in bytes.",
+        )
+        .note(
+            "The server buffers at most 2 MiB of a request body today, so a larger\n\
+             value takes effect only when that limit moves.",
+        ),
+        Setting::text(
+            "csrf_field",
+            "_csrf_token",
+            "The form field that carries the CSRF token: `[csrf] field`.",
+        ),
+        Setting::text(
+            "csrf_header",
+            "x-csrf-token",
+            "The header the CSRF check reads: `[csrf] header`.",
+        ),
+    ]
+}
+
+fn routes_rs(project: &Project) -> String {
+    let (derive, note) = settings_derive(project, "storage_routes");
+    ROUTES_RS
+        .replace("@DERIVE@", &derive)
+        .replace("@NOTE@", &note)
+        .replace("@PATH@", &module_ref("storage-routes", "path"))
+        .replace("@PUBLIC@", &module_ref("storage-routes", "public"))
+        .replace("@THUMBNAILS@", &module_ref("storage-routes", "thumbnails"))
+}
+
+const ROUTES_RS: &str = r##"//! The upload and download routes, as this application answers them.
+//!
+//! `POST /files` takes a `multipart/form-data` form, stores its `file` part
+//! and answers `303` to the form's `return_to` field, with `?file=` and
+//! `&token=` added, or `201` with the address. `GET /files/{address}` serves
+//! the file to a request whose `?token=` opens it; add `&thumb=300x200` for
+//! a thumbnail. The path, `public` and `thumbnails` are in
+//! `src/modules/storage_routes.rs`.
+//!
+//! A plain form works with no script. The CSRF check reads no multipart
+//! body, so the `lift` hook copies the form's `_csrf_token` field into the
+//! header the check reads, before it runs:
+//!
+//! ```html
+//! <form method="post" action="/files" enctype="multipart/form-data">
+//!   <input type="hidden" name="return_to" value="/posts/new">
+//!   <input type="file" name="file">
+//!   <button>Upload</button>
+//! </form>
+//! ```
+//!
+//! A page shows a stored file with a link it mints after its own policy
+//! allowed the read:
+//!
+//! ```ignore
+//! let files = ctx.provided::<crate::plugins::storage::FileStore, _>().expect("dispatched");
+//! let token = files.tokens.issue(&key);
+//! let src = format!("/files/{}?token={}", key.to_hex(), token.as_str());
+//! ```
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
+use brocanth::plugin_order::Order;
+use brocanth_storage::routes::{FileRoutes, RoutesConfig};
+use brocanth_storage::{FileTokens, Storage};
+
+/// Whether this request may store a file.
+///
+/// It answers no, so nobody can upload until you say who may. The request
+/// has passed the session and the CSRF check by now; read the signed-in
+/// account from `state` and ask your policy. A "yes" for everyone is a free
+/// disk for every stranger.
+fn may_upload(_request: &Request, _state: &RequestState) -> bool {
+    false
+}
+
+/// What this plugin is built from.
+///
+/// @NOTE@
+@DERIVE@
+pub struct Settings {
+    /// The largest file accepted, in bytes.
+    pub max_bytes: usize,
+    /// The form field that carries the CSRF token: `[csrf] field`.
+    pub csrf_field: String,
+    /// The header the CSRF check reads: `[csrf] header`.
+    pub csrf_header: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            max_bytes: 2_097_152,
+            csrf_field: "_csrf_token".to_string(),
+            csrf_header: "x-csrf-token".to_string(),
+        }
+    }
+}
+
+pub struct StorageRoutes {
+    settings: Settings,
+    /// Built at `configure`, from the store the storage plugin published.
+    routes: Option<FileRoutes>,
+}
+
+impl Plugin for StorageRoutes {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "storage_routes";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            routes: None,
+        }
+    }
+
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let store = lc.services().get::<Arc<dyn Storage>>().cloned();
+        let tokens = lc.services().get::<FileTokens>().cloned();
+        let (Some(store), Some(tokens)) = (store, tokens) else {
+            return Err(PluginError::new(
+                "[storage_routes] no file store is registered\n\
+                 help: register the storage plugin before this one in src/app.rs",
+            ));
+        };
+        let config = RoutesConfig {
+            path: @PATH@.to_string(),
+            max_bytes: self.settings.max_bytes,
+            public: @PUBLIC@,
+            thumbnails: @THUMBNAILS@,
+            csrf_field: self.settings.csrf_field.clone(),
+            csrf_header: self.settings.csrf_header.clone(),
+            ..RoutesConfig::default()
+        };
+        self.routes = Some(FileRoutes::new(store, tokens, config, may_upload)?);
+        Ok(())
+    }
+}
+
+impl HookSource for StorageRoutes {
+    type Families = OnAsyncRequest;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        if let Some(routes) = &self.routes {
+            registrar.request_async(
+                "lift",
+                Order::new().before_if_present("csrf.check"),
+                routes.csrf_lift(),
+            );
+            // After the CSRF check, so an upload from another site stops
+            // there, and after the proxy reader and the rate limiter.
+            registrar.request_async(
+                "answer",
+                Order::new()
+                    .after_if_present("csrf.check")
+                    .after_if_present("proxy-headers.read")
+                    .after_if_present("rate_limit.count"),
+                routes.clone(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn nobody_may_upload_until_may_upload_says_who() {
+        let app = crate::app::build().expect("the application builds");
+        let mut request = Request::new(Verb::Post, "/files")
+            .with_header("content-type", "multipart/form-data; boundary=b");
+        request.body = b"--b--\r\n".to_vec().into();
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 403);
+    }
+
+    #[tokio::test]
+    async fn a_file_is_served_only_with_a_token() {
+        let app = crate::app::build().expect("the application builds");
+        let address = "0".repeat(64);
+        let request = Request::new(Verb::Get, &format!("/files/{address}"));
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 403);
+    }
+}
+"##;
