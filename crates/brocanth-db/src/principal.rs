@@ -81,15 +81,16 @@ impl Principal {
     ///
     /// # Errors
     /// [`DbError::Config`] for a role name or a key this crate refuses.
-    pub(crate) fn statements(
-        &self,
-    ) -> Result<(Option<String>, Option<(String, Vec<String>)>), DbError> {
+    pub(crate) fn statements(&self) -> Result<Statements, DbError> {
         let role = match &self.role {
             Some(name) => Some(format!("SET LOCAL ROLE {}", quote_ident(name)?)),
             None => None,
         };
         if self.settings.is_empty() {
-            return Ok((role, None));
+            return Ok(Statements {
+                role,
+                settings: None,
+            });
         }
         let mut sql = String::from("SELECT ");
         let mut binds = Vec::with_capacity(self.settings.len() * 2);
@@ -103,8 +104,21 @@ impl Principal {
             binds.push(format!("{SETTING_PREFIX}{key}"));
             binds.push(value.clone());
         }
-        Ok((role, Some((sql, binds))))
+        Ok(Statements {
+            role,
+            settings: Some((sql, binds)),
+        })
     }
+}
+
+/// What [`Tx::assume`](crate::Tx::assume) runs for a [`Principal`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Statements {
+    /// `SET LOCAL ROLE "<name>"`, when the principal has a role.
+    pub(crate) role: Option<String>,
+    /// `SELECT set_config($1, $2, true), …` and its binds, when it has
+    /// values.
+    pub(crate) settings: Option<(String, Vec<String>)>,
 }
 
 /// `"name"`, with each `"` doubled.
@@ -164,7 +178,7 @@ mod tests {
             .role("app \"member\"")
             .set("tenant_id", 7)
             .set("user_id", "x'; DROP TABLE posts; --");
-        let (role, settings) = p.statements().unwrap();
+        let Statements { role, settings } = p.statements().unwrap();
         assert_eq!(role.unwrap(), r#"SET LOCAL ROLE "app ""member""""#);
         let (sql, binds) = settings.unwrap();
         assert_eq!(
@@ -204,6 +218,12 @@ mod tests {
 
     #[test]
     fn no_role_and_no_value_runs_nothing() {
-        assert_eq!(Principal::new().statements().unwrap(), (None, None));
+        assert_eq!(
+            Principal::new().statements().unwrap(),
+            Statements {
+                role: None,
+                settings: None
+            }
+        );
     }
 }

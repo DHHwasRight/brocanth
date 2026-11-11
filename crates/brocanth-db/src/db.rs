@@ -221,7 +221,7 @@ impl<'c> Tx<'c> {
     /// [`DbError::Config`] for a role or key [`Principal`] refuses;
     /// [`DbError::Query`] when the login role is not a member of the role.
     pub async fn assume(&mut self, principal: &Principal) -> Result<(), DbError> {
-        let (role, settings) = principal.statements()?;
+        let crate::principal::Statements { role, settings } = principal.statements()?;
         if let Some(sql) = role {
             sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
                 .execute(&mut *self.inner)
