@@ -46,27 +46,27 @@ fn each_run_is_a_log_line_in_its_span_and_a_counted_outcome() {
         let failure = JobFailure::returned("smtp refused");
         for (id, end) in [(1, "completed"), (2, "retrying"), (3, "dead")] {
             events.handle(JobEvent::Started {
-                id: JobId(id),
+                id: JobId(id.to_string()),
                 name: "send_welcome",
                 attempt: 1,
                 worker: "w1",
             });
             events.handle(match end {
                 "completed" => JobEvent::Completed {
-                    id: JobId(id),
+                    id: JobId(id.to_string()),
                     name: "send_welcome",
                     took: Duration::from_millis(3),
                     attempt: 1,
                 },
                 "retrying" => JobEvent::Retrying {
-                    id: JobId(id),
+                    id: JobId(id.to_string()),
                     name: "send_welcome",
                     attempt: 1,
                     delay: Duration::from_secs(1),
                     failure: &failure,
                 },
                 _ => JobEvent::DeadLettered {
-                    id: JobId(id),
+                    id: JobId(id.to_string()),
                     name: "send_welcome",
                     attempts: 1,
                     failure: &failure,
@@ -84,7 +84,7 @@ fn each_run_is_a_log_line_in_its_span_and_a_counted_outcome() {
         r#""level":"info""#,
         r#""target":"brocanth::jobs""#,
         r#""job":"send_welcome""#,
-        r#""job_id":1"#,
+        r#""job_id":"1""#,
         r#""attempt":1"#,
         r#""worker":"w1""#,
         r#""outcome":"completed""#,
@@ -112,49 +112,30 @@ fn each_run_is_a_log_line_in_its_span_and_a_counted_outcome() {
 }
 
 #[test]
-fn the_queue_depth_is_scraped_and_its_table_is_a_readiness_check() {
+fn the_queue_depth_is_scraped_and_the_queue_is_a_readiness_check() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
-    let path = std::env::temp_dir().join(format!(
-        "brocanth-observe-jobs-{}-{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let url = format!("sqlite://{}?mode=rwc", path.display());
     let observer = observer();
 
     runtime.block_on(async {
-        let queue = Queue::connect(&url)
-            .await
-            .unwrap()
-            .with_events(observer.job_events());
+        // The memory backend: a readiness check that fails needs a store
+        // that can be down, which `brocanth-jobs`' own Postgres tests cover.
+        let queue = Queue::memory().with_events(observer.job_events());
+        let _app = AppBuilder::new()
+            .plugin(ObservePlugin::new(observer.clone()))
+            .plugin(JobsPlugin::new(JobsConfig::new(queue.clone())))
+            .build()
+            .expect("builds");
 
-        // Before the table exists: the jobs check fails.
-        let unready = {
-            let app = AppBuilder::new()
-                .plugin(ObservePlugin::new(observer.clone()))
-                .plugin(JobsPlugin::new(JobsConfig::new(queue.clone())))
-                .build()
-                .expect("builds");
-            let report = observer.ready().await;
-            drop(app);
-            report
-        };
-        assert!(!unready.is_ready(), "{unready:?}");
-        assert_eq!(unready.checks[0].name, "jobs");
-
-        queue.migrate().await.unwrap();
         queue.enqueue(SendWelcome { user_id: 1 }).await.unwrap();
         queue.enqueue(SendWelcome { user_id: 2 }).await.unwrap();
 
         let report = observer.ready().await;
         assert!(report.is_ready(), "{report:?}");
+        assert_eq!(report.checks[0].name, "jobs");
 
         let text = observer.metrics().render(Duration::from_secs(5)).await;
         for expected in [
@@ -165,5 +146,4 @@ fn the_queue_depth_is_scraped_and_its_table_is_a_readiness_check() {
             assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
         }
     });
-    let _ = std::fs::remove_file(&path);
 }

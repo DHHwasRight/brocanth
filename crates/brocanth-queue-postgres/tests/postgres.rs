@@ -475,12 +475,17 @@ async fn a_finished_job_is_archived_by_default() {
     assert_eq!(live, 0, "and it still has to leave the live table");
 }
 
+/// Whether `name` is a partition of `queue_archive` in this connection's
+/// schema. Another schema on the same server can hold a table of the same
+/// name: the `brocanth-jobs` tests migrate the queue into schemas of their
+/// own.
 async fn partition_exists(pool: &PgPool, name: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM pg_class c \
            JOIN pg_inherits i ON i.inhrelid = c.oid \
            JOIN pg_class p ON p.oid = i.inhparent \
-          WHERE p.relname = 'queue_archive' AND c.relname = $1",
+          WHERE p.relname = 'queue_archive' AND c.relname = $1 \
+            AND c.relnamespace = current_schema()::regnamespace",
     )
     .bind(name)
     .fetch_one(pool)

@@ -292,7 +292,7 @@ else.
 | Piece | On Postgres today | The seam | The way out |
 |---|---|---|---|
 | Data | SeaORM, Postgres by default | `brocanth-model` | SQLite for a single machine (`features = ["sqlite"]`) |
-| Jobs | `brocanth-jobs`: `SKIP LOCKED`, `LISTEN` to wake workers | its store (Postgres or SQLite) | `brocanth-queue` (below) |
+| Jobs | `brocanth-jobs`: typed jobs, cron and a panel over the `brocanth-queue` engine | `brocanth-queue` (below) | another queue `Backend` |
 | Queue | `PgQueue`, `PgOutbox` in `brocanth-queue-postgres` | `Backend`, `Outbox`, `Inspect` | The `Bulk` lane moves to another `Backend`. The contract is written against SQS limits. |
 | Cache | `PgCache` on unlogged tables | `Cache` (tags, `CacheExt`) | Another `Cache` impl |
 | Files | `Postgres` in `brocanth-storage` (`postgres` feature) | `Storage` | `LocalDisk` exists. An object store would be another `Storage` impl. |
@@ -303,8 +303,8 @@ A job has a lane. A `Transactional` job commits with its data and stays in
 your database. A `Bulk` job is idempotent and goes to whichever `Backend`
 you run, through the outbox when you enqueue it inside a transaction. So a
 move to a dedicated broker does not change one `enqueue` call. Today the
-only backends are `PgQueue` and `Memory`, and `brocanth-jobs` shares only
-the `Inspect` read side with `brocanth-queue`. Read
+only backends are `PgQueue` and `Memory`. `brocanth-jobs` is a layer over
+this engine: one job system, with cron and the admin panel on top. Read
 [`crates/brocanth-queue/docs/DECISIONS.md`](crates/brocanth-queue/docs/DECISIONS.md).
 
 ## Day-2 checklist

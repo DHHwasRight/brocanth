@@ -81,7 +81,8 @@ pub use outbox::{
     DynOutboxInspect, OnOutboxFull, Outbox, OutboxError, OutboxInspect, OutboxRow, Relay,
     RelayConfig, Tick, DEFAULT_MAX_PENDING,
 };
-pub use registry::{Demands, DuplicateKind, Registry, Unmet};
+pub use registry::{Demands, DuplicateKind, Entry, Registry, Unmet};
 pub use worker::{
     Budget, ConfigError, Observer, PoolTooSmall, Silent, StartError, Worker, WorkerConfig,
+    WorkerReport,
 };

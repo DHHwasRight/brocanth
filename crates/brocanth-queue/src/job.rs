@@ -251,10 +251,27 @@ pub struct JobContext {
     pub(crate) attempt: u32,
     pub(crate) max_attempts: u32,
     pub(crate) worker: String,
-    pub(crate) stopping: tokio::sync::watch::Receiver<bool>,
+    pub(crate) stopping: tokio::sync::watch::Receiver<Option<std::time::Duration>>,
 }
 
 impl JobContext {
+    /// A context for a job run outside a worker, as a test of a job's body
+    /// does. It is never asked to stop, and its worker is `"detached"`.
+    pub fn detached(id: JobId, kind: &str, queue: &str, attempt: u32, max_attempts: u32) -> Self {
+        // The sender is dropped here, so the receiver keeps its first value,
+        // `None`, for good: the job is never told to stop.
+        let (_tx, stopping) = tokio::sync::watch::channel(None);
+        JobContext {
+            id,
+            kind: kind.to_string(),
+            queue: queue.to_string(),
+            attempt,
+            max_attempts,
+            worker: "detached".to_string(),
+            stopping,
+        }
+    }
+
     /// The backend's identity for this job.
     pub fn id(&self) -> &JobId {
         &self.id
@@ -295,7 +312,7 @@ impl JobContext {
     /// A long job should check this and return early. A job that ignores it
     /// is dropped at the grace deadline, and its lease is released.
     pub fn is_stopping(&self) -> bool {
-        *self.stopping.borrow()
+        self.stopping.borrow().is_some()
     }
 }
 
@@ -351,6 +368,9 @@ pub enum FailureKind {
     /// The payload did not match the registered type. Retrying cannot help,
     /// so the job goes straight to the dead letter.
     Undecodable,
+    /// The job ran longer than its runner allowed and was stopped. Retried
+    /// like a returned error.
+    TimedOut,
 }
 
 impl FailureKind {
@@ -366,6 +386,7 @@ impl fmt::Display for FailureKind {
             FailureKind::Returned => "returned",
             FailureKind::Panicked => "panicked",
             FailureKind::Undecodable => "undecodable",
+            FailureKind::TimedOut => "timed out",
         })
     }
 }

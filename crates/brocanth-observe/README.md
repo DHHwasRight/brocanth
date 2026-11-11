@@ -15,7 +15,7 @@ layer. An application that does not name `ObservePlugin` links none of it.
 | `/up` (liveness), `/readyz` (each plugin's readiness check, with latency) | always |
 | `/metrics`: requests by route template and status class, in-flight, plugin series | `metrics` (default) |
 | A span per request and per job run, OTLP over HTTP, W3C `traceparent` | `otel` (off) |
-| A span, a log line and a counter per job run; queue depth gauges | `jobs` (Postgres) or `jobs-sqlite` (off) |
+| A span, a log line and a counter per job run; queue depth gauges | `jobs` (Postgres) or `jobs-memory` (off) |
 
 **Reason for the defaults:** every deployed application wants logs and
 metrics, and both are small. Traces need a collector, so they wait to be
@@ -202,7 +202,7 @@ assert!(line.contains(&id));
 ```sh
 cargo test -p brocanth-observe                        # logs + metrics
 cargo test -p brocanth-observe --features otel        # traces
-cargo test -p brocanth-observe --features jobs-sqlite # job telemetry
+cargo test -p brocanth-observe --features jobs-memory # job telemetry
 ```
 
 No database is needed. The trace tests use the SDK's

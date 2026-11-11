@@ -52,8 +52,6 @@ pub enum JobEvent<'a> {
     },
     /// An enqueue was folded into an existing row by its unique key.
     Deduplicated {
-        /// The row that already existed.
-        id: JobId,
         /// The job name.
         name: &'a str,
         /// The key that matched.
@@ -106,6 +104,10 @@ pub enum JobEvent<'a> {
         failure: &'a JobFailure,
     },
     /// Jobs held by a worker that stopped heartbeating were put back.
+    ///
+    /// **No longer emitted.** A lease that runs out makes its job claimable
+    /// again by itself, so nothing reclaims and nothing counts. The variant
+    /// stays so a `match` written for the first queue still compiles.
     Reclaimed {
         /// How many rows went back to `pending`.
         requeued: u64,
@@ -181,11 +183,9 @@ impl fmt::Display for JobEvent<'_> {
                 "enqueued {name} {id} on {queue}{}",
                 if *scheduled { " (scheduled)" } else { "" }
             ),
-            JobEvent::Deduplicated {
-                id,
-                name,
-                unique_key,
-            } => write!(f, "deduplicated {name} onto {id} by key `{unique_key}`"),
+            JobEvent::Deduplicated { name, unique_key } => {
+                write!(f, "deduplicated {name} by key `{unique_key}`")
+            }
             JobEvent::Started {
                 id,
                 name,

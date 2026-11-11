@@ -1,20 +1,31 @@
 //! The queue: the handle an application enqueues through, and everything you
-//! can do to work that is already in the table.
+//! can do to work that is already in it.
 //!
-//! A [`Queue`] is cheap to clone — it is an `Arc` around a pool, a clock and an
-//! event sink — so it goes in the context, in a handler, in a hook, anywhere.
+//! A [`Queue`] is cheap to clone — it is an `Arc` around the engine's
+//! backend, its read side, the schedule store, a clock and an event sink —
+//! so it goes in the context, in a handler, in a hook, anywhere.
+//!
+//! # The engine
+//!
+//! Every job lives in a `brocanth-queue` backend: Postgres by default
+//! (`brocanth-queue-postgres`, the `queue_*` tables), or the memory backend
+//! (`brocanth-queue-memory`) behind the `memory` feature, for tests and
+//! development. This crate adds what the engine does not have: typed jobs,
+//! recurring schedules, the event sink and the admin panel.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use brocanth_queue::{
+    DeadId, DeadRow, DynBackend, DynInspect, JobRow, NewJob, Page, Pushed, UniquenessKind, View,
+};
 
 use crate::clock::{from_millis, to_millis, Clock, SystemClock};
 use crate::cron::Cron;
 use crate::error::{Error, Result};
 use crate::events::{JobEvent, JobEvents, Silent};
 use crate::job::{Job, JobId};
-use crate::store::{
-    schema, Backend, DeadJob, Enqueued, NewJob, RunningJob, Stats, Store, WaitingJob,
-};
+use crate::schedule::{ScheduleRow, Schedules};
 
 /// What a recurring schedule does about occurrences it slept through.
 ///
@@ -75,9 +86,59 @@ impl Misfire {
 /// occurrences, and walking all of them to decide to skip them is pointless.
 const MAX_OCCURRENCES_PER_TICK: u32 = 100_000;
 
+/// How long the unique key of one schedule occurrence is held.
+///
+/// Long enough that two workers ticking the same occurrence minutes apart
+/// still enqueue it once, even when the first copy already ran. Every
+/// occurrence has its own key, so the length never delays the next one.
+const OCCURRENCE_KEY_HELD: Duration = Duration::from_secs(24 * 60 * 60);
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// The store a queue runs on. Each one is a Cargo feature.
+#[non_exhaustive]
+pub enum Backend {
+    /// Postgres, on this pool: the engine's `queue_*` tables and this
+    /// crate's `brocanth_job_schedules`.
+    #[cfg(feature = "postgres")]
+    Postgres(sqlx::PgPool),
+    /// The process's memory. **For tests and development only**: every job
+    /// is gone when the process stops, and two processes do not share one.
+    /// `brocanth check --deploy` reports a project that ships it.
+    #[cfg(feature = "memory")]
+    Memory,
+}
+
+#[cfg(feature = "postgres")]
+impl From<sqlx::PgPool> for Backend {
+    fn from(pool: sqlx::PgPool) -> Self {
+        Backend::Postgres(pool)
+    }
+}
+
+/// What the queue holds besides the engine's two handles, per backend.
+enum Store {
+    #[cfg(feature = "postgres")]
+    Postgres(sqlx::PgPool),
+    #[cfg(feature = "memory")]
+    Memory,
+}
+
+struct Inner {
+    backend: Arc<dyn DynBackend>,
+    inspect: Arc<dyn DynInspect>,
+    schedules: Schedules,
+    store: Store,
+}
+
 // ---------------------------------------------------------------------------
 // Queue
 // ---------------------------------------------------------------------------
+
+/// The queue [`Queue::install`] recorded.
+static INSTALLED: std::sync::OnceLock<Queue> = std::sync::OnceLock::new();
 
 /// The queue.
 ///
@@ -91,7 +152,7 @@ const MAX_OCCURRENCES_PER_TICK: u32 = 100_000;
 /// #     async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> { Ok(()) }
 /// # }
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let queue = Queue::connect("sqlite://jobs.db").await?;
+/// let queue = Queue::connect("postgres://localhost/app").await?;
 /// queue.migrate().await?;
 ///
 /// queue.enqueue(SendWelcome { user_id: 7 }).await?;
@@ -105,7 +166,7 @@ const MAX_OCCURRENCES_PER_TICK: u32 = 100_000;
 /// ```
 #[derive(Clone)]
 pub struct Queue {
-    store: Arc<Store>,
+    inner: Arc<Inner>,
     clock: Arc<dyn Clock>,
     events: Arc<dyn JobEvents>,
 }
@@ -113,17 +174,15 @@ pub struct Queue {
 impl Queue {
     /// Opens a queue from a database URL.
     ///
-    /// `postgres://…` or `postgresql://…` needs the `postgres` feature;
-    /// `sqlite://…` needs `sqlite`. A URL whose backend was not compiled in is
-    /// an error that says which Cargo feature to turn on, because that is where
-    /// the fix is.
-    ///
-    /// For SQLite this sets WAL journalling and a five-second `busy_timeout`,
-    /// which the claim path depends on. Handing in a pool built elsewhere with
-    /// [`Queue::from_pool`] means setting them yourself.
+    /// `postgres://…` or `postgresql://…` needs the `postgres` feature, the
+    /// default. A URL whose backend was not compiled in is an error that says
+    /// which Cargo feature to turn on, because that is where the fix is.
     pub async fn connect(url: &str) -> Result<Self> {
-        let backend = connect_backend(url).await?;
-        Ok(Self::from_pool(backend))
+        let queue = Self::connect_lazy(url)?;
+        // One connection now, so a wrong URL or password fails here and not
+        // on the first enqueue.
+        queue.ping().await?;
+        Ok(queue)
     }
 
     /// Builds a queue from a database URL and opens no connection. The first
@@ -132,27 +191,80 @@ impl Queue {
     /// For a synchronous stage, which must not wait for I/O: a plugin calls
     /// this in `before_start`, and runs [`Queue::migrate`] and its first
     /// check later, from async code. The pool spawns its upkeep task, so call
-    /// it inside a Tokio runtime. The backends and their settings are those
-    /// of [`Queue::connect`].
+    /// it inside a Tokio runtime.
     pub fn connect_lazy(url: &str) -> Result<Self> {
-        Ok(Self::from_pool(lazy_backend(url)?))
+        let scheme = url.split(':').next().unwrap_or("");
+        match scheme {
+            #[cfg(feature = "postgres")]
+            "postgres" | "postgresql" => Ok(Self::from_pool(
+                sqlx::postgres::PgPoolOptions::new().connect_lazy(url)?,
+            )),
+            #[cfg(not(feature = "postgres"))]
+            "postgres" | "postgresql" => Err(Error::Backend(
+                "this build of brocanth-jobs has no Postgres driver\n\
+                 help: add `features = [\"postgres\"]` to its dependency in Cargo.toml"
+                    .to_string(),
+            )),
+            "sqlite" => Err(Error::Backend(
+                "brocanth-jobs runs on brocanth-queue, which has no SQLite backend yet\n\
+                 help: use a `postgres://` URL, or `Queue::memory()` for tests and development"
+                    .to_string(),
+            )),
+            other => Err(Error::Backend(format!(
+                "`{other}` is not a database this queue knows; the URL must start \
+                 with `postgres://`\n\
+                 help: for tests and development, `Queue::memory()` needs no URL"
+            ))),
+        }
     }
 
-    /// Builds a queue on a pool the application already has.
+    /// Builds a queue on a store the application already has.
     ///
-    /// This is the path for an application that also uses `brocanth-model`:
-    /// SeaORM 2.0 hands out its underlying `sqlx` pool, so the queue and the
+    /// This is the path for an application that also uses `brocanth-db` or
+    /// `brocanth-model`: hand it the same `PgPool`, and the queue and the
     /// models share one set of connections rather than opening a second pool
     /// against the same database.
-    pub fn from_pool(pool: impl Into<Backend>) -> Self {
+    pub fn from_pool(backend: impl Into<Backend>) -> Self {
+        let inner = match backend.into() {
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => {
+                let pg = Arc::new(brocanth_queue_postgres::PgQueue::bulk(pool.clone()));
+                Inner {
+                    backend: pg.clone(),
+                    inspect: pg,
+                    schedules: Schedules::Postgres(pool.clone()),
+                    store: Store::Postgres(pool),
+                }
+            }
+            #[cfg(feature = "memory")]
+            Backend::Memory => {
+                let memory = Arc::new(brocanth_queue_memory::Memory::new());
+                Inner {
+                    backend: memory.clone(),
+                    inspect: memory,
+                    schedules: Schedules::Memory(Default::default()),
+                    store: Store::Memory,
+                }
+            }
+        };
         Self {
-            store: Arc::new(Store::new(pool.into())),
+            inner: Arc::new(inner),
             clock: Arc::new(SystemClock),
             events: Arc::new(Silent),
         }
     }
 
+    /// A queue in this process's memory. **For tests and development
+    /// only**: see [`Backend::Memory`].
+    #[cfg(feature = "memory")]
+    pub fn memory() -> Self {
+        Self::from_pool(Backend::Memory)
+    }
+
     /// Replaces the clock. See [`crate::clock`] for why there is one.
+    ///
+    /// The clock drives the recurring schedules. A job's own delay is the
+    /// backend's business, and Postgres measures it with the server's clock.
     #[must_use]
     pub fn with_clock(mut self, clock: impl Clock) -> Self {
         self.clock = Arc::new(clock);
@@ -166,9 +278,9 @@ impl Queue {
         self
     }
 
-    /// Which backend this queue is on: `"postgres"` or `"sqlite"`.
+    /// Which backend this queue is on: `"postgres"` or `"memory"`.
     pub fn backend(&self) -> &'static str {
-        self.store.backend().name()
+        self.inner.backend.name()
     }
 
     /// The current time, from this queue's clock.
@@ -176,21 +288,79 @@ impl Queue {
         self.clock.now()
     }
 
-    /// Creates the three tables if they are not there.
-    ///
-    /// Safe to call on every boot. See [`Queue::schema_sql`] for the version an
-    /// application keeps in `migrations/` instead.
-    pub async fn migrate(&self) -> Result<()> {
-        self.store.migrate().await
+    /// One cheap read, to prove the store answers. A readiness check calls
+    /// it.
+    pub async fn ping(&self) -> Result<()> {
+        self.inner.inspect.stats().await?;
+        Ok(())
     }
 
-    /// The DDL this queue would run, as statements.
+    /// Creates the tables if they are not there, and moves the rows of the
+    /// first queue's tables into the engine's.
+    ///
+    /// Safe to call on every boot, from several processes at once. See
+    /// [`Queue::schema_sql`] for the statements an application keeps in
+    /// `migrations/` instead. The memory backend has nothing to create.
+    pub async fn migrate(&self) -> Result<()> {
+        match &self.inner.store {
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pool) => {
+                brocanth_queue_postgres::migrate(pool).await?;
+                self.inner.schedules.migrate().await?;
+                crate::legacy::move_rows(pool).await?;
+                Ok(())
+            }
+            #[cfg(feature = "memory")]
+            Store::Memory => Ok(()),
+        }
+    }
+
+    /// The DDL [`Queue::migrate`] runs, as statements.
     ///
     /// For an application whose rule is that the schema lives in files a human
     /// reviewed — which is §4.3 of the plan, and the right rule — paste these
-    /// into a migration and never call [`Queue::migrate`].
-    pub fn schema_sql(&self) -> &'static [&'static str] {
-        schema(self.store.backend().dialect())
+    /// into a migration and never call [`Queue::migrate`]. The engine's
+    /// archive needs a partition per day: a worker creates them as it
+    /// sweeps.
+    pub fn schema_sql(&self) -> Vec<&'static str> {
+        match &self.inner.store {
+            #[cfg(feature = "postgres")]
+            Store::Postgres(_) => brocanth_queue_postgres::SCHEMA
+                .split(";\n")
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.lines().all(|l| l.trim_start().starts_with("--")))
+                .chain(std::iter::once(crate::schedule::SCHEMA))
+                .collect(),
+            #[cfg(feature = "memory")]
+            Store::Memory => Vec::new(),
+        }
+    }
+
+    /// Makes this queue the one [`Queue::installed`] answers. The first
+    /// call wins; a later one does nothing.
+    ///
+    /// For a generated admin, which mounts its panels before any plugin has
+    /// opened a queue: `JobsPanel::installed()` asks here when it renders.
+    /// A process builds one application, so "the first" is "the one". A
+    /// test that builds several hands the panel its queue instead.
+    pub fn install(&self) {
+        let _ = INSTALLED.set(self.clone());
+    }
+
+    /// The queue [`Queue::install`] recorded, if one did.
+    pub fn installed() -> Option<Queue> {
+        INSTALLED.get().cloned()
+    }
+
+    /// The engine's backend, for a worker or for a test that drives the
+    /// engine directly.
+    pub fn engine(&self) -> &Arc<dyn DynBackend> {
+        &self.inner.backend
+    }
+
+    /// The engine's read side, which the admin panel renders.
+    pub fn reader(&self) -> &Arc<dyn DynInspect> {
+        &self.inner.inspect
     }
 
     // -- enqueue ------------------------------------------------------------
@@ -199,7 +369,8 @@ impl Queue {
     ///
     /// Returns a builder that is also a future, so the simple case is
     /// `queue.enqueue(job).await?` and the elaborate one chains `.at()`,
-    /// `.in_()`, `.queue()`, `.priority()` or `.unique()` first.
+    /// `.in_()`, `.queue()` or `.unique()` first, or ends in
+    /// `.in_tx(&mut tx)` to commit the job with the caller's data.
     ///
     /// # The payload is the job
     ///
@@ -241,7 +412,6 @@ impl Queue {
             queue: self,
             job,
             override_queue: None,
-            override_priority: None,
             override_unique: None,
             run_at: None,
         }
@@ -252,104 +422,88 @@ impl Queue {
     /// Counts by state, per queue and in total, plus the age of the oldest
     /// runnable job.
     pub async fn stats(&self) -> Result<Stats> {
-        let now = to_millis(self.clock.now());
-        self.store.stats(now).await
+        let total = self.inner.inspect.stats().await?;
+        let depths = self.inner.inspect.depths().await?;
+        Ok(Stats {
+            ready: total.ready,
+            retrying: total.retrying,
+            scheduled: total.scheduled,
+            running: total.running,
+            dead: total.dead,
+            oldest_ready_age: total.oldest_ready,
+            queues: depths
+                .into_iter()
+                .map(|d| QueueDepth {
+                    queue: d.queue,
+                    ready: d.ready,
+                    retrying: d.retrying,
+                    scheduled: d.scheduled,
+                    running: d.running,
+                    oldest_ready_age: d.oldest_ready,
+                })
+                .collect(),
+        })
     }
 
-    /// One job's state, attempt count and `run_at`. `None` once it has
-    /// finished and its row is gone.
-    pub async fn inspect(&self, id: JobId) -> Result<Option<JobState>> {
-        Ok(self
-            .store
-            .job_state(id)
-            .await?
-            .map(|(state, attempts, run_at)| JobState {
-                state,
-                attempts: attempts.max(0) as u32,
-                run_at: from_millis(run_at),
-            }))
+    /// One job's state, attempt count and next run. `None` once it has
+    /// finished and is gone.
+    pub async fn inspect(&self, id: &JobId) -> Result<Option<JobState>> {
+        let Some(row) = self.inner.inspect.job(id).await? else {
+            return Ok(None);
+        };
+        let running = row.claimed_by.is_some() && row.available_at > SystemTime::now();
+        Ok(Some(JobState {
+            state: if running { "running" } else { "pending" }.to_string(),
+            attempts: row.attempt,
+            run_at: row.available_at.into(),
+        }))
     }
 
-    // -- the dead letter ----------------------------------------------------
+    /// One waiting or running job, whole.
+    pub async fn job(&self, id: &JobId) -> Result<Option<JobRow>> {
+        Ok(self.inner.inspect.job(id).await?)
+    }
 
-    /// The most recent dead jobs, newest first.
-    pub async fn dead_jobs(&self, limit: u32, offset: u32) -> Result<Vec<DeadJob>> {
-        self.store
-            .dead_jobs(i64::from(limit), i64::from(offset))
-            .await
+    /// Jobs that could run right now, oldest first.
+    pub async fn ready(&self, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
+        self.list(View::Ready, limit, offset).await
+    }
+
+    /// What every worker is holding right now, oldest claim first.
+    pub async fn busy(&self, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
+        self.list(View::Running, limit, offset).await
     }
 
     /// Jobs that ran, failed, and are waiting for their backoff to pass.
     ///
     /// Separate from [`Queue::scheduled`] by `attempts`, and that is the
-    /// only thing separating them. A job waiting for its first run has
-    /// none; a job waiting after a failure has some. Sidekiq keeps two
-    /// sorted sets to tell those apart, because a Redis set is the index
-    /// and a second kind of waiting needs a second set. Here it is a
-    /// column, and the two screens are one query with one predicate
-    /// changed.
-    pub async fn retries(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
-        let now = to_millis(self.clock.now());
-        self.store
-            .retries(now, i64::from(limit), i64::from(offset))
-            .await
+    /// only thing separating them: a job waiting for its first run has
+    /// none, a job waiting after a failure has some.
+    pub async fn retries(&self, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
+        self.list(View::Retrying, limit, offset).await
     }
 
     /// Jobs that have never run and are waiting for their time.
-    pub async fn scheduled(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
-        let now = to_millis(self.clock.now());
-        self.store
-            .scheduled(now, i64::from(limit), i64::from(offset))
-            .await
+    pub async fn scheduled(&self, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
+        self.list(View::Scheduled, limit, offset).await
     }
 
-    /// What every worker is holding right now, oldest claim first.
-    ///
-    /// A worker holding nothing does not appear, which is right: there is
-    /// nothing to show about it and nothing to do to it. `heartbeat_at`
-    /// against [`WorkerConfig::stale_after`](crate::WorkerConfig) is how a
-    /// screen tells a busy worker from a dead one whose jobs have not been
-    /// reclaimed yet.
-    pub async fn busy(&self, limit: u32, offset: u32) -> Result<Vec<RunningJob>> {
-        self.store.busy(i64::from(limit), i64::from(offset)).await
+    async fn list(&self, view: View, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
+        let page = Page {
+            limit: limit.min(Page::MAX_LIMIT),
+            offset: u64::from(offset),
+        };
+        Ok(self.inner.inspect.list(view, page).await?)
     }
 
-    /// Jobs that could run right now, oldest first.
-    ///
-    /// The count was always on the dashboard and the list was not. A ready
-    /// job that stays ready is the one number that separates a busy queue
-    /// from a stopped one, and this is how you find out which jobs they
-    /// are.
-    pub async fn ready(&self, limit: u32, offset: u32) -> Result<Vec<WaitingJob>> {
-        let now = to_millis(self.clock.now());
-        self.store
-            .ready(now, i64::from(limit), i64::from(offset))
-            .await
-    }
-
-    /// One waiting job, whole.
-    ///
-    /// [`job_state`](Queue::job_state) answers three columns, which is
-    /// enough for a test and not enough for a screen.
-    pub async fn waiting_job(&self, id: JobId) -> Result<Option<WaitingJob>> {
-        self.store.one_waiting(id.0).await
-    }
-
-    /// One running job, whole.
-    pub async fn running_job(&self, id: JobId) -> Result<Option<RunningJob>> {
-        self.store.one_running(id.0).await
-    }
-
-    /// Makes a waiting job runnable now, whatever its `run_at` said.
+    /// Makes a waiting job runnable now, whatever its next run said.
     ///
     /// The operator's override: a retry whose backoff is an hour away, or a
     /// job scheduled for tonight that should go out immediately. `false`
-    /// means the job is not waiting -- it is already running, or gone.
-    ///
-    /// A worker is told, so "now" means now rather than at the next tick.
-    pub async fn run_now(&self, id: JobId) -> Result<bool> {
-        let now = to_millis(self.clock.now());
-        self.store.run_now(id.0, now).await
+    /// means the job is not waiting: a worker holds it, or it is gone. The
+    /// attempts it spent stay spent.
+    pub async fn run_now(&self, id: &JobId) -> Result<bool> {
+        Ok(self.inner.inspect.run_now(id).await?)
     }
 
     /// Throws a waiting job away without running it.
@@ -358,13 +512,24 @@ impl Queue {
     /// ran out of attempts, and a deliberate deletion is a different event;
     /// mixing them makes the record of failure useless. `false` means the
     /// job is not waiting.
-    pub async fn discard(&self, id: JobId) -> Result<bool> {
-        self.store.discard(id.0).await
+    pub async fn discard(&self, id: &JobId) -> Result<bool> {
+        Ok(self.inner.inspect.discard(id).await?)
+    }
+
+    // -- the dead letter ----------------------------------------------------
+
+    /// The most recent dead jobs, newest first.
+    pub async fn dead_jobs(&self, limit: u32, offset: u32) -> Result<Vec<DeadRow>> {
+        let page = Page {
+            limit: limit.min(Page::MAX_LIMIT),
+            offset: u64::from(offset),
+        };
+        Ok(self.inner.inspect.dead(page).await?)
     }
 
     /// One dead job by its dead-letter id.
-    pub async fn dead_job(&self, dead_id: i64) -> Result<Option<DeadJob>> {
-        self.store.dead_job(dead_id).await
+    pub async fn dead_job(&self, dead_id: &DeadId) -> Result<Option<DeadRow>> {
+        Ok(self.inner.inspect.dead_one(dead_id).await?)
     }
 
     /// Puts a dead job back on its queue with its attempt count reset.
@@ -372,41 +537,13 @@ impl Queue {
     /// `Ok(None)` means either that the dead row is gone, or that a live job
     /// already holds its unique key — in which case the dead row is left where
     /// it is rather than being deleted without being replayed.
-    pub async fn requeue_dead(&self, dead_id: i64) -> Result<Option<JobId>> {
-        let now = to_millis(self.clock.now());
-        self.store.requeue_dead(dead_id, now).await
+    pub async fn requeue_dead(&self, dead_id: &DeadId) -> Result<Option<JobId>> {
+        Ok(self.inner.inspect.requeue(dead_id).await?)
     }
 
     /// Deletes a dead job for good.
-    pub async fn discard_dead(&self, dead_id: i64) -> Result<bool> {
-        Ok(self.store.discard_dead(dead_id).await? > 0)
-    }
-
-    // -- maintenance --------------------------------------------------------
-
-    /// Puts back every running job whose worker stopped heartbeating longer
-    /// ago than `stale_after`.
-    ///
-    /// A [`Worker`](crate::Worker) does this on a timer. It is public because a
-    /// CLI wants it, a test wants it, and an operator who has just lost a
-    /// machine wants it now rather than on the next tick.
-    pub async fn reclaim_orphans(&self, stale_after: Duration) -> Result<Reclaimed> {
-        let now = self.clock.now();
-        let stale_before = to_millis(now) - stale_after.as_millis() as i64;
-        let (requeued, dead_lettered) = self
-            .store
-            .reclaim_orphans(to_millis(now), stale_before)
-            .await?;
-        if requeued > 0 || dead_lettered > 0 {
-            self.events.handle(JobEvent::Reclaimed {
-                requeued,
-                dead_lettered,
-            });
-        }
-        Ok(Reclaimed {
-            requeued,
-            dead_lettered,
-        })
+    pub async fn discard_dead(&self, dead_id: &DeadId) -> Result<bool> {
+        Ok(self.inner.inspect.forget(dead_id).await?)
     }
 
     // -- recurring ----------------------------------------------------------
@@ -452,20 +589,20 @@ impl Queue {
 
     /// Removes a schedule. Jobs it already enqueued are untouched.
     pub async fn remove_recurring(&self, name: &str) -> Result<bool> {
-        Ok(self.store.remove_schedule(name).await? > 0)
+        Ok(self.inner.schedules.remove(name).await? > 0)
     }
 
     /// Enqueues whatever the recurring schedules owe, and advances them.
     ///
     /// A [`Worker`](crate::Worker) calls this on its maintenance tick. Running
     /// it from two workers at once is safe: every occurrence is enqueued with
-    /// the unique key `"<schedule>@<occurrence epoch millis>"`, so the second
-    /// worker's insert folds into the first one's row instead of producing a
-    /// second job.
+    /// the unique key `"<schedule>@<occurrence epoch millis>"`, held for a
+    /// day, and only one worker advances the schedule. See
+    /// `schedule.rs` for the argument.
     pub async fn tick_schedules(&self) -> Result<u32> {
         let now = self.clock.now();
         let now_ms = to_millis(now);
-        let due = self.store.due_schedules(now_ms).await?;
+        let due = self.inner.schedules.due(now_ms).await?;
         let mut fired = 0;
 
         for row in due {
@@ -517,21 +654,21 @@ impl Queue {
                 }
             }
 
+            // Enqueue first, then advance. A process that dies between the
+            // two leaves the schedule due, and the next tick enqueues the
+            // same occurrence again, which its key folds into the first.
             let fired_at = match to_fire {
                 Some(occurrence) => {
                     let new = NewJob {
+                        kind: row.job_name.clone(),
                         queue: row.queue.clone(),
-                        // The schedule row owns the name; the registry
-                        // resolves it on the worker that runs it.
-                        job_name: row.job_name.clone(),
-                        payload: row.payload.clone(),
-                        priority: row.priority,
-                        max_attempts: row.max_attempts,
-                        run_at: now_ms,
+                        payload: row.payload.clone().into_bytes(),
+                        run_at: None,
+                        max_attempts: row.max_attempts.max(1) as u32,
                         unique_key: Some(format!("{}@{}", row.name, occurrence)),
+                        uniqueness: UniquenessKind::Window(OCCURRENCE_KEY_HELD.as_millis() as u64),
                     };
-                    let result = self.store.enqueue(&new, now_ms).await?;
-                    if !result.is_duplicate() {
+                    if let Pushed::Enqueued(_) = self.push(new).await? {
                         fired += 1;
                         self.events.handle(JobEvent::ScheduleFired {
                             schedule: &row.name,
@@ -544,32 +681,36 @@ impl Queue {
                 None => None,
             };
 
-            self.store
-                .advance_schedule(&row.name, occurrence_ms, fired_at, missed)
+            self.inner
+                .schedules
+                .advance(&row.name, row.next_run_at, occurrence_ms, fired_at, missed)
                 .await?;
         }
 
         Ok(fired)
     }
 
-    // -- internals the worker uses ------------------------------------------
+    // -- internals ----------------------------------------------------------
 
-    /// Reports a failure in the queue's own machinery through the event sink.
-    pub(crate) fn events_for_error(&self, during: &'static str, error: &Error) {
-        self.events
-            .handle(JobEvent::InternalError { during, error });
+    /// One job into the backend.
+    async fn push(&self, new: NewJob) -> Result<Pushed> {
+        let mut out = self.inner.backend.push(vec![new]).await?;
+        Ok(out.pop().unwrap_or(Pushed::Duplicate))
     }
 
     pub(crate) fn event_sink(&self) -> Arc<dyn JobEvents> {
         Arc::clone(&self.events)
     }
 
-    pub(crate) fn clock_handle(&self) -> Arc<dyn Clock> {
-        Arc::clone(&self.clock)
-    }
-
-    pub(crate) fn store_handle(&self) -> Arc<Store> {
-        Arc::clone(&self.store)
+    /// The Postgres pool this queue runs on, to open the transaction that
+    /// [`Enqueue::in_tx`] joins. `None` on the memory backend.
+    #[cfg(feature = "postgres")]
+    pub fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        match &self.inner.store {
+            Store::Postgres(pool) => Some(pool),
+            #[cfg(feature = "memory")]
+            Store::Memory => None,
+        }
     }
 }
 
@@ -584,15 +725,6 @@ impl std::fmt::Debug for Queue {
 /// So a [`Queue`] can go straight into the request context.
 impl brocanth::plugin_context::ContextItem for Queue {}
 
-/// What [`Queue::reclaim_orphans`] did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Reclaimed {
-    /// Jobs put back on their queue.
-    pub requeued: u64,
-    /// Jobs that had no attempts left and went to the dead letter instead.
-    pub dead_lettered: u64,
-}
-
 /// One job's position, for an admin screen or a test.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobState {
@@ -600,23 +732,94 @@ pub struct JobState {
     pub state: String,
     /// Attempts started so far.
     pub attempts: u32,
-    /// When it next becomes runnable.
+    /// When it next becomes runnable. For a running job, when its lease
+    /// runs out.
     pub run_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// How deep one queue is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueueDepth {
+    /// The queue's name.
+    pub queue: String,
+    /// Jobs that could run now.
+    pub ready: u64,
+    /// Jobs waiting out a retry backoff.
+    pub retrying: u64,
+    /// Jobs waiting for their first run.
+    pub scheduled: u64,
+    /// Jobs a worker holds.
+    pub running: u64,
+    /// How long the oldest ready job has waited.
+    pub oldest_ready_age: Option<Duration>,
+}
+
+/// The whole queue in numbers.
+///
+/// `oldest_ready_age` is the one that matters: a queue whose oldest runnable
+/// job keeps getting older is a queue whose workers are not keeping up, and no
+/// count of anything tells you that.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Jobs that could run now.
+    pub ready: u64,
+    /// Jobs waiting out a retry backoff.
+    pub retrying: u64,
+    /// Jobs waiting for their first run.
+    pub scheduled: u64,
+    /// Jobs a worker holds.
+    pub running: u64,
+    /// Jobs in the dead letter.
+    pub dead: u64,
+    /// How long the oldest ready job has waited.
+    pub oldest_ready_age: Option<Duration>,
+    /// The same counts, per queue.
+    pub queues: Vec<QueueDepth>,
+}
+
+impl Stats {
+    /// Every job that exists and is not dead.
+    pub fn total(&self) -> u64 {
+        self.ready + self.retrying + self.scheduled + self.running
+    }
+}
+
+/// What an enqueue did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Enqueued {
+    /// A new job, with its id.
+    Inserted(JobId),
+    /// A live job already held the unique key, so nothing was written.
+    Duplicate,
+}
+
+impl Enqueued {
+    /// The new job's id. `None` for a duplicate.
+    pub fn id(&self) -> Option<&JobId> {
+        match self {
+            Enqueued::Inserted(id) => Some(id),
+            Enqueued::Duplicate => None,
+        }
+    }
+
+    /// Whether the enqueue folded into a job that was already there.
+    pub fn is_duplicate(&self) -> bool {
+        matches!(self, Enqueued::Duplicate)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The enqueue builder
 // ---------------------------------------------------------------------------
 
-/// A job on its way into the table. Awaiting it is what sends it.
+/// A job on its way into the queue. Awaiting it is what sends it.
 #[must_use = "an enqueue does nothing until it is awaited"]
 pub struct Enqueue<'a, J: Job> {
     queue: &'a Queue,
     job: J,
     override_queue: Option<String>,
-    override_priority: Option<i32>,
     override_unique: Option<Option<String>>,
-    run_at: Option<chrono::DateTime<chrono::Utc>>,
+    run_at: Option<SystemTime>,
 }
 
 impl<'a, J: Job> Enqueue<'a, J> {
@@ -626,10 +829,9 @@ impl<'a, J: Job> Enqueue<'a, J> {
         self
     }
 
-    /// Runs this one at a different priority than [`Job::PRIORITY`]. Lower
-    /// runs first.
-    pub fn priority(mut self, priority: i32) -> Self {
-        self.override_priority = Some(priority);
+    /// Kept so code written for the first queue still compiles. **It has no
+    /// effect**: see [`Job::PRIORITY`].
+    pub fn priority(self, _priority: i32) -> Self {
         self
     }
 
@@ -647,58 +849,125 @@ impl<'a, J: Job> Enqueue<'a, J> {
 
     /// Does not run before `at`.
     pub fn at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
-        self.run_at = Some(at);
+        self.run_at = Some(at.into());
         self
     }
 
     /// Does not run for another `delay`.
     pub fn in_(mut self, delay: Duration) -> Self {
-        let now = self.queue.clock.now();
-        self.run_at = Some(
-            now + chrono::Duration::from_std(delay)
-                .unwrap_or_else(|_| chrono::Duration::days(3_650)),
-        );
+        self.run_at = Some(SystemTime::now() + delay);
         self
     }
 
-    async fn send(self) -> Result<Enqueued> {
-        let now = self.queue.clock.now();
-        let payload = serde_json::to_string(&self.job).map_err(|source| Error::Encode {
+    fn build(&self) -> Result<NewJob> {
+        let payload = serde_json::to_vec(&self.job).map_err(|source| Error::Encode {
             job: J::NAME,
             source,
         })?;
-        let run_at = self.run_at.unwrap_or(now);
-        let unique = match self.override_unique {
-            Some(key) => key,
+        let unique_key = match &self.override_unique {
+            Some(key) => key.clone(),
             None => self.job.unique_key(),
         };
-        let queue_name = self.override_queue.unwrap_or_else(|| J::QUEUE.to_string());
-
-        let new = NewJob {
-            queue: queue_name,
-            job_name: J::NAME.to_string(),
-            payload,
-            priority: i64::from(self.override_priority.unwrap_or(J::PRIORITY)),
-            max_attempts: i64::from(J::MAX_ATTEMPTS),
-            run_at: to_millis(run_at),
-            unique_key: unique,
-        };
-
-        let result = self.queue.store.enqueue(&new, to_millis(now)).await?;
-        match result {
-            Enqueued::Inserted(id) => self.queue.events.handle(JobEvent::Enqueued {
-                id,
-                name: J::NAME,
-                queue: &new.queue,
-                scheduled: run_at > now,
-            }),
-            Enqueued::Duplicate(id) => self.queue.events.handle(JobEvent::Deduplicated {
-                id,
-                name: J::NAME,
-                unique_key: new.unique_key.as_deref().unwrap_or(""),
-            }),
+        let caps = self.queue.inner.backend.capabilities();
+        if unique_key.is_some() && !caps.satisfies(brocanth_queue::Uniqueness::UntilSuccess) {
+            return Err(Error::Enqueue(
+                brocanth_queue::EnqueueError::UniquenessUnsupported {
+                    kind: J::NAME,
+                    want: brocanth_queue::Uniqueness::UntilSuccess,
+                    have: caps.uniqueness,
+                },
+            ));
         }
-        Ok(result)
+        Ok(NewJob {
+            kind: J::NAME.to_string(),
+            queue: self
+                .override_queue
+                .clone()
+                .unwrap_or_else(|| J::QUEUE.to_string()),
+            payload,
+            run_at: self.run_at,
+            max_attempts: J::MAX_ATTEMPTS,
+            uniqueness: if unique_key.is_some() {
+                UniquenessKind::UntilSuccess
+            } else {
+                UniquenessKind::None
+            },
+            unique_key,
+        })
+    }
+
+    async fn send(self) -> Result<Enqueued> {
+        let new = self.build()?;
+        let scheduled = new.run_at.is_some_and(|at| at > SystemTime::now());
+        let queue_name = new.queue.clone();
+        let unique_key = new.unique_key.clone();
+        let events = &self.queue.events;
+        match self.queue.push(new).await? {
+            Pushed::Enqueued(id) => {
+                events.handle(JobEvent::Enqueued {
+                    id: id.clone(),
+                    name: J::NAME,
+                    queue: &queue_name,
+                    scheduled,
+                });
+                Ok(Enqueued::Inserted(id))
+            }
+            Pushed::Duplicate => {
+                events.handle(JobEvent::Deduplicated {
+                    name: J::NAME,
+                    unique_key: unique_key.as_deref().unwrap_or(""),
+                });
+                Ok(Enqueued::Duplicate)
+            }
+        }
+    }
+
+    /// Enqueues inside the caller's transaction, so the job commits with the
+    /// data it refers to, or not at all.
+    ///
+    /// The job goes to the engine's outbox, `queue_outbox`, in the same
+    /// transaction. After the commit, the relay that every
+    /// [`Worker`](crate::Worker) runs moves it to the queue, within a few
+    /// hundred milliseconds. A rollback takes the job with it.
+    ///
+    /// ```no_run
+    /// # use brocanth_jobs::{Job, JobContext, Queue};
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Serialize, Deserialize)] struct ChargeCard { order: i64 }
+    /// # impl Job for ChargeCard {
+    /// #     const NAME: &'static str = "charge_card";
+    /// #     type Error = std::io::Error;
+    /// #     async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> { Ok(()) }
+    /// # }
+    /// # async fn example(queue: &Queue, pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut tx = pool.begin().await?;
+    /// // ... insert the order with `&mut *tx` ...
+    /// queue.enqueue(ChargeCard { order: 7 }).in_tx(&mut tx).await?;
+    /// tx.commit().await?; // the order and the job commit together
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The outbox refuses a write once it holds 100,000 undelivered rows,
+    /// so an outage of the relay fails the request that would grow it
+    /// rather than filling the disk. A queue on the memory backend has no
+    /// transaction to join, and refuses.
+    #[cfg(feature = "postgres")]
+    pub async fn in_tx(self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+        use brocanth_queue::TxEnqueue;
+        #[cfg(feature = "memory")]
+        if let Store::Memory = self.queue.inner.store {
+            return Err(Error::Backend(
+                "the memory backend has no transaction to enqueue in\n\
+                 help: use `.await` without `.in_tx`, or a Postgres queue"
+                    .to_string(),
+            ));
+        }
+        let new = self.build()?;
+        brocanth_queue_postgres::Tx::new(tx)
+            .enqueue_in_tx(brocanth_queue::Lane::Bulk, new)
+            .await?;
+        Ok(())
     }
 }
 
@@ -716,7 +985,7 @@ impl<'a, J: Job> std::future::IntoFuture for Enqueue<'a, J> {
 // The recurring builder
 // ---------------------------------------------------------------------------
 
-/// A recurring schedule on its way into the table.
+/// A recurring schedule on its way into the store.
 #[must_use = "a schedule does nothing until `install` is awaited"]
 pub struct Recurring<'a, J: Job> {
     queue: &'a Queue,
@@ -753,7 +1022,8 @@ impl<J: Job> Recurring<'_, J> {
         self
     }
 
-    /// Overrides [`Job::PRIORITY`] for the jobs this schedule enqueues.
+    /// Kept so code written for the first queue still compiles. Stored, and
+    /// **without effect**: see [`Job::PRIORITY`].
     pub fn priority(mut self, priority: i32) -> Self {
         self.override_priority = Some(priority);
         self
@@ -772,80 +1042,20 @@ impl<J: Job> Recurring<'_, J> {
             source,
         })?;
         self.queue
-            .store
-            .upsert_schedule(
-                &self.name,
-                cron.source(),
-                J::NAME,
-                self.override_queue.as_deref().unwrap_or(J::QUEUE),
-                &payload,
-                i64::from(self.override_priority.unwrap_or(J::PRIORITY)),
-                i64::from(J::MAX_ATTEMPTS),
-                to_millis(next),
-                self.misfire.as_str(),
-                self.grace.as_millis() as i64,
-            )
+            .inner
+            .schedules
+            .upsert(ScheduleRow {
+                name: self.name,
+                cron: cron.source().to_string(),
+                job_name: J::NAME.to_string(),
+                queue: self.override_queue.unwrap_or_else(|| J::QUEUE.to_string()),
+                payload,
+                priority: i64::from(self.override_priority.unwrap_or(J::PRIORITY)),
+                max_attempts: i64::from(J::MAX_ATTEMPTS),
+                next_run_at: to_millis(next),
+                misfire: self.misfire.as_str().to_string(),
+                grace_ms: self.grace.as_millis() as i64,
+            })
             .await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Connecting
-// ---------------------------------------------------------------------------
-
-async fn connect_backend(url: &str) -> Result<Backend> {
-    let backend = lazy_backend(url)?;
-    // One connection now, so a wrong URL or password fails here and not on
-    // the first enqueue.
-    match &backend {
-        #[cfg(feature = "postgres")]
-        Backend::Postgres(pool) => drop(pool.acquire().await?),
-        #[cfg(feature = "sqlite")]
-        Backend::Sqlite(pool) => drop(pool.acquire().await?),
-    }
-    Ok(backend)
-}
-
-/// The pool for `url`, with no connection open yet.
-fn lazy_backend(url: &str) -> Result<Backend> {
-    let scheme = url.split(':').next().unwrap_or("");
-    match scheme {
-        #[cfg(feature = "postgres")]
-        "postgres" | "postgresql" => Ok(Backend::Postgres(
-            sqlx::postgres::PgPoolOptions::new().connect_lazy(url)?,
-        )),
-        #[cfg(not(feature = "postgres"))]
-        "postgres" | "postgresql" => Err(Error::Backend(
-            "this build of brocanth-jobs has no Postgres driver; add \
-             `features = [\"postgres\"]` to its dependency in Cargo.toml"
-                .to_string(),
-        )),
-        #[cfg(feature = "sqlite")]
-        "sqlite" => {
-            use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-            use std::str::FromStr;
-            let options = SqliteConnectOptions::from_str(url)?
-                .create_if_missing(true)
-                // WAL lets readers run while the one writer writes, which is
-                // the difference between a usable SQLite queue and a stalled
-                // one. `busy_timeout` is what makes `BEGIN IMMEDIATE` wait for
-                // the write lock rather than failing instantly.
-                .journal_mode(SqliteJournalMode::Wal)
-                .busy_timeout(Duration::from_secs(5))
-                .foreign_keys(true);
-            Ok(Backend::Sqlite(
-                SqlitePoolOptions::new().connect_lazy_with(options),
-            ))
-        }
-        #[cfg(not(feature = "sqlite"))]
-        "sqlite" => Err(Error::Backend(
-            "this build of brocanth-jobs has no SQLite driver; add \
-             `features = [\"sqlite\"]` to its dependency in Cargo.toml"
-                .to_string(),
-        )),
-        other => Err(Error::Backend(format!(
-            "`{other}` is not a database this queue knows; the URL must start \
-             with `postgres://` or `sqlite://`"
-        ))),
     }
 }

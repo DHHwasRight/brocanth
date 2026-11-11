@@ -419,6 +419,113 @@ The memory crate now has `MemoryOutbox`, so the outbox suite in
 
 ---
 
+## Part 6 — One job system
+
+Max decided on 2026-11-09 (`docs/audit/backends-jobs-cache.md`,
+"Decisions" 1, 2, 4, 5): `brocanth-queue` is the engine, and
+`brocanth-jobs` becomes a thin layer over it that adds cron and the admin
+panel. This part is the plan, written before the code.
+
+### 6.1 What moves where
+
+| Piece | Before | After |
+| --- | --- | --- |
+| Claim, lease, heartbeat, settle, retry, dead letter | `brocanth-jobs` `store.rs`, `worker.rs` | the queue `Backend` and `Worker` |
+| Postgres tables | `brocanth_jobs`, `brocanth_dead_jobs` | `queue_bulk`, `queue_scheduled`, `queue_dead` (`brocanth-queue-postgres`) |
+| Memory store | none | `brocanth-queue-memory`, for tests and development only |
+| LISTEN/NOTIFY | `brocanth-jobs` `listen.rs` | `brocanth_queue_postgres::wakeups`, passed to `Worker::wake_on` |
+| `Inspect` | implemented by jobs over its own tables | the backend's own `Inspect`; `Queue` delegates to it |
+| Transactional enqueue, outbox | queue only | `Enqueue::in_tx` in jobs writes to `queue_outbox`; the jobs worker runs the relay |
+| Cron, misfire, schedule table | jobs | jobs (unchanged table `brocanth_job_schedules`; a memory copy for the memory backend) |
+| Events (`JobEvents`) | jobs worker | jobs, fed by the queue `Observer` |
+| Admin panel | jobs, over `DynInspect` | jobs, unchanged |
+
+The queue core gains what the layer needs, each one small and additive:
+
+- `WorkerConfig::extra_queues`: one worker claims from several queues, as
+  a jobs worker always did.
+- `Observer::on_start` and `Observer::on_settle`: the job context and the
+  outcome, so jobs can emit `Started`, `Completed`, `Retrying` and
+  `DeadLettered` with an id.
+- `Worker::drain`: a stop signal that carries the grace and returns a
+  report of what finished and what went back. A jobs caller chooses the
+  grace when it stops, not when it starts.
+- `Registry::try_add` with `Entry::custom`: a registry entry with its own
+  runner. Jobs adds its timeout, its panic backtrace and its decoding
+  error there, without a second `Job` trait in the queue.
+- `FailureKind::TimedOut`.
+
+### 6.2 What the public jobs API keeps
+
+Kept, same spelling: `Job` (`NAME`, `QUEUE`, `MAX_ATTEMPTS`, `BACKOFF`,
+`unique_key`, `perform`), `Queue::{connect, connect_lazy, from_pool,
+migrate, enqueue, recurring, remove_recurring, tick_schedules, stats,
+dead_jobs, requeue_dead, run_now, discard}`, the `Enqueue` builder
+(`queue`, `unique`, `not_unique`, `at`, `in_`), `Worker`, `WorkerBuilder`,
+`WorkerHandle` (`shutdown`, `stop`, `stop_when`, `finished`), `JobRegistry`,
+`JobsPlugin`, `JobsConfig`, `JobEvent`, `JobEvents`, `Misfire`, `Cron`,
+`Stats`, `QueueDepth`, `JobsPanel`.
+
+Changed, with the reason:
+
+- `JobId` is the queue's `JobId`, a string. A delayed Postgres job is
+  `s17`, and an SQS id is not a number.
+- The read side returns the queue's rows: `JobRow` for a waiting or a
+  running job, `DeadRow` for a dead one, `DeadId` for its id. The jobs
+  copies (`WaitingJob`, `RunningJob`, `DeadJob`) were the same columns in
+  milliseconds.
+- `Job::PRIORITY` and `Enqueue::priority` stay and do nothing. The queue
+  contract has no numeric priority on purpose (`Job::QUEUE` in the queue
+  crate says why). A queue per urgency is the replacement.
+- `reclaim_orphans` is gone. A lease that runs out makes the job claimable
+  again by itself; nothing has to reclaim it.
+- `Backend` is an enum of the stores jobs runs on: `Postgres(PgPool)` and,
+  behind `memory`, `Memory`.
+- New: `Queue::memory()`, `Enqueue::in_tx(&mut tx)`, `Queue::ping()`.
+
+### 6.3 Existing tables and data
+
+`Queue::migrate` creates the queue tables, keeps `brocanth_job_schedules`
+as it is, and then moves what the old tables hold, in one transaction:
+
+- every row of `brocanth_jobs` goes to `queue_bulk` with its kind, queue,
+  payload, attempts, unique key and `run_at`. A running row becomes ready
+  at once: its worker was the old code, which no longer runs.
+- every row of `brocanth_dead_jobs` goes to `queue_dead`, with the failure
+  kind, the message and the backtrace in `failure`.
+
+The old tables stay, empty, so a worker of the old version still running
+during a rolling deploy does not fail; the next `migrate` moves what it
+wrote. Drop them by hand when no old worker is left. A unique key that
+`queue_bulk` already holds is not moved twice.
+
+### 6.4 The `sqlite` feature
+
+It goes. Decision 4 kept it as a library option, but under decision 2 it
+would need a `brocanth-queue-sqlite` adapter that passes the conformance
+suite, and keeping the old SQLite store would be the second job system
+that decision 2 removes. No generated project can select SQLite today, and
+`db` has no dialect. The adapter is listed in 6.6 and comes with the `db`
+dialect choice.
+
+### 6.5 The generated project
+
+- `jobs` keeps Postgres as the default. With `db`, it builds the queue on
+  the `db` pool (`Queue::from_pool`) and has no `url` setting.
+- `jobs-memory` is a child module, off by default: the queue lives in the
+  process. `brocanth check --deploy` reports it as an error
+  (`deploy/development-only`).
+- With `admin`, the admin mounts `JobsPanel` at `/admin/jobs`.
+
+### 6.6 What this part does not do
+
+- `brocanth-queue-sqlite` (6.4).
+- The outbox dead letter screen in `JobsPanel` (Part 5).
+- A cache sweep scheduled by jobs: it is the cache agent's side, and it
+  only needs `Queue::recurring`.
+
+---
+
 ## Verified
 
 ```

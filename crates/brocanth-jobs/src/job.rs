@@ -71,10 +71,14 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// subscribes to a list of them.
     const QUEUE: &'static str = "default";
 
-    /// Run order within a queue. **Lower runs first**, like `nice`.
+    /// Kept so code written for the first queue still compiles. **It has no
+    /// effect.**
     ///
-    /// Ties break by `run_at`, then by insertion order, so a priority of `0`
-    /// everywhere gives you plain FIFO.
+    /// The engine under this crate is `brocanth-queue`, whose contract has
+    /// no numeric priority on purpose: Postgres can order by one, SQS and
+    /// most brokers cannot, and an API that offers it cannot move. Put
+    /// urgent work on its own [`Job::QUEUE`] and give that queue its own
+    /// worker or a larger share of one.
     const PRIORITY: i32 = 0;
 
     /// How many times the job may be *started* before it goes to the dead
@@ -95,7 +99,7 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// An optional key that makes this job unique **while it is queued**.
     ///
     /// Two enqueues with the same key produce one row: the second is reported
-    /// as a duplicate and returns the first one's id. The key is released when
+    /// as a duplicate. The key is released when
     /// the job finishes, so it means "do not queue this twice", not "never run
     /// this twice in the history of the world". For the second guarantee the
     /// application needs its own record of what it has done, written in the
@@ -121,69 +125,62 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     fn perform(&self, cx: &JobContext) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// A job's id. A database primary key, and the handle for everything the queue
-/// can do to one row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JobId(pub i64);
-
-impl fmt::Display for JobId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{}", self.0)
-    }
-}
+/// A job's id, as the backend spells it.
+///
+/// It is the queue's id and a string, because the backends disagree on what
+/// an id is: Postgres has a `bigint`, and a delayed job there is `s17`
+/// until it is promoted; the memory backend has a counter; SQS would have a
+/// message id.
+pub use brocanth_queue::JobId;
 
 /// What a running job knows about itself.
 #[derive(Clone, Debug)]
 pub struct JobContext {
-    pub(crate) id: JobId,
-    pub(crate) queue: String,
-    pub(crate) name: String,
-    pub(crate) attempt: u32,
-    pub(crate) max_attempts: u32,
-    pub(crate) enqueued_at: chrono::DateTime<chrono::Utc>,
-    pub(crate) worker: String,
-    pub(crate) shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) inner: brocanth_queue::JobContext,
 }
 
 impl JobContext {
-    /// The row this job came from.
-    pub fn id(&self) -> JobId {
-        self.id
+    /// A context for a job run outside a worker, as a test of a job's body
+    /// does. It is never asked to stop.
+    pub fn detached(id: JobId, name: &str, queue: &str, attempt: u32, max_attempts: u32) -> Self {
+        Self {
+            inner: brocanth_queue::JobContext::detached(id, name, queue, attempt, max_attempts),
+        }
+    }
+
+    /// The job's id.
+    pub fn id(&self) -> &JobId {
+        self.inner.id()
     }
 
     /// The queue it was claimed from.
     pub fn queue(&self) -> &str {
-        &self.queue
+        self.inner.queue()
     }
 
     /// Its [`Job::NAME`].
     pub fn name(&self) -> &str {
-        &self.name
+        self.inner.kind()
     }
 
     /// Which attempt this is, counting from 1.
     pub fn attempt(&self) -> u32 {
-        self.attempt
+        self.inner.attempt()
     }
 
     /// Its [`Job::MAX_ATTEMPTS`].
     pub fn max_attempts(&self) -> u32 {
-        self.max_attempts
+        self.inner.max_attempts()
     }
 
     /// Whether this is the last attempt before the dead letter.
     pub fn is_last_attempt(&self) -> bool {
-        self.attempt >= self.max_attempts
+        self.inner.is_last_attempt()
     }
 
-    /// When the row was first created.
-    pub fn enqueued_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.enqueued_at
-    }
-
-    /// The id of the worker running it.
+    /// The name of the worker running it.
     pub fn worker(&self) -> &str {
-        &self.worker
+        self.inner.worker()
     }
 
     /// Whether the worker has been asked to stop.
@@ -192,7 +189,7 @@ impl JobContext {
     /// strictly better than being abandoned at the shutdown deadline and run
     /// again from the start by somebody else.
     pub fn is_shutting_down(&self) -> bool {
-        self.shutdown.load(std::sync::atomic::Ordering::Relaxed)
+        self.inner.is_stopping()
     }
 }
 
@@ -212,8 +209,8 @@ pub enum FailureKind {
     /// can read it and decide. This is the case that a queue which simply
     /// retries turns into an infinite loop.
     Undecodable,
-    /// The worker holding the job stopped sending heartbeats and the job was
-    /// reclaimed, but it had no attempts left.
+    /// The worker holding the job stopped renewing its lease, and the job
+    /// had no attempts left when the lease ran out.
     Orphaned,
 }
 

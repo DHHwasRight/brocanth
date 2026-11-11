@@ -14,8 +14,18 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum Error {
     /// The database said no.
+    #[cfg(feature = "postgres")]
     #[error("the jobs database: {0}")]
     Database(#[from] sqlx::Error),
+
+    /// The queue backend refused a call, or could not be reached.
+    #[error("the jobs queue: {0}")]
+    Store(#[from] brocanth_queue::BackendError),
+
+    /// An enqueue the backend cannot take: a payload over its limit, a
+    /// delay past its ceiling, a full outbox.
+    #[error("enqueueing a job: {0}")]
+    Enqueue(#[from] brocanth_queue::EnqueueError),
 
     /// A job value would not serialise into its payload.
     #[error("the payload for job `{job}` will not serialise: {source}")]

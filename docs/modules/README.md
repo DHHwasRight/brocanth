@@ -72,6 +72,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`cache-memory`](cache-memory.md) | the cache in this process's memory, for tests and development; never in production | Enhancer |  |
 | [`cache-redis`](cache-redis.md) | the cache on Redis or Valkey instead of Postgres; one more server to run | Enhancer |  |
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |
+| [`jobs-memory`](jobs-memory.md) | the queue in this process's memory; for development and tests, gone at restart | Enhancer | jobs |
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |

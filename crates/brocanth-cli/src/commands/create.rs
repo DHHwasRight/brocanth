@@ -5459,6 +5459,12 @@ mod tests {
             // The queue, with a config file, which is the shape that opens
             // a pool and starts a worker from a TOML section.
             ("jobs", vec!["config", "jobs"]),
+            // The queue on the `db` pool, with the admin: `[jobs]` has no
+            // `url`, and the admin mounts the jobs tab.
+            ("jobs-db", vec!["config", "db", "jobs", "admin"]),
+            // The queue in memory: no `url`, no `migrate`, and a note in
+            // AGENTS.md that `check --deploy` refuses it.
+            ("jobs-memory", vec!["config", "jobs", "jobs-memory"]),
             // The pool, with a config file: a `[db]` section, a plugin that
             // opens it in `before_start`, and `ctx.db()` on the context.
             ("db", vec!["config", "db"]),

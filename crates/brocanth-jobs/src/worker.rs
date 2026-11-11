@@ -1,82 +1,73 @@
-//! The worker: a pool, a heartbeat, and a shutdown with a deadline.
+//! The worker: this crate's settings over the engine's worker, plus the
+//! recurring schedules.
 //!
 //! # The runtime question, answered
 //!
 //! **Workers run on Tokio, and by default on the same runtime that serves
 //! requests.**
 //!
-//! The research flagged this as the decision that has to come before a job
-//! system rather than after, and the core deliberately contains no async
-//! runtime — `brocanth`'s own test fails the build if one appears in its
-//! dependency tree — so bringing one in is this crate's decision to own.
+//! The core deliberately contains no async runtime — `brocanth`'s own test
+//! fails the build if one appears in its dependency tree — so bringing one in
+//! is this crate's decision to own.
 //!
 //! *Why Tokio.* The workspace already resolves `sqlx` 0.9 through SeaORM, which
-//! is pinned to `runtime-tokio-rustls`. A queue on `smol` or `async-std` in the
-//! same process as a Tokio-flavoured driver means two reactors, two thread
-//! pools and a connection pool whose timers belong to the wrong one. There is
-//! one defensible runtime here and this is it.
+//! is pinned to `runtime-tokio-rustls`. A queue on another runtime in the same
+//! process as a Tokio-flavoured driver means two reactors, two thread pools
+//! and a connection pool whose timers belong to the wrong one.
 //!
 //! *Why the same runtime.* [`Worker::start`] spawns onto
 //! `tokio::runtime::Handle::current()`, which in a server process is the
-//! runtime already running the handlers. The alternative — a second runtime
-//! inside the same process — gives you two thread pools sized independently,
-//! competing for the same cores, with no shared backpressure and no shared
-//! view of how busy the machine is. One runtime, with concurrency limited where
-//! it belongs (`WorkerBuilder::concurrency`), is the simpler and more
-//! controllable arrangement.
+//! runtime already running the handlers. One runtime, with concurrency
+//! limited where it belongs (`WorkerBuilder::concurrency`), is the simpler
+//! and more controllable arrangement.
 //!
-//! *What it costs, stated plainly.*
+//! *What it costs.* A job that blocks the thread stalls request handlers, and
+//! a job that burns CPU competes with request latency. The way out is the one
+//! Rails uses and it is not a runtime: run workers in their own process.
+//! [`Worker::run`] is a plain `async fn`, so a `jobs` binary is a `main`, a
+//! [`Queue`], a [`JobRegistry`] and a call.
 //!
-//! 1. **A job that blocks the thread stalls request handlers.** They share a
-//!    worker pool. Blocking work goes in `tokio::task::spawn_blocking`, and
-//!    this is now a rule the application has to keep rather than a problem the
-//!    framework solved.
-//! 2. **A job that burns CPU competes with request latency.** Tokio is fair,
-//!    not prioritised; a pegged core is a pegged core.
-//! 3. **Tokio arrives in the dependency tree the moment this crate is named in
-//!    `main`.** That is the entire reason jobs are not in the core.
+//! # What the engine does
 //!
-//! *The way out of 1 and 2 is the same one Rails uses and it is not a runtime:*
-//! run workers in their own process. [`Worker::run`] is a plain `async fn`, so
-//! a `jobs` binary is a `main`, a [`Queue`], a [`JobRegistry`] and a call. The
-//! defaults are shaped for the in-process case because that is what a developer
-//! runs on a laptop and it must be the same code that runs in production — the
-//! other half of §4 step 9 — and the separate process is a deployment choice
-//! rather than a different queue.
+//! The claim loop, the lease and its heartbeat, the retry and the dead letter
+//! are `brocanth_queue::Worker`'s. This worker maps its settings onto the
+//! engine's, gives it the registry, and adds three things:
+//!
+//! * the recurring schedules, ticked every `maintenance_interval`;
+//! * on Postgres, a listener, so an enqueue wakes the worker
+//!   (`LISTEN/NOTIFY`), and the outbox relay, so a job enqueued with
+//!   `in_tx` reaches the queue after its transaction commits;
+//! * the [`JobEvent`]s, from the engine's observer.
 //!
 //! # Shutdown
 //!
 //! [`WorkerHandle::shutdown`] (or [`WorkerHandle::stop`], which does not
-//! wait) stops claiming immediately, waits up to a
-//! deadline for the jobs already running, and then gives the rest back:
-//! `state = 'pending'`, runnable now, **and the attempt they had taken is given
-//! back with them**. The worker chose to stop; the job did not fail, and
-//! charging it an attempt every time somebody deploys is how a four-minute job
-//! ends up in the dead letter after a busy afternoon of releases.
+//! wait) stops claiming at once, waits up to a deadline for the jobs already
+//! running, and then gives the rest back **without spending an attempt**. The
+//! worker chose to stop; the job did not fail, and charging it an attempt
+//! every time somebody deploys is how a four-minute job ends up in the dead
+//! letter after a busy afternoon of releases.
 //!
-//! # Heartbeat
+//! # A worker that dies
 //!
-//! A running job's row carries `heartbeat_at`, refreshed on a timer by the
-//! worker holding it. A worker that is killed stops refreshing, and any other
-//! worker's maintenance tick puts its jobs back — see
-//! [`Queue::reclaim_orphans`]. Without this, a job held by a machine that is
-//! never coming back is held forever, which is the quiet way a queue loses
-//! work.
+//! A running job holds a lease of `stale_after`, renewed every
+//! `heartbeat_interval`. A worker that is killed stops renewing, the lease
+//! runs out, and the job is claimable again by any worker. Nothing has to
+//! notice: the lease is the job's visibility, so a job held by a machine that
+//! is never coming back cannot stay held.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
+use brocanth_queue::{Observer, Settle};
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 
-use crate::clock::{to_millis, Clock};
 use crate::error::{Error, Result};
 use crate::events::{JobEvent, JobEvents};
-use crate::job::{FailureKind, JobContext, JobFailure, JobId};
+use crate::job::JobFailure;
 use crate::queue::Queue;
-use crate::registry::JobRegistry;
-use crate::store::Store;
+use crate::registry::{JobRegistry, RunEnv};
 
 /// How a worker is set up.
 #[derive(Clone, Debug)]
@@ -86,19 +77,13 @@ pub struct WorkerConfig {
     /// How many jobs may run at once on this worker.
     pub concurrency: usize,
     /// How long to wait after finding nothing before looking again, on a
-    /// store that cannot announce new work.
-    ///
-    /// SQLite, in other words. On Postgres a worker is woken by the enqueue
-    /// itself and this is not used; see [`safety_poll`](Self::safety_poll)
-    /// and the [`listen`](crate::listen) module.
+    /// store that cannot announce new work, or with `listen` off.
     pub poll_interval: Duration,
     /// The longest a listening worker sleeps before looking anyway.
     ///
-    /// A backstop and not the mechanism. A worker on Postgres sleeps until
-    /// the soonest pending job is due, and a notification only shortens
-    /// that; this caps the sleep so a notification nobody heard -- sent
-    /// while the listener was reconnecting -- costs seconds rather than
-    /// waiting for the next enqueue.
+    /// A backstop and not the mechanism. A notification only shortens the
+    /// sleep; this caps it, so a notification nobody heard — sent while the
+    /// listener was reconnecting — costs seconds rather than a job.
     pub safety_poll: Duration,
     /// Whether to listen for new work instead of asking for it.
     ///
@@ -107,26 +92,26 @@ pub struct WorkerConfig {
     /// spare one connection per worker process: that is what a listener
     /// costs, because `LISTEN` holds a session.
     pub listen: bool,
-    /// How often to refresh `heartbeat_at` on the jobs this worker holds.
+    /// How often to renew the lease of each job this worker holds.
     pub heartbeat_interval: Duration,
-    /// How quiet a worker must go before another worker takes its jobs back.
+    /// How long a lease lasts without a renewal: how quiet a worker must go
+    /// before another worker may take its jobs.
     ///
-    /// Must be comfortably more than `heartbeat_interval`, or a worker that is
-    /// merely busy gets its work stolen. The builder refuses a value below
-    /// three times the heartbeat.
+    /// Must be at least three times `heartbeat_interval`, or one late
+    /// renewal loses a job a worker is still running. The builder refuses a
+    /// smaller value.
     pub stale_after: Duration,
-    /// How often to reclaim orphans and tick the recurring schedules.
+    /// How often to tick the recurring schedules and sweep the store.
     pub maintenance_interval: Duration,
-    /// How long one job may run before it is abandoned as timed out.
+    /// How long one job may run before it is stopped as timed out.
     ///
     /// `None` by default: a timeout that is too short turns slow work into
     /// failed work, and this crate will not guess a number. Setting one is how
     /// you stop a job that hangs on a socket from holding a slot forever —
-    /// heartbeats keep flowing while it hangs, so the orphan sweep will not
-    /// save you.
+    /// the lease keeps being renewed while it hangs, so nothing else will.
     pub job_timeout: Option<Duration>,
-    /// A name for this worker in the `locked_by` column and in events.
-    /// Defaults to `"<hostname-ish>-<pid>-<n>"`.
+    /// A name for this worker, on every job it claims and in events.
+    /// Defaults to `"<host>-<pid>-<first queue>-<n>"`.
     pub id: Option<String>,
 }
 
@@ -191,7 +176,7 @@ impl WorkerBuilder {
         self
     }
 
-    /// How often to refresh the heartbeat.
+    /// How often to renew the lease of a running job.
     pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
         self.config.heartbeat_interval = interval;
         self
@@ -204,19 +189,19 @@ impl WorkerBuilder {
         self
     }
 
-    /// How often to reclaim orphans and tick the schedules.
+    /// How often to tick the schedules and sweep the store.
     pub fn maintenance_interval(mut self, interval: Duration) -> Self {
         self.config.maintenance_interval = interval;
         self
     }
 
-    /// Abandons a job that has run for longer than this. Off by default.
+    /// Stops a job that has run for longer than this. Off by default.
     pub fn job_timeout(mut self, timeout: Duration) -> Self {
         self.config.job_timeout = Some(timeout);
         self
     }
 
-    /// Names this worker, which is what lands in `locked_by`.
+    /// Names this worker, which is what the running screen shows.
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.config.id = Some(id.into());
         self
@@ -235,12 +220,7 @@ impl WorkerBuilder {
         self
     }
 
-    /// Finishes the worker without starting it.
-    ///
-    /// Refuses an empty registry — a worker that knows no job types claims
-    /// rows, fails every one of them with "no job named …", and burns their
-    /// attempts — and refuses a `stale_after` that a merely busy worker could
-    /// trip over.
+    /// Checks the settings and builds the worker without starting it.
     pub fn build(self) -> Result<Worker> {
         if self.registry.is_empty() {
             return Err(Error::UnknownJob {
@@ -248,10 +228,18 @@ impl WorkerBuilder {
                 known: "nothing: call `register::<J>()` before `build`".to_string(),
             });
         }
+        if self.config.queues.is_empty() {
+            return Err(Error::Backend(
+                "the worker has no queue to claim from\n\
+                 help: name at least one with `queues([\"default\"])`"
+                    .to_string(),
+            ));
+        }
         if self.config.stale_after < self.config.heartbeat_interval * 3 {
             return Err(Error::Backend(format!(
                 "stale_after ({:?}) must be at least three times heartbeat_interval ({:?}), \
-                 or a worker that is merely busy will have its jobs reclaimed from under it",
+                 or a worker that is merely busy will have its jobs taken from under it\n\
+                 help: raise stale_after or lower heartbeat_interval",
                 self.config.stale_after, self.config.heartbeat_interval
             )));
         }
@@ -269,15 +257,12 @@ impl WorkerBuilder {
     }
 
     /// Builds the worker and spawns it on the current Tokio runtime.
-    ///
-    /// See the module documentation for why that is the current runtime rather
-    /// than one of this crate's own.
     pub fn start(self) -> Result<WorkerHandle> {
         self.build()?.start()
     }
 }
 
-/// A worker.
+/// A worker, built and not yet running.
 pub struct Worker {
     queue: Queue,
     registry: JobRegistry,
@@ -286,7 +271,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Starts building a worker against `queue`.
+    /// A builder for a worker on `queue`.
     pub fn builder(queue: &Queue) -> WorkerBuilder {
         WorkerBuilder {
             queue: queue.clone(),
@@ -295,12 +280,13 @@ impl Worker {
         }
     }
 
-    /// This worker's id, which is the value in `locked_by`.
+    /// This worker's name.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// Spawns the worker on the current Tokio runtime.
+    /// Spawns the worker on the current Tokio runtime and returns a handle
+    /// that stops it.
     pub fn start(self) -> Result<WorkerHandle> {
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             Error::NoRuntime(format!(
@@ -308,9 +294,10 @@ impl Worker {
                  which is a plain future you can drive yourself"
             ))
         })?;
-        let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::Running);
+        let engine = self.engine()?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(None);
         let id = self.id.clone();
-        let join = handle.spawn(async move { self.run_with(shutdown_rx).await });
+        let join = handle.spawn(async move { self.run_with(engine, shutdown_rx).await });
         Ok(WorkerHandle {
             id,
             shutdown_tx,
@@ -318,301 +305,239 @@ impl Worker {
         })
     }
 
-    /// Runs the worker until `shutdown` resolves, then finishes in-flight jobs
-    /// within `grace` and returns the rest to the queue.
+    /// Runs the worker until `shutdown` completes, then gives running jobs
+    /// `grace` to finish.
     ///
-    /// The form for a dedicated worker process. In a container, pass
-    /// SIGTERM: Kubernetes sends it, waits `terminationGracePeriodSeconds`,
-    /// then kills. Keep `grace` a few seconds below that, so the jobs that
-    /// did not finish go back to the queue, with their attempt given back,
-    /// before the kill. Another worker runs them.
-    ///
-    /// ```no_run
-    /// # use std::time::Duration;
-    /// # use brocanth_jobs::{Queue, Worker};
-    /// # async fn worker(queue: Queue) -> brocanth_jobs::Result<()> {
-    /// let sigterm = async {
-    ///     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    ///         .expect("a SIGTERM handler");
-    ///     term.recv().await;
-    /// };
-    /// let report = Worker::builder(&queue)
-    ///     .build()?
-    ///     .run(sigterm, Duration::from_secs(25))
-    ///     .await?;
-    /// println!("{} finished, {} returned", report.finished, report.returned);
-    /// # Ok(()) }
-    /// ```
+    /// For a `jobs` binary: `worker.run(tokio::signal::ctrl_c().map(drop),
+    /// Duration::from_secs(30)).await`.
     pub async fn run(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send,
         grace: Duration,
     ) -> Result<ShutdownReport> {
-        let (tx, rx) = watch::channel(ShutdownSignal::Running);
-        let worker = tokio::spawn(async move { self.run_with(rx).await });
+        let engine = self.engine()?;
+        let (tx, rx) = watch::channel(None);
+        let worker = tokio::spawn(async move { self.run_with(engine, rx).await });
         shutdown.await;
-        let _ = tx.send(ShutdownSignal::Draining(grace));
+        let _ = tx.send(Some(grace));
         worker
             .await
             .map_err(|e| Error::NoRuntime(format!("the worker task did not finish: {e}")))?
     }
 
+    /// The engine's worker, built and checked, but not started: a wrong
+    /// setting fails here, before anything is spawned.
+    fn engine(&self) -> Result<brocanth_queue::Worker> {
+        let config = &self.config;
+        let listening = config.listen && self.queue.backend() == "postgres";
+        let engine_config = brocanth_queue::WorkerConfig {
+            name: self.id.clone(),
+            queue: config.queues[0].clone(),
+            extra_queues: config.queues[1..].to_vec(),
+            concurrency: config.concurrency.max(1) as u32,
+            lease: config.stale_after,
+            heartbeat: config.heartbeat_interval,
+            poll_idle: if listening {
+                config.safety_poll
+            } else {
+                config.poll_interval
+            },
+            sweep_every: config.maintenance_interval,
+            ..brocanth_queue::WorkerConfig::default()
+        };
+        let registry = self.registry.build(RunEnv {
+            timeout: config.job_timeout,
+        });
+        let engine = brocanth_queue::Worker::new(
+            Arc::clone(self.queue.engine()),
+            Arc::new(registry),
+            engine_config,
+        )
+        .map_err(|e| Error::Backend(format!("{e}\nhelp: check the worker's settings")))?;
+        Ok(engine.observe(Arc::new(Bridge {
+            events: self.queue.event_sink(),
+        })))
+    }
+
     async fn run_with(
         self,
-        mut shutdown: watch::Receiver<ShutdownSignal>,
+        engine: brocanth_queue::Worker,
+        shutdown: watch::Receiver<Option<Duration>>,
     ) -> Result<ShutdownReport> {
         let Worker {
-            queue,
-            registry,
-            config,
-            id,
+            queue, config, id, ..
         } = self;
-
-        let store = queue.store_handle();
-        let clock = queue.clock_handle();
         let events = queue.event_sink();
-        let draining = Arc::new(AtomicBool::new(false));
-
         events.handle(JobEvent::WorkerStarted {
             worker: &id,
             queues: &config.queues,
         });
 
-        // Two background tasks, both stopped by the same watch channel: the
-        // heartbeat that keeps this worker's claims alive, and the maintenance
-        // tick that reclaims everybody else's orphans and fires the schedules.
-        let heartbeat = tokio::spawn(heartbeat_loop(
-            Arc::clone(&store),
-            Arc::clone(&clock),
-            queue.event_sink(),
-            id.clone(),
-            config.heartbeat_interval,
-            shutdown.clone(),
-        ));
-        let maintenance = tokio::spawn(maintenance_loop(
+        #[allow(unused_mut)]
+        let mut engine = engine;
+        #[cfg(feature = "postgres")]
+        if let Some(pool) = queue.pg_pool() {
+            if config.listen {
+                match brocanth_queue_postgres::wakeups(pool).await {
+                    Ok(rx) => {
+                        events.handle(JobEvent::ListenerConnected);
+                        engine = engine.wake_on(rx);
+                    }
+                    Err(e) => events.handle(JobEvent::ListenerFailed {
+                        error: e.to_string(),
+                    }),
+                }
+            }
+            // The relay moves what `in_tx` wrote to the outbox into the
+            // queue. It runs in every worker: the outbox claim takes rows
+            // with `SKIP LOCKED` under a lease, so several relays share the
+            // work without a leader.
+            let relay = brocanth_queue::Relay::new(
+                Arc::new(brocanth_queue_postgres::PgOutbox::new(pool.clone())),
+                Arc::clone(queue.engine()),
+                brocanth_queue::RelayConfig::default(),
+            );
+            engine = engine.relay(relay);
+        }
+
+        let ticker = tokio::spawn(tick_loop(
             queue.clone(),
-            config.stale_after,
             config.maintenance_interval,
             shutdown.clone(),
         ));
+        let report = engine.drain(shutdown).await;
+        ticker.abort();
+        let _ = ticker.await;
 
-        // And a third, where the store can announce its own work. It is an
-        // optimisation with no say in correctness: the bell only ever cuts a
-        // sleep short, so a listener that never connects costs idle latency
-        // and nothing else.
-        let bell = crate::listen::Bell::default();
-        let listener = crate::listen::spawn(
-            &store,
-            &bell,
-            queue.event_sink(),
-            config.safety_poll,
-            config.listen,
-        );
-        // The store decides this, not the config: `listen = true` on SQLite
-        // is a wish, and the sleep has to follow what actually happened.
-        let listening = listener.is_some();
-
-        let mut running: JoinSet<()> = JoinSet::new();
-        let mut finished = 0usize;
-        let grace = loop {
-            if let ShutdownSignal::Draining(grace) = *shutdown.borrow_and_update() {
-                break grace;
-            }
-
-            // Claim only as much as there is room for. A worker that claims a
-            // batch it cannot start is a worker holding rows nobody is working
-            // on, which looks exactly like a stuck queue.
-            let room = config.concurrency.saturating_sub(running.len());
-            let claimed = if room == 0 {
-                Vec::new()
-            } else {
-                match store
-                    .claim(&id, &config.queues, room as i64, to_millis(clock.now()))
-                    .await
-                {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        events.handle(JobEvent::InternalError {
-                            during: "claiming jobs",
-                            error: &e,
-                        });
-                        Vec::new()
-                    }
-                }
-            };
-
-            let claimed_count = claimed.len();
-            for row in claimed {
-                let attempt = row.attempts.max(1) as u32;
-                let cx = JobContext {
-                    id: JobId(row.id),
-                    queue: row.queue.clone(),
-                    name: row.job_name.clone(),
-                    attempt,
-                    max_attempts: row.max_attempts.max(1) as u32,
-                    enqueued_at: crate::clock::from_millis(row.created_at),
-                    worker: id.clone(),
-                    shutdown: Arc::clone(&draining),
-                };
-                let task = RunOne {
-                    store: Arc::clone(&store),
-                    clock: Arc::clone(&clock),
-                    events: queue.event_sink(),
-                    registry: registry.clone(),
-                    worker: id.clone(),
-                    timeout: config.job_timeout,
-                    row,
-                    cx,
-                };
-                running.spawn(task.run());
-            }
-
-            // Drain whatever has finished, without waiting for anything.
-            while let Some(done) = running.try_join_next() {
-                if done.is_ok() {
-                    finished += 1;
-                }
-            }
-
-            if claimed_count == 0 {
-                // Nothing to do. How long to wait is the whole question, and
-                // the answer is the soonest of: the next job's `run_at`, the
-                // cap, a notification, a free slot, a shutdown.
-                let nap = idle_nap(&store, &clock, &config, listening).await;
-                tokio::select! {
-                    _ = tokio::time::sleep(nap) => {}
-                    _ = bell.rung(), if listening => {}
-                    _ = shutdown.changed() => {}
-                    Some(done) = running.join_next(), if !running.is_empty() => {
-                        if done.is_ok() {
-                            finished += 1;
-                        }
-                    }
-                }
-            } else if running.len() >= config.concurrency {
-                // Full. Wait for a slot rather than spinning on the claim.
-                tokio::select! {
-                    _ = shutdown.changed() => {}
-                    Some(done) = running.join_next() => {
-                        if done.is_ok() {
-                            finished += 1;
-                        }
-                    }
-                }
-            }
-        };
-
-        // Draining. Stop claiming, tell the running jobs, and wait out the
-        // grace period.
-        draining.store(true, Ordering::Relaxed);
-        let deadline = Instant::now() + grace;
-        while !running.is_empty() {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(left, running.join_next()).await {
-                Ok(Some(done)) => {
-                    if done.is_ok() {
-                        finished += 1;
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-
-        // Whatever is still running at the deadline is abandoned here and given
-        // back to the queue. Aborting first means the task stops at its next
-        // await point rather than racing the release.
-        running.abort_all();
-        while running.join_next().await.is_some() {}
-
-        let returned = match store.release(&id, to_millis(clock.now())).await {
-            Ok(n) => n,
-            Err(e) => {
-                events.handle(JobEvent::InternalError {
-                    during: "returning in-flight jobs at shutdown",
-                    error: &e,
-                });
-                0
-            }
-        };
-
-        heartbeat.abort();
-        maintenance.abort();
-        if let Some(listener) = listener {
-            listener.abort();
-        }
-
+        let finished = report.finished as usize;
+        let returned = report.returned;
         events.handle(JobEvent::WorkerStopped {
             worker: &id,
             finished,
             returned,
         });
-
         Ok(ShutdownReport { finished, returned })
     }
 }
 
-/// What a shutdown did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShutdownReport {
-    /// Jobs that finished — successfully or not — before the deadline.
-    pub finished: usize,
-    /// Jobs abandoned at the deadline and put back on the queue.
-    pub returned: u64,
+/// Ticks the schedules every `every`, from the first moment, until a stop.
+async fn tick_loop(queue: Queue, every: Duration, mut stop: watch::Receiver<Option<Duration>>) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    while stop.borrow().is_none() {
+        tokio::select! {
+            _ = tick.tick() => {
+                if let Err(error) = queue.tick_schedules().await {
+                    queue.event_sink().handle(JobEvent::InternalError {
+                        during: "ticking the recurring schedules",
+                        error: &error,
+                    });
+                }
+            }
+            changed = stop.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
+/// The engine's observer, written as [`JobEvent`]s.
+struct Bridge {
+    events: Arc<dyn JobEvents>,
+}
+
+impl Observer for Bridge {
+    fn on_start(&self, cx: &brocanth_queue::JobContext) {
+        self.events.handle(JobEvent::Started {
+            id: cx.id().clone(),
+            name: cx.kind(),
+            attempt: cx.attempt(),
+            worker: cx.worker(),
+        });
+    }
+
+    fn on_settle(&self, cx: &brocanth_queue::JobContext, outcome: &Settle, took: Duration) {
+        match outcome {
+            Settle::Done => self.events.handle(JobEvent::Completed {
+                id: cx.id().clone(),
+                name: cx.kind(),
+                took,
+                attempt: cx.attempt(),
+            }),
+            Settle::Retry { at, failure } => {
+                let failure = JobFailure::from_queue(failure);
+                self.events.handle(JobEvent::Retrying {
+                    id: cx.id().clone(),
+                    name: cx.kind(),
+                    attempt: cx.attempt(),
+                    delay: at
+                        .duration_since(SystemTime::now())
+                        .unwrap_or(Duration::ZERO),
+                    failure: &failure,
+                });
+            }
+            Settle::Dead { failure } => {
+                let failure = JobFailure::from_queue(failure);
+                self.events.handle(JobEvent::DeadLettered {
+                    id: cx.id().clone(),
+                    name: cx.kind(),
+                    attempts: cx.attempt(),
+                    failure: &failure,
+                });
+            }
+            Settle::Release { .. } => {}
+        }
+    }
+
+    fn on_backend_error(&self, op: &'static str, error: &brocanth_queue::BackendError) {
+        let error = Error::Backend(error.to_string());
+        self.events.handle(JobEvent::InternalError {
+            during: op,
+            error: &error,
+        });
+    }
+}
+
+/// What a worker did before it stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShutdownSignal {
-    Running,
-    Draining(Duration),
+pub struct ShutdownReport {
+    /// Jobs that ran to an outcome while the worker ran: done, a retry or
+    /// the dead letter.
+    pub finished: usize,
+    /// Jobs given back at the stop, without an attempt spent.
+    pub returned: u64,
 }
 
 /// A running worker.
 pub struct WorkerHandle {
     id: String,
-    shutdown_tx: watch::Sender<ShutdownSignal>,
+    shutdown_tx: watch::Sender<Option<Duration>>,
     join: tokio::task::JoinHandle<Result<ShutdownReport>>,
 }
 
 impl WorkerHandle {
-    /// The worker's id.
+    /// The worker's name.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// Stops claiming, waits up to `grace` for the jobs already running, and
-    /// returns the rest to the queue.
-    ///
-    /// After [`WorkerHandle::stop`], the first deadline stands and `grace`
-    /// changes nothing.
+    /// Stops the worker and waits for it: no new claims, `grace` for the
+    /// running jobs, the rest given back.
     pub async fn shutdown(self, grace: Duration) -> Result<ShutdownReport> {
         self.stop(grace);
         self.finished().await
     }
 
-    /// Stops claiming now, and gives the jobs already running `grace` before
-    /// they go back to the queue. Returns at once, so a synchronous stage can
-    /// call it.
-    ///
-    /// The first stop sets the deadline; a later one changes nothing.
+    /// Asks the worker to stop, and returns at once. A second call does
+    /// nothing: the first grace stands.
     pub fn stop(&self, grace: Duration) {
-        self.shutdown_tx.send_if_modified(|signal| {
-            if *signal != ShutdownSignal::Running {
-                return false;
-            }
-            *signal = ShutdownSignal::Draining(grace);
-            true
-        });
+        stop(&self.shutdown_tx, grace);
     }
 
-    /// Calls [`WorkerHandle::stop`] with `grace` when `signal` resolves.
-    ///
-    /// For a worker that must stop claiming the moment its process begins to
-    /// stop: `signal` is SIGTERM, or `Readiness::draining`. A worker that
-    /// ends first lets the waiting task go with it.
+    /// Stops the worker when `signal` completes, as [`WorkerHandle::stop`]
+    /// would.
     pub fn stop_when(
         &self,
         signal: impl std::future::Future<Output = ()> + Send + 'static,
@@ -621,269 +546,42 @@ impl WorkerHandle {
         let tx = self.shutdown_tx.clone();
         tokio::spawn(async move {
             tokio::select! {
-                () = signal => {
-                    tx.send_if_modified(|state| {
-                        if *state != ShutdownSignal::Running {
-                            return false;
-                        }
-                        *state = ShutdownSignal::Draining(grace);
-                        true
-                    });
-                }
+                () = signal => stop(&tx, grace),
                 () = tx.closed() => {}
             }
         });
     }
 
-    /// Waits for the worker to end, after [`WorkerHandle::stop`].
+    /// Waits for the worker to stop on its own, after a [`WorkerHandle::stop`].
     pub async fn finished(self) -> Result<ShutdownReport> {
         self.join
             .await
             .map_err(|e| Error::NoRuntime(format!("the worker task did not finish: {e}")))?
     }
 
-    /// Whether the worker task has ended.
+    /// Whether the worker has stopped.
     pub fn is_finished(&self) -> bool {
         self.join.is_finished()
     }
 
-    /// Stops the worker **without** draining: no grace period, nothing
-    /// returned to the queue.
-    ///
-    /// The jobs this worker holds stay locked and `running` until their
-    /// heartbeat lapses and some other worker's maintenance tick reclaims
-    /// them. That is on purpose — it is what `kill -9`, a lost machine and an
-    /// out-of-memory kill all look like from the database's side, and it is
-    /// here so that the reclaim path can be tested with a worker that really
-    /// does stop mid-job rather than with a hand-written row.
-    ///
-    /// Use [`WorkerHandle::shutdown`] for an orderly stop.
+    /// Stops the worker at once, without a grace. The jobs it held run
+    /// again when their leases run out.
     pub fn abort(self) {
         self.join.abort();
     }
 }
 
-// ---------------------------------------------------------------------------
-// One attempt
-// ---------------------------------------------------------------------------
-
-struct RunOne {
-    store: Arc<Store>,
-    clock: Arc<dyn Clock>,
-    events: Arc<dyn JobEvents>,
-    registry: JobRegistry,
-    worker: String,
-    timeout: Option<Duration>,
-    row: crate::store::JobRow,
-    cx: JobContext,
+fn stop(tx: &watch::Sender<Option<Duration>>, grace: Duration) {
+    tx.send_if_modified(|signal| {
+        if signal.is_some() {
+            return false;
+        }
+        *signal = Some(grace);
+        true
+    });
 }
 
-impl RunOne {
-    async fn run(self) {
-        let RunOne {
-            store,
-            clock,
-            events,
-            registry,
-            worker,
-            timeout,
-            row,
-            cx,
-        } = self;
-
-        let id = JobId(row.id);
-        let attempt = cx.attempt;
-        events.handle(JobEvent::Started {
-            id,
-            name: &row.job_name,
-            attempt,
-            worker: &worker,
-        });
-
-        let started = Instant::now();
-        let outcome = match registry.handler(&row.job_name) {
-            Some(handler) => {
-                let fut = handler(row.payload.clone(), cx);
-                match timeout {
-                    Some(limit) => match tokio::time::timeout(limit, fut).await {
-                        Ok(result) => result,
-                        Err(_) => Err(JobFailure::of(
-                            FailureKind::TimedOut,
-                            format!("still running after {limit:?}"),
-                        )),
-                    },
-                    None => fut.await,
-                }
-            }
-            None => Err(JobFailure::of(
-                FailureKind::Undecodable,
-                format!(
-                    "no job named `{}` is registered on worker `{worker}`; registered: {}",
-                    row.job_name,
-                    registry.names().join(", ")
-                ),
-            )),
-        };
-
-        let took = started.elapsed();
-        match outcome {
-            Ok(()) => {
-                if let Err(e) = store.complete(id, &worker).await {
-                    events.handle(JobEvent::InternalError {
-                        during: "deleting a finished job",
-                        error: &e,
-                    });
-                    return;
-                }
-                events.handle(JobEvent::Completed {
-                    id,
-                    name: &row.job_name,
-                    took,
-                    attempt,
-                });
-            }
-            Err(failure) => {
-                let attempts_left = row.attempts < row.max_attempts;
-                if failure.kind.is_retryable() && attempts_left {
-                    let backoff = registry.backoff_for(&row.job_name);
-                    let mut rng = crate::backoff::Prng::from_entropy();
-                    let delay = backoff.delay(attempt, &mut rng);
-                    let run_at = to_millis(clock.now()) + delay.as_millis() as i64;
-                    if let Err(e) = store
-                        .retry_at(id, &worker, run_at, &failure.to_string())
-                        .await
-                    {
-                        events.handle(JobEvent::InternalError {
-                            during: "rescheduling a failed job",
-                            error: &e,
-                        });
-                        return;
-                    }
-                    events.handle(JobEvent::Retrying {
-                        id,
-                        name: &row.job_name,
-                        attempt,
-                        delay,
-                        failure: &failure,
-                    });
-                } else {
-                    match store
-                        .dead_letter(id, &failure, to_millis(clock.now()))
-                        .await
-                    {
-                        Ok(_) => events.handle(JobEvent::DeadLettered {
-                            id,
-                            name: &row.job_name,
-                            attempts: attempt,
-                            failure: &failure,
-                        }),
-                        Err(e) => events.handle(JobEvent::InternalError {
-                            during: "moving a job to the dead letter",
-                            error: &e,
-                        }),
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The two background loops
-// ---------------------------------------------------------------------------
-
-/// How long a worker with nothing to do should sleep.
-///
-/// Three inputs, and the smallest wins:
-///
-/// 1. **The next job's `run_at`.** A job scheduled for 09:00 should start at
-///    09:00, not at whichever tick follows it. This is why the cap can be
-///    seconds without making every retry wait seconds.
-/// 2. **The cap** -- [`safety_poll`](WorkerConfig::safety_poll) while
-///    listening, [`poll_interval`](WorkerConfig::poll_interval) otherwise.
-/// 3. **Zero**, when the next job is already due. That means the claim that
-///    just came back empty lost a race to another worker, and there may be
-///    more where that came from, so the loop goes straight round again.
-///
-/// A failed lookup falls back to the cap. The question "when is the next job
-/// due" is an optimisation, and a database that cannot answer it is already
-/// being reported by the claim that runs next.
-async fn idle_nap(
-    store: &Store,
-    clock: &Arc<dyn Clock>,
-    config: &WorkerConfig,
-    listening: bool,
-) -> Duration {
-    let cap = if listening {
-        config.safety_poll
-    } else {
-        config.poll_interval
-    };
-    match store.next_run_at(&config.queues).await {
-        Ok(Some(due)) => {
-            let now = to_millis(clock.now());
-            let wait = due.saturating_sub(now).max(0) as u64;
-            cap.min(Duration::from_millis(wait))
-        }
-        // Nothing pending at all. Nothing to wake up for except a
-        // notification, which is exactly what the cap is a backstop for.
-        Ok(None) => cap,
-        Err(_) => cap,
-    }
-}
-
-async fn heartbeat_loop(
-    store: Arc<Store>,
-    clock: Arc<dyn Clock>,
-    events: Arc<dyn JobEvents>,
-    worker: String,
-    interval: Duration,
-    mut shutdown: watch::Receiver<ShutdownSignal>,
-) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = shutdown.changed() => return,
-        }
-        if let Err(e) = store.heartbeat(&worker, to_millis(clock.now())).await {
-            events.handle(JobEvent::InternalError {
-                during: "sending a heartbeat",
-                error: &e,
-            });
-        }
-    }
-}
-
-async fn maintenance_loop(
-    queue: Queue,
-    stale_after: Duration,
-    interval: Duration,
-    mut shutdown: watch::Receiver<ShutdownSignal>,
-) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = shutdown.changed() => return,
-        }
-        if let Err(e) = queue.reclaim_orphans(stale_after).await {
-            queue.events_for_error("reclaiming orphaned jobs", &e);
-        }
-        if let Err(e) = queue.tick_schedules().await {
-            queue.events_for_error("ticking the recurring schedules", &e);
-        }
-    }
-}
-
-/// A worker id that is distinct per process and per worker, without a
-/// dependency on a hostname crate.
-///
-/// `HOSTNAME` is read if the environment sets it — it usually does not on
-/// Linux, where it is a shell variable rather than an exported one — and
-/// otherwise this falls back to the process id plus a counter, which is enough
-/// to tell two workers in one process apart. It only has to be unique, and
-/// `locked_by` is a diagnostic rather than a key.
 fn default_worker_id(queues: &[String]) -> String {
-    use std::sync::atomic::AtomicU64;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "host".to_string());

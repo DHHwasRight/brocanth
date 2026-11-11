@@ -48,6 +48,41 @@ impl std::fmt::Debug for Entry {
 }
 
 impl Entry {
+    /// An entry with its own runner, for a layer that has its own job
+    /// trait. `brocanth-jobs` builds its entries here: the runner decodes
+    /// the payload into the layer's type, applies the layer's timeout and
+    /// turns a panic into a failure with a backtrace.
+    ///
+    /// The runner receives the payload and the context, and answers the
+    /// same way [`Job::run`] does: `Ok` settles the job as done, `Err`
+    /// retries it or buries it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn custom<F>(
+        kind: &'static str,
+        lane: Lane,
+        queue: &'static str,
+        max_attempts: u32,
+        backoff: Backoff,
+        uniqueness: Uniqueness,
+        run: F,
+    ) -> Self
+    where
+        F: Fn(Vec<u8>, JobContext) -> BoxFuture<'static, Result<(), JobFailure>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Entry {
+            kind,
+            lane,
+            queue,
+            max_attempts,
+            backoff,
+            uniqueness,
+            run: Arc::new(run),
+        }
+    }
+
     /// Decode the payload and run the job.
     pub fn run(
         &self,
@@ -119,6 +154,16 @@ impl Registry {
                 run,
             },
         );
+        Ok(self)
+    }
+
+    /// Add an entry built with [`Entry::custom`]. Refuses a kind that is
+    /// already registered, as [`Registry::try_register`] does.
+    pub fn try_add(&mut self, entry: Entry) -> Result<&mut Self, DuplicateKind> {
+        if self.by_kind.contains_key(entry.kind) {
+            return Err(DuplicateKind { kind: entry.kind });
+        }
+        self.by_kind.insert(entry.kind, entry);
         Ok(self)
     }
 
