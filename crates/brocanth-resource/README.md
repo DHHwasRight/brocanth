@@ -90,7 +90,12 @@ brocanth_policy::policy! {
         create: author_id == who.user_id else deny,
         update: author_id == who.user_id else deny,
         // No `delete` rule: it defaults to `never`, which is a 403.
-        writable: only [title, author_id],
+        // An update changes the title only. A create also names the owner,
+        // and `create` admits only the subject's own id. `update` reads the
+        // stored row, so `author_id` in `writable` would let an author give
+        // a post away.
+        writable: only [title],
+        writable_on_create: only [title, author_id],
     }
 }
 

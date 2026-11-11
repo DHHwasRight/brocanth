@@ -25,6 +25,7 @@ impl SubjectSource<Base> for Posts {
             None => Ok(Visitor::anonymous()),
             Some(value) => match value.to_str() {
                 Ok("admin") => Ok(Visitor::admin()),
+                Ok("moderator") => Ok(Visitor::moderator(5)),
                 Ok("banned") => Ok(Visitor::banned()),
                 Ok(id) => id
                     .parse()
@@ -281,14 +282,16 @@ fn a_delete_is_204_and_a_delete_rule_of_never_is_403() {
 }
 
 #[test]
-fn an_update_that_hides_the_row_from_its_own_author_is_a_204() {
+fn an_update_that_hides_the_row_from_its_own_writer_is_a_204() {
     let posts = Posts::new();
-    posts.db.seed(&[(1, Some(7), "draft", "one")]);
+    posts.db.seed(&[(1, Some(7), "published", "one")]);
     let mounted = mount(posts);
 
+    // A moderator sees published rows and their own. Author 7's draft is
+    // neither.
     let response = mounted.call(
         "posts.update",
-        request("PATCH", "/1", Some("7"), b"author_id=8".to_vec()),
+        request("PATCH", "/1", Some("moderator"), b"status=draft".to_vec()),
         &[("id", "1")],
     );
 
@@ -296,6 +299,25 @@ fn an_update_that_hides_the_row_from_its_own_author_is_a_204() {
         response.status(),
         204,
         "the write stood; there is nothing to show"
+    );
+}
+
+#[test]
+fn an_update_that_changes_the_owner_is_a_403() {
+    let posts = Posts::new();
+    posts.db.seed(&[(1, Some(7), "draft", "one")]);
+    let mounted = mount(posts);
+
+    let refused = mounted.call(
+        "posts.update",
+        request("PATCH", "/1", Some("7"), b"author_id=8".to_vec()),
+        &[("id", "1")],
+    );
+
+    assert_eq!(
+        refused.status(),
+        403,
+        "author_id is not writable on an update"
     );
 }
 

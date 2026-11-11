@@ -50,6 +50,8 @@ pub struct PostRow {
 pub struct Visitor {
     pub user_id: Option<i64>,
     pub admin: bool,
+    /// May set the status of any row, and sees what an author sees.
+    pub moderator: bool,
     /// Nothing at all, not even the published rows: the typed form of
     /// PocketBase's `null` rule.
     pub banned: bool,
@@ -64,6 +66,16 @@ impl Visitor {
         Visitor {
             user_id: Some(id),
             admin: false,
+            moderator: false,
+            banned: false,
+        }
+    }
+
+    pub fn moderator(id: i64) -> Self {
+        Visitor {
+            user_id: Some(id),
+            admin: false,
+            moderator: true,
             banned: false,
         }
     }
@@ -72,6 +84,7 @@ impl Visitor {
         Visitor {
             user_id: Some(0),
             admin: true,
+            moderator: false,
             banned: false,
         }
     }
@@ -80,6 +93,7 @@ impl Visitor {
         Visitor {
             user_id: Some(7),
             admin: false,
+            moderator: false,
             banned: true,
         }
     }
@@ -106,6 +120,7 @@ brocanth_policy::policy! {
 
         update {
             who.admin => always,
+            who.moderator => always,
             author_id == who.user_id else deny,
         }
 
@@ -115,10 +130,19 @@ brocanth_policy::policy! {
             who.admin => always,
         }
 
-        /// An author writes the title and the author column. Never the
-        /// status: PocketBase's `status:changed = false || role = "admin"`, as
-        /// a value.
+        /// An author changes the title. Never the status (PocketBase's
+        /// `status:changed = false || role = "admin"`, as a value), and never
+        /// the owner: `update` reads the stored row, so an author who may
+        /// write `author_id` can give the post to somebody else.
         writable {
+            who.admin => except [id],
+            who.moderator => only [status],
+            only [title],
+        }
+
+        /// A create also names the owner, and `create` admits only the
+        /// subject's own id.
+        writable_on_create {
             who.admin => except [id],
             only [title, author_id],
         }

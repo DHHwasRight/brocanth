@@ -22,7 +22,7 @@
 //! nobody made must not be announced; `tests/events.rs` asserts both halves.
 
 use brocanth_events::{RowChange, RowId};
-use brocanth_policy::{Column, MapRow, Policy, Value};
+use brocanth_policy::{Column, FieldMask, MapRow, Policy, Value};
 use std::borrow::Cow;
 
 use crate::data::{FetchQuery, ListQuery, ResourceData};
@@ -138,10 +138,12 @@ pub fn view<R: Resource>(
 /// row — PLAN.md §9's synthesised one-row CTE — so the predicate that will
 /// govern the row for the rest of its life is the predicate that let it in.
 ///
-/// The field mask applies here too. "May this subject write this column" has
-/// the same answer whether the row is new, and it is the mask that keeps a
-/// client from setting the owner column on a row it is creating for somebody
-/// else.
+/// The field mask applies here too, but the create mask:
+/// [`Policy::writable_on_create`]. A create may set a column that an update
+/// must not change, and the owner column is the usual one. Here the create
+/// rule checks the proposed row, so it limits the owner to the subject. An
+/// update rule checks only the stored row, so on an update only the mask
+/// stops a change of owner.
 ///
 /// # Errors
 ///
@@ -163,7 +165,7 @@ pub fn create<R: Resource>(
             "a create must set at least one column",
         ));
     }
-    check_mask::<R>(resource, subject, &values)?;
+    check_mask(resource.policy().writable_on_create(subject), &values)?;
 
     // `Always` admits every row, so the query could only have one answer.
     if !pred.is_always() {
@@ -229,7 +231,7 @@ pub fn update<R: Resource>(
 
     // Before the admission query, and the status table explains why: a 403 for
     // a forbidden column must not also mean "and the row is there".
-    check_mask::<R>(resource, subject, &values)?;
+    check_mask(resource.policy().writable(subject), &values)?;
 
     let changed: Vec<&'static str> = values.iter().map(|(c, _)| c.name()).collect();
 
@@ -288,19 +290,16 @@ pub fn delete<R: Resource>(
     Ok(())
 }
 
-/// `Policy::writable`, checked against the columns the request sets.
+/// A field mask, checked against the columns the request sets:
+/// [`Policy::writable_on_create`] for a create, [`Policy::writable`] for an
+/// update.
 ///
 /// PLAN.md §9: *"`Policy::writable() -> FieldMask`, checked against the dirty
 /// tracking the model layer already has. Nearly free, and almost nobody has
 /// it."* The names come from the entity's own column enum, which is the same
 /// place `brocanth_model::dirty::Tracked::changed()` gets them, so the two
 /// sides agree without either one knowing about the other.
-fn check_mask<R: Resource>(
-    resource: &R,
-    subject: &R::Subject,
-    values: &[(ColumnOf<R>, Value)],
-) -> Result<(), Failure> {
-    let mask = resource.policy().writable(subject);
+fn check_mask<C: Column>(mask: FieldMask<C>, values: &[(C, Value)]) -> Result<(), Failure> {
     let names: Vec<&'static str> = values.iter().map(|(c, _)| c.name()).collect();
     mask.check(names.iter().copied())?;
     Ok(())

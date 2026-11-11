@@ -218,7 +218,7 @@ pub trait ResourceData<E: brocanth_policy::Entity>: Send + Sync + 'static {
     /// the row as stored.
     ///
     /// The values are exactly what the request set, already checked against
-    /// [`Policy::writable`](brocanth_policy::Policy::writable). Defaults,
+    /// [`Policy::writable_on_create`](brocanth_policy::Policy::writable_on_create). Defaults,
     /// generated keys and timestamps are the model layer's business.
     ///
     /// # Errors
