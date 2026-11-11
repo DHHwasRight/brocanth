@@ -253,7 +253,16 @@ What remains, from `docs/admin-customization.md`, "Open":
    `ModelAdmin::page` (`{base}/{model}/{key}`) and `record_page`
    (`{base}/{model}/{record}/{key}`), with the list's or the record's
    policy and the admin's layout.
-3. A three-way `admin diff`: it needs the template of the version a copy
+3. ~~Inlines are not atomic.~~ Done: `AdminData::begin` opens an
+   `AdminTransaction`; a save with inline rows commits the parent and
+   every child together or rolls all of them back
+   (`docs/admin-customization.md`, "One transaction for the parent and
+   its children").
+4. ~~A model page that awaits.~~ Done: `ModelAdmin::page_async` and
+   `record_page_async` take an async render with a `PageCx`, whose
+   `update` and `delete` write through the admin's checks
+   (`docs/admin-customization.md`, "An async page").
+5. A three-way `admin diff`: it needs the template of the version a copy
    came from.
 
 ### 5. Open questions to decide

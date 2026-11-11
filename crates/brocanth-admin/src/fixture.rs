@@ -11,20 +11,34 @@
 //! [`DataError::Invalid`] the way a model layer with validations would, so a
 //! screen that works here is a screen whose logic is right.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search};
+use crate::data::{
+    AdminData, AdminTransaction, DataError, FieldErrors, ListRequest, Scope, Search,
+};
 use crate::discovery::RegistryEntry;
 use crate::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::query::{Direction, Sort};
 
+/// Every table, by name, with its rows.
+type Tables = Vec<(String, Vec<Row>)>;
+
 /// An in-memory data source.
+///
+/// [`AdminData::begin`] stages the writes on a copy of the tables, and
+/// [`AdminTransaction::commit`] puts the copy in place. A commit after
+/// another write reached the fixture fails and keeps nothing, as a
+/// serialisable database transaction does.
 #[derive(Debug, Default)]
 pub struct Fixture {
     entries: Vec<RegistryEntry>,
-    tables: Mutex<Vec<(String, Vec<Row>)>>,
+    tables: Mutex<Tables>,
+    /// Goes up on each write, under the `tables` lock. A transaction
+    /// commits only while it is still the number it started from.
+    generation: AtomicU64,
 }
 
 impl Fixture {
@@ -308,51 +322,7 @@ impl AdminData for Fixture {
         model: &ModelDescriptor,
         values: &[(String, Value)],
     ) -> Result<PrimaryKey, DataError> {
-        let mut tables = self.tables.lock().expect("fixture lock");
-        let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
-            return Err(DataError::UnknownModel(model.key.clone()));
-        };
-
-        // What a model layer with `uniqueness` validations would raise, in the
-        // shape the form needs to put the message beside the field.
-        let mut errors = FieldErrors::new();
-        for column in model.columns.iter().filter(|c| c.unique) {
-            let Some((_, submitted)) = values.iter().find(|(n, _)| *n == column.name) else {
-                continue;
-            };
-            if rows
-                .iter()
-                .any(|row| row.get(&column.name).map(Value::as_input) == Some(submitted.as_input()))
-            {
-                errors.add(&column.name, "has already been taken");
-            }
-        }
-        if !errors.is_empty() {
-            return Err(DataError::Invalid(errors));
-        }
-
-        let mut row = Row::new();
-        for column in &model.columns {
-            if column.primary_key && column.auto_generated {
-                let next = rows
-                    .iter()
-                    .filter_map(|r| r.get(&column.name).map(Value::as_input))
-                    .filter_map(|v| v.parse::<i64>().ok())
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                row.set(&column.name, Value::Int(next));
-                continue;
-            }
-            match values.iter().find(|(n, _)| *n == column.name) {
-                Some((_, value)) => row.set(&column.name, value.clone()),
-                None => row.set(&column.name, Value::Null),
-            }
-        }
-        let key = PrimaryKey::from_row(model, &row)
-            .ok_or_else(|| DataError::backend("the fixture row has no primary key"))?;
-        rows.push(row);
-        Ok(key)
+        self.write(|tables| insert_into(tables, model, values))
     }
 
     async fn update(
@@ -363,34 +333,7 @@ impl AdminData for Fixture {
         scope: Scope<'_>,
     ) -> Result<u64, DataError> {
         unscoped(scope)?;
-        let mut tables = self.tables.lock().expect("fixture lock");
-        let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
-            return Err(DataError::UnknownModel(model.key.clone()));
-        };
-        let mut errors = FieldErrors::new();
-        for column in model.columns.iter().filter(|c| c.unique) {
-            let Some((_, submitted)) = values.iter().find(|(n, _)| *n == column.name) else {
-                continue;
-            };
-            if rows.iter().any(|row| {
-                !matches_key(model, row, key)
-                    && row.get(&column.name).map(Value::as_input) == Some(submitted.as_input())
-            }) {
-                errors.add(&column.name, "has already been taken");
-            }
-        }
-        if !errors.is_empty() {
-            return Err(DataError::Invalid(errors));
-        }
-        // A missing row is zero rows changed, which the admin answers as a
-        // lost race rather than as success.
-        let Some(row) = rows.iter_mut().find(|row| matches_key(model, row, key)) else {
-            return Ok(0);
-        };
-        for (name, value) in values {
-            row.set(name, value.clone());
-        }
-        Ok(1)
+        self.write(|tables| update_in(tables, model, key, values))
     }
 
     async fn delete(
@@ -400,12 +343,179 @@ impl AdminData for Fixture {
         scope: Scope<'_>,
     ) -> Result<u64, DataError> {
         unscoped(scope)?;
+        self.write(|tables| delete_from(tables, model, key))
+    }
+
+    async fn begin(&self) -> Result<Box<dyn AdminTransaction + '_>, DataError> {
+        let tables = self.tables.lock().expect("fixture lock");
+        Ok(Box::new(Staged {
+            fixture: self,
+            generation: self.generation.load(Ordering::SeqCst),
+            tables: tables.clone(),
+        }))
+    }
+}
+
+impl Fixture {
+    /// Runs one write on the tables, under the lock, and counts it.
+    fn write<T>(&self, apply: impl FnOnce(&mut Tables) -> T) -> T {
         let mut tables = self.tables.lock().expect("fixture lock");
-        let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
-            return Err(DataError::UnknownModel(model.key.clone()));
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        apply(&mut tables)
+    }
+}
+
+fn insert_into(
+    tables: &mut Tables,
+    model: &ModelDescriptor,
+    values: &[(String, Value)],
+) -> Result<PrimaryKey, DataError> {
+    let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
+        return Err(DataError::UnknownModel(model.key.clone()));
+    };
+
+    // What a model layer with `uniqueness` validations would raise, in the
+    // shape the form needs to put the message beside the field.
+    let mut errors = FieldErrors::new();
+    for column in model.columns.iter().filter(|c| c.unique) {
+        let Some((_, submitted)) = values.iter().find(|(n, _)| *n == column.name) else {
+            continue;
         };
-        let before = rows.len();
-        rows.retain(|row| !matches_key(model, row, key));
-        Ok((before - rows.len()) as u64)
+        if rows
+            .iter()
+            .any(|row| row.get(&column.name).map(Value::as_input) == Some(submitted.as_input()))
+        {
+            errors.add(&column.name, "has already been taken");
+        }
+    }
+    if !errors.is_empty() {
+        return Err(DataError::Invalid(errors));
+    }
+
+    let mut row = Row::new();
+    for column in &model.columns {
+        if column.primary_key && column.auto_generated {
+            let next = rows
+                .iter()
+                .filter_map(|r| r.get(&column.name).map(Value::as_input))
+                .filter_map(|v| v.parse::<i64>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            row.set(&column.name, Value::Int(next));
+            continue;
+        }
+        match values.iter().find(|(n, _)| *n == column.name) {
+            Some((_, value)) => row.set(&column.name, value.clone()),
+            None => row.set(&column.name, Value::Null),
+        }
+    }
+    let key = PrimaryKey::from_row(model, &row)
+        .ok_or_else(|| DataError::backend("the fixture row has no primary key"))?;
+    rows.push(row);
+    Ok(key)
+}
+
+fn update_in(
+    tables: &mut Tables,
+    model: &ModelDescriptor,
+    key: &PrimaryKey,
+    values: &[(String, Value)],
+) -> Result<u64, DataError> {
+    let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
+        return Err(DataError::UnknownModel(model.key.clone()));
+    };
+    let mut errors = FieldErrors::new();
+    for column in model.columns.iter().filter(|c| c.unique) {
+        let Some((_, submitted)) = values.iter().find(|(n, _)| *n == column.name) else {
+            continue;
+        };
+        if rows.iter().any(|row| {
+            !matches_key(model, row, key)
+                && row.get(&column.name).map(Value::as_input) == Some(submitted.as_input())
+        }) {
+            errors.add(&column.name, "has already been taken");
+        }
+    }
+    if !errors.is_empty() {
+        return Err(DataError::Invalid(errors));
+    }
+    // A missing row is zero rows changed, which the admin answers as a
+    // lost race rather than as success.
+    let Some(row) = rows.iter_mut().find(|row| matches_key(model, row, key)) else {
+        return Ok(0);
+    };
+    for (name, value) in values {
+        row.set(name, value.clone());
+    }
+    Ok(1)
+}
+
+fn delete_from(
+    tables: &mut Tables,
+    model: &ModelDescriptor,
+    key: &PrimaryKey,
+) -> Result<u64, DataError> {
+    let Some((_, rows)) = tables.iter_mut().find(|(t, _)| *t == model.table) else {
+        return Err(DataError::UnknownModel(model.key.clone()));
+    };
+    let before = rows.len();
+    rows.retain(|row| !matches_key(model, row, key));
+    Ok((before - rows.len()) as u64)
+}
+
+/// A [`Fixture`] transaction: the writes go to a copy of the tables.
+struct Staged<'a> {
+    fixture: &'a Fixture,
+    generation: u64,
+    tables: Tables,
+}
+
+#[async_trait]
+impl AdminTransaction for Staged<'_> {
+    async fn insert(
+        &mut self,
+        model: &ModelDescriptor,
+        values: &[(String, Value)],
+    ) -> Result<PrimaryKey, DataError> {
+        insert_into(&mut self.tables, model, values)
+    }
+
+    async fn update(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError> {
+        unscoped(scope)?;
+        update_in(&mut self.tables, model, key, values)
+    }
+
+    async fn delete(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError> {
+        unscoped(scope)?;
+        delete_from(&mut self.tables, model, key)
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), DataError> {
+        let mut tables = self.fixture.tables.lock().expect("fixture lock");
+        if self.fixture.generation.load(Ordering::SeqCst) != self.generation {
+            return Err(DataError::backend(
+                "another write reached the Fixture during this transaction, so the \
+                 transaction kept nothing; run the writes again",
+            ));
+        }
+        self.fixture.generation.fetch_add(1, Ordering::SeqCst);
+        *tables = self.tables;
+        Ok(())
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), DataError> {
+        Ok(())
     }
 }

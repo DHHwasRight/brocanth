@@ -19,7 +19,7 @@ in step with new versions of the admin.
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
 | 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]`, then `brocanth admin diff` after an upgrade | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
 | Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `Panel` | `AdminSite.get_urls()` |
-| Page under a model | a page of your own under one model or one record | `ModelAdmin::{page, record_page}` | `ModelAdmin.get_urls()` |
+| Page under a model | a page of your own under one model or one record | `ModelAdmin::{page, record_page}` and their `_async` forms | `ModelAdmin.get_urls()` |
 | Inlines | a child model's rows on the parent's form | `ModelAdmin::inline(Inline)` | `InlineModelAdmin`, `TabularInline` |
 
 The tests for levels 1 to 5 are in
@@ -572,12 +572,71 @@ refuses a key that the admin's own screens use there (`new` and `actions`
 under a model, `edit` and `delete` under a record), a key with a slash,
 and two pages with one key, each with a `help:` line.
 
-**What the page writes is its own.** The admin asks the policy and the
-update rule before it calls the page, and passes the record it read. It
-does not guard the page's own writes with that rule, because it does not
-see them. A page that writes the record should go through the same rule
-in its own code, or be an action over selected rows
-(`ModelAdmin::action`), which the admin guards.
+### An async page, and the writes it makes
+
+`page_async` and `record_page_async` take an async render. It gets a
+`PageCx` and returns a boxed future, as a custom action does:
+
+```rust
+AdminConfig::new().model("invoice", |m| {
+    m.record_page_async("send", "Send", move |cx| {
+        let mailer = mailer.clone();
+        Box::pin(async move {
+            let key = cx.key().expect("a record page has a key").clone();
+            if !cx.request().post {
+                let history = mailer.history(&key).await?;  // an awaited read
+                return Ok(Some(PanelPage::body("Send", render_send(&history)?)));
+            }
+            mailer.send(&key).await?;
+            cx.update(&key, &[("sent".into(), true.into())]).await?;
+            Ok(Some(PanelPage::redirect(cx.request().mount)))
+        })
+    })
+})
+```
+
+`PageCx` holds the request (`cx.request()`), the record and its key on a
+page under a record (`cx.record()`, `cx.key()`), and two writes:
+
+| | Checks |
+|---|---|
+| `cx.update(key, values)` | `Action::Update` on that record, the field mask, the update rule, and a write guarded by that rule (zero rows is `false`) |
+| `cx.delete(key)` | `Action::Delete` on that record, the delete rule, and a guarded delete |
+
+Both are the writes of an action over selected rows (`ActionCx`), and both
+tell the journal. On a GET they write nothing and return `false`.
+
+So a POST to a model page passes these checks, in this order:
+
+1. **CSRF.** With `middleware-csrf`, the hook refuses a POST without the
+   token before the admin runs. A model page is under `{base}/`, like
+   every admin screen, and the generated admin plugin stamps the token
+   into each `<form method="post">` of the page it sends, the page's own
+   forms included. No exemption exists.
+2. **The screen policy.** `Action::Update` on the model, or on the record
+   and its update rule, before the page runs (the table above).
+3. **The record it writes.** `cx.update` and `cx.delete` ask again for
+   the record they write. A page under post 1 that writes post 2 needs
+   the rules for post 2.
+
+A write the page makes through its own handle, not through `cx`, gets
+check 1 and 2 only: the admin does not see it.
+
+The sync `page` and `record_page` stay: a page that only renders from the
+request and the record needs no future. They are stored as an async
+render that is ready at once, so both kinds share one route and one
+policy.
+
+**Why a boxed future and not `async fn` in a trait.** The admin holds
+each page as a trait object. An async closure (`AsyncFn`) is not
+object-safe, and its future cannot be named to say that it is `Send`. A
+closure that returns `Pin<Box<dyn Future + Send>>` is both, and
+`BulkAction::custom` already uses the same shape.
+
+**Why `cx.update` and not a guard the page applies.** The checks need the
+admin's policy, the row rules, the data source and the journal. A page
+that is handed them could forget one. A page that is handed one method
+cannot.
 
 ## What is stable API
 
@@ -676,29 +735,42 @@ PostgreSQL when `BROCANTH_TEST_DATABASE_URL` is set).
   empty is skipped. A `<select>` on a row always offers the empty choice,
   so a blank row really posts nothing.
 
-### Decision: no transaction, and a partial save is shown as one
+### Decision: one transaction for the parent and its children
 
-`AdminData` has no transaction, and the admin does not hold the
-connection. So the writes are not atomic: the parent first, then each
-child row in form order. The admin narrows the window it can control:
-every check and every form error comes before the first write. What is
-left is a refusal by the data source itself, such as a unique index, on
-one child row.
+A save with inline writes is all or nothing. `AdminData::begin` opens an
+`AdminTransaction`, and the parent's write and each child write, in form
+order, go through it. When every write passes, the admin commits. When
+the data source refuses one row (a unique index, a lost race), the admin
+rolls back, marks that row, and answers 422 with "Nothing was saved. Fix
+the marked row and save again." The form comes back as it was posted: a
+create form still creates, an added row has no key, a deleted row is
+still there. A backend error rolls back too, and answers 500. Django
+wraps the same writes in `transaction.atomic`.
 
-Then the admin stops at that row and answers 422. The row shows the
-error; the form says that the record and the rows before the marked one
-were saved. The form that comes back is safe to post again: an added row
-comes back as an existing child with its key, a deleted row is gone, and
-a create form comes back as the new record's edit form. Django wraps the
-same writes in `transaction.atomic`. Here that waits for a transaction
-on `AdminData`.
+The journal hears the writes only after the commit, so it never records
+a write that was rolled back. A save with no inline write writes straight
+to the data source and opens no transaction: one write is already atomic.
 
-Two other choices were open:
+`begin` is a required method of `AdminData`:
+
+- `brocanth-admin-model` opens a SeaORM `DatabaseTransaction`. Its
+  guarded update and delete open their own transaction for the row lock;
+  on a transaction that is a savepoint, and the lock lasts until the
+  outer commit.
+- `Fixture` stages the writes on a copy of its tables, and the commit puts
+  the copy in place. A commit after another write reached the fixture
+  fails and keeps nothing, as a serialisable transaction does.
 
 | Choice | Why not |
 |---|---|
-| A `transaction` method on `AdminData` | Every data source must then implement it, and the in-memory fixture and a source over an HTTP API cannot. It is the right next step for SQL sources, behind a default method. |
+| A default `begin` that writes at once | The form then says "nothing was saved" when some rows were. A source that cannot roll back must say so in its own code, not inherit a lie. |
+| Keep the partial save and say which rows were saved | It was the first version. The person must read which rows changed, and a second POST must not add a row twice, so the form had to rewrite itself into the saved state. A transaction removes both problems. |
+| A closure, `transaction(|tx| ...)` | `AdminData` is a trait object, and an async closure over a borrowed transaction is not object-safe. A boxed transaction with `commit` and `rollback` is. |
 | Write the children first | A new parent has no key until it is written, and a child needs it. |
+
+The tests: `crates/brocanth-admin/tests/inlines.rs` (the fixture, on the
+edit and the create form) and `crates/brocanth-admin-model/tests/inlines.rs`
+(PostgreSQL, with a unique index that refuses the third write).
 
 ### Decision: an exact-match filter on `ListRequest`
 
@@ -724,9 +796,14 @@ fixture applies no condition.
 - **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
   and the two blocks. A `Panel` renders its own body in the crate that
   owns it, so there is no shipped panel template to copy.
-- **An async page under a model.** `ModelAdmin::page` takes a
-  synchronous closure, as `AdminConfig::page` does. A page that awaits a
-  database read is a `Panel` today, under its own key.
+- **An async `AdminConfig::page`.** `ModelAdmin::page_async` exists. A
+  top-level page that awaits something still implements `Panel`, which
+  is async already.
+- **Typed field errors from SeaORM.** `brocanth-admin-model` reports every
+  database refusal as a backend error, so a unique index on an inline row
+  rolls the save back and answers 500, not 422 with the message beside
+  the field. The fix is to map `DbErr::sql_err()` (a unique violation) to
+  `DataError::Invalid`.
 - **More blocks.** `brand` and `userlinks` exist. `nav-global` and
   `footer` follow the same pattern when an application needs them.
 - **dp-swap's `main`.** The vendored build is `f80aeeb` plus the head

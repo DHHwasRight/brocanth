@@ -165,7 +165,10 @@ pub mod parts {
 #[cfg(feature = "runtime")]
 pub use config::{AdminConfig, ModelAdmin};
 #[cfg(feature = "runtime")]
-pub use data::{AdminData, DataError, Equals, FieldErrors, ListRequest, Scope, Search, SharedData};
+pub use data::{
+    AdminData, AdminTransaction, DataError, Equals, FieldErrors, ListRequest, Scope, Search,
+    SharedData,
+};
 #[cfg(feature = "runtime")]
 pub use inline::Inline;
 #[cfg(feature = "runtime")]

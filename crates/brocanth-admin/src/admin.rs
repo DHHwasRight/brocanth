@@ -15,14 +15,16 @@ use thiserror::Error;
 
 use crate::actions::{ActionCx, BulkAction, Run, Selected, MAX_SELECTED};
 use crate::config::{AdminConfig, ModelAdmin};
-use crate::data::{DataError, Equals, ListRequest, Search, SharedData};
+use crate::data::{
+    AdminData, AdminTransaction, DataError, Equals, ListRequest, Search, SharedData,
+};
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
 use crate::inline::Inline;
 use crate::journal::{AdminWrite, FieldChange, Journal, RecordLinkFn, RecordRef, Written};
 use crate::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::paging::Pager;
-use crate::panel::{Panel, PanelPage, PanelRequest};
+use crate::panel::{PageCx, Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::rows::{Gate, Guard, RowAction, RowRules, Rules, Write};
@@ -140,9 +142,83 @@ enum Op {
     },
 }
 
-/// What the form says when the record was saved and a child row was not.
-const PARTLY_SAVED: &str = "The record and the rows before the marked one were saved. \
-     Fix the marked row and save again.";
+/// What the form says when a child row was refused and the save was undone.
+const NOT_SAVED: &str = "Nothing was saved. Fix the marked row and save again.";
+
+/// Where a save writes: straight to the data source, or into one
+/// transaction when it writes inline rows too.
+enum Writer<'a> {
+    Direct(&'a dyn AdminData),
+    Transaction(Box<dyn AdminTransaction + 'a>),
+}
+
+impl Writer<'_> {
+    async fn insert(
+        &mut self,
+        model: &ModelDescriptor,
+        values: &[(String, Value)],
+    ) -> Result<PrimaryKey, DataError> {
+        match self {
+            Writer::Direct(data) => data.insert(model, values).await,
+            Writer::Transaction(tx) => tx.insert(model, values).await,
+        }
+    }
+
+    async fn update(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: crate::data::Scope<'_>,
+    ) -> Result<u64, DataError> {
+        match self {
+            Writer::Direct(data) => data.update(model, key, values, scope).await,
+            Writer::Transaction(tx) => tx.update(model, key, values, scope).await,
+        }
+    }
+
+    async fn delete(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: crate::data::Scope<'_>,
+    ) -> Result<u64, DataError> {
+        match self {
+            Writer::Direct(data) => data.delete(model, key, scope).await,
+            Writer::Transaction(tx) => tx.delete(model, key, scope).await,
+        }
+    }
+
+    async fn commit(self) -> Result<(), DataError> {
+        match self {
+            Writer::Direct(_) => Ok(()),
+            Writer::Transaction(tx) => tx.commit().await,
+        }
+    }
+
+    async fn rollback(self) -> Result<(), DataError> {
+        match self {
+            Writer::Direct(_) => Ok(()),
+            Writer::Transaction(tx) => tx.rollback().await,
+        }
+    }
+}
+
+/// One write the journal hears about once the save is kept.
+struct Told<'e> {
+    entry: &'e Entry,
+    key: PrimaryKey,
+    label: String,
+    kind: Written,
+    fields: Vec<FieldChange>,
+}
+
+/// Ends a save that failed with `error`: discards its writes, and keeps the
+/// first error, which says what went wrong.
+async fn abandon(writer: Writer<'_>, error: impl Into<AdminError>) -> AdminError {
+    let _ = writer.rollback().await;
+    error.into()
+}
 
 /// The sets to render, out of the built inlines.
 fn sets(built: Vec<Built<'_>>) -> Vec<InlineSet> {
@@ -726,35 +802,39 @@ impl Admin {
             return self.form_page(principal, entry, form, None, sets(built), 422);
         }
         let values = form.values();
-        match self.data.insert(&entry.descriptor, &values).await {
-            Ok(key) => {
-                let mut row = row_of(&values);
-                for (column, text) in key.parts() {
-                    if row.get(column).is_none_or(Value::is_null) {
-                        row.set(column.clone(), Value::Text(text.clone()));
-                    }
-                }
-                let fields = crate::journal::changes(None, &values);
-                let label = entry.admin.label_for(&entry.descriptor, &row);
-                self.tell(principal, entry, &key, &label, Written::Created, &fields);
-                if !self.write_inlines(principal, &mut built, &row).await? {
-                    // The record exists now, so the form that comes back
-                    // edits it: a second POST must not create it again.
-                    form.key = Some(key.clone());
-                    form.add_error(PARTLY_SAVED);
-                    return self.form_page(principal, entry, form, Some(&key), sets(built), 422);
-                }
-                Ok(Response::Redirect {
-                    status: 303,
-                    location: self.detail_url(model, &key),
-                })
-            }
+        let mut writer = self.writer(&built).await?;
+        let key = match writer.insert(&entry.descriptor, &values).await {
+            Ok(key) => key,
             Err(DataError::Invalid(errors)) => {
+                writer.rollback().await?;
                 form.reject(&errors);
-                self.form_page(principal, entry, form, None, sets(built), 422)
+                return self.form_page(principal, entry, form, None, sets(built), 422);
             }
-            Err(other) => Err(other.into()),
+            Err(other) => return Err(abandon(writer, other).await),
+        };
+        let mut row = row_of(&values);
+        for (column, text) in key.parts() {
+            if row.get(column).is_none_or(Value::is_null) {
+                row.set(column.clone(), Value::Text(text.clone()));
+            }
         }
+        let mut told = vec![Told {
+            entry,
+            key: key.clone(),
+            label: entry.admin.label_for(&entry.descriptor, &row),
+            kind: Written::Created,
+            fields: crate::journal::changes(None, &values),
+        }];
+        if !self.finish(writer, &mut built, &row, &mut told).await? {
+            // Nothing was kept, so the form that comes back still creates.
+            form.add_error(NOT_SAVED);
+            return self.form_page(principal, entry, form, None, sets(built), 422);
+        }
+        self.tell_all(principal, told);
+        Ok(Response::Redirect {
+            status: 303,
+            location: self.detail_url(model, &key),
+        })
     }
 
     /// The edit form, filled from the record.
@@ -858,35 +938,43 @@ impl Admin {
             return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
         }
         let values = form.values();
-        let written = self
-            .data
+        let mut writer = self.writer(&built).await?;
+        let written = writer
             .update(&entry.descriptor, &record, &values, guard.scope())
             .await;
         match written.map(|rows| guard.applied(rows)) {
-            Ok(Ok(_)) => {
-                let fields = crate::journal::changes(Some(&row), &values);
-                let label = entry.admin.label_for(&entry.descriptor, &row);
-                self.tell(principal, entry, &record, &label, Written::Updated, &fields);
-                let mut after = row.clone();
-                for (name, value) in &values {
-                    after.set(name.clone(), value.clone());
-                }
-                if !self.write_inlines(principal, &mut built, &after).await? {
-                    form.add_error(PARTLY_SAVED);
-                    return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
-                }
-                Ok(Response::Redirect {
-                    status: 303,
-                    location: self.detail_url(model, &record),
-                })
+            Ok(Ok(_)) => {}
+            Ok(Err(_lost)) => {
+                writer.rollback().await?;
+                return self.conflict(principal);
             }
-            Ok(Err(_lost)) => self.conflict(principal),
             Err(DataError::Invalid(errors)) => {
+                writer.rollback().await?;
                 form.reject(&errors);
-                self.form_page(principal, entry, form, Some(&record), sets(built), 422)
+                return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
             }
-            Err(other) => Err(other.into()),
+            Err(other) => return Err(abandon(writer, other).await),
         }
+        let mut told = vec![Told {
+            entry,
+            key: record.clone(),
+            label: entry.admin.label_for(&entry.descriptor, &row),
+            kind: Written::Updated,
+            fields: crate::journal::changes(Some(&row), &values),
+        }];
+        let mut after = row.clone();
+        for (name, value) in &values {
+            after.set(name.clone(), value.clone());
+        }
+        if !self.finish(writer, &mut built, &after, &mut told).await? {
+            form.add_error(NOT_SAVED);
+            return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
+        }
+        self.tell_all(principal, told);
+        Ok(Response::Redirect {
+            status: 303,
+            location: self.detail_url(model, &record),
+        })
     }
 
     /// The delete confirmation.
@@ -1148,7 +1236,7 @@ impl Admin {
         else {
             return self.missing(principal);
         };
-        let (mount, row, can_act) = match route.record {
+        let (mount, record, can_act) = match route.record {
             None => {
                 // The list's policy: the screen and the list rule.
                 if !self.allows(principal, Request::new(Action::ViewList, model)) {
@@ -1195,21 +1283,28 @@ impl Admin {
                     return self.missing(principal);
                 }
                 let mount = format!("{}/{}", self.detail_url(model, &record), page.key);
-                (mount, Some(row), screen && rule)
+                (mount, Some((record, row)), screen && rule)
             }
         };
         if route.post && !can_act {
             return self.refuse(principal, Action::Update);
         }
-        let request = PanelRequest {
-            path: route.rest,
-            query,
-            post: route.post,
-            can_act,
-            submission,
-            mount: &mount,
+        let cx = PageCx {
+            admin: self,
+            model,
+            principal,
+            request: PanelRequest {
+                path: route.rest,
+                query,
+                post: route.post,
+                can_act,
+                submission,
+                mount: &mount,
+            },
+            key: record.as_ref().map(|(key, _)| key),
+            record: record.as_ref().map(|(_, row)| row),
         };
-        match (page.render)(&request, row.as_ref())? {
+        match (page.render)(cx).await? {
             None => self.missing(principal),
             Some(PanelPage::Redirect { location }) => Ok(Response::Redirect {
                 status: 303,
@@ -1947,28 +2042,62 @@ impl Admin {
         Ok(pending.resolve(1).ok())
     }
 
-    /// Runs the writes the inlines planned, after the parent's own.
+    /// Where a save writes. A save with inline writes opens one
+    /// transaction, so the parent and its children are kept together or not
+    /// at all. A save of one row writes straight to the data source.
+    async fn writer(&self, built: &[Built<'_>]) -> Result<Writer<'_>, DataError> {
+        if built.iter().all(|b| b.ops.is_empty()) {
+            return Ok(Writer::Direct(self.data.as_ref()));
+        }
+        Ok(Writer::Transaction(self.data.begin().await?))
+    }
+
+    /// Runs the inline writes after the parent's own, then keeps or
+    /// discards all of them.
+    ///
+    /// `Ok(true)`: the writes are committed. `Ok(false)`: a row was
+    /// refused, it carries the error, and nothing is kept. The journal hears
+    /// nothing here; the caller tells it once the writes are kept.
+    async fn finish<'e>(
+        &self,
+        mut writer: Writer<'_>,
+        built: &mut [Built<'e>],
+        parent: &Row,
+        told: &mut Vec<Told<'e>>,
+    ) -> Result<bool, AdminError> {
+        match self.write_inlines(&mut writer, built, parent, told).await {
+            Ok(true) => {
+                writer.commit().await?;
+                Ok(true)
+            }
+            Ok(false) => {
+                writer.rollback().await?;
+                Ok(false)
+            }
+            Err(error) => Err(abandon(writer, error).await),
+        }
+    }
+
+    /// Runs the writes the inlines planned, in form order.
     ///
     /// `parent` is the parent row as written, for the key a new child
     /// holds. Stops at the first row the data source refuses and returns
-    /// `false`: that row carries the error, and the rows written before it
-    /// stay written. The sets are left as a re-render must show them: a
-    /// deleted child is gone, and an added child is an existing one.
-    async fn write_inlines(
+    /// `false`: that row carries the error, and [`Admin::finish`] discards
+    /// every write. The sets stay as they were posted, so the form that
+    /// comes back is the one the person sent.
+    async fn write_inlines<'e>(
         &self,
-        principal: Principal<'_>,
-        built: &mut [Built<'_>],
+        writer: &mut Writer<'_>,
+        built: &mut [Built<'e>],
         parent: &Row,
+        told: &mut Vec<Told<'e>>,
     ) -> Result<bool, AdminError> {
         for built in built.iter_mut() {
             let child = built.child;
-            let child_key = &child.descriptor.key;
             let parent_value = parent
                 .get(built.parent_column)
                 .map(|value| typed(built.fk_kind, &value.as_input()))
                 .unwrap_or(Value::Null);
-            let mut gone = Vec::new();
-            let mut failed = false;
             for op in std::mem::take(&mut built.ops) {
                 match op {
                     Op::Delete {
@@ -1977,19 +2106,20 @@ impl Admin {
                         before,
                         guard,
                     } => {
-                        let removed = self
-                            .data
+                        let removed = writer
                             .delete(&child.descriptor, &key, guard.scope())
                             .await?;
                         if guard.applied(removed).is_err() {
                             built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
-                            failed = true;
-                            break;
+                            return Ok(false);
                         }
-                        let label = child.admin.label_for(&child.descriptor, &before);
-                        let fields = crate::journal::removed(&before);
-                        self.tell(principal, child, &key, &label, Written::Deleted, &fields);
-                        gone.push(row);
+                        told.push(Told {
+                            entry: child,
+                            label: child.admin.label_for(&child.descriptor, &before),
+                            fields: crate::journal::removed(&before),
+                            kind: Written::Deleted,
+                            key,
+                        });
                     }
                     Op::Update {
                         row,
@@ -1998,75 +2128,56 @@ impl Admin {
                         values,
                         guard,
                     } => {
-                        let written = self
-                            .data
+                        let written = writer
                             .update(&child.descriptor, &key, &values, guard.scope())
                             .await;
                         match written.map(|rows| guard.applied(rows)) {
-                            Ok(Ok(_)) => {
-                                let label = child.admin.label_for(&child.descriptor, &before);
-                                let fields = crate::journal::changes(Some(&before), &values);
-                                self.tell(
-                                    principal,
-                                    child,
-                                    &key,
-                                    &label,
-                                    Written::Updated,
-                                    &fields,
-                                );
-                            }
+                            Ok(Ok(_)) => told.push(Told {
+                                entry: child,
+                                label: child.admin.label_for(&child.descriptor, &before),
+                                fields: crate::journal::changes(Some(&before), &values),
+                                kind: Written::Updated,
+                                key,
+                            }),
                             Ok(Err(_lost)) => {
                                 built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
-                                failed = true;
-                                break;
+                                return Ok(false);
                             }
                             Err(DataError::Invalid(errors)) => {
                                 built.set.rows[row].form.reject(&errors);
-                                failed = true;
-                                break;
+                                return Ok(false);
                             }
                             Err(other) => return Err(other.into()),
                         }
                     }
                     Op::Insert { row, mut values } => {
                         values.push((built.fk.to_string(), parent_value.clone()));
-                        match self.data.insert(&child.descriptor, &values).await {
-                            Ok(key) => {
-                                let fields = crate::journal::changes(None, &values);
-                                let label =
-                                    child.admin.label_for(&child.descriptor, &row_of(&values));
-                                self.tell(
-                                    principal,
-                                    child,
-                                    &key,
-                                    &label,
-                                    Written::Created,
-                                    &fields,
-                                );
-                                let shown = &mut built.set.rows[row];
-                                shown.key = Some(key.to_segment());
-                                shown.href = Some(self.detail_url(child_key, &key));
-                                shown.label = label;
-                            }
+                        match writer.insert(&child.descriptor, &values).await {
+                            Ok(key) => told.push(Told {
+                                entry: child,
+                                label: child.admin.label_for(&child.descriptor, &row_of(&values)),
+                                fields: crate::journal::changes(None, &values),
+                                kind: Written::Created,
+                                key,
+                            }),
                             Err(DataError::Invalid(errors)) => {
                                 built.set.rows[row].form.reject(&errors);
-                                failed = true;
-                                break;
+                                return Ok(false);
                             }
                             Err(other) => return Err(other.into()),
                         }
                     }
                 }
             }
-            for row in gone.into_iter().rev() {
-                built.set.rows.remove(row);
-            }
-            if failed {
-                number(&mut built.set);
-                return Ok(false);
-            }
         }
         Ok(true)
+    }
+
+    /// Tells the journal about the writes of one save, once they are kept.
+    fn tell_all(&self, principal: Principal<'_>, told: Vec<Told<'_>>) {
+        for t in told {
+            self.tell(principal, t.entry, &t.key, &t.label, t.kind, &t.fields);
+        }
     }
 
     /// Reads the options for every foreign-key field on a form.
@@ -2659,45 +2770,41 @@ impl<'a> Route<'a> {
     }
 }
 
-impl ActionCx<'_> {
-    /// Sets `values` on one record, under the update rule, and tells the
-    /// journal. `Ok(false)` when the rules refuse the record, the record is
-    /// gone, it changed meanwhile, or the data source refused the values.
-    ///
-    /// # Errors
-    ///
-    /// The data source failed, or a row policy did not compile.
-    pub async fn update(
+impl Admin {
+    /// Sets `values` on one record, under the screen policy, the field mask
+    /// and the update rule, and tells the journal. The write behind
+    /// [`ActionCx::update`] and [`PageCx::update`].
+    async fn guarded_update(
         &self,
+        principal: Principal<'_>,
+        model: &str,
         key: &PrimaryKey,
         values: &[(String, Value)],
     ) -> Result<bool, AdminError> {
-        let admin = self.admin;
-        let Some(entry) = admin.entry(self.model) else {
+        let Some(entry) = self.entry(model) else {
             return Ok(false);
         };
         if !entry.admin.allows_update()
-            || !admin.allows(self.principal, Request::on(Action::Update, self.model, key))
+            || !self.allows(principal, Request::on(Action::Update, model, key))
         {
             return Ok(false);
         }
         let names: Vec<&str> = values.iter().map(|(name, _)| name.as_str()).collect();
-        match admin
+        match self
             .rules(entry)
-            .check(&self.principal, Write::Update, &names)
+            .check(&principal, Write::Update, &names)
         {
             Ok(()) => {}
             Err(MaskViolation::Forbidden { .. }) => return Ok(false),
             Err(unknown) => return Err(AdminError::Mask(unknown)),
         }
-        let Some(pending) =
-            admin
-                .rules(entry)
-                .admission(&self.principal, RowAction::Update, key)?
+        let Some(pending) = self
+            .rules(entry)
+            .admission(&principal, RowAction::Update, key)?
         else {
             return Ok(false);
         };
-        let Some(row) = admin
+        let Some(row) = self
             .data
             .fetch(&entry.descriptor, key, pending.scope())
             .await?
@@ -2707,7 +2814,7 @@ impl ActionCx<'_> {
         let Ok(guard) = pending.resolve(1) else {
             return Ok(false);
         };
-        let rows = match admin
+        let rows = match self
             .data
             .update(&entry.descriptor, key, values, guard.scope())
             .await
@@ -2721,41 +2828,34 @@ impl ActionCx<'_> {
         }
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::changes(Some(&row), values);
-        admin.tell(
-            self.principal,
-            entry,
-            key,
-            &label,
-            Written::Updated,
-            &fields,
-        );
+        self.tell(principal, entry, key, &label, Written::Updated, &fields);
         Ok(true)
     }
 
-    /// Deletes one record, under the delete rule, and tells the journal.
-    /// `Ok(false)` when the rules refuse it or it is gone.
-    ///
-    /// # Errors
-    ///
-    /// The data source failed, or a row policy did not compile.
-    pub async fn delete(&self, key: &PrimaryKey) -> Result<bool, AdminError> {
-        let admin = self.admin;
-        let Some(entry) = admin.entry(self.model) else {
+    /// Deletes one record, under the screen policy and the delete rule, and
+    /// tells the journal. The write behind [`ActionCx::delete`] and
+    /// [`PageCx::delete`].
+    async fn guarded_delete(
+        &self,
+        principal: Principal<'_>,
+        model: &str,
+        key: &PrimaryKey,
+    ) -> Result<bool, AdminError> {
+        let Some(entry) = self.entry(model) else {
             return Ok(false);
         };
         if !entry.admin.allows_delete()
-            || !admin.allows(self.principal, Request::on(Action::Delete, self.model, key))
+            || !self.allows(principal, Request::on(Action::Delete, model, key))
         {
             return Ok(false);
         }
-        let Some(pending) =
-            admin
-                .rules(entry)
-                .admission(&self.principal, RowAction::Delete, key)?
+        let Some(pending) = self
+            .rules(entry)
+            .admission(&principal, RowAction::Delete, key)?
         else {
             return Ok(false);
         };
-        let found = admin
+        let found = self
             .data
             .fetch(&entry.descriptor, key, pending.scope())
             .await?;
@@ -2765,7 +2865,7 @@ impl ActionCx<'_> {
         let Ok(guard) = pending.resolve(1) else {
             return Ok(false);
         };
-        let removed = admin
+        let removed = self
             .data
             .delete(&entry.descriptor, key, guard.scope())
             .await?;
@@ -2774,15 +2874,82 @@ impl ActionCx<'_> {
         }
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::removed(&row);
-        admin.tell(
-            self.principal,
-            entry,
-            key,
-            &label,
-            Written::Deleted,
-            &fields,
-        );
+        self.tell(principal, entry, key, &label, Written::Deleted, &fields);
         Ok(true)
+    }
+}
+
+impl ActionCx<'_> {
+    /// Sets `values` on one record, under the update rule, and tells the
+    /// journal. `Ok(false)` when the rules refuse the record, the record is
+    /// gone, it changed meanwhile, or the data source refused the values.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn update(
+        &self,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+    ) -> Result<bool, AdminError> {
+        self.admin
+            .guarded_update(self.principal, self.model, key, values)
+            .await
+    }
+
+    /// Deletes one record, under the delete rule, and tells the journal.
+    /// `Ok(false)` when the rules refuse it or it is gone.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn delete(&self, key: &PrimaryKey) -> Result<bool, AdminError> {
+        self.admin
+            .guarded_delete(self.principal, self.model, key)
+            .await
+    }
+}
+
+impl PageCx<'_> {
+    /// Sets `values` on one record of this page's model, through the
+    /// checks of every admin write: `Action::Update` on the record, the
+    /// field mask, the update rule, and a write guarded by that rule. Tells
+    /// the journal.
+    ///
+    /// `Ok(false)` on a GET, which writes nothing, and when the rules
+    /// refuse the record, the record is gone, it changed meanwhile, or the
+    /// data source refused the values.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn update(
+        &self,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+    ) -> Result<bool, AdminError> {
+        if !self.request.post {
+            return Ok(false);
+        }
+        self.admin
+            .guarded_update(self.principal, self.model, key, values)
+            .await
+    }
+
+    /// Deletes one record of this page's model, through `Action::Delete`
+    /// and the delete rule, and tells the journal. `Ok(false)` on a GET,
+    /// and when the rules refuse the record or it is gone.
+    ///
+    /// # Errors
+    ///
+    /// The data source failed, or a row policy did not compile.
+    pub async fn delete(&self, key: &PrimaryKey) -> Result<bool, AdminError> {
+        if !self.request.post {
+            return Ok(false);
+        }
+        self.admin
+            .guarded_delete(self.principal, self.model, key)
+            .await
     }
 }
 

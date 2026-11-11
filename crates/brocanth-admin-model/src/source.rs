@@ -9,8 +9,8 @@ use brocanth_admin::query::{Direction, Sort};
 use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
 use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition};
 use brocanth_model::sea_orm::{
-    ColumnTrait, Condition, DbBackend, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Select, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, Order, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Select, TransactionSession, TransactionTrait,
 };
 use std::str::FromStr;
 
@@ -288,13 +288,14 @@ pub fn entry_of<E: EntityTrait + Default>(
 use brocanth_model::sea_orm::{ActiveModelTrait, IntoActiveModel, ModelTrait};
 
 /// Writes a new row and reports its key.
-pub async fn insert_of<E>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+pub async fn insert_of<E, C>(
+    db: &C,
     model: &brocanth_admin::model::ModelDescriptor,
     values: &[(String, brocanth_admin::model::Value)],
 ) -> Result<brocanth_admin::model::PrimaryKey, DataError>
 where
     E: EntityTrait,
+    C: ConnectionTrait + TransactionTrait,
     // The bounds `set_from_json` asks for, written out rather than hidden
     // behind a helper trait: they are what tells you the entity has to
     // round-trip through JSON, which is the whole mechanism here.
@@ -342,8 +343,8 @@ where
 /// Handing it only the submitted fields emptied the rest of the record --
 /// a test caught it, having been written in the belief that the opposite
 /// was true.
-pub async fn update_of<E>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+pub async fn update_of<E, C>(
+    db: &C,
     model: &brocanth_admin::model::ModelDescriptor,
     key: &brocanth_admin::model::PrimaryKey,
     values: &[(String, brocanth_admin::model::Value)],
@@ -351,6 +352,7 @@ pub async fn update_of<E>(
 ) -> Result<u64, DataError>
 where
     E: EntityTrait,
+    C: ConnectionTrait + TransactionTrait,
     E::Model: Send + Sync + IntoActiveModel<E::ActiveModel> + serde::Serialize,
     for<'de> E::Model: serde::Deserialize<'de>,
     E::ActiveModel: ActiveModelTrait<Entity = E>
@@ -393,14 +395,15 @@ where
 /// Through the loaded model and not `delete_many`, for the reason above: a
 /// `before_delete` hook is a hook. Guarded the way [`update_of`] is, in one
 /// transaction with the row locked.
-pub async fn delete_of<E>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+pub async fn delete_of<E, C>(
+    db: &C,
     model: &brocanth_admin::model::ModelDescriptor,
     key: &brocanth_admin::model::PrimaryKey,
     scope: Scope<'_>,
 ) -> Result<u64, DataError>
 where
     E: EntityTrait,
+    C: ConnectionTrait + TransactionTrait,
     E::Model: Send + Sync + ModelTrait<Entity = E> + IntoActiveModel<E::ActiveModel>,
     E::ActiveModel:
         ActiveModelTrait<Entity = E> + brocanth_model::sea_orm::ActiveModelBehavior + Send,

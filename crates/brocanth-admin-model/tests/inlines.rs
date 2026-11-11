@@ -274,15 +274,19 @@ async fn sqlite_inline_rows_obey_the_child_policy() {
     inline_rows_obey_the_child_policy(harness.conn(), client(config, data)).await;
 }
 
-#[tokio::test]
-async fn postgres_inline_rows_obey_the_child_policy() {
+/// A PostgreSQL schema of the test's own, seeded, with the sequences moved
+/// past the seeded ids. `None` when no server is named.
+///
+/// Returns the connection that owns the schema, to drop it at the end, and
+/// the connection whose search path is the schema.
+async fn postgres_schema(name: &str, extra: &[&str]) -> Option<(Harness, Harness, String)> {
     let Some(url) = Harness::postgres_url() else {
         brocanth_model::testing::skipped("no BROCANTH_TEST_DATABASE_URL");
-        return;
+        return None;
     };
     // A schema of this test's own, named in the connection's search path,
     // so nothing here touches a shared table.
-    let schema = format!("admin_inline_{}", std::process::id());
+    let schema = format!("{name}_{}", std::process::id());
     let admin = Harness::postgres(&url).await.expect("connect");
     admin
         .conn()
@@ -296,15 +300,13 @@ async fn postgres_inline_rows_obey_the_child_policy() {
     let harness = Harness::postgres(&scoped)
         .await
         .expect("connect in the schema");
-    seed(
-        harness.conn(),
-        &[
-            "CREATE TABLE person (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
-            "CREATE TABLE post (id SERIAL PRIMARY KEY, author_id INTEGER NOT NULL, \
-             title TEXT NOT NULL, status TEXT NOT NULL)",
-        ],
-    )
-    .await;
+    let mut tables = vec![
+        "CREATE TABLE person (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE post (id SERIAL PRIMARY KEY, author_id INTEGER NOT NULL, \
+         title TEXT NOT NULL, status TEXT NOT NULL)",
+    ];
+    tables.extend_from_slice(extra);
+    seed(harness.conn(), &tables).await;
     // The rows were inserted with their ids; the sequences start after them.
     for table in ["person", "post"] {
         harness
@@ -315,12 +317,97 @@ async fn postgres_inline_rows_obey_the_child_policy() {
             .await
             .expect("sequence");
     }
-    let data: Arc<dyn AdminData> = Arc::new(Models::new(harness.conn().clone()));
-    let config = AdminConfig::new().resource(PgPeople).resource(PgPosts);
-    inline_rows_obey_the_child_policy(harness.conn(), client(config, data)).await;
+    Some((admin, harness, schema))
+}
+
+async fn drop_schema(admin: &Harness, schema: &str) {
     admin
         .conn()
         .execute_unprepared(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .expect("drop the schema");
+}
+
+#[tokio::test]
+async fn postgres_inline_rows_obey_the_child_policy() {
+    let Some((admin, harness, schema)) = postgres_schema("admin_inline", &[]).await else {
+        return;
+    };
+    let data: Arc<dyn AdminData> = Arc::new(Models::new(harness.conn().clone()));
+    let config = AdminConfig::new().resource(PgPeople).resource(PgPosts);
+    inline_rows_obey_the_child_policy(harness.conn(), client(config, data)).await;
+    drop_schema(&admin, &schema).await;
+}
+
+/// The name of person 1.
+async fn person_name(conn: &DatabaseConnection) -> String {
+    use brocanth_model::sea_orm::EntityTrait;
+    blog::user::Entity::find_by_id(1)
+        .one(conn)
+        .await
+        .expect("a read")
+        .expect("person 1")
+        .name
+}
+
+#[tokio::test]
+async fn postgres_a_refused_child_row_undoes_the_parent_and_the_rows_before_it() {
+    // A unique title: the database refuses the third write of the save.
+    let Some((admin, harness, schema)) = postgres_schema(
+        "admin_inline_atomic",
+        &["CREATE UNIQUE INDEX post_title ON post (title)"],
+    )
+    .await
+    else {
+        return;
+    };
+    let conn = harness.conn();
+    let data: Arc<dyn AdminData> = Arc::new(Models::new(conn.clone()));
+    let config = AdminConfig::new().resource(PgPeople).resource(PgPosts);
+    let client = client(config, data);
+    let before = posts(conn).await;
+
+    // The parent changes, the draft changes, then a new post repeats the
+    // title of post 2: the index refuses it.
+    let response = client
+        .post_async(
+            "/admin/person/1",
+            &[
+                ("name", "Ada Lovelace"),
+                ("post-0-pk", "1"),
+                ("post-0-title", "Draft, changed"),
+                ("post-0-status", "draft"),
+                ("post-2-title", "Out already"),
+                ("post-2-status", "draft"),
+            ],
+        )
+        .await;
+    assert!(
+        response.status() >= 500,
+        "the database refused the row: {}",
+        response.status()
+    );
+    assert_eq!(person_name(conn).await, "Ada", "the parent is not kept");
+    assert_eq!(posts(conn).await, before, "no child write is kept");
+
+    // The same save with a new title is kept whole.
+    client
+        .post_async(
+            "/admin/person/1",
+            &[
+                ("name", "Ada Lovelace"),
+                ("post-0-pk", "1"),
+                ("post-0-title", "Draft, changed"),
+                ("post-0-status", "draft"),
+                ("post-2-title", "Brand new"),
+                ("post-2-status", "draft"),
+            ],
+        )
+        .await
+        .assert_redirects("/admin/person/1");
+    assert_eq!(person_name(conn).await, "Ada Lovelace");
+    let now = posts(conn).await;
+    assert_eq!(now[0].2, "Draft, changed");
+    assert_eq!(now.len(), 4);
+    drop_schema(&admin, &schema).await;
 }
