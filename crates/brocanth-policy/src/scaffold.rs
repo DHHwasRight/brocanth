@@ -60,9 +60,15 @@ use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Sett
 ///
 /// A unit struct, because a module is asked once per run and everything it
 /// needs arrives in [`Project`].
-pub struct Policy;
+///
+/// Named `Authorisation` and not `Policy`, which is this crate's own trait.
+/// A second item under that name in the crate makes rustc print the full
+/// path in every error that names the trait, and a UI test in
+/// `brocanth-resource` pins that error. A crate whose tests take the CLI
+/// compiles this module, so the name must not collide.
+pub struct Authorisation;
 
-impl Module for Policy {
+impl Module for Authorisation {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "policy",

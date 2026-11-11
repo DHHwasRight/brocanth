@@ -4,10 +4,10 @@
 //! `tests/golden/<name>.txt`. Bless with `BROCANTH_BLESS=1`; build and test
 //! each project too with `BROCANTH_BUILD=1`.
 
-use brocanth_policy::scaffold::Policy;
+use brocanth_policy::scaffold::Authorisation;
 use brocanth_scaffold::{testing, Module};
 
-const MODULES: &[&dyn Module] = &[&Policy];
+const MODULES: &[&dyn Module] = &[&Authorisation];
 
 fn shape(name: &str, picks: &[&'static str]) {
     let files = brocanth_cli::testing::generate("my-blog", picks, MODULES)
