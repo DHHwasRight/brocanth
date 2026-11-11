@@ -2493,18 +2493,21 @@ pub enum PostColumn {
     AuthorId,
     /// `draft` or `published`.
     Status,
+    /// The text.
+    Body,
 }
 
 impl Column for PostColumn {
     /// Required rather than derived: a changed-field name that is not one of
     /// these is rejected instead of quietly permitted.
-    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status];
+    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status, Self::Body];
 
     fn name(&self) -> &'static str {
         match self {
             Self::Id => "id",
             Self::AuthorId => "author_id",
             Self::Status => "status",
+            Self::Body => "body",
         }
     }
 }
@@ -2585,10 +2588,11 @@ impl Policy for PostPolicy {
         if who.admin {
             FieldMask::except([PostColumn::Id])
         } else {
-            // The author edits the body, never the status. The mask is the
-            // other half of the rule: `update` says which rows, this says
-            // which columns.
-            FieldMask::only([PostColumn::AuthorId])
+            // The author edits the body, never the status. `AuthorId` is
+            // here because a create writes it, and `create` above admits
+            // only the author's own id. The mask is the other half of the
+            // rule: `update` says which rows, this says which columns.
+            FieldMask::only([PostColumn::Body, PostColumn::AuthorId])
         }
     }
 }
