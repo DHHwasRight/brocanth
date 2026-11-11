@@ -151,6 +151,14 @@ database variable treats an empty value as unset. `[server]
 shutdown_grace_secs` has a flag and a variable in every project
 (`docs/module-flags.md`, "The framework's own settings").
 
+~~**A post's author could give the post away.**~~ Done. One field mask
+covered create and update, and the generated policy let an author write
+`author_id`, which a create needs. `update` decides on the row as stored,
+so an update could change the owner. `Policy::writable_on_create` is now
+the create mask (default: `writable`), `brocanth-resource` and the admin
+check it on a create, and the generated policy and `docs/policy.md` keep
+`author_id` out of `writable` (`docs/policy.md`, "Field masks").
+
 ### 2. New modules
 
 1. ~~**`realtime-websocket`.**~~ Done: `brocanth-server` has the upgrade

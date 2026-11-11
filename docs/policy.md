@@ -73,6 +73,10 @@ brocanth_policy::policy! {
         }
         writable {
             who.admin => except [id],
+            only [title],
+        }
+        writable_on_create {
+            who.admin => except [id],
             only [title, author_id],
         }
     }
@@ -102,9 +106,10 @@ inside it. Write `_` for a policy that does not read it. The entity must be
 declared in the same `policy!` block, because the macro reads the column
 types from it.
 
-Rules: `list`, `view`, `create`, `update`, `delete`, `writable`. Each is the
-`Policy` method of the same name. A rule you omit keeps the trait default:
-`view` is `list`, every other rule denies.
+Rules: `list`, `view`, `create`, `update`, `delete`, `writable`,
+`writable_on_create`. Each is the `Policy` method of the same name. A rule
+you omit keeps the trait default: `view` is `list`, `writable_on_create` is
+`writable`, every other rule denies.
 
 A rule has two forms:
 
@@ -160,6 +165,32 @@ rule becomes `NULL`, and `NULL` becomes access.
 returns a `FieldMask`. Prefer `only`: a column added later is not writable
 until you say so.
 
+A policy has two masks:
+
+* `writable`: the columns an update may change.
+* `writable_on_create`: the columns a create may set. It defaults to
+  `writable`.
+
+Keep the owner column (`author_id`) out of `writable`. The reason: `update`
+decides on the row as stored, not on the row that the write leaves. For an
+author, `author_id == who.user_id` is true before the write, whatever the
+write sets. So with `author_id` in `writable`, an author can give a post to
+somebody else, and no rule refuses it. `create` decides on the proposed row,
+so `create: author_id == who.user_id else deny` lets a create name only the
+author's own id. Put `author_id` in `writable_on_create`, and nowhere else.
+
+`brocanth-resource` and the admin check `writable_on_create` on a create and
+`writable` on an update, before they read a row. A refused column is `403`.
+
+Decision: two masks, and not a server that fills in the owner. A hook that
+sets `author_id` from the subject must exist in each write path
+(`brocanth-resource`, the admin, each handler), and a write path that forgets
+it lets the client choose the owner again. The create rule already pins the
+owner, in the policy, for every write path. The cost: the client sends its
+own id on a create. We decided against one mask with a `create`/`update`
+argument: each existing policy would break to say the same thing, and the
+`policy!` guards would need a name for the argument.
+
 ### Escape hatch
 
 A `{ … }` block in place of a predicate or a mask is plain Rust. Use it for
@@ -198,7 +229,7 @@ answer the query. The macro does not know your driver. See
 
 ### `brocanth-resource/tests/common/mod.rs`
 
-Before, about 85 lines:
+Before, about 95 lines:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -265,13 +296,21 @@ impl Policy for PostPolicy {
         if who.admin {
             FieldMask::except([PostColumn::Id])
         } else {
+            FieldMask::only([PostColumn::Title])
+        }
+    }
+
+    fn writable_on_create(&self, who: &Visitor) -> FieldMask<PostColumn> {
+        if who.admin {
+            FieldMask::except([PostColumn::Id])
+        } else {
             FieldMask::only([PostColumn::Title, PostColumn::AuthorId])
         }
     }
 }
 ```
 
-After, about 30 lines. The `create` rule's `match` becomes `else deny`, which gives
+After, about 35 lines. The `create` rule's `match` becomes `else deny`, which gives
 the same `Pred` for both arms:
 
 ```rust
@@ -298,6 +337,10 @@ brocanth_policy::policy! {
             who.admin => always,
         }
         writable {
+            who.admin => except [id],
+            only [title],
+        }
+        writable_on_create {
             who.admin => except [id],
             only [title, author_id],
         }
@@ -355,9 +398,16 @@ brocanth_policy::policy! {
             who.superuser => always,
             author_id == who.id,
         }
+        create {
+            who.superuser => always,
+        }
         update: author_id == who.id && status == "draft",
         delete: author_id == who.id,
         writable {
+            who.superuser => except [id, author_id],
+            only [title],
+        }
+        writable_on_create {
             who.superuser => except [id],
             only [title],
         }
