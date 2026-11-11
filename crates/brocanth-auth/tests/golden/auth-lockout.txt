@@ -2826,6 +2826,7 @@ pub mod flash {
 
     /// A setting of `[flash]` that has a flag. A secret or a list has no flag,
     /// so it has no variant here and cannot be renamed.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Cookie,
@@ -2883,7 +2884,7 @@ pub mod auth_lockout {
     }
 }
 
-// brocanth-digest: 99af5eab42f250b9
+// brocanth-digest: 9859f1a28bbee627
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
