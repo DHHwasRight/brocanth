@@ -2284,7 +2284,7 @@ pub mod audit {
     /// The code `audit` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a History tab at /admin/history, a History link on every
+        /// With `admin`: a History tab in the admin, a History link on every
         /// record, and every admin write recorded with its values.
         pub admin: bool,
     }
@@ -2317,7 +2317,7 @@ pub mod audit {
     }
 }
 
-// brocanth-digest: 3cc89b82ab0177a5
+// brocanth-digest: f4c18bd68ccb2f30
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2466,9 +2466,9 @@ pub const MODULE: Module = Module {
     },
 
     integrate: Integrate {
-        // A History tab at /admin/history, a History link on every record, and
-        // every admin write recorded with its values. Without the `admin` module
-        // this does nothing.
+        // A History tab in the admin, a History link on every record, and every
+        // admin write recorded with its values. Without the `admin` module this
+        // does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2582,7 +2582,7 @@ fn main() -> std::process::ExitCode {
 //! ```
 //!
 //! The history is the `brocanth_audit` table of the `[db]` database. With
-//! the `admin` module, the History tab at `/admin/history` lists it, every
+//! the `admin` module, the admin's History tab lists it, every
 //! record has a History link, and every admin write is recorded with the
 //! values before and after.
 

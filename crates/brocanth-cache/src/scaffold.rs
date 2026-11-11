@@ -63,7 +63,7 @@ impl Module for Cache {
         )
         .integration(
             "admin",
-            "a tab at /admin/cache: purge expired entries, clear a namespace you name",
+            "a `cache` tab in the admin: purge expired entries, clear a namespace you name",
             true,
         )
         .asked_in("data", "A cache, in the database you already have")

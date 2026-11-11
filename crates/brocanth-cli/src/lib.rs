@@ -82,43 +82,29 @@ pub mod testing {
     }
 
     /// Moves the admin of generated `files` to `to`, as a person does: the
-    /// `mount_at` field of `src/modules/admin.rs`, and the admin's two
-    /// patterns in the route table test of `src/pages/mod.rs`, the written
-    /// record of every route.
+    /// `mount_at` field of `src/modules/admin.rs`, and nothing else. Every
+    /// reader of the path, the route table test too, reads that field.
     ///
     /// For a test that proves a module reads `admin`'s `mount_at` and does
-    /// not copy it (`docs/module-config.md` §9). Pick a `to` that sorts
-    /// where `/admin` does among the project's routes.
+    /// not copy it (`docs/module-config.md` §9).
     ///
     /// # Errors
     ///
     /// When `files` has no admin at the default path.
     pub fn move_admin(files: &mut [(String, String)], to: &str) -> Result<(), String> {
-        let mut edit = |path: &str, from: &str, into: &str| -> Result<(), String> {
-            let (_, text) = files.iter_mut().find(|(p, _)| p == path).ok_or_else(|| {
-                format!("error: {path} is not generated\n  help: pick `admin` in the test")
-            })?;
-            if !text.contains(from) {
-                return Err(format!(
-                    "error: {path} does not hold {from}\n  \
-                     help: move the admin of a project generated with its default path"
-                ));
-            }
-            *text = text.replace(from, into);
-            Ok(())
-        };
-        edit(
-            "src/modules/admin.rs",
-            "mount_at: \"/admin\"",
-            &format!("mount_at: {to:?}"),
-        )?;
-        // On one line or one per line, as the list's width decides.
-        edit("src/pages/mod.rs", "\"/admin\",", &format!("{to:?},"))?;
-        edit(
-            "src/pages/mod.rs",
-            "\"/admin/{*rest}\"",
-            &format!("\"{to}/{{*rest}}\""),
-        )
+        let path = "src/modules/admin.rs";
+        let from = "mount_at: \"/admin\"";
+        let (_, text) = files.iter_mut().find(|(p, _)| p == path).ok_or_else(|| {
+            format!("error: {path} is not generated\n  help: pick `admin` in the test")
+        })?;
+        if !text.contains(from) {
+            return Err(format!(
+                "error: {path} does not hold {from}\n  \
+                 help: move the admin of a project generated with its default path"
+            ));
+        }
+        *text = text.replace(from, &format!("mount_at: {to:?}"));
+        Ok(())
     }
 
     fn generated(

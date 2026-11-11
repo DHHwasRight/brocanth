@@ -1269,10 +1269,16 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(
-            patterns,
-            ["/", "/about", "/admin", "/admin/{*rest}", "/users/{id}"]
-        );
+        // A module's mount path is read from its file in src/modules/.
+        let mut expected = vec![
+            "/".to_string(),
+            "/about".to_string(),
+            "/users/{id}".to_string(),
+            crate::modules::admin::MODULE.mount_at.to_string(),
+            format!("{}/{{*rest}}", crate::modules::admin::MODULE.mount_at),
+        ];
+        expected.sort();
+        assert_eq!(patterns, expected);
     }
 
     #[test]
@@ -2325,8 +2331,8 @@ pub mod jobs {
     /// The code `jobs` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/jobs: the queues, what runs, the retries
-        /// and the dead letter.
+        /// With `admin`: a `jobs` tab in the admin: the queues, what runs, the
+        /// retries and the dead letter.
         pub admin: bool,
     }
 
@@ -2447,7 +2453,7 @@ pub mod webhooks_out {
     /// The code `webhooks-out` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/webhooks with the endpoints, the
+        /// With `admin`: a `webhooks` tab in the admin, with the endpoints, the
         /// deliveries and a Send again button.
         pub admin: bool,
     }
@@ -2477,7 +2483,7 @@ pub mod webhooks_out {
     }
 }
 
-// brocanth-digest: b488009d84b4dad8
+// brocanth-digest: 0865f188afe730c4
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2608,8 +2614,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // A tab at /admin/jobs: the queues, what runs, the retries and the dead
-        // letter. Without the `admin` module this does nothing.
+        // A `jobs` tab in the admin: the queues, what runs, the retries and the
+        // dead letter. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2694,8 +2700,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // A tab at /admin/webhooks with the endpoints, the deliveries and a Send
-        // again button. Without the `admin` module this does nothing.
+        // A `webhooks` tab in the admin, with the endpoints, the deliveries and
+        // a Send again button. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2790,7 +2796,7 @@ timeout_secs = 10
 # is chosen by whoever registers it, and this stops it reaching your network.
 allow_private = true
 ===== src/plugins/admin/mod.rs =====
-//! The backoffice, at `/admin`.
+//! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
@@ -2808,8 +2814,8 @@ allow_private = true
 //! SeaORM.
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
-//! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
-//! therefore a build error, not a race.
+//! `pages::mounted` calls [`mount`] with the prefix. A page at that prefix
+//! is therefore a build error, not a race.
 
 use std::sync::{Arc, OnceLock};
 
@@ -3517,8 +3523,8 @@ impl Plugin for Jobs {
 //! not be lost is emitted by the code that wrote the row.
 //!
 //! The deliveries are retried on the `webhooks` queue by a worker this
-//! plugin runs, over the `db` module's pool. With the admin, they are a tab
-//! at `/admin/webhooks`.
+//! plugin runs, over the `db` module's pool. With the admin, they are the
+//! admin's `webhooks` tab.
 
 pub use brocanth_webhooks::{OutgoingConfig as Settings, OutgoingPlugin as WebhooksOut};
 ===== AGENTS.md =====
@@ -3591,7 +3597,8 @@ unlikely.
 
 ## The admin
 
-`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+`src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in
+`src/modules/admin.rs` (`/admin` by default). It ships
 locked: the policy is `DenyAll` and `principal` returns an anonymous
 principal, so every screen answers 403. Do not open it with
 `AllowAllUnsafeForDevelopment` outside a test.
@@ -3691,7 +3698,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 4be274525223fef2 -->
+<!-- brocanth-digest: 3158c66415774e58 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

@@ -1239,17 +1239,17 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(
-            patterns,
-            [
-                "/",
-                "/about",
-                "/admin",
-                "/admin/{*rest}",
-                "/robots.txt",
-                "/users/{id}"
-            ]
-        );
+        // A module's mount path is read from its file in src/modules/.
+        let mut expected = vec![
+            "/".to_string(),
+            "/about".to_string(),
+            "/robots.txt".to_string(),
+            "/users/{id}".to_string(),
+            crate::modules::admin::MODULE.mount_at.to_string(),
+            format!("{}/{{*rest}}", crate::modules::admin::MODULE.mount_at),
+        ];
+        expected.sort();
+        assert_eq!(patterns, expected);
     }
 
     #[test]
@@ -2384,7 +2384,7 @@ mod tests {
     }
 }
 ===== src/plugins/admin/mod.rs =====
-//! The backoffice, at `/admin`.
+//! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
@@ -2402,8 +2402,8 @@ mod tests {
 //! SeaORM.
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
-//! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
-//! therefore a build error, not a race.
+//! `pages::mounted` calls [`mount`] with the prefix. A page at that prefix
+//! is therefore a build error, not a race.
 
 use std::sync::{Arc, OnceLock};
 
@@ -2853,7 +2853,8 @@ unlikely.
 
 ## The admin
 
-`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+`src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in
+`src/modules/admin.rs` (`/admin` by default). It ships
 locked: the policy is `DenyAll` and `principal` returns an anonymous
 principal, so every screen answers 403. Do not open it with
 `AllowAllUnsafeForDevelopment` outside a test.
@@ -2891,7 +2892,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: aa2952dec58ddf1e -->
+<!-- brocanth-digest: 4dc88e2b444beb8c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

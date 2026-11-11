@@ -1237,7 +1237,15 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(patterns, ["/", "/about", "/oauth/{*rest}", "/users/{id}"]);
+        // A module's mount path is read from its file in src/modules/.
+        let mut expected = vec![
+            "/".to_string(),
+            "/about".to_string(),
+            "/users/{id}".to_string(),
+            format!("{}/{{*rest}}", crate::modules::auth_oauth::MODULE.mount_at),
+        ];
+        expected.sort();
+        assert_eq!(patterns, expected);
     }
 
     #[test]

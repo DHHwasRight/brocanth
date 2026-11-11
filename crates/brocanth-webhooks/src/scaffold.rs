@@ -492,7 +492,7 @@ impl Module for WebhooksOut {
         .after("config")
         .integration(
             "admin",
-            "a tab at /admin/webhooks with the endpoints, the deliveries and a Send again button",
+            "a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button",
             true,
         )
         .absent(
@@ -575,8 +575,8 @@ const OUTGOING_RS: &str = r#"//! Outgoing webhooks, as this application sends th
 //! not be lost is emitted by the code that wrote the row.
 //!
 //! The deliveries are retried on the `webhooks` queue by a worker this
-//! plugin runs, over the `db` module's pool. With the admin, they are a tab
-//! at `/admin/webhooks`.
+//! plugin runs, over the `db` module's pool. With the admin, they are the
+//! admin's `webhooks` tab.
 
 pub use brocanth_webhooks::{OutgoingConfig as Settings, OutgoingPlugin as WebhooksOut};
 "#;

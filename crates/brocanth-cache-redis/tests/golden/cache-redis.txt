@@ -1270,10 +1270,16 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(
-            patterns,
-            ["/", "/about", "/admin", "/admin/{*rest}", "/users/{id}"]
-        );
+        // A module's mount path is read from its file in src/modules/.
+        let mut expected = vec![
+            "/".to_string(),
+            "/about".to_string(),
+            "/users/{id}".to_string(),
+            crate::modules::admin::MODULE.mount_at.to_string(),
+            format!("{}/{{*rest}}", crate::modules::admin::MODULE.mount_at),
+        ];
+        expected.sort();
+        assert_eq!(patterns, expected);
     }
 
     #[test]
@@ -2207,7 +2213,7 @@ pub mod cache {
     /// The code `cache` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/cache: purge expired entries, clear a
+        /// With `admin`: a `cache` tab in the admin: purge expired entries, clear a
         /// namespace you name.
         pub admin: bool,
     }
@@ -2292,7 +2298,7 @@ pub mod admin {
     }
 }
 
-// brocanth-digest: 6c0efafe53c8b0e6
+// brocanth-digest: 07c5052cc669d953
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2407,8 +2413,8 @@ use crate::plugins::shape::cache::{Integrate, Module};
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
     integrate: Integrate {
-        // A tab at /admin/cache: purge expired entries, clear a namespace you
-        // name. Without the `admin` module this does nothing.
+        // A `cache` tab in the admin: purge expired entries, clear a namespace
+        // you name. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2527,7 +2533,7 @@ application_name = "my-app"
 # A URL can carry a password, so no flag sets it.
 url = "redis://localhost:6379"
 ===== src/plugins/admin/mod.rs =====
-//! The backoffice, at `/admin`.
+//! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
@@ -2545,8 +2551,8 @@ url = "redis://localhost:6379"
 //! SeaORM.
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
-//! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
-//! therefore a build error, not a race.
+//! `pages::mounted` calls [`mount`] with the prefix. A page at that prefix
+//! is therefore a build error, not a race.
 
 use std::sync::{Arc, OnceLock};
 
@@ -3126,7 +3132,8 @@ unlikely.
 
 ## The admin
 
-`src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships
+`src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in
+`src/modules/admin.rs` (`/admin` by default). It ships
 locked: the policy is `DenyAll` and `principal` returns an anonymous
 principal, so every screen answers 403. Do not open it with
 `AllowAllUnsafeForDevelopment` outside a test.
@@ -3212,7 +3219,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 8e1e889aac318708 -->
+<!-- brocanth-digest: 4ce8ecd457783f42 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

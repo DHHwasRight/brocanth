@@ -1111,6 +1111,13 @@ pub enum Slot {
     /// a route, so without this the generated test failed the moment the
     /// module was chosen -- which it did, for `openapi`, in every project
     /// that picked it.
+    ///
+    /// A line that does not start with `/` is a Rust expression that gives
+    /// a `String`. Use it for a route under a path that a module file
+    /// chooses, and read the path with [`snippet::module_ref`]:
+    /// `crate::modules::admin::MODULE.mount_at.to_string()`. Then the test
+    /// builds and sorts its list at run time, and a moved mount needs no
+    /// edit in it (`docs/module-config.md` §9).
     PagesRoutes,
     /// `src/pages/mod.rs`, items the pages share.
     PagesItems,

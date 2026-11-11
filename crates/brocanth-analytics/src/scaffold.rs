@@ -11,7 +11,7 @@
 //! - one registration in `src/plugins/mod.rs`, after the `db` plugin, so
 //!   the plugin finds the pool and writes to `PgStore`;
 //! - `[analytics]` in the config file, or flags and variables without one;
-//! - with `admin`, a tab at `/admin/analytics`, in the generated
+//! - with `admin`, an `analytics` tab in the admin, in the generated
 //!   `plugins::admin_panels`. `integrate.admin` in `src/modules/analytics.rs`
 //!   turns it off: the toggle is in the file of the module that is a guest.
 //! - `hooks.count` and `hooks.collect` in the same file: a server that only
@@ -68,7 +68,7 @@ impl Module for PageViews {
         )
         .integration(
             "admin",
-            "a tab at /admin/analytics with the page-view numbers",
+            "an `analytics` tab in the admin, with the page-view numbers",
             true,
         )
         .absent(

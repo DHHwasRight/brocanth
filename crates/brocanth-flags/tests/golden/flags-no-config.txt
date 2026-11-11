@@ -2219,8 +2219,8 @@ pub mod flags {
     /// The code `flags` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/flags that turns each declared flag on or
-        /// off.
+        /// With `admin`: a `flags` tab in the admin that turns each declared flag
+        /// on or off.
         pub admin: bool,
     }
 
@@ -2249,7 +2249,7 @@ pub mod flags {
     }
 }
 
-// brocanth-digest: 3ba63679c1e4bd10
+// brocanth-digest: 44e37f7ae0f2aa69
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2363,8 +2363,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // A tab at /admin/flags that turns each declared flag on or off. Without
-        // the `admin` module this does nothing.
+        // A `flags` tab in the admin that turns each declared flag on or off.
+        // Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2593,7 +2593,7 @@ impl Plugin for Database {
 //! The rules are rows in the `brocanth_flags` table of the `[db]` database.
 //! The plugin reads them before the server listens and again every
 //! `refresh_secs`, so a page never waits on the database for a flag. With
-//! the `admin` module, the tab at `/admin/flags` turns each flag on for
+//! the `admin` module, the admin's `flags` tab turns each flag on for
 //! everyone, for a percentage of signed-in users, or for a list of users
 //! and groups.
 

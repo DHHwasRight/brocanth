@@ -12,7 +12,7 @@
 //! - one registration in `src/plugins/mod.rs`, after the `db` plugin, so
 //!   the plugin finds the pool and keeps the rules in `PgStore`;
 //! - `[flags]` in the config file, or flags and variables without one;
-//! - with `admin`, a tab at `/admin/flags`, behind `integrate.admin` in
+//! - with `admin`, a `flags` tab in the admin, behind `integrate.admin` in
 //!   `src/modules/flags.rs`.
 //!
 //! Compiled only under the `scaffold` feature, which is off.
@@ -55,7 +55,7 @@ impl Module for FeatureFlags {
         .after("db")
         .integration(
             "admin",
-            "a tab at /admin/flags that turns each declared flag on or off",
+            "a `flags` tab in the admin that turns each declared flag on or off",
             true,
         )
         .absent(
@@ -128,7 +128,7 @@ const FLAGS_RS: &str = r#"//! Feature flags: the list this application reads, an
 //! The rules are rows in the `brocanth_flags` table of the `[db]` database.
 //! The plugin reads them before the server listens and again every
 //! `refresh_secs`, so a page never waits on the database for a flag. With
-//! the `admin` module, the tab at `/admin/flags` turns each flag on for
+//! the `admin` module, the admin's `flags` tab turns each flag on for
 //! everyone, for a percentage of signed-in users, or for a list of users
 //! and groups.
 

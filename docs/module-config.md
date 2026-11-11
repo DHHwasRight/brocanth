@@ -973,8 +973,9 @@ The spec leftovers are built too:
 Status: **built** for `i18n-routing` (`storage-routes`' `path`,
 `admin`'s `mount_at`, the realtime routes), for the `exclude` of
 `sitemap`, `analytics` and `gtag` (`admin`'s `mount_at`), for the
-generated tests of `robots` and `admin`, and for the negotiated locale on
-the context.
+generated tests of `robots` and `admin`, for the route table test
+(`admin`'s and `auth-oauth`'s `mount_at`), and for the negotiated locale
+on the context.
 
 ### The problem
 
@@ -1074,11 +1075,30 @@ admin. The application does, and passes it with `exclude_path` or
 `keep_unprefixed`. The `i18n` `unprefixed` setting starts as `["/api"]`
 for the same reason.
 
+**Decision 6: the route table test reads a mount path too.** The test
+`the_table_is_the_shape_of_the_directory` in `src/pages/mod.rs` lists
+every route (`Slot::PagesRoutes`). It listed `/admin`, `/admin/{*rest}`
+and `/oauth/{*rest}` as literals, so a project that moved the admin
+edited the test too. Now a `PagesRoutes` line that does not start with
+`/` is a Rust expression that gives a `String`. `admin` writes
+`crate::modules::admin::MODULE.mount_at.to_string()` and
+`format!("{}/{{*rest}}", crate::modules::admin::MODULE.mount_at)`;
+`auth-oauth` writes the second form with its own `mount_at`. When the
+list holds an expression, the test builds it in a `vec!` and sorts it at
+run time. Without one, the test keeps the sorted literal array.
+**Reason:** as decision 1. The generator cannot sort a value that is
+known only at `cargo build`, so the test sorts it. A project without a
+mounted module keeps the shorter test.
+
 The tests: each of `analytics`, `gtag` and `robots` (`sitemap` and
 `robots`) has a test in `tests/scaffold.rs` that checks the generated
 code and the file, then, with `BROCANTH_BUILD=1`, moves the admin to
 `/backoffice` with `brocanth_cli::testing::move_admin` and builds and
-tests the project.
+tests the project. `move_admin` changes only `mount_at` in
+`src/modules/admin.rs`, as a person does. `brocanth-admin`'s
+`a_moved_admin_passes_the_route_table_test_with_no_other_edit` moves the
+admin to `/zz-staff`, which sorts after `/users/{id}`, and runs the
+project's own tests.
 
 ### Rejected
 
@@ -1095,12 +1115,3 @@ tests the project.
 - `add` does not print a field that a newer module adds (§8). This
   mechanism reads a field. It does not say that a field is new: that
   needs the old manifest, which the CLI does not keep.
-- The route table test in `src/pages/mod.rs` lists the admin's two
-  patterns (`/admin`, `/admin/{*rest}`) as literals. A project that moves
-  the admin edits that list too; `move_admin` does the same edit. The
-  list is the written record of every route (`Slot::PagesRoutes`), and
-  it is sorted when it is generated, so a value read at `cargo build`
-  does not fit it. A fix: the test sorts a list that it builds with
-  `MODULE.mount_at`.
-- A manifest's integration text and some comments still say "a tab at
-  `/admin/<name>`". They are words, not values: nothing reads them.
