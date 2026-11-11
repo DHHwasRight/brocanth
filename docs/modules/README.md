@@ -103,6 +103,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`static`](static.md) | `export` writes every GET page and every asset to dist/; no server, so no runtime modules | External, Enhancer |  |
 | [`robots`](robots.md) | a robots.txt from your settings, served at /robots.txt; closed outside production | Routes |  |
 | [`sitemap`](sitemap.md) | a sitemap.xml of every page with no parameter, served at /sitemap.xml | Routes |  |
+| [`pagination`](pagination.md) | offset and keyset pages, with links that keep the query; no dependency | Renderer |  |
+| [`filters`](filters.md) | typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE | Renderer |  |
+| [`search`](search.md) | Postgres full-text and trigram search: a site index, its migration, a page at /search | Routes |  |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |

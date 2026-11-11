@@ -1,6 +1,22 @@
-//! Pagination arithmetic at the four boundaries that are always wrong.
+//! Offset arithmetic at the four boundaries that are always wrong. These were
+//! the admin's tests when the admin had a paginator of its own.
 
-use brocanth_admin::Page;
+use brocanth_pagination::{Limits, Page};
+
+#[test]
+fn limits_apply_the_ceiling_rather_than_refuse() {
+    let limits = Limits::new(25, 100);
+    assert_eq!(limits.per_page(None), 25);
+    assert_eq!(limits.per_page(Some(1_000_000)), 100);
+    assert_eq!(limits.per_page(Some(0)), 1);
+    assert_eq!(limits.window(3, Some(10)), (20, 10));
+    assert_eq!(limits.window(0, None), (0, 25), "page zero is page one");
+    assert_eq!(
+        Limits::new(50, 10).max,
+        50,
+        "a ceiling below the default is raised"
+    );
+}
 
 #[test]
 fn the_first_page_has_no_previous() {

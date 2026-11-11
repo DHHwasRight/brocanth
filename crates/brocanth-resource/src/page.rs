@@ -68,13 +68,14 @@ impl PageRequest {
     /// [`Resource::MAX_PER_PAGE`] rather than refused: a client asking for
     /// a million rows gets the maximum, which is what every paginated API
     /// does, and refusing would make a harmless mistake fatal.
+    ///
+    /// The arithmetic is `brocanth-pagination`'s [`Limits`], which the admin
+    /// uses too.
+    ///
+    /// [`Limits`]: brocanth_pagination::Limits
     pub fn window<R: Resource + ?Sized>(&self) -> (u64, u64) {
-        let per_page = self
-            .per_page
-            .unwrap_or(R::DEFAULT_PER_PAGE)
-            .clamp(1, R::MAX_PER_PAGE);
-        let page = self.page.max(1);
-        (page.saturating_sub(1).saturating_mul(per_page), per_page)
+        brocanth_pagination::Limits::new(R::DEFAULT_PER_PAGE, R::MAX_PER_PAGE)
+            .window(self.page, self.per_page)
     }
 }
 

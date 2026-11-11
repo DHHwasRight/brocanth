@@ -18,18 +18,18 @@ use crate::data::{DataError, ListRequest, Search, SharedData};
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
 use crate::model::{ColumnDescriptor, ModelDescriptor, PrimaryKey, Row, Value};
-use crate::paging::Page;
+use crate::paging::{Page, Pager};
 use crate::panel::{Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::rows::{Gate, RowAction, RowRules, Rules};
 use crate::view::{
     self, Cell, Chrome, ColumnHeader, DeleteCtx, DetailCtx, DetailRow, ErrorCtx, FormCtx, IndexCtx,
-    IndexEntry, LayoutCtx, ListCtx, ModelHeading, NavItem, PageLink, RowView, Views,
+    IndexEntry, LayoutCtx, ListCtx, ModelHeading, NavItem, RowView, Views,
 };
 
 /// How many numbered page links a pager shows.
-const PAGER_WINDOW: usize = 7;
+const PAGER_WINDOW: u64 = Pager::SPAN;
 
 /// What the admin can fail with.
 ///
@@ -308,15 +308,15 @@ impl Admin {
         let total = self.data.count(descriptor, search, scope).await?;
         let page = Page::new(
             query.page,
-            query.per_page.unwrap_or_else(|| admin.page_size()),
-            total,
+            query.per_page.unwrap_or(admin.page_size() as u64),
+            total as u64,
         );
         let rows = self
             .data
             .list(ListRequest {
                 model: descriptor,
-                offset: page.offset(),
-                limit: page.limit(),
+                offset: usize::try_from(page.offset()).unwrap_or(usize::MAX),
+                limit: usize::try_from(page.limit()).unwrap_or(usize::MAX),
                 search,
                 sort: query.sort.as_ref(),
                 scope,
@@ -344,25 +344,17 @@ impl Admin {
             .map(|row| self.row_view(principal, entry, &columns, row, &labels, writes))
             .collect();
 
-        let pages = page
-            .window(PAGER_WINDOW)
-            .into_iter()
-            .map(|number| PageLink {
-                href: format!("{}?{}", self.list_url(model), query.to_query_string(number)),
-                current: number == page.number(),
-                number,
-            })
-            .collect();
-        let link_for =
-            |number: usize| format!("{}?{}", self.list_url(model), query.to_query_string(number));
+        let pager = Pager::with(page, PAGER_WINDOW, |number| {
+            format!("{}?{}", self.list_url(model), query.to_query_string(number))
+        });
         let context = ListCtx {
             chrome: self.chrome(principal, model),
             model: self.heading(entry),
             columns: headers,
             rows: row_views,
-            previous_href: page.previous().map(link_for),
-            next_href: page.next().map(link_for),
-            pages,
+            previous_href: pager.previous,
+            next_href: pager.next,
+            pages: pager.pages,
             page,
             searchable: !search_columns.is_empty(),
             can_create: admin.allows_create()

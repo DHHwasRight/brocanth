@@ -176,6 +176,13 @@ pub const ALL: &[&dyn Module] = &[
     // A sitemap.xml of the page table, from the same crate. `robots`
     // names it on its `Sitemap:` line when both are chosen.
     &brocanth_robots::scaffold::Sitemap,
+    // Lists: one paginator, offset and keyset, with links that keep
+    // the query.
+    &brocanth_pagination::scaffold::Pagination,
+    // Typed filters ANDed with the policy's rule, and site search in
+    // Postgres. Both build on the paginator above.
+    &brocanth_filters::scaffold::Filters,
+    &brocanth_search::scaffold::Search,
     // Translations checked at build time and a locale per request. Last
     // in the pages question: a language is a choice made after the shape.
     &brocanth_i18n::scaffold::I18n,

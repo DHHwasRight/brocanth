@@ -24,7 +24,13 @@ plugin = ["runtime", "dep:brocanth", "dep:http"]
 # A generated project asks for `default-features = false, features =
 # ["runtime"]`: the screens without the `RouteSource`. The CLI asks for
 # `scaffold` alone and links no template engine.
-runtime = ["dep:rsx", "dep:async-trait", "dep:brocanth-policy", "dep:brocanth-middleware"]
+runtime = [
+    "dep:rsx",
+    "dep:async-trait",
+    "dep:brocanth-policy",
+    "dep:brocanth-middleware",
+    "dep:brocanth-pagination",
+]
 # The module `brocanth create` lists under the key `admin`, and `admin-model`
 # beside it. Off by default: the one program that wants it is the CLI, which
 # asks for `default-features = false, features = ["scaffold"]`. It writes
@@ -51,6 +57,9 @@ thiserror = "2"
 # and a bind list, and the data source runs it.
 brocanth-policy = { workspace = true, optional = true }
 brocanth-middleware = { workspace = true, optional = true }
+# The page arithmetic and the numbered links, shared with
+# `brocanth-resource`. No dependency of its own.
+brocanth-pagination = { workspace = true, optional = true, features = ["runtime"] }
 
 # Optional, and off. See the `scaffold` feature.
 brocanth-scaffold = { workspace = true, optional = true }

@@ -173,6 +173,15 @@ impl DbError {
     }
 }
 
+/// A statement run straight on [`Db::pool`](crate::Db::pool) gets the same
+/// error, and the same `help:` line, as one run through [`Exec`](crate::Exec).
+/// `brocanth-search` runs its ranked queries this way.
+impl From<sqlx::Error> for DbError {
+    fn from(source: sqlx::Error) -> Self {
+        DbError::query(source)
+    }
+}
+
 /// A help line for the Postgres errors an application causes most.
 fn help_for(code: &str) -> Option<&'static str> {
     Some(match code {

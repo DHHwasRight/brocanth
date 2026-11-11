@@ -330,9 +330,9 @@ module with what it costs.
 | Category | Hooks in through | Modules |
 |---|---|---|
 | Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `i18n`, `gtag` |
-| Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `admin`, `admin-model`, `realtime-sse`, `realtime-websocket`, `robots`, `sitemap` |
+| Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `admin`, `admin-model`, `realtime-sse`, `realtime-websocket`, `robots`, `sitemap`, `search` |
 | Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `model`, `cache`, `jobs`, `jobs-memory`, `storage`, `realtime`, `input`, `client`, `commands` |
-| Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt`, `sanitize` |
+| Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt`, `sanitize`, `pagination`, `filters` |
 | External | files only: build, ship, check | `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github` |
 
 A module that is listed and not available yet gives the reason on its

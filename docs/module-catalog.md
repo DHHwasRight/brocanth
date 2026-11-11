@@ -46,7 +46,7 @@ nothing holds this page.
 | [`sessions`](modules/sessions.md) | A cookie, and a `Session` the context hands a handler |  |  |  |  |
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
 
-### Renderer (4)
+### Renderer (6)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -54,8 +54,10 @@ nothing holds this page.
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |
 | [`rsx-htmx`](modules/rsx-htmx.md) | A click swaps what changed; the server renders from the shared layout down |  |  | part of `rsx`, ticked with its parent | static-site safe |
 | [`sanitize`](modules/sanitize.md) | An allow-list HTML sanitizer and a SafeHtml type; links html5ever |  |  |  | static-site safe |
+| [`pagination`](modules/pagination.md) | Offset and keyset pages, with links that keep the query; the admin and `resource` page with it too |  |  |  | static-site safe |
+| [`filters`](modules/filters.md) | Typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE |  |  | needs `policy`: a filter is a `Pred` over a policy entity's columns | static-site safe |
 
-### Routes (10)
+### Routes (11)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -67,6 +69,7 @@ nothing holds this page.
 | [`realtime-sse`](modules/realtime-sse.md) | One long response per subscriber, frames written as they are made |  |  | part of `realtime`, off until you tick it |  |
 | [`realtime-websocket`](modules/realtime-websocket.md) | A duplex socket per subscriber, frames both ways |  |  | part of `realtime`, off until you tick it |  |
 | [`resource`](modules/resource.md) | Typed CRUD routes over one table, with the policy in the WHERE clause |  |  |  |  |
+| [`search`](modules/search.md) | Postgres full-text and trigram search: a site index, its migration, a page at /search |  |  | needs `db` and `pagination` |  |
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
@@ -138,6 +141,9 @@ shutdown_grace_secs` has a flag and a variable in every project
    the socket loop and `GET /realtime/socket`. Open items are in
    `docs/realtime.md` §10: RFC 8441 over HTTP/2, `permessage-deflate`,
    subprotocols.
+2. ~~**`pagination`.**~~ Done: one public paginator
+   (offset and keyset) that the admin and `resource` use. Open: a keyset
+   page has no previous link; the admin's `per_page` has no ceiling yet.
 
 ### 3. Module system
 
