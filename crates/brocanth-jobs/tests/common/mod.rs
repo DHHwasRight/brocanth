@@ -42,7 +42,7 @@ macro_rules! on_every_backend {
                 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
                 async fn $name() {
                     match super::common::postgres_queue().await {
-                        Some(queue) => super::$name(queue).await,
+                        Some((queue, _schema)) => super::$name(queue).await,
                         None => super::common::skipped(super::common::NO_POSTGRES),
                     }
                 }
@@ -61,17 +61,61 @@ pub fn memory_queue() -> Queue {
 }
 
 /// A queue on the Postgres test server, in a schema of its own, with its
-/// tables created. `None` when no variable names a server.
-pub async fn postgres_queue() -> Option<Queue> {
-    let pool = postgres_pool().await?;
+/// tables created. `None` when no variable names a server. Keep the
+/// [`Schema`] until the test ends: dropping it drops the schema.
+pub async fn postgres_queue() -> Option<(Queue, Schema)> {
+    let (pool, schema) = postgres_pool().await?;
     let queue = Queue::from_pool(pool);
     queue.migrate().await.expect("creating the tables");
-    Some(queue)
+    Some((queue, schema))
+}
+
+/// A test's own schema on the Postgres test server. Dropping it drops the
+/// schema, also when the test panics, so a run leaves no `jobs_t_*` schema
+/// behind.
+pub struct Schema {
+    url: String,
+    name: String,
+}
+
+impl Drop for Schema {
+    fn drop(&mut self) {
+        use sqlx::Connection as _;
+
+        let url = std::mem::take(&mut self.url);
+        let name = std::mem::take(&mut self.name);
+        // `drop` runs on the test's runtime, which cannot block on a
+        // future. A thread with a runtime of its own can.
+        let _ = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime to drop the test schema");
+            runtime.block_on(async {
+                let Ok(mut admin) = sqlx::PgConnection::connect(&url).await else {
+                    return;
+                };
+                // A worker the test left running may still hold a lock.
+                // Give up after a while rather than hang the run.
+                let _ = sqlx::query("SET lock_timeout = '10s'")
+                    .execute(&mut admin)
+                    .await;
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS {name} CASCADE"
+                )))
+                .execute(&mut admin)
+                .await;
+                let _ = admin.close().await;
+            });
+        })
+        .join();
+    }
 }
 
 /// A pool on the Postgres test server whose `search_path` is a new, empty
-/// schema. `None` when no variable names a server.
-pub async fn postgres_pool() -> Option<sqlx::PgPool> {
+/// schema. `None` when no variable names a server. Keep the [`Schema`]
+/// until the test ends: dropping it drops the schema.
+pub async fn postgres_pool() -> Option<(sqlx::PgPool, Schema)> {
     use std::str::FromStr;
 
     let url = postgres_url()?;
@@ -87,13 +131,12 @@ pub async fn postgres_pool() -> Option<sqlx::PgPool> {
     let options = sqlx::postgres::PgConnectOptions::from_str(&url)
         .expect("a Postgres URL")
         .options([("search_path", schema.as_str())]);
-    Some(
-        sqlx::postgres::PgPoolOptions::new()
-            .max_connections(6)
-            .connect_with(options)
-            .await
-            .expect("connecting to Postgres"),
-    )
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .connect_with(options)
+        .await
+        .expect("connecting to Postgres");
+    Some((pool, Schema { url, name: schema }))
 }
 
 /// The Postgres test server's URL, or `None` when no variable names one.

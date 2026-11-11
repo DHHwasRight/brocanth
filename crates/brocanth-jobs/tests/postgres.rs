@@ -27,27 +27,31 @@ use std::time::Duration;
 use brocanth_jobs::{Queue, Worker};
 use common::{log, token, wait_for, Echo};
 
+/// `queue_or_skip!(queue)` binds `queue` and keeps the test's schema
+/// until the end of the block, where it is dropped.
 macro_rules! queue_or_skip {
-    () => {
-        match common::postgres_queue().await {
-            Some(queue) => queue,
+    ($queue:ident) => {
+        let ($queue, _schema) = match common::postgres_queue().await {
+            Some(found) => found,
             None => {
                 common::skipped(common::NO_POSTGRES);
                 return;
             }
-        }
+        };
     };
 }
 
+/// `pool_or_skip!(pool)` binds `pool` and keeps the test's schema
+/// until the end of the block, where it is dropped.
 macro_rules! pool_or_skip {
-    () => {
-        match common::postgres_pool().await {
-            Some(pool) => pool,
+    ($pool:ident) => {
+        let ($pool, _schema) = match common::postgres_pool().await {
+            Some(found) => found,
             None => {
                 common::skipped(common::NO_POSTGRES);
                 return;
             }
-        }
+        };
     };
 }
 
@@ -64,7 +68,7 @@ macro_rules! pool_or_skip {
 /// short-circuits and there is nothing left to race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn migrate_is_safe_from_several_connections_at_once() {
-    let pool = pool_or_skip!();
+    pool_or_skip!(pool);
 
     // Eight at once, on one pool of six connections, so several really are
     // in flight together.
@@ -110,7 +114,7 @@ async fn migrate_is_safe_from_several_connections_at_once() {
 /// so nothing waiting or dead is lost in the upgrade.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migrate_moves_the_first_queues_rows_into_the_engine() {
-    let pool = pool_or_skip!();
+    pool_or_skip!(pool);
     let t = token("legacy");
 
     create_old_tables(&pool).await;
@@ -239,7 +243,7 @@ async fn old_job(
 /// jobs, the dead letter and the schedules are all still there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migrate_twice_on_a_current_schema_is_a_no_op() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let t = token("migrate-twice");
 
     let id = queue
@@ -278,7 +282,7 @@ async fn migrate_twice_on_a_current_schema_is_a_no_op() {
 /// unique key. A future `run_at` stays in the future.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migrate_keeps_what_each_old_row_said() {
-    let pool = pool_or_skip!();
+    pool_or_skip!(pool);
     let t = token("legacy-fields");
     create_old_tables(&pool).await;
 
@@ -324,7 +328,7 @@ async fn migrate_keeps_what_each_old_row_said() {
 /// key the engine already holds is folded, not doubled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_later_migrate_moves_what_an_old_worker_wrote_and_folds_a_held_key() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let pool = queue_pool(&queue).await;
     let t = token("legacy-later");
 
@@ -363,7 +367,7 @@ async fn a_later_migrate_moves_what_an_old_worker_wrote_and_folds_a_held_key() {
 /// nothing about one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migrate_moves_an_old_dead_letter_on_its_own() {
-    let pool = pool_or_skip!();
+    pool_or_skip!(pool);
     let t = token("legacy-dead");
     sqlx::query(OLD_DEAD)
         .execute(&pool)
@@ -423,7 +427,7 @@ async fn migrate_moves_an_old_dead_letter_on_its_own() {
 /// delivers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_job_enqueued_in_a_committed_transaction_runs() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let pool = queue_pool(&queue).await;
     let t = token("in-tx");
 
@@ -460,7 +464,7 @@ async fn a_job_enqueued_in_a_committed_transaction_runs() {
 /// A rollback takes the job with it: no relay ever sees it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rolled_back_transaction_takes_its_job_with_it() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let pool = queue_pool(&queue).await;
     let t = token("in-tx-rollback");
 
@@ -508,7 +512,7 @@ async fn queue_pool(queue: &Queue) -> sqlx::PgPool {
 /// enqueue woke it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let token = token("notify-wakes");
 
     let worker = Worker::builder(&queue)
@@ -557,7 +561,7 @@ async fn an_enqueue_wakes_a_worker_that_would_otherwise_be_asleep() {
 /// when its connection limit cannot spare a session per worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_told_not_to_listen_still_finds_the_work() {
-    let queue = queue_or_skip!();
+    queue_or_skip!(queue);
     let token = token("no-listen");
 
     let worker = Worker::builder(&queue)
