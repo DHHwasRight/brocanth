@@ -14,7 +14,8 @@
 //! # Every default denies
 //!
 //! Only [`Policy::list`] is required. The rest default to [`Pred::Never`] and
-//! [`FieldMask::deny_all`], which matches `brocanth-admin`'s `DenyAll` and for
+//! [`FieldMask::deny_all`] ([`Policy::writable_on_create`] defaults to
+//! [`Policy::writable`], so it denies too), which matches `brocanth-admin`'s `DenyAll` and for
 //! the same reason it gives: shipping open and asking people to remember to
 //! lock it is a security incident waiting for someone's first deploy.
 //!
@@ -69,6 +70,11 @@ use crate::pred::{EntityPred, Pred};
 ///         ])
 ///     }
 ///
+///     fn create(&self, who: &Visitor) -> EntityPred<Post> {
+///         // The proposed row must name the author as its owner.
+///         Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id))
+///     }
+///
 ///     fn update(&self, who: &Visitor) -> EntityPred<Post> {
 ///         Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.user_id))
 ///     }
@@ -77,12 +83,27 @@ use crate::pred::{EntityPred, Pred};
 ///         if who.admin {
 ///             FieldMask::except([PostColumn::Id])
 ///         } else {
-///             // The author may edit the body, never the status. PocketBase's
-///             // `status:changed = false || role = "admin"`, as a value.
-///             FieldMask::only([PostColumn::AuthorId])
+///             // Never the status (PocketBase's `status:changed = false ||
+///             // role = "admin"`, as a value), and never the owner. This
+///             // entity has no other column, so that is nothing.
+///             FieldMask::deny_all()
 ///         }
 ///     }
+///
+///     fn writable_on_create(&self, who: &Visitor) -> FieldMask<PostColumn> {
+///         if who.admin {
+///             return self.writable(who);
+///         }
+///         // A create names its owner, and `create` above admits only the
+///         // author's own id. `update` reads the stored row and not the new
+///         // one, so the owner column stays out of `writable`.
+///         FieldMask::only([PostColumn::AuthorId])
+///     }
 /// }
+///
+/// let author = Visitor { user_id: Some(7), admin: false };
+/// assert!(PostPolicy.writable_on_create(&author).permits(PostColumn::AuthorId));
+/// assert!(!PostPolicy.writable(&author).permits(PostColumn::AuthorId));
 /// ```
 pub trait Policy {
     /// The table these rules are about.
@@ -121,8 +142,34 @@ pub trait Policy {
         Pred::Never
     }
 
-    /// Which columns this subject may write.
+    /// Which columns this subject may change on a row that exists: an update.
+    ///
+    /// [`Policy::update`] decides on the row **as stored**, not on the row
+    /// the update leaves. So a column in this mask is a column the subject
+    /// may set to any value, and a column that [`Policy::update`] reads (the
+    /// owner column, say) lets the subject move a row out of its own rule:
+    /// an author who may write `author_id` can give a post to somebody else.
+    /// Keep such a column out of this mask, and put it in
+    /// [`Policy::writable_on_create`] when a create must set it.
     fn writable(&self, _subject: &Self::Subject) -> FieldMask<<Self::Entity as Entity>::Column> {
         FieldMask::deny_all()
+    }
+
+    /// Which columns this subject may set on a row it creates.
+    ///
+    /// Defaults to [`Policy::writable`]. Override it when a create must set a
+    /// column that an update must not change. The usual case is the owner
+    /// column: [`Policy::create`] checks the **proposed** row, so a rule like
+    /// `author_id = <subject>` lets a create set only the subject's own id,
+    /// while [`Policy::update`] checks only the stored row and cannot stop a
+    /// change of owner.
+    ///
+    /// The other direction (a column an update may change but a create may
+    /// not set) is rare. Write both methods for it.
+    fn writable_on_create(
+        &self,
+        subject: &Self::Subject,
+    ) -> FieldMask<<Self::Entity as Entity>::Column> {
+        self.writable(subject)
     }
 }

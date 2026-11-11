@@ -173,4 +173,56 @@ fn a_policys_mask_reads_the_way_section_nine_writes_it() {
     // `view` follows `list`, because a row you may see in a list is a row you
     // may see.
     assert_eq!(PostPolicy.view(&author), PostPolicy.list(&author));
+    // `writable_on_create` follows `writable` when nobody overrides it.
+    assert_eq!(
+        PostPolicy.writable_on_create(&author),
+        PostPolicy.writable(&author)
+    );
+}
+
+/// The owner column: a create sets it, and an update must not change it.
+///
+/// `create` checks the proposed row, so `author_id = <subject>` limits a
+/// create to the subject's own id. `update` checks only the stored row, so
+/// nothing but the mask stops an author who may write `author_id` from giving
+/// the post to somebody else.
+#[test]
+fn a_create_may_set_the_owner_and_an_update_may_not_change_it() {
+    use brocanth_policy::{EntityPred, Policy, Pred};
+    use common::Post;
+
+    struct Author(i64);
+
+    struct PostPolicy;
+
+    impl Policy for PostPolicy {
+        type Entity = Post;
+        type Subject = Author;
+
+        fn list(&self, who: &Author) -> EntityPred<Post> {
+            Pred::eq(C::AuthorId, who.0)
+        }
+
+        fn writable(&self, _: &Author) -> FieldMask<C> {
+            FieldMask::only([C::Score])
+        }
+
+        fn writable_on_create(&self, _: &Author) -> FieldMask<C> {
+            FieldMask::only([C::Score, C::AuthorId])
+        }
+    }
+
+    let author = Author(7);
+    assert_eq!(
+        PostPolicy
+            .writable_on_create(&author)
+            .check(["score", "author_id"]),
+        Ok(())
+    );
+    assert_eq!(
+        PostPolicy.writable(&author).check(["score", "author_id"]),
+        Err(MaskViolation::Forbidden {
+            fields: vec!["author_id".to_owned()]
+        })
+    );
 }
