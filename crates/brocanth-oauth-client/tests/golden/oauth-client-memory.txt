@@ -3626,7 +3626,7 @@ impl Plugin for OauthClientPlugin {
         }
     }
 
-    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let key = key(&self.settings)?;
         let providers = providers(&self.settings)?;
         // In memory: `oauth-client-memory`. Remove that module and the

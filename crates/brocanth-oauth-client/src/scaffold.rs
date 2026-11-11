@@ -383,6 +383,9 @@ fn plugin_rs(project: &Project) -> String {
         .replace("@PROVIDER_DEFAULTS@", &provider_defaults())
         .replace("@PROVIDER_LIST@", &provider_list())
         .replace("@STORE@", store)
+        // Only the Postgres store reads the lifecycle: the database and a
+        // readiness check.
+        .replace("@LC@", if memory { "_lc" } else { "lc" })
         .replace("@MOUNT@", &module_ref("oauth-client", "mount_at"))
         .replace(
             "@ENV@",
@@ -612,7 +615,7 @@ impl Plugin for OauthClientPlugin {
         }
     }
 
-    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn before_start(&mut self, @LC@: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let key = key(&self.settings)?;
         let providers = providers(&self.settings)?;
 @STORE@        let mount = @MOUNT@;
