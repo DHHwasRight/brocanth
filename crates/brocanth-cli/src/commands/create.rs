@@ -3351,7 +3351,7 @@ mod tests {
             .map(|(template, _)| template.pattern())
             .collect();
         patterns.sort();
-        assert_eq!(@ROUTES@);
+@ROUTES@
     }
 
     #[test]
@@ -3615,18 +3615,40 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
     // brought. The list is written down because a route is a file and the
     // directory is the only other record of it; a module that writes a page
     // says so here, or the test it is not allowed to edit starts failing.
-    let mut routes: Vec<String> = ["/", "/about", "/users/{id}"]
+    // A line that starts with `/` is a pattern. Any other line is a Rust
+    // expression that gives a `String`: a pattern under a path that a
+    // module file chooses (`docs/module-config.md` §9).
+    let (mut routes, read): (Vec<String>, Vec<String>) = ["/", "/about", "/users/{id}"]
         .iter()
         .map(|r| (*r).to_string())
-        .chain(
-            built
-                .slot(Slot::PagesRoutes)
-                .map(|r| r.trim_end().to_string()),
-        )
-        .collect();
+        .chain(built.slot(Slot::PagesRoutes).map(|r| r.trim().to_string()))
+        .partition(|r| r.starts_with('/'));
     routes.sort();
     routes.dedup();
+    out.replace("@ROUTES@", &route_assertion(&routes, &read))
+        .replace("@DESCRIBE@", &format!("{describe}{mounts}{errors}"))
+}
+
+/// The assertion of the route table test: `patterns` equals `routes` and
+/// the patterns that the expressions in `read` give.
+fn route_assertion(routes: &[String], read: &[String]) -> String {
     let quoted: Vec<String> = routes.iter().map(|r| format!("{r:?}")).collect();
+    if !read.is_empty() {
+        // The test builds the list at run time, so it sorts the list too.
+        // It reads the module file and copies no value from it, so a moved
+        // mount needs no edit here.
+        let items = quoted
+            .iter()
+            .map(|r| format!("            {r}.to_string(),\n"))
+            .chain(read.iter().map(|r| format!("            {r},\n")))
+            .collect::<String>();
+        return format!(
+            "        // A module's mount path is read from its file in src/modules/.\n        \
+             let mut expected = vec![\n{items}        ];\n        \
+             expected.sort();\n        \
+             assert_eq!(patterns, expected);"
+        );
+    }
     // One line while it fits, and rustfmt's own broken form when it does
     // not. `every_generated_rust_file_is_already_formatted` rejects the
     // long line, and a generated project nobody can `cargo fmt --check` is
@@ -3654,9 +3676,7 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
             .join(",\n");
         format!("\n            patterns,\n            [\n{items}\n            ]\n        ")
     };
-
-    out.replace("@ROUTES@", &routes)
-        .replace("@DESCRIBE@", &format!("{describe}{mounts}{errors}"))
+    format!("        assert_eq!({routes});")
 }
 
 fn index_rs(a: &Answers) -> String {

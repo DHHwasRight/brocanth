@@ -102,7 +102,12 @@ impl Module for AuthOauth {
             "    crate::plugins::auth_oauth::mount(routes, {})?;",
             module_ref("auth-oauth", "mount_at")
         ));
-        s.at(Slot::PagesRoutes).line("/oauth/{*rest}");
+        // An expression that reads `mount_at`, so a moved mount needs no
+        // edit in the route table test (docs/module-config.md §9).
+        s.at(Slot::PagesRoutes).line(format!(
+            "format!(\"{{}}/{{{{*rest}}}}\", {})",
+            module_ref("auth-oauth", "mount_at")
+        ));
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }

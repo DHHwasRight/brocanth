@@ -32,7 +32,7 @@
 //!   (`Queue::memory()`), for development and tests. `brocanth check
 //!   --deploy` reports it (`deploy/development-only`).
 //!
-//! With `admin`, the queue is a tab at `/admin/jobs`: an integration, on by
+//! With `admin`, the queue is the admin's `jobs` tab: an integration, on by
 //! default, that `src/modules/jobs.rs` turns off.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
@@ -88,7 +88,7 @@ impl Module for Jobs {
         )
         .integration(
             "admin",
-            "a tab at /admin/jobs: the queues, what runs, the retries and the dead letter",
+            "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",
             true,
         )
         .asked_in(

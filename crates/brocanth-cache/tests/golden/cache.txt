@@ -1975,7 +1975,7 @@ pub mod cache {
     /// The code `cache` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/cache: purge expired entries, clear a
+        /// With `admin`: a `cache` tab in the admin: purge expired entries, clear a
         /// namespace you name.
         pub admin: bool,
     }
@@ -2005,7 +2005,7 @@ pub mod cache {
     }
 }
 
-// brocanth-digest: fc15219b546b315a
+// brocanth-digest: 112dfc7df56715f1
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2102,8 +2102,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // A tab at /admin/cache: purge expired entries, clear a namespace you
-        // name. Without the `admin` module this does nothing.
+        // A `cache` tab in the admin: purge expired entries, clear a namespace
+        // you name. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },

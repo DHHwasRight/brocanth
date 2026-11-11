@@ -67,7 +67,7 @@ impl Module for Audit {
         )
         .integration(
             "admin",
-            "a History tab at /admin/history, a History link on every record, and every admin write recorded with its values",
+            "a History tab in the admin, a History link on every record, and every admin write recorded with its values",
             true,
         )
         .absent(
@@ -144,7 +144,7 @@ const AUDIT_RS: &str = r#"//! The change history: who is asking, and the sink a 
 //! ```
 //!
 //! The history is the `brocanth_audit` table of the `[db]` database. With
-//! the `admin` module, the History tab at `/admin/history` lists it, every
+//! the `admin` module, the admin's History tab lists it, every
 //! record has a History link, and every admin write is recorded with the
 //! values before and after.
 

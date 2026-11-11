@@ -1935,7 +1935,7 @@ pub mod cache {
     /// The code `cache` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/cache: purge expired entries, clear a
+        /// With `admin`: a `cache` tab in the admin: purge expired entries, clear a
         /// namespace you name.
         pub admin: bool,
     }
@@ -1996,7 +1996,7 @@ pub mod cache_memory {
     }
 }
 
-// brocanth-digest: 8589e623c4b58307
+// brocanth-digest: 657980a3526699e8
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2079,8 +2079,8 @@ use crate::plugins::shape::cache::{Integrate, Module};
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
     integrate: Integrate {
-        // A tab at /admin/cache: purge expired entries, clear a namespace you
-        // name. Without the `admin` module this does nothing.
+        // A `cache` tab in the admin: purge expired entries, clear a namespace
+        // you name. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },

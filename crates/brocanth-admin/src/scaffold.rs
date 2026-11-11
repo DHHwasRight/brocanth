@@ -185,9 +185,13 @@ impl Module for Backoffice {
             "    crate::plugins::admin::mount(routes, {})?;",
             module_ref("admin", "mount_at")
         ));
-        // Two patterns, and the table's own test lists every route.
-        s.at(Slot::PagesRoutes).line("/admin");
-        s.at(Slot::PagesRoutes).line("/admin/{*rest}");
+        // Two patterns, and the table's own test lists every route. They
+        // are expressions that read `mount_at`, so a moved admin needs no
+        // edit in the test (docs/module-config.md §9).
+        let at = module_ref("admin", "mount_at");
+        s.at(Slot::PagesRoutes).line(format!("{at}.to_string()"));
+        s.at(Slot::PagesRoutes)
+            .line(format!("format!(\"{{}}/{{{{*rest}}}}\", {at})"));
         // `admin eject` belongs to the `brocanth` CLI, which writes source.
         // With a command line, the binary offers it too and hands it to the
         // CLI, so the app never links the code that writes code.
@@ -600,7 +604,7 @@ impl OverOrm {
 "#;
 
 /// `src/plugins/admin/mod.rs`. `@TITLE@` is the quoted title.
-const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
+const ADMIN_RS: &str = r##"//! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
@@ -614,8 +618,8 @@ const ADMIN_RS: &str = r##"//! The backoffice, at `/admin`.
 @MODELS_DOC@
 //!
 //! The routes are in the one table `src/pages/mod.rs` builds:
-//! `pages::mounted` calls [`mount`] with the prefix. A page at `/admin` is
-//! therefore a build error, not a race.
+//! `pages::mounted` calls [`mount`] with the prefix. A page at that prefix
+//! is therefore a build error, not a race.
 @MODELS_MOD@
 use std::sync::{@SYNC@};
 
@@ -817,7 +821,8 @@ fn principal(staff: Option<&brocanth_auth::Staff>) -> Principal<'_> {
 const AGENTS: &str = "\n\
     ## The admin\n\
     \n\
-    `src/plugins/admin/mod.rs` mounts the backoffice at `/admin`. It ships\n\
+    `src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in\n\
+    `src/modules/admin.rs` (`/admin` by default). It ships\n\
     locked: the policy is `DenyAll` and `principal` returns an anonymous\n\
     principal, so every screen answers 403. Do not open it with\n\
     `AllowAllUnsafeForDevelopment` outside a test.\n\

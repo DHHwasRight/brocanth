@@ -228,9 +228,10 @@ check it on a create, and the generated policy and `docs/policy.md` keep
    stream. `sitemap`, `analytics` and `gtag` read `admin`'s `mount_at`
    for their exclusion, and the generated `robots` and `admin` tests
    follow a moved admin (§9, decisions 4 and 5). No library default names
-   `/admin`. Remains: `add` does not print a field a newer module adds;
-   the route table test of `src/pages/mod.rs` lists the admin's patterns
-   as literals, so a move edits it too.
+   `/admin`. The route table test of `src/pages/mod.rs` reads the
+   `mount_at` of `admin` and `auth-oauth` too, so a move is one edit in
+   the module file (§9, decision 6). Remains: `add` does not print a
+   field a newer module adds.
 
 ### 4. Admin
 

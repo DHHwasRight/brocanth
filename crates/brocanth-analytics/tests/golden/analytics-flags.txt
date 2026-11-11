@@ -2432,7 +2432,8 @@ pub mod analytics {
     /// The code `analytics` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/analytics with the page-view numbers.
+        /// With `admin`: an `analytics` tab in the admin, with the page-view
+        /// numbers.
         pub admin: bool,
     }
 
@@ -2464,7 +2465,7 @@ pub mod analytics {
     }
 }
 
-// brocanth-digest: 8f7977dc2c5ec994
+// brocanth-digest: a0b1c24adbaccdd6
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2587,8 +2588,8 @@ pub const MODULE: Module = Module {
     },
 
     integrate: Integrate {
-        // A tab at /admin/analytics with the page-view numbers. Without the
-        // `admin` module this does nothing.
+        // An `analytics` tab in the admin, with the page-view numbers. Without
+        // the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },

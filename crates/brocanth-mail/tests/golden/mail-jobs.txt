@@ -2097,8 +2097,8 @@ pub mod jobs {
     /// The code `jobs` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: a tab at /admin/jobs: the queues, what runs, the retries
-        /// and the dead letter.
+        /// With `admin`: a `jobs` tab in the admin: the queues, what runs, the
+        /// retries and the dead letter.
         pub admin: bool,
     }
 
@@ -2180,7 +2180,7 @@ pub mod mail {
     }
 }
 
-// brocanth-digest: 6922f71e57f23e0c
+// brocanth-digest: 13b2b47a2eba8491
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2278,8 +2278,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // A tab at /admin/jobs: the queues, what runs, the retries and the dead
-        // letter. Without the `admin` module this does nothing.
+        // A `jobs` tab in the admin: the queues, what runs, the retries and the
+        // dead letter. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
