@@ -1243,7 +1243,7 @@ fn the_module_writes_this_project() {
 | `testing::assert_formatted(files)` | Fails when rustfmt changes a generated `.rs` file. Skips when rustfmt is not on `PATH`. |
 | `testing::snapshot(files)` | The project as one text, in the CLI's golden format. |
 | `testing::golden(path, text)` | Compares with the file, or writes it under `BROCANTH_BLESS=1`. |
-| `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo build` in a temporary directory and deletes it when the build passes. |
+| `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo test` in a temporary directory, so the project builds and its own tests run. It deletes the directory when they pass. |
 
 `crates/brocanth-robots/tests/scaffold.rs` uses it: the two `robots`
 shapes and their goldens moved there from the CLI. It also generates a
@@ -1335,7 +1335,7 @@ without a change to the CLI.
     for a compile-time value (§3.9).
 10. No stage waits for async work: a lazy pool and a readiness check.
 11. Two lines in the CLI, the goldens blessed and read, a generated
-    project built. Outside this repository: `brocanth_scaffold::testing`
+    project built and tested. Outside this repository: `brocanth_scaffold::testing`
     in the module's own tests.
 
 ## 5. Gaps
@@ -1372,7 +1372,7 @@ Found while writing this guide. Input for the module-design discussion.
    declared setting names its section, and `snippet::configurable` writes
    it. `docs/module-flags.md` has the design.
 8. ~~**An out-of-tree module has no test harness.**~~ Closed:
-   `brocanth_scaffold::testing` (rustfmt, goldens, a build) and
+   `brocanth_scaffold::testing` (rustfmt, goldens, a build and test run) and
    `brocanth_cli::testing::generate`, which takes the module as a
    `&dyn Module`. See "Testing a module outside this repository" in §4.
    `brocanth-robots` tests itself this way.

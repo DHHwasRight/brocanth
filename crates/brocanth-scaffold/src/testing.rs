@@ -1,5 +1,5 @@
 //! Tests for a module crate: format a generated project, compare it with a
-//! golden file, and build it.
+//! golden file, and build and test it.
 //!
 //! On under the `testing` feature. A module crate takes it as a
 //! dev-dependency:
@@ -40,7 +40,7 @@
 //!             &[&brocanth_robots::scaffold::Robots],
 //!         )
 //!         .expect("the project generates");
-//!         testing::build(&files).expect("the project builds");
+//!         testing::build(&files).expect("the project builds and passes its tests");
 //!     }
 //! }
 //! ```
@@ -49,8 +49,8 @@
 //!
 //! * `BROCANTH_BLESS=1` writes the golden file instead of comparing.
 //! * `BROCANTH_BUILD=1` makes [`building`] true, so a test builds the
-//!   project. Off by default: a build fetches and compiles the framework,
-//!   which takes minutes.
+//!   project and runs its own tests. Off by default: a build fetches and
+//!   compiles the framework, which takes minutes.
 
 use std::io::Write;
 use std::path::Path;
@@ -80,8 +80,8 @@ pub fn blessing() -> bool {
     std::env::var("BROCANTH_BLESS").is_ok_and(|v| !v.is_empty())
 }
 
-/// Whether this run builds generated projects: `BROCANTH_BUILD` is set and
-/// not empty.
+/// Whether this run builds and tests generated projects: `BROCANTH_BUILD`
+/// is set and not empty.
 pub fn building() -> bool {
     std::env::var("BROCANTH_BUILD").is_ok_and(|v| !v.is_empty())
 }
@@ -216,8 +216,10 @@ pub fn write(dir: &Path, files: &Files) -> std::io::Result<()> {
 }
 
 /// Writes the project into a fresh directory under the system's temporary
-/// directory and runs `cargo build` in it. The directory is deleted when
-/// the build passes, and kept for a look when it fails.
+/// directory and runs `cargo test` in it: cargo builds the project, then
+/// runs the tests the generator wrote into it. A build alone proves the
+/// code compiles, not that the project passes its own tests. The directory
+/// is deleted when the tests pass, and kept for a look when they fail.
 ///
 /// The project must name its brocanth crates by path or by a source cargo
 /// can reach. `brocanth_cli::testing::generate_for_build` writes path
@@ -225,8 +227,8 @@ pub fn write(dir: &Path, files: &Files) -> std::io::Result<()> {
 ///
 /// # Errors
 ///
-/// When a file cannot be written, or cargo fails. The error holds cargo's
-/// output.
+/// When a file cannot be written, the project does not build, or a test
+/// fails. The error holds cargo's output.
 pub fn build(files: &Files) -> Result<(), String> {
     let name = files
         .iter()
@@ -247,7 +249,7 @@ pub fn build(files: &Files) -> Result<(), String> {
     // Its own target directory, so the build does not wait on the lock of
     // the test that runs it.
     let out = Command::new(cargo)
-        .args(["build", "--quiet"])
+        .args(["test", "--quiet"])
         .current_dir(&dir)
         .env_remove("CARGO_TARGET_DIR")
         .output()
@@ -258,9 +260,10 @@ pub fn build(files: &Files) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "error: the generated project in {} does not build\n{}\n\
-             help: open the directory and run `cargo build` to read the error in place",
+            "error: the generated project in {} does not build or fails its tests\n{}{}\n\
+             help: open the directory and run `cargo test` to read the error in place",
             dir.display(),
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ))
     }
