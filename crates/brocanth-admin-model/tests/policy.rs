@@ -20,7 +20,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::Base;
 use brocanth::plugin_hooks::{NoHooks, Request, RequestState};
-use brocanth_admin::data::{AdminData, DataError, ListRequest, Scope, Search};
+use brocanth_admin::data::{AdminData, AdminTransaction, DataError, ListRequest, Scope, Search};
 use brocanth_admin::discovery::RegistryEntry;
 use brocanth_admin::model::{ModelDescriptor, PrimaryKey, Row, Value};
 use brocanth_admin::policy::{policy_fn, Principal};
@@ -367,6 +367,10 @@ impl AdminData for Racing {
         scope: Scope<'_>,
     ) -> Result<u64, DataError> {
         self.inner.delete(model, key, scope).await
+    }
+
+    async fn begin(&self) -> Result<Box<dyn AdminTransaction + '_>, DataError> {
+        self.inner.begin().await
     }
 }
 

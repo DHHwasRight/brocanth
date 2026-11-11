@@ -28,6 +28,9 @@
 //! | [`AdminData::update`] | the write, guarded by `<pk> = ? AND <scope>`; report rows changed |
 //! | [`AdminData::delete`] | the same, for a delete |
 //!
+//! [`AdminData::begin`] opens an [`AdminTransaction`]. It has the same three
+//! writes under the same rules, and keeps them all together or not at all.
+//!
 //! The count and the page get the same scope, so the total and the pages
 //! describe one set. A write that reports zero rows is an authorisation
 //! failure, and the admin answers `409`: the row stopped matching between the
@@ -282,6 +285,57 @@ pub trait AdminData: Send + Sync + 'static {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<u64, DataError>;
+
+    /// Opens a unit of work: writes that are kept all together or not at
+    /// all.
+    ///
+    /// The admin opens one for a save that writes more than one row: a
+    /// parent and its inline children. A SQL source opens a database
+    /// transaction. A source without one can stage the writes and apply
+    /// them in [`AdminTransaction::commit`], as [`crate::Fixture`] does.
+    /// **Do not return a pass-through that writes at once:** when a write
+    /// fails, the admin tells the person that nothing was saved, and a
+    /// pass-through makes that false.
+    async fn begin(&self) -> Result<Box<dyn AdminTransaction + '_>, DataError>;
+}
+
+/// The writes of one unit of work, from [`AdminData::begin`].
+///
+/// Each write has the contract of the [`AdminData`] method with the same
+/// name, the scope and the zero-rows answer included. Other requests see
+/// nothing before [`AdminTransaction::commit`]. A transaction that is
+/// dropped, or that [`AdminTransaction::rollback`] ends, keeps nothing.
+#[async_trait]
+pub trait AdminTransaction: Send {
+    /// Writes a new row and returns its key. See [`AdminData::insert`].
+    async fn insert(
+        &mut self,
+        model: &ModelDescriptor,
+        values: &[(String, Value)],
+    ) -> Result<PrimaryKey, DataError>;
+
+    /// Writes over a row, guarded by the scope. See [`AdminData::update`].
+    async fn update(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError>;
+
+    /// Removes a row, guarded by the scope. See [`AdminData::delete`].
+    async fn delete(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<u64, DataError>;
+
+    /// Keeps every write. An error means that none is kept.
+    async fn commit(self: Box<Self>) -> Result<(), DataError>;
+
+    /// Discards every write.
+    async fn rollback(self: Box<Self>) -> Result<(), DataError>;
 }
 
 /// A shared data source, which is how the admin holds one.

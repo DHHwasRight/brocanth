@@ -46,10 +46,14 @@
 //! [`Action::ViewPanel`]: crate::policy::Action::ViewPanel
 //! [`Action::ActOnPanel`]: crate::policy::Action::ActOnPanel
 
+use std::future::Future;
+use std::pin::Pin;
+
 use async_trait::async_trait;
 
 use crate::admin::AdminError;
 use crate::form::Submission;
+use crate::model::{PrimaryKey, Row};
 
 /// A tab contributed by another crate.
 #[async_trait]
@@ -160,6 +164,50 @@ impl PanelPage {
         PanelPage::Redirect {
             location: location.into(),
         }
+    }
+}
+
+/// What an async page under a model returns. Build one with `Box::pin`.
+pub type PageFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<PanelPage>, AdminError>> + Send + 'a>>;
+
+/// One request of a page under a model or a record, as an async page sees
+/// it: the request, the record, and the writes that keep the admin's rules.
+///
+/// See [`ModelAdmin::page_async`](crate::ModelAdmin::page_async). The admin
+/// asked the policy before it built this; [`PageCx::update`] and
+/// [`PageCx::delete`] ask it again for the record they write, as an action
+/// over selected rows does.
+pub struct PageCx<'a> {
+    pub(crate) admin: &'a crate::admin::Admin,
+    pub(crate) model: &'a str,
+    pub(crate) principal: crate::policy::Principal<'a>,
+    pub(crate) request: PanelRequest<'a>,
+    pub(crate) key: Option<&'a PrimaryKey>,
+    pub(crate) record: Option<&'a Row>,
+}
+
+impl<'a> PageCx<'a> {
+    /// The request: the path below the page, the query, the POST and its
+    /// form, `can_act` and `mount`.
+    pub fn request(&self) -> &PanelRequest<'a> {
+        &self.request
+    }
+
+    /// The record, read under the view rule, on a page under a record.
+    /// `None` on a page under the model.
+    pub fn record(&self) -> Option<&'a Row> {
+        self.record
+    }
+
+    /// The record's key, on a page under a record.
+    pub fn key(&self) -> Option<&'a PrimaryKey> {
+        self.key
+    }
+
+    /// The model key.
+    pub fn model(&self) -> &str {
+        self.model
     }
 }
 

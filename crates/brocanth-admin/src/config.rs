@@ -69,16 +69,33 @@ pub struct ModelAdmin {
     pages: Vec<ModelPage>,
 }
 
-/// Renders one request of a page under a model: the request, and the record
-/// for a page under one record. See [`ModelAdmin::page`].
-pub type ModelPageFn = Box<
-    dyn Fn(
+/// Renders one request of a page under a model. See [`ModelAdmin::page`]
+/// and [`ModelAdmin::page_async`].
+pub type ModelPageFn =
+    Box<dyn for<'a> Fn(crate::panel::PageCx<'a>) -> crate::panel::PageFuture<'a> + Send + Sync>;
+
+/// The stored form of an async render: the closure, with its signature
+/// fixed so that the compiler reads the lifetimes of a bare closure.
+fn async_page<F>(render: F) -> ModelPageFn
+where
+    F: for<'a> Fn(crate::panel::PageCx<'a>) -> crate::panel::PageFuture<'a> + Send + Sync + 'static,
+{
+    Box::new(render)
+}
+
+/// The stored form of a synchronous render: a future that is ready at once.
+fn sync_page<F>(render: F) -> ModelPageFn
+where
+    F: Fn(
             &crate::panel::PanelRequest<'_>,
             Option<&Row>,
         ) -> Result<Option<crate::panel::PanelPage>, crate::AdminError>
         + Send
-        + Sync,
->;
+        + Sync
+        + 'static,
+{
+    async_page(move |cx| Box::pin(std::future::ready(render(cx.request(), cx.record()))))
+}
 
 /// A page of the application's own under one model, or under one record.
 pub(crate) struct ModelPage {
@@ -429,6 +446,9 @@ impl ModelAdmin {
     /// rows does. [`PanelRequest::can_act`](crate::panel::PanelRequest)
     /// says whether a POST would pass. The record argument is `None`.
     ///
+    /// The closure is synchronous. A page that awaits a read, or that
+    /// writes a record, uses [`ModelAdmin::page_async`].
+    ///
     /// ```
     /// use brocanth_admin::panel::PanelPage;
     /// use brocanth_admin::AdminConfig;
@@ -461,7 +481,78 @@ impl ModelAdmin {
             key: key.into(),
             label: label.into(),
             record: false,
-            render: Box::new(render),
+            render: sync_page(render),
+        });
+        self
+    }
+
+    /// [`ModelAdmin::page`] with an async render: a page that awaits a
+    /// database read, or that writes.
+    ///
+    /// The render gets a [`PageCx`](crate::panel::PageCx): the request, and
+    /// [`PageCx::update`](crate::panel::PageCx::update) and
+    /// [`PageCx::delete`](crate::panel::PageCx::delete), which write a
+    /// record of this model through the checks of every admin write. The
+    /// policy is the one [`ModelAdmin::page`] has.
+    ///
+    /// ```
+    /// use brocanth_admin::panel::PanelPage;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().model("invoice", |m| {
+    ///     m.page_async("overdue", "Overdue", |cx| {
+    ///         Box::pin(async move {
+    ///             // let rows = db.overdue().await?;
+    ///             Ok(match cx.request().path {
+    ///                 "" => Some(PanelPage::body("Overdue invoices", "<p>…</p>")),
+    ///                 _ => None,
+    ///             })
+    ///         })
+    ///     })
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn page_async<F>(
+        mut self,
+        key: impl Into<String>,
+        label: impl Into<String>,
+        render: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::panel::PageCx<'a>) -> crate::panel::PageFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pages.push(ModelPage {
+            key: key.into(),
+            label: label.into(),
+            record: false,
+            render: async_page(render),
+        });
+        self
+    }
+
+    /// [`ModelAdmin::record_page`] with an async render. The render gets a
+    /// [`PageCx`](crate::panel::PageCx) with the record and its key; see
+    /// [`ModelAdmin::page_async`].
+    pub fn record_page_async<F>(
+        mut self,
+        key: impl Into<String>,
+        label: impl Into<String>,
+        render: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::panel::PageCx<'a>) -> crate::panel::PageFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pages.push(ModelPage {
+            key: key.into(),
+            label: label.into(),
+            record: true,
+            render: async_page(render),
         });
         self
     }
@@ -497,7 +588,7 @@ impl ModelAdmin {
             key: key.into(),
             label: label.into(),
             record: true,
-            render: Box::new(render),
+            render: sync_page(render),
         });
         self
     }

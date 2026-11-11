@@ -84,6 +84,11 @@ pub fn unknown_model(module_path: &str) -> DataError {
     DataError::UnknownModel(module_path.to_string())
 }
 
+/// A database error, as the admin spells a backend failure.
+pub fn db_error(error: brocanth_model::sea_orm::DbErr) -> DataError {
+    DataError::backend(error.to_string())
+}
+
 /// What a name that is not a column gets, rather than a query.
 pub fn unknown_column(name: &str) -> DataError {
     DataError::backend(format!(
@@ -202,13 +207,22 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
 /// cache, a set of flags -- never needs one. That admin shows "nothing to
 /// administer" and its tabs, which is accurate rather than broken.
 ///
-/// # Why the match is written six times
+/// # Why the match is written nine times
 ///
-/// Once per method, by the macro. A helper macro holding it once cannot be
-/// written: a `macro_rules!` nested inside another cannot capture the outer
-/// one's variables, and every arm names a different entity, so no function
-/// can hold them either. Six expansions of a two-line match is the cost of
-/// the ORM being static and the admin being dynamic.
+/// Once per method, by the macro: six on the source, three on its
+/// transaction. A helper macro holding it once cannot be written: a
+/// `macro_rules!` nested inside another cannot capture the outer one's
+/// variables, and every arm names a different entity, so no function can
+/// hold them either. Nine expansions of a two-line match is the cost of the
+/// ORM being static and the admin being dynamic.
+///
+/// # One save, one transaction
+///
+/// `AdminData::begin` opens a SeaORM `DatabaseTransaction`, and the writes
+/// of its `AdminTransaction` run on it through the same functions as the
+/// source's own writes. The guarded update and delete open their own
+/// transaction for the row lock; on a transaction that is a savepoint, so
+/// the row lock lasts until the outer commit.
 ///
 /// [`AdminData`]: brocanth_admin::data::AdminData
 #[macro_export]
@@ -244,8 +258,88 @@ macro_rules! admin_source {
             }
         }
 
+        // In a block, so the transaction type needs no name of its own and
+        // two sources in one module do not collide.
+        const _: () = {
+        /// The writes of one admin save, in one database transaction.
+        struct Transaction {
+            txn: $crate::brocanth_model::sea_orm::DatabaseTransaction,
+        }
+
+        #[$crate::async_trait]
+        impl $crate::brocanth_admin::data::AdminTransaction for Transaction {
+            async fn insert(
+                &mut self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::model::PrimaryKey,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::insert_of::<$entity, _>(&self.txn, model, values).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn update(
+                &mut self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::update_of::<$entity, _>(&self.txn, model, key, values, scope)
+                            .await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn delete(
+                &mut self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::delete_of::<$entity, _>(&self.txn, model, key, scope).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn commit(
+                self: ::std::boxed::Box<Self>,
+            ) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
+                self.txn.commit().await.map_err($crate::db_error)
+            }
+
+            async fn rollback(
+                self: ::std::boxed::Box<Self>,
+            ) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
+                self.txn.rollback().await.map_err($crate::db_error)
+            }
+        }
+
         #[$crate::async_trait]
         impl $crate::brocanth_admin::data::AdminData for $name {
+            async fn begin(
+                &self,
+            ) -> ::std::result::Result<
+                ::std::boxed::Box<dyn $crate::brocanth_admin::data::AdminTransaction + '_>,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                use $crate::brocanth_model::sea_orm::TransactionTrait as _;
+                let txn = self.db.begin().await.map_err($crate::db_error)?;
+                ::std::result::Result::Ok(::std::boxed::Box::new(Transaction { txn }))
+            }
+
             fn registry(
                 &self,
             ) -> ::std::vec::Vec<$crate::brocanth_admin::discovery::RegistryEntry> {
@@ -304,7 +398,7 @@ macro_rules! admin_source {
             > {
                 match model.module_path.as_str() {
                     $($module => {
-                        $crate::insert_of::<$entity>(&self.db, model, values).await
+                        $crate::insert_of::<$entity, _>(&self.db, model, values).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
@@ -319,7 +413,7 @@ macro_rules! admin_source {
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
                     $($module => {
-                        $crate::update_of::<$entity>(&self.db, model, key, values, scope).await
+                        $crate::update_of::<$entity, _>(&self.db, model, key, values, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
@@ -333,11 +427,12 @@ macro_rules! admin_source {
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
                 match model.module_path.as_str() {
                     $($module => {
-                        $crate::delete_of::<$entity>(&self.db, model, key, scope).await
+                        $crate::delete_of::<$entity, _>(&self.db, model, key, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
             }
         }
+        };
     };
 }

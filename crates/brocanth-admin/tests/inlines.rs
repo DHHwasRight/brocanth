@@ -4,9 +4,10 @@
 //! here. The row rules on a real database are in
 //! `crates/brocanth-admin-model/tests/inlines.rs`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use brocanth_admin::data::{AdminData, ListRequest, Scope, Search};
+use brocanth_admin::journal::AdminWrite;
 use brocanth_admin::policy::{policy_fn, Action, AllowAllUnsafeForDevelopment, Policy, Request};
 use brocanth_admin::rt::block_on;
 use brocanth_admin::{
@@ -503,19 +504,47 @@ fn library() -> Arc<Fixture> {
     )
 }
 
-#[test]
-fn a_row_the_data_source_refuses_keeps_what_was_saved_before_it() {
-    let data = library();
+/// The library admin, with two blank book rows and a journal that keeps
+/// every write it hears.
+fn library_admin(data: Arc<Fixture>) -> (Admin, Arc<Mutex<Vec<String>>>) {
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let journal = heard.clone();
     let admin = Admin::new(
-        data.clone(),
+        data,
         AdminConfig::new()
             .at("/admin")
             .unscoped_rows_unsafe_for_development()
             .with_policy(AllowAllUnsafeForDevelopment)
+            .journal(move |write: &AdminWrite<'_>| {
+                journal.lock().unwrap().push(format!(
+                    "{} {} {}",
+                    write.kind.as_str(),
+                    write.model,
+                    write.key
+                ));
+            })
             .model("author", |m| m.inline(Inline::new("book").extra(2))),
     );
+    (admin, heard)
+}
+
+/// One stored column, as text.
+fn column(data: &Fixture, admin: &Admin, model: &str, id: i64, name: &str) -> Option<String> {
+    let model = admin.descriptor(model).expect("the model");
+    block_on(data.fetch(model, &PrimaryKey::single("id", id), Scope::Unscoped))
+        .unwrap()
+        .map(|row| row.get(name).map(Value::as_input).unwrap_or_default())
+}
+
+#[test]
+fn a_row_the_data_source_refuses_undoes_the_whole_save() {
+    let data = library();
+    let (admin, heard) = library_admin(data.clone());
+    // The parent changes, the first book changes, a second book is added,
+    // and the third row repeats the first book's ISBN: the data source
+    // refuses it after three writes.
     let form = Submission::new()
-        .with("name", "Mary Shelley")
+        .with("name", "Mary Wollstonecraft Shelley")
         .with("book-0-pk", "1")
         .with("book-0-title", "Frankenstein; or, The Modern Prometheus")
         .with("book-0-isbn", "111")
@@ -527,37 +556,115 @@ fn a_row_the_data_source_refuses_keeps_what_was_saved_before_it() {
     assert_eq!(response.status(), 422);
     let page = html(&response);
     page.assert_text("has already been taken")
-        .assert_text("Fix the marked row and save again");
-    // The rows before the refused one are saved, and the added one comes
-    // back as an existing child, so a second save does not add it twice.
-    let book = admin.descriptor("book").unwrap();
-    let first = block_on(data.fetch(book, &PrimaryKey::single("id", 1), Scope::Unscoped))
-        .unwrap()
-        .unwrap();
+        .assert_text("Nothing was saved");
+
+    // Nothing is kept: not the parent, not the change before the refused
+    // row, not the book added before it. The journal heard nothing.
     assert_eq!(
-        first.get("title").map(Value::as_input).as_deref(),
-        Some("Frankenstein; or, The Modern Prometheus")
+        column(&data, &admin, "author", 1, "name").as_deref(),
+        Some("Mary Shelley")
     );
-    assert_eq!(data.len("book"), 2);
-    assert_eq!(page.field("book-1-pk").unwrap().attr("value"), Some("2"));
+    assert_eq!(
+        column(&data, &admin, "book", 1, "title").as_deref(),
+        Some("Frankenstein")
+    );
+    assert_eq!(data.len("book"), 1);
+    assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock());
+
+    // The form comes back as it was sent: the added book is still a new
+    // row, with no key, so the next save adds it once.
+    assert!(page.field("book-1-pk").is_none());
+    assert_eq!(
+        page.field("book-1-title").unwrap().attr("value"),
+        Some("The Last Man")
+    );
     assert_eq!(
         page.field("book-2-isbn").unwrap().attr("value"),
         Some("111")
     );
 
-    // The person fixes the ISBN and saves the form as it came back.
+    // The person fixes the ISBN and sends the form again.
     let again = Submission::new()
-        .with("name", "Mary Shelley")
+        .with("name", "Mary Wollstonecraft Shelley")
         .with("book-0-pk", "1")
         .with("book-0-title", "Frankenstein; or, The Modern Prometheus")
         .with("book-0-isbn", "111")
-        .with("book-1-pk", "2")
         .with("book-1-title", "The Last Man")
         .with("book-1-isbn", "222")
         .with("book-2-title", "A copy")
         .with("book-2-isbn", "333");
     assert_eq!(post(&admin, "/admin/author/1", again).status(), 303);
     assert_eq!(data.len("book"), 3);
+    assert_eq!(
+        column(&data, &admin, "author", 1, "name").as_deref(),
+        Some("Mary Wollstonecraft Shelley")
+    );
+    assert_eq!(
+        *heard.lock().unwrap(),
+        [
+            "updated author 1",
+            "updated book 1",
+            "created book 2",
+            "created book 3"
+        ]
+    );
+}
+
+#[test]
+fn a_refused_row_on_the_create_form_creates_no_parent() {
+    let data = library();
+    let (admin, heard) = library_admin(data.clone());
+    let form = Submission::new()
+        .with("name", "Percy Shelley")
+        .with("book-0-title", "Queen Mab")
+        .with("book-0-isbn", "444")
+        .with("book-1-title", "A copy")
+        .with("book-1-isbn", "111");
+    let response = post(&admin, "/admin/author", form);
+    assert_eq!(response.status(), 422);
+    let page = html(&response);
+    page.assert_text("Nothing was saved");
+    assert_eq!(data.len("author"), 1, "no author was created");
+    assert_eq!(data.len("book"), 1, "no book was created");
+    assert!(heard.lock().unwrap().is_empty());
+    // Still the create form: it posts to the create route.
+    assert!(
+        page.source().contains(r#"action="/admin/author""#),
+        "the form still creates"
+    );
+}
+
+#[test]
+fn a_fixture_transaction_keeps_nothing_until_it_commits() {
+    let data = library();
+    let (admin, _) = library_admin(data.clone());
+    let book = admin.descriptor("book").unwrap().clone();
+    let values = [
+        ("title".to_string(), Value::from("Mathilda")),
+        ("isbn".to_string(), Value::from("555")),
+        ("author_id".to_string(), Value::Int(1)),
+    ];
+
+    // Dropped: nothing kept.
+    let mut tx = block_on(data.begin()).unwrap();
+    block_on(tx.insert(&book, &values)).unwrap();
+    assert_eq!(data.len("book"), 1, "a staged write is not visible");
+    drop(tx);
+    assert_eq!(data.len("book"), 1);
+
+    // Committed: kept.
+    let mut tx = block_on(data.begin()).unwrap();
+    block_on(tx.insert(&book, &values)).unwrap();
+    block_on(tx.commit()).unwrap();
+    assert_eq!(data.len("book"), 2);
+
+    // Another write first: the commit fails and keeps nothing.
+    let mut tx = block_on(data.begin()).unwrap();
+    block_on(tx.delete(&book, &PrimaryKey::single("id", 1), Scope::Unscoped)).unwrap();
+    block_on(data.delete(&book, &PrimaryKey::single("id", 2), Scope::Unscoped)).unwrap();
+    assert!(block_on(tx.commit()).is_err());
+    assert_eq!(data.len("book"), 1);
+    assert!(column(&data, &admin, "book", 1, "title").is_some());
 }
 
 #[test]

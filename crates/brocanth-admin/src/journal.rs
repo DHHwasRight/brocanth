@@ -75,7 +75,9 @@ pub struct AdminWrite<'a> {
 
 /// Hears every write the admin makes.
 ///
-/// Called synchronously, after the write, on the request's task. It must
+/// Called synchronously, after the write, on the request's task. For a
+/// save with inline rows, after the commit: a write that was rolled back
+/// is never heard. It must
 /// not block: a journal that stores rows queues them and writes later.
 pub trait Journal: Send + Sync {
     /// One write.
