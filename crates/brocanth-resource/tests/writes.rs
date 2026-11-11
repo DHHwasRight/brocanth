@@ -139,13 +139,50 @@ fn a_write_that_moves_the_row_out_of_its_own_view_still_stands() {
         flow::update(&posts, &Visitor::user(7), "1", b"title=two").expect("the update applies");
     assert!(updated.row.is_some());
 
-    // Handing it to somebody else is a legal write under this policy, and the
-    // row is then no longer author 7's to see. The write stands, and there is
-    // nothing to show.
-    let updated =
-        flow::update(&posts, &Visitor::user(7), "1", b"author_id=8").expect("the update applies");
+    // A moderator publishes it, then takes it back to a draft. A draft that
+    // is not your own is not in your view, so the second write leaves the
+    // moderator with nothing to see. The write stands.
+    let updated = flow::update(&posts, &Visitor::moderator(5), "1", b"status=published")
+        .expect("the update applies");
+    assert!(updated.row.is_some(), "a published row is visible");
+    let updated = flow::update(&posts, &Visitor::moderator(5), "1", b"status=draft")
+        .expect("the update applies");
     assert!(updated.row.is_none(), "the row is no longer visible");
     assert_eq!(posts.db.status_of(1).as_deref(), Some("draft"));
+}
+
+/// The owner column is writable on a create and not on an update.
+///
+/// `create` checks the proposed row, so it limits a create to the author's
+/// own id. `update` checks the row as stored, and `author_id = 7` is true
+/// before the write whatever the write sets. Only the update mask stops
+/// author 7 from giving a post to author 8.
+#[test]
+fn an_author_cannot_give_their_post_to_somebody_else() {
+    let posts = Posts::new();
+    seed_eight(&posts);
+
+    let refused = flow::update(&posts, &Visitor::user(7), "1", b"author_id=8");
+
+    match refused {
+        Err(Failure::NotWritable(violation)) => {
+            assert_eq!(violation.to_string(), "not writable: author_id");
+        }
+        other => panic!("expected a mask violation, got {other:?}"),
+    }
+    assert!(
+        posts.db.seen.lock().unwrap().is_empty(),
+        "refused before the row is read"
+    );
+    let still = flow::view(&posts, &Visitor::user(7), "1").expect("still author 7's");
+    assert_eq!(still.author_id, Some(7));
+
+    // A create still names the owner: its own id, and no other.
+    flow::create(&posts, &Visitor::user(7), b"author_id=7&title=mine").expect("own id");
+    assert!(matches!(
+        flow::create(&posts, &Visitor::user(7), b"author_id=8&title=theirs"),
+        Err(Failure::NoMatch)
+    ));
 }
 
 #[test]

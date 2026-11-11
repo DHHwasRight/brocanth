@@ -13,7 +13,7 @@
 //! | edit form, delete confirmation | [`Policy::update`], [`Policy::delete`] | the same guarded select, with that rule |
 //! | update, delete | [`Policy::update`], [`Policy::delete`] | an admission, then a [`Verified`](brocanth_policy::Verified) whose condition guards the write; zero rows is `409` |
 //! | create | [`Policy::create`] | only [`Pred::Always`](brocanth_policy::Pred::Always) is accepted; see below |
-//! | form fields | [`Policy::writable`] | a field the mask refuses is drawn read-only, and a POST that sends one is `403` before any row is read |
+//! | form fields | [`Policy::writable_on_create`] on the create form, [`Policy::writable`] on the edit form, an inline row and an action | a field the mask refuses is drawn read-only, and a POST that sends one is `403` before any row is read |
 //! | foreign-key labels and pickers | the **target** model's view and list rules | a label or a choice the subject may not see is not shown |
 //!
 //! The status codes are `brocanth-resource`'s, for that crate's reasons:
@@ -61,8 +61,8 @@
 use std::sync::Arc;
 
 use brocanth_policy::{
-    Column, CompileError, Condition, Denied, Dialect, Entity, EntityPred, MaskViolation, Policy,
-    Value as PolicyValue,
+    Column, CompileError, Condition, Denied, Dialect, Entity, EntityPred, FieldMask, MaskViolation,
+    Policy, Value as PolicyValue,
 };
 
 use crate::data::Scope;
@@ -288,9 +288,27 @@ pub(crate) trait RowRules: Send + Sync {
         key: &PrimaryKey,
     ) -> Result<Option<Pending>, CompileError>;
     /// Whether the subject may write this column. An unknown name is not.
-    fn writable(&self, principal: &Principal<'_>, column: &str) -> bool;
-    /// `Policy::writable`, checked against the names a request sent.
-    fn check(&self, principal: &Principal<'_>, sent: &[&str]) -> Result<(), MaskViolation>;
+    fn writable(&self, principal: &Principal<'_>, write: Write, column: &str) -> bool;
+    /// The mask for `write`, checked against the names a request sent.
+    fn check(
+        &self,
+        principal: &Principal<'_>,
+        write: Write,
+        sent: &[&str],
+    ) -> Result<(), MaskViolation>;
+}
+
+/// Which write a field mask is for.
+///
+/// A create may set a column that an update must not change. The owner
+/// column is the usual one: [`Policy::create`] checks the proposed row, and
+/// [`Policy::update`] checks only the stored row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Write {
+    /// [`Policy::writable_on_create`].
+    Create,
+    /// [`Policy::writable`].
+    Update,
 }
 
 struct Typed<R>(R);
@@ -304,6 +322,14 @@ impl<R: AdminResource> Typed<R> {
             RowAction::Create => policy.create(subject),
             RowAction::Update => policy.update(subject),
             RowAction::Delete => policy.delete(subject),
+        }
+    }
+
+    fn mask(&self, subject: &R::Subject, write: Write) -> FieldMask<<R::Entity as Entity>::Column> {
+        let policy = self.0.policy();
+        match write {
+            Write::Create => policy.writable_on_create(subject),
+            Write::Update => policy.writable(subject),
         }
     }
 }
@@ -364,27 +390,29 @@ impl<R: AdminResource> RowRules for Typed<R> {
         }))
     }
 
-    fn writable(&self, principal: &Principal<'_>, column: &str) -> bool {
+    fn writable(&self, principal: &Principal<'_>, write: Write, column: &str) -> bool {
         let Some(subject) = self.0.subject(principal) else {
             return false;
         };
-        let mask = self.0.policy().writable(subject);
+        let mask = self.mask(subject, write);
         <<R::Entity as Entity>::Column as Column>::ALL
             .iter()
             .find(|c| c.name() == column)
             .is_some_and(|c| mask.permits(*c))
     }
 
-    fn check(&self, principal: &Principal<'_>, sent: &[&str]) -> Result<(), MaskViolation> {
+    fn check(
+        &self,
+        principal: &Principal<'_>,
+        write: Write,
+        sent: &[&str],
+    ) -> Result<(), MaskViolation> {
         let Some(subject) = self.0.subject(principal) else {
             return Err(MaskViolation::Forbidden {
                 fields: sent.iter().map(|s| (*s).to_owned()).collect(),
             });
         };
-        self.0
-            .policy()
-            .writable(subject)
-            .check(sent.iter().copied())
+        self.mask(subject, write).check(sent.iter().copied())
     }
 }
 
@@ -430,9 +458,9 @@ impl Rules<'_> {
         }
     }
 
-    pub(crate) fn writable(self, principal: &Principal<'_>, column: &str) -> bool {
+    pub(crate) fn writable(self, principal: &Principal<'_>, write: Write, column: &str) -> bool {
         match self {
-            Rules::Resource(rules) => rules.writable(principal, column),
+            Rules::Resource(rules) => rules.writable(principal, write, column),
             Rules::Unscoped => true,
             Rules::Missing => false,
         }
@@ -441,10 +469,11 @@ impl Rules<'_> {
     pub(crate) fn check(
         self,
         principal: &Principal<'_>,
+        write: Write,
         sent: &[&str],
     ) -> Result<(), MaskViolation> {
         match self {
-            Rules::Resource(rules) => rules.check(principal, sent),
+            Rules::Resource(rules) => rules.check(principal, write, sent),
             Rules::Unscoped => Ok(()),
             Rules::Missing => Err(MaskViolation::Forbidden {
                 fields: sent.iter().map(|s| (*s).to_owned()).collect(),

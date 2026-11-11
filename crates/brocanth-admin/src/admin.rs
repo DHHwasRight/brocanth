@@ -25,7 +25,7 @@ use crate::paging::Pager;
 use crate::panel::{Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
-use crate::rows::{Gate, Guard, RowAction, RowRules, Rules};
+use crate::rows::{Gate, Guard, RowAction, RowRules, Rules, Write};
 use crate::view::{
     self, ActionChoice, ActionCtx, Cell, Chrome, ColumnHeader, DeleteCtx, DetailCtx, DetailRow,
     ErrorCtx, FormCtx, IndexCtx, IndexEntry, InlineRow, InlineSet, LayoutCtx, ListCtx,
@@ -676,7 +676,7 @@ impl Admin {
             .choices(principal, &entry.admin, &entry.descriptor)
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
-        self.lock(principal, entry, &mut form);
+        self.lock(principal, entry, Write::Create, &mut form);
         let inlines = match self.inlines(principal, entry, None, None).await? {
             Ok(built) => sets(built),
             Err(refused) => return Ok(refused),
@@ -705,14 +705,14 @@ impl Admin {
         if let Some(refused) = self.refuse_create(principal, entry)? {
             return Ok(refused);
         }
-        if let Some(refused) = self.refuse_fields(principal, entry, submission)? {
+        if let Some(refused) = self.refuse_fields(principal, entry, Write::Create, submission)? {
             return Ok(refused);
         }
         let choices = self
             .choices(principal, &entry.admin, &entry.descriptor)
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
-        self.lock(principal, entry, &mut form);
+        self.lock(principal, entry, Write::Create, &mut form);
         form.accept(submission);
         let valid = form.validate();
         let mut built = match self
@@ -788,7 +788,7 @@ impl Admin {
             .choices(principal, &entry.admin, &entry.descriptor)
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
-        self.lock(principal, entry, &mut form);
+        self.lock(principal, entry, Write::Update, &mut form);
         let inlines = match self.inlines(principal, entry, Some(&row), None).await? {
             Ok(built) => sets(built),
             Err(refused) => return Ok(refused),
@@ -827,7 +827,7 @@ impl Admin {
         else {
             return self.refuse(principal, Action::Update);
         };
-        if let Some(refused) = self.refuse_fields(principal, entry, submission)? {
+        if let Some(refused) = self.refuse_fields(principal, entry, Write::Update, submission)? {
             return Ok(refused);
         }
         let found = self
@@ -844,7 +844,7 @@ impl Admin {
             .choices(principal, &entry.admin, &entry.descriptor)
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
-        self.lock(principal, entry, &mut form);
+        self.lock(principal, entry, Write::Update, &mut form);
         form.accept(submission);
         let valid = form.validate();
         let mut built = match self
@@ -1301,13 +1301,15 @@ impl Admin {
         }
     }
 
-    /// Draws every field the row policy's mask refuses as read-only.
-    fn lock(&self, principal: Principal<'_>, entry: &Entry, form: &mut Form) {
+    /// Draws every field the row policy's mask for `write` refuses as
+    /// read-only.
+    fn lock(&self, principal: Principal<'_>, entry: &Entry, write: Write, form: &mut Form) {
         let rules = self.rules(entry);
-        form.lock(|column| rules.writable(&principal, column));
+        form.lock(|column| rules.writable(&principal, write, column));
     }
 
-    /// `Policy::writable`, checked against every column a request sent.
+    /// The mask for `write` (`Policy::writable_on_create` or
+    /// `Policy::writable`), checked against every column a request sent.
     ///
     /// The columns *sent*, as `brocanth-resource` checks them, and before
     /// any row is read, so the 403 says nothing about whether the row
@@ -1319,6 +1321,7 @@ impl Admin {
         &self,
         principal: Principal<'_>,
         entry: &Entry,
+        write: Write,
         submission: &Submission,
     ) -> Result<Option<Response>, AdminError> {
         let mut sent: Vec<&str> = Vec::new();
@@ -1330,7 +1333,7 @@ impl Admin {
         if sent.is_empty() {
             return Ok(None);
         }
-        match self.rules(entry).check(&principal, &sent) {
+        match self.rules(entry).check(&principal, write, &sent) {
             Ok(()) => Ok(None),
             Err(MaskViolation::Forbidden { fields }) => self
                 .error_page(
@@ -1636,11 +1639,16 @@ impl Admin {
                     .collect(),
             };
             let build = |row: Option<&Row>| {
+                let write = if row.is_some() {
+                    Write::Update
+                } else {
+                    Write::Create
+                };
                 let mut form = Form::build(&child.descriptor, &child.admin, row, &choices);
                 form.fields.retain(|f| names.contains(&f.name));
                 form.fields
                     .sort_by_key(|f| names.iter().position(|n| *n == f.name));
-                self.lock(principal, child, &mut form);
+                self.lock(principal, child, write, &mut form);
                 form
             };
 
@@ -1764,7 +1772,9 @@ impl Admin {
                             }
                             continue;
                         }
-                        if let Some(refused) = self.refuse_fields(principal, child, &row.fields)? {
+                        if let Some(refused) =
+                            self.refuse_fields(principal, child, Write::Update, &row.fields)?
+                        {
                             return Ok(Err(refused));
                         }
                         let sent = row
@@ -1813,14 +1823,19 @@ impl Admin {
                         if !can_add {
                             return self.refuse(principal, Action::Create).map(Err);
                         }
-                        if let Some(refused) = self.refuse_fields(principal, child, &row.fields)? {
+                        if let Some(refused) =
+                            self.refuse_fields(principal, child, Write::Create, &row.fields)?
+                        {
                             return Ok(Err(refused));
                         }
                         // The admin writes the parent's key into the child,
                         // so the mask must let this person write it.
-                        if let Some(refused) =
-                            self.refuse_fields(principal, child, &Submission::new().with(fk, ""))?
-                        {
+                        if let Some(refused) = self.refuse_fields(
+                            principal,
+                            child,
+                            Write::Create,
+                            &Submission::new().with(fk, ""),
+                        )? {
                             return Ok(Err(refused));
                         }
                         let mut form = build(None);
@@ -2315,7 +2330,11 @@ impl Admin {
                     principal,
                     Request::new(screen_action(a.needs), &entry.descriptor.key),
                 ) && self.opens(principal, entry, a.needs)
-                    && (columns.is_empty() || self.rules(entry).check(&principal, &columns).is_ok())
+                    && (columns.is_empty()
+                        || self
+                            .rules(entry)
+                            .check(&principal, Write::Update, &columns)
+                            .is_ok())
             })
             .collect()
     }
@@ -2347,7 +2366,7 @@ impl Admin {
         // The field mask before any row is read, as on the edit form.
         let columns = action.columns();
         if !columns.is_empty() {
-            match self.rules(entry).check(&principal, &columns) {
+            match self.rules(entry).check(&principal, Write::Update, &columns) {
                 Ok(()) => {}
                 Err(MaskViolation::Forbidden { fields }) => {
                     return self.error_page(
@@ -2663,7 +2682,10 @@ impl ActionCx<'_> {
             return Ok(false);
         }
         let names: Vec<&str> = values.iter().map(|(name, _)| name.as_str()).collect();
-        match admin.rules(entry).check(&self.principal, &names) {
+        match admin
+            .rules(entry)
+            .check(&self.principal, Write::Update, &names)
+        {
             Ok(()) => {}
             Err(MaskViolation::Forbidden { .. }) => return Ok(false),
             Err(unknown) => return Err(AdminError::Mask(unknown)),

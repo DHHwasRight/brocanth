@@ -62,6 +62,7 @@ mod kw {
 ///             who.admin => always,
 ///             status == "published" || author_id == who.user_id else deny,
 ///         }
+///         create: author_id == who.user_id else deny,
 ///         update {
 ///             who.admin => always,
 ///             author_id == who.user_id else deny,
@@ -69,6 +70,12 @@ mod kw {
 ///         writable {
 ///             who.admin => except [id],
 ///             only [title],
+///         }
+///         // A create may also set the owner, which `create` pins to the
+///         // subject. An update may not change it.
+///         writable_on_create {
+///             who.admin => except [id],
+///             only [title, author_id],
 ///         }
 ///     }
 /// }
@@ -127,7 +134,7 @@ struct PolicyDecl {
     subject_ty: Type,
     entity: Ident,
     rules: Vec<(Ident, Rule<PredExpr>)>,
-    writable: Option<(Ident, Rule<MaskExpr>)>,
+    masks: Vec<(Ident, Rule<MaskExpr>)>,
     eval: Option<EvalClause>,
 }
 
@@ -188,7 +195,7 @@ struct EvalClause {
 // Parsing
 // ---------------------------------------------------------------------------
 
-const RULES: &str = "list, view, create, update, delete, writable, eval";
+const RULES: &str = "list, view, create, update, delete, writable, writable_on_create, eval";
 
 impl Parse for Input {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -372,14 +379,14 @@ fn parse_policy(
     let content;
     braced!(content in input);
     let mut rules: Vec<(Ident, Rule<PredExpr>)> = Vec::new();
-    let mut writable = None;
+    let mut masks: Vec<(Ident, Rule<MaskExpr>)> = Vec::new();
     let mut eval = None;
     while !content.is_empty() {
         let attrs = content.call(Attribute::parse_outer)?;
         let rule: Ident = content.call(Ident::parse_any)?;
         let label = rule.to_string();
         let seen = rules.iter().any(|(r, _)| *r == rule)
-            || (label == "writable" && writable.is_some())
+            || masks.iter().any(|(r, _)| *r == rule)
             || (label == "eval" && eval.is_some());
         if seen {
             return Err(syn::Error::new(
@@ -392,9 +399,9 @@ fn parse_policy(
                 let body = parse_rule(&content, &rule, attrs, parse_pred_tokens)?;
                 rules.push((rule, body));
             }
-            "writable" => {
+            "writable" | "writable_on_create" => {
                 let body = parse_rule(&content, &rule, attrs, parse_mask_tokens)?;
-                writable = Some((rule, body));
+                masks.push((rule, body));
             }
             "eval" => {
                 if let Some(attr) = attrs.first() {
@@ -427,7 +434,7 @@ fn parse_policy(
         subject_ty,
         entity,
         rules,
-        writable,
+        masks,
         eval,
     })
 }
@@ -1128,7 +1135,7 @@ fn expand_policy(policy: &PolicyDecl, entity: &EntityDecl) -> syn::Result<TokenS
         subject_pat,
         subject_ty,
         rules,
-        writable,
+        masks,
         eval,
         ..
     } = policy;
@@ -1154,7 +1161,7 @@ fn expand_policy(policy: &PolicyDecl, entity: &EntityDecl) -> syn::Result<TokenS
             Err(e) => push_error(&mut errors, e),
         }
     }
-    if let Some((action, rule)) = writable {
+    for (action, rule) in masks {
         let rule_attrs = &rule.attrs;
         match expand_rule(
             rule,

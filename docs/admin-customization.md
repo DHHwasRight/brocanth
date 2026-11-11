@@ -661,8 +661,10 @@ PostgreSQL when `BROCANTH_TEST_DATABASE_URL` is set).
   the row). A row the rules refuse is drawn read-only, posts no key, and
   has no delete box. A new row needs `Action::Create` and a create rule
   that admits every row, as the child's own create form does. The field
-  mask locks the fields it refuses; the column that points at the parent
-  must be writable to add a child, because the admin writes it.
+  mask locks the fields it refuses (`writable_on_create` on a new row,
+  `writable` on an existing one); the column that points at the parent
+  must be in `writable_on_create` to add a child, because the admin
+  writes it.
 - **Everything is checked before anything is written.** The admin
   validates the parent and every row, asks every rule, and admits every
   write with the same guarded select the child's own screens use. A POST

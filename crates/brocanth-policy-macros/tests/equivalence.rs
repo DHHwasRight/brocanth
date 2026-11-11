@@ -71,6 +71,10 @@ mod by_macro {
             }
             writable {
                 who.admin => except [id],
+                only [title],
+            }
+            writable_on_create {
+                who.admin => except [id],
                 only [title, author_id],
             }
         }
@@ -164,6 +168,14 @@ mod by_hand {
         }
 
         fn writable(&self, who: &Visitor) -> FieldMask<PostColumn> {
+            if who.admin {
+                FieldMask::except([PostColumn::Id])
+            } else {
+                FieldMask::only([PostColumn::Title])
+            }
+        }
+
+        fn writable_on_create(&self, who: &Visitor) -> FieldMask<PostColumn> {
             if who.admin {
                 FieldMask::except([PostColumn::Id])
             } else {
@@ -282,6 +294,11 @@ where
             mask(&by_macro.writable(who)),
             mask(&by_hand.writable(who)),
             "writable, visitor {index}"
+        );
+        assert_eq!(
+            mask(&by_macro.writable_on_create(who)),
+            mask(&by_hand.writable_on_create(who)),
+            "writable_on_create, visitor {index}"
         );
     }
 }

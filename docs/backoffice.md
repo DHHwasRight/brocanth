@@ -106,7 +106,7 @@ AdminConfig::new().with_policy(staff_only).resource(Posts)
 | detail | `view` | `WHERE pk = ? AND <condition>` | `404`, the same answer as a missing row |
 | edit form, delete confirmation | `update`, `delete` | the same guarded select | `404` |
 | update, delete | `update`, `delete` | an admission, then a `Verified` whose condition guards the write | `404` before the write; `409` when the write changes zero rows |
-| form fields | `writable` | a field the mask refuses is drawn read-only; a POST that sends one is refused before any row is read | `403` |
+| form fields | `writable_on_create` on a create, `writable` on an update | a field the mask refuses is drawn read-only; a POST that sends one is refused before any row is read | `403` |
 | foreign-key labels and pickers | the target model's `view` and `list` | the same scopes | the stored value is shown; the picker leaves the record out |
 | create | `create` | only `Always` and `Never` are decided | `403` for anything else |
 

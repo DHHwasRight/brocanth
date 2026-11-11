@@ -3117,19 +3117,31 @@ impl Plugin for Database {
 //! ```
 //!
 //! A write is the same predicate carried into the statement, which is what
-//! closes the window between the check and the change:
+//! closes the window between the check and the change. The field mask comes
+//! first, before any row is read:
 //!
 //! ```ignore
+//! PostPolicy.writable(&visitor).check(["body"])?;   // which columns
 //! let admission = PostPolicy.update(&visitor).admission::<Post>(rules.dialect, id)?;
 //! let rows = /* run admission.query(), count the rows */;
 //! let verified = admission.resolve(rows)?;          // zero rows is a denial
-//! let write = verified.update(rules.dialect, [(PostColumn::Status, "published".into())])?;
+//! let write = verified.update(rules.dialect, [(PostColumn::Body, "new text".into())])?;
 //! // run write.query(); then:
 //! write.applied(affected)?;                          // zero affected is RaceLost
 //! ```
 //!
 //! `Verified` is taken by value everywhere it is used, and a debug build fails
 //! the test that checked one and then forgot to spend it.
+//!
+//! # Two masks: create and update
+//!
+//! `update` decides on the row as stored, not on the row the write leaves.
+//! So `author_id = me` is true before the write, whatever the write sets, and
+//! only the mask stops an author from giving a post to somebody else. That is
+//! why `writable` (an update) leaves out `AuthorId`, and `writable_on_create`
+//! puts it in: `create` decides on the proposed row, so a create can name
+//! only its author's own id. A create through `brocanth-resource` uses
+//! `writable_on_create`, an update uses `writable`.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
@@ -3239,16 +3251,27 @@ impl Policy for PostPolicy {
         Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id))
     }
 
+    /// Which columns an update may change. `update` says which rows; this
+    /// says which columns.
     fn writable(&self, who: &Visitor) -> FieldMask<PostColumn> {
         if who.admin {
             FieldMask::except([PostColumn::Id])
         } else {
-            // The author edits the body, never the status. `AuthorId` is
-            // here because a create writes it, and `create` above admits
-            // only the author's own id. The mask is the other half of the
-            // rule: `update` says which rows, this says which columns.
-            FieldMask::only([PostColumn::Body, PostColumn::AuthorId])
+            // The author edits the body. Never the status, and never the
+            // owner: `update` reads the row as stored, so `AuthorId` here
+            // would let an author give a post to somebody else.
+            FieldMask::only([PostColumn::Body])
         }
+    }
+
+    /// Which columns a create may set.
+    fn writable_on_create(&self, who: &Visitor) -> FieldMask<PostColumn> {
+        if who.admin {
+            return self.writable(who);
+        }
+        // A create names its owner, and `create` above admits only the
+        // author's own id.
+        FieldMask::only([PostColumn::Body, PostColumn::AuthorId])
     }
 }
 
@@ -3346,6 +3369,54 @@ impl Plugin for Policies {
         if let Some(dialect) = self.dialect {
             cx.insert(Rules { dialect });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn author(id: i64) -> Visitor {
+        Visitor {
+            account_id: Some(id),
+            admin: false,
+        }
+    }
+
+    #[test]
+    fn a_create_names_its_author_and_no_other() {
+        let ada = author(7);
+        assert_eq!(
+            PostPolicy
+                .writable_on_create(&ada)
+                .check(["author_id", "body"]),
+            Ok(())
+        );
+        // `create` decides on the proposed row.
+        let theirs = brocanth_policy::MapRow::new().with(PostColumn::AuthorId, 8_i64);
+        let admitted = PostPolicy.create(&ada).admits(&theirs);
+        assert!(!admitted.expect("decided in memory"));
+    }
+
+    #[test]
+    fn an_update_changes_the_body_and_never_the_author() {
+        let ada = author(7);
+        // The mask first, before any row is read: the update rule reads the
+        // row as stored, so it cannot refuse a change of owner.
+        assert!(PostPolicy.writable(&ada).check(["author_id"]).is_err());
+        assert_eq!(PostPolicy.writable(&ada).check(["body"]), Ok(()));
+
+        // Then the witness, spent by the write that carries its condition.
+        let admission = PostPolicy
+            .update(&ada)
+            .admission::<Post>(Dialect::Postgres, 1_i64)
+            .expect("the rule compiles");
+        let verified = admission.resolve(1).expect("the admission found the row");
+        let write = verified
+            .update(Dialect::Postgres, [(PostColumn::Body, "new text".into())])
+            .expect("the update compiles");
+        assert!(write.query().sql().contains("\"author_id\""));
+        assert!(write.applied(0).is_err(), "zero rows is a lost race");
     }
 }
 ===== AGENTS.md =====
