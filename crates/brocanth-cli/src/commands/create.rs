@@ -5447,6 +5447,13 @@ mod tests {
                     "gtag",
                 ],
             ),
+            // `validation` keeps its shapes here, not in its own crate:
+            // `brocanth-schema` has no dev-dependency, by a test of its own
+            // (`tests/modularity.rs`), and the harness needs the CLI as one.
+            // With a config file, the `[validation]` section; without one,
+            // the settings from flags.
+            ("validation-config", vec!["config", "validation"]),
+            ("validation-flags", vec!["validation"]),
             // `robots` has no shape here: its own crate generates its two
             // shapes through `brocanth_cli::testing` and keeps the goldens
             // in `crates/brocanth-robots/tests/golden/`.

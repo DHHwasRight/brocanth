@@ -186,15 +186,24 @@ shutdown_grace_secs` has a flag and a variable in every project
    sixteen to three, the starter pages, which stay by decision (gap 11).
    Also done: `brocanth-i18n` provides the negotiated locale through
    `provide_for_request`, and a page reads it with `ctx.provided`.
-5. ~~**More module crates on the harness.**~~ Done. All thirty module
+5. ~~**More module crates on the harness.**~~ Done. Twenty-nine module
    crates keep their own shapes and goldens through
    `brocanth_scaffold::testing` (in `tests/scaffold.rs`), the CLI's
-   goldens beside them. The last ten were `observe`, `i18n`, `policy`,
-   `openapi`, `analytics`, `input`, `schema`, `gtag`, `resource` and
-   `client`. Their shapes cover each module's options and the modules it
-   adapts to, with and without a config file. `mise run generated` builds
-   and tests each of them. A new module crate starts with its own
+   goldens beside them. The last nine were `observe`, `i18n`, `policy`,
+   `openapi`, `analytics`, `input`, `gtag`, `resource` and `client`.
+   Their shapes cover each module's options and the modules it adapts
+   to, with and without a config file. `mise run generated` builds and
+   tests each of them. A new module crate starts with its own
    `tests/scaffold.rs`.
+   `schema` is the exception, by decision: its shapes
+   (`validation-config`, `validation-flags`) are in the CLI's goldens.
+   The harness needs the CLI as a dev-dependency, and
+   `brocanth-schema/tests/modularity.rs` asserts that the crate has none,
+   so that `cargo tree` shows it with no dependency at all.
+   The harness also showed a name clash: a crate whose tests take the CLI
+   compiles every module, and `brocanth_policy::scaffold::Policy` made
+   rustc print the trait `Policy` with its full path in a pinned UI test
+   of `brocanth-resource`. The module struct is now `Authorisation`.
 6. ~~**The gate covers generated projects.**~~ Done. `mise run generated`
    builds and tests every project of a crate test that calls
    `testing::build`, then the CLI's golden shapes, in one target

@@ -1412,7 +1412,6 @@ name = "brocanth-schema"
 version = "0.1.0"
 dependencies = [
  "brocanth",
- "brocanth-cli",
  "brocanth-scaffold",
  "brocanth-schema-derive",
  "regex",
