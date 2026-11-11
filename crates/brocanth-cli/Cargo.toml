@@ -38,6 +38,11 @@ brocanth-analytics = { workspace = true, default-features = false, features = [
     "scaffold",
 ] }
 
+# Change history over the model layer's writes, and feature flags, each for
+# its scaffold module alone, on the same terms.
+brocanth-audit = { workspace = true, default-features = false, features = ["scaffold"] }
+brocanth-flags = { workspace = true, default-features = false, features = ["scaffold"] }
+
 # The broker, on the same terms. It offers `realtime` and no transport: the
 # core's `Response` is a finished `Vec<u8>` and every response hook is
 # specified to see one, so server-sent events are a change to the hook

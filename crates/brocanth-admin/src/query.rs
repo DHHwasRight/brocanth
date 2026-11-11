@@ -259,7 +259,7 @@ fn hex(byte: u8) -> Option<u8> {
 }
 
 /// Percent-encodes everything outside the unreserved set.
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.as_bytes() {
         match byte {

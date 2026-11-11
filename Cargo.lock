@@ -773,6 +773,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-audit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-admin",
+ "brocanth-audit",
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-events",
+ "brocanth-model",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "brocanth-auth"
 version = "0.1.0"
 dependencies = [
@@ -865,6 +883,7 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-analytics",
+ "brocanth-audit",
  "brocanth-auth",
  "brocanth-cache",
  "brocanth-cache-redis",
@@ -873,6 +892,7 @@ dependencies = [
  "brocanth-db",
  "brocanth-errors",
  "brocanth-filters",
+ "brocanth-flags",
  "brocanth-gtag",
  "brocanth-i18n",
  "brocanth-input",
@@ -993,6 +1013,22 @@ dependencies = [
  "brocanth-policy",
  "brocanth-scaffold",
  "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "brocanth-flags"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-admin",
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-flags",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "serde",
  "tokio",
 ]
 

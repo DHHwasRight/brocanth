@@ -112,6 +112,9 @@ pub struct Views {
     pub form: Box<dyn View<FormCtx>>,
     /// The delete confirmation.
     pub confirm_delete: Box<dyn View<DeleteCtx>>,
+    /// The confirmation before an action over selected rows. See
+    /// [`crate::actions`].
+    pub confirm_action: Box<dyn View<ActionCtx>>,
     /// Anything that went wrong: 403, 404.
     pub error: Box<dyn View<ErrorCtx>>,
     /// The top of the sidebar: the header, linked to the index. Django's
@@ -151,6 +154,9 @@ impl Default for Views {
             }),
             confirm_delete: Box::new(|ctx: &DeleteCtx, w: &mut Writer<'_>| {
                 templates::delete::Delete { ctx }.render(w)
+            }),
+            confirm_action: Box::new(|ctx: &ActionCtx, w: &mut Writer<'_>| {
+                templates::action::ConfirmAction { ctx }.render(w)
             }),
             error: Box::new(|ctx: &ErrorCtx, w: &mut Writer<'_>| {
                 templates::error::ErrorPage { ctx }.render(w)
@@ -199,6 +205,12 @@ impl Views {
     /// Replaces the delete confirmation.
     pub fn with_confirm_delete(mut self, view: impl View<DeleteCtx>) -> Self {
         self.confirm_delete = Box::new(view);
+        self
+    }
+
+    /// Replaces the confirmation before an action over selected rows.
+    pub fn with_confirm_action(mut self, view: impl View<ActionCtx>) -> Self {
+        self.confirm_action = Box::new(view);
         self
     }
 
@@ -418,6 +430,23 @@ pub struct ListCtx {
     pub can_create: bool,
     /// Where creating starts.
     pub create_href: String,
+    /// The actions over selected rows this person may run. Empty draws no
+    /// checkboxes and no menu.
+    pub actions: Vec<ActionChoice>,
+    /// Where the action form posts to.
+    pub actions_href: String,
+    /// One line about the action that just ran: "Publish selected: 3
+    /// posts."
+    pub notice: Option<String>,
+}
+
+/// One entry in the list screen's action menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionChoice {
+    /// The key the form posts.
+    pub key: String,
+    /// What the menu says.
+    pub label: String,
 }
 
 /// One row on the detail screen.
@@ -450,6 +479,52 @@ pub struct DetailCtx {
     pub edit_href: Option<String>,
     /// The delete confirmation, when this person may remove it.
     pub delete_href: Option<String>,
+    /// More links about this record, such as its history. See
+    /// [`AdminConfig::record_link`](crate::AdminConfig::record_link).
+    pub links: Vec<RecordLink>,
+}
+
+/// One extra link on the detail screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordLink {
+    /// What it says.
+    pub label: String,
+    /// Where it goes.
+    pub href: String,
+}
+
+/// One record on the action confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedRecord {
+    /// The record's key, in its URL form: the value the form posts back.
+    pub key: String,
+    /// What the record is called.
+    pub label: String,
+    /// The detail screen.
+    pub href: String,
+}
+
+/// The action confirmation's context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionCtx {
+    /// The chrome.
+    pub chrome: Chrome,
+    /// The model.
+    pub model: ModelHeading,
+    /// The action's key, which the form posts back.
+    pub key: String,
+    /// What the action is called.
+    pub label: String,
+    /// Whether it deletes.
+    pub destructive: bool,
+    /// The records it will act on.
+    pub records: Vec<SelectedRecord>,
+    /// How many selected records the rules left out.
+    pub skipped: usize,
+    /// Where the confirmation posts to.
+    pub action: String,
+    /// Where cancelling goes.
+    pub cancel_href: String,
 }
 
 /// The form screen's context, for both create and edit.

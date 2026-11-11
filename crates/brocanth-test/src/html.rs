@@ -756,7 +756,13 @@ fn decode(text: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         let tail = &rest[at..];
-        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+        // Bytes, not a `str` slice: twelve bytes on may fall inside a
+        // character such as `→`. A `;` is one byte, so its index is a
+        // character boundary.
+        let Some(semi) = tail.as_bytes()[..tail.len().min(12)]
+            .iter()
+            .position(|&b| b == b';')
+        else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -808,6 +814,16 @@ mod tests {
         assert!(
             !page.has_link_to("/admin/post"),
             "a path in a data attribute is not a link, and `contains` cannot tell"
+        );
+    }
+
+    #[test]
+    fn an_ampersand_before_a_multibyte_character_does_not_panic() {
+        // `&lt;/i&gt;</q> → ` puts `→` across the twelfth byte after `&`.
+        let page = Html::new("<p>a &amp; b<q>&lt;/i&gt;</q> \u{2192} <q>c</q> &x \u{2192}\u{2192}\u{2192}\u{2192}</p>");
+        assert_eq!(
+            page.text(),
+            "a & b</i> \u{2192} c &x \u{2192}\u{2192}\u{2192}\u{2192}"
         );
     }
 

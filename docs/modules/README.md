@@ -68,6 +68,8 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`sessions`](sessions.md) | a cookie, and a `Session` the context hands a handler | Middleware |  |
 | [`db`](db.md) | one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver | Enhancer, Middleware, Renderer |  |
 | [`model`](model.md) | SeaORM, validations, migrations; without it no SQL driver at all | Enhancer, Middleware |  |
+| [`flags`](flags.md) | feature flags: on for all, a percentage, users or groups; rows in your Postgres | Enhancer |  |
+| [`audit`](audit.md) | change history: who changed which row, when, and what; rows in your Postgres | Middleware, Enhancer |  |
 | [`cache`](cache.md) | a cache on an unlogged Postgres table, not Redis; without it no cache at all | Enhancer |  |
 | [`cache-memory`](cache-memory.md) | the cache in this process's memory, for tests and development; never in production | Enhancer |  |
 | [`cache-redis`](cache-redis.md) | the cache on Redis or Valkey instead of Postgres; one more server to run | Enhancer |  |
@@ -91,6 +93,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`resource`](resource.md) | typed CRUD routes over one table, with the policy in the WHERE clause | Routes |  |
 | [`admin`](admin.md) | a Django-shaped backoffice at /admin, locked until you say who may in | Routes |  |
 | [`admin-model`](admin-model.md) | the admin's rows over SeaORM, one line per entity | Routes | admin |
+| [`admin-actions`](admin-actions.md) | "Delete selected" on every admin list, with a confirmation page | Enhancer | admin |
 | [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber | Enhancer, Middleware |  |
 | [`realtime-sse`](realtime-sse.md) | one long response per subscriber, frames written as they are made | Routes | realtime |
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |

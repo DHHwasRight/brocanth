@@ -505,8 +505,24 @@ Not stable: the markup and the class names inside the shipped templates.
 Assert on behaviour and on the context, not on a class name. A theme that
 targets `.bg-white` breaks on the next stylesheet build.
 
+## Actions, the journal and record links
+
+- **Actions over selected rows** (`brocanth_admin::actions`): Django's
+  `ModelAdmin.actions`. `AdminConfig::action` adds one to every model,
+  `ModelAdmin::action` to one, `ModelAdmin::without_action` drops one. A
+  confirmation page comes first; the rules of the single-record screens
+  hold for every record. The `action` screen ejects like the others
+  (`with_confirm_action`). See `docs/modules/admin-actions.md`.
+- **The journal** (`AdminConfig::journal`): after each write the admin
+  makes, a `Journal` hears who, which record, and the values before and
+  after. Django's `LogEntry`, without a table: `brocanth-audit` keeps it.
+- **Record links** (`AdminConfig::record_link`): a link on every detail
+  screen. Django's History button is one; `brocanth-audit` adds it.
+
 ## Open
 
+- **Inlines.** Django's `TabularInline`: the related rows of a record on
+  its edit form. Not built.
 - **Per-app overrides.** No app grouping exists.
 - **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
   and the two blocks. A `Panel` renders its own body in the crate that

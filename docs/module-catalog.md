@@ -28,6 +28,7 @@ nothing holds this page.
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`analytics`](modules/analytics.md) | Page views counted on the server: no cookie, no script, no third party; rows in your Postgres |  |  | needs `db`: the views are rows in the database the `db` module opens |  |
+| [`audit`](modules/audit.md) | Change history: who changed which row, when, and what; rows in your Postgres | Enhancer |  | needs `db`: the history is rows in the database the `db` module opens; `model`: it records the changes the model layer publishes |  |
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
 | [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
@@ -80,6 +81,7 @@ nothing holds this page.
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`admin-actions`](modules/admin-actions.md) | "Delete selected" on every admin list, with a confirmation page |  |  | part of `admin`, off until you tick it |  |
 | [`cache`](modules/cache.md) | A cache on an unlogged Postgres table, not Redis; without it no cache at all |  |  |  |  |
 | [`cache-memory`](modules/cache-memory.md) | The cache in this process's memory, for tests and development; never in production |  |  | part of `cache`, off until you tick it | `check --deploy` refuses it |
 | [`cache-redis`](modules/cache-redis.md) | The cache on Redis or Valkey instead of Postgres; one more server to run |  |  | part of `cache`, off until you tick it |  |
@@ -87,6 +89,7 @@ nothing holds this page.
 | [`commands`](modules/commands.md) | This project's own command line, `serve` plus whatever you add |  | yes |  | static-site safe |
 | [`config`](modules/config.md) | Config/<env>.toml, merged; without it nothing links a TOML parser |  | yes |  | static-site safe |
 | [`db`](modules/db.md) | One Postgres pool and sea-query statements, read as `ctx.db()`; without it no SQL driver | Middleware, Renderer |  |  | with `commands` and no `model`: SQL migrations in migrations/ |
+| [`flags`](modules/flags.md) | Feature flags: on for all, a percentage, users or groups; rows in your Postgres |  |  | needs `db`: the rules are rows in the database the `db` module opens |  |
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | not for production |

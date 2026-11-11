@@ -6,6 +6,8 @@ members = [
     "crates/brocanth-admin-model",
     "crates/brocanth-gtag",
     "crates/brocanth-analytics",
+    "crates/brocanth-audit",
+    "crates/brocanth-flags",
     "crates/brocanth-assets",
     "crates/brocanth-bundle",
     "crates/brocanth-auth",
@@ -70,6 +72,8 @@ brocanth-events = { path = "crates/brocanth-events", version = "0.1.0" }
 brocanth-i18n = { path = "crates/brocanth-i18n", version = "0.1.0", default-features = false }
 brocanth-admin = { path = "crates/brocanth-admin", version = "0.1.0" }
 brocanth-analytics = { path = "crates/brocanth-analytics", version = "0.1.0", default-features = false }
+brocanth-audit = { path = "crates/brocanth-audit", version = "0.1.0", default-features = false }
+brocanth-flags = { path = "crates/brocanth-flags", version = "0.1.0", default-features = false }
 brocanth-auth = { path = "crates/brocanth-auth", version = "0.1.0" }
 brocanth-config = { path = "crates/brocanth-config", version = "0.1.0" }
 brocanth-db = { path = "crates/brocanth-db", version = "0.1.0" }

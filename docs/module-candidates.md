@@ -36,10 +36,10 @@ then what the module unblocks. Both scans put `mail` first.
 | 16 | `search` | Postgres full-text and trigram search, with a migration and a search page. **Built** (`brocanth-search`). | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
 | 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE`. **Built** (`brocanth-filters`). | django-filter, ransack | M |
 | 18 | `webhooks-out` | Signed outgoing webhooks with retries, over row changes, `jobs` and the outbox | svix, PocketHost webhooks | M |
-| 19 | `audit` | Change history over `RowChange`, with an admin history page | paper_trail, django-simple-history | M |
+| 19 | `audit` | Change history over `RowChange`, with an admin history page. **Built** (`brocanth-audit`). | paper_trail, django-simple-history | M |
 | 20 | `roles` | Groups and permissions for staff and admin access | django.contrib.auth groups, pundit roles | M |
-| 21 | `flags` | Feature flags with an admin panel | Flipper, django-waffle, Vercel flags | M |
-| 22 | `admin-actions` | Bulk actions with a confirm page, then inlines | Django admin actions, ActiveAdmin batch actions | M |
+| 21 | `flags` | Feature flags with an admin panel. **Built** (`brocanth-flags`). | Flipper, django-waffle, Vercel flags | M |
+| 22 | `admin-actions` | Bulk actions with a confirm page, then inlines. **Built**, without inlines (`brocanth-admin`). | Django admin actions, ActiveAdmin batch actions | M |
 
 Next after these: `markdown` with `content` and `feed`, `image`,
 `auth-otp` and `auth-mfa`, `debug-toolbar`, `impersonate`,
@@ -132,13 +132,13 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `flash` | One-shot messages across a redirect, with levels | contrib.messages; `flash` | no | Middleware | S | 5 | Every POST-redirect-GET form needs it; sessions already exist |
 | `compression` | gzip and brotli on text responses, `Vary: Accept-Encoding` | GZipMiddleware; Rack::Deflater, Thruster | yes (`middleware-compression`) | Middleware | S | 4 | HTML pages compress 5–10x; the route cache already expects it |
 | `conditional-get` | Dynamic `ETag` and `Last-Modified`, 304 | ConditionalGetMiddleware, `@condition`; `fresh_when`, `stale?` | yes (`middleware-conditional-get`) | Middleware | S | 4 | The hook contract was designed for it; dp-swap GETs gain most |
-| `audit` | Row history from `RowChange`; who, when, diff; admin history page | django-simple-history, django-auditlog, admin `LogEntry`; paper_trail, audited | no | Enhancer | M | 4 | Model changes already publish (G4); a sink and a table finish it |
+| `audit` | Row history from `RowChange`; who, when, diff; admin history page | django-simple-history, django-auditlog, admin `LogEntry`; paper_trail, audited | yes (`audit`) | Enhancer | M | 4 | Model changes already publish (G4); a sink and a table finish it |
 | `roles` | Groups, permissions, staff flag; `require_role` on a route | contrib.auth groups and permissions; rolify, Devise + Pundit roles | no | Enhancer | M | 4 | `policy` covers rows; admin and staff screens ask "which people" |
 | `auth-lockout` | Lock or slow an account after N failed logins; notify by mail | django-axes; Devise lockable, rack-attack throttle | partly: rate limit by address only | Middleware | S | 4 | Credential stuffing defence beside the existing rate limiter |
 | `search` | Postgres full-text (`tsvector`, ranking) and trigram on a model | contrib.postgres.search, django-watson; pg_search, searchkick | yes (`search`) | Routes | M | 4 | Done: a site index, its migration and /search |
 | `filters` | Typed list filters and sort from the query string, compiled to `WHERE` | django-filter, admin `list_filter`; ransack | yes (`filters`) | Renderer | M | 4 | Done: a `Pred` ANDed with the policy's rule |
 | `pagination` | One general paginator: offset and keyset, page links in rsx | Paginator; pagy, kaminari | yes (`pagination`) | Renderer | S | 4 | Done: admin and resource use it |
-| `flags` | Feature flags per user, group, percentage; admin panel | django-waffle, django-flags; Flipper | no | Enhancer | M | 4 | Safe rollout without a deploy; cache and admin are ready |
+| `flags` | Feature flags per user, group, percentage; admin panel | django-waffle, django-flags; Flipper | yes (`flags`) | Enhancer | M | 4 | Safe rollout without a deploy; cache and admin are ready |
 | `errors` | Error reporting to Sentry or a log, with context; HTML 404/500 pages; dev error page | Django technical 500, `ADMINS` mail, sentry-sdk; `Rails.error`, exceptions_app, better_errors | partly: `ErrorHook` seam only | Enhancer | M | 4 | No HTML error page and no reporter today |
 | `debug-toolbar` | Dev panel: SQL queries, N+1, timings, context per request | django-debug-toolbar, django-silk; rack-mini-profiler, bullet | partly: `brocanth-model` probe | Middleware | M | 4 | 27% of Django users name it a favourite; probe already finds N+1 |
 | `storage-s3` | S3-compatible backend for `storage` | django-storages; Active Storage S3 service | no, by decision (later crate) | Enhancer | M | 4 | Most deployments have no persistent disk |
@@ -156,7 +156,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `secrets` | Encrypted credentials file per environment | django-environ (env only); Rails credentials | partly: `config` declines secrets by design | Enhancer | M | 3 | Decided against in `brocanth-config`; revisit only if users ask |
 | `tenancy` | Tenant from subdomain or path; scope every query | django-tenants, django-tenant-schemas; acts_as_tenant, apartment | no | Middleware | L | 3 | SaaS need; must go through `policy` conditions |
 | `import-export` | CSV export and import of a model in the admin | django-import-export; ActiveAdmin CSV, active_admin_import | no | Routes | M | 3 | Common admin ask; plain HTML forms |
-| `admin-actions` | Bulk actions with a confirm page; inlines | ModelAdmin actions, inlines; ActiveAdmin batch actions | no (`docs/admin-customization.md` "Open") | Routes | M | 4 | Biggest gap of the existing admin |
+| `admin-actions` | Bulk actions with a confirm page; inlines | ModelAdmin actions, inlines; ActiveAdmin batch actions | yes (`admin-actions`); inlines no | Routes | M | 4 | Biggest gap of the existing admin |
 | `api-keys` | Personal API tokens: hashed, scoped, revocable | DRF TokenAuthentication, django-rest-knox, simplejwt; `has_secure_token` | no | Middleware | M | 3 | For the `client` and API users; secondary in HTML-first |
 | `passkeys` | WebAuthn sign-in and second factor | django-otp-webauthn, django-allauth MFA; devise-passkeys, webauthn-ruby | no: named `FactorKind::Passkey` | Enhancer | M | 3 | Auth crate planned for it; needs a small JS island |
 | `captcha` | Honeypot and Turnstile or hCaptcha on public forms | django-recaptcha, django-simple-captcha; invisible_captcha | no | Middleware | S | 3 | Spam on sign-up and contact forms |

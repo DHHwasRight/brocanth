@@ -95,6 +95,14 @@ pub const SCREENS: &[Screen] = &[
         shipped: include_str!("templates/delete.rsx"),
     },
     Screen {
+        name: "action",
+        component: "ConfirmAction",
+        context: "ActionCtx",
+        every_model: "with_confirm_action",
+        one_model: None,
+        shipped: include_str!("templates/action.rsx"),
+    },
+    Screen {
         name: "error",
         component: "ErrorPage",
         context: "ErrorCtx",

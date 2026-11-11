@@ -194,10 +194,12 @@ puts the crate in a new project.
 | [`brocanth-mail`](crates/brocanth-mail/README.md) | Mail: one trait, an in-memory backend, SMTP behind a feature | |
 | [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` and `realtime-websocket` carry it to a browser | `realtime` |
 | [`brocanth-static`](crates/brocanth-static/README.md) | Writes the application to files: every GET page, partials per layout depth, the assets | `static` |
-| [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin` | `admin` |
+| [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin`; actions over selected rows | `admin`, `admin-actions` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
 | [`brocanth-analytics`](crates/brocanth-analytics/README.md) | Page views counted on the server: a daily visitor hash, no cookie, no third party; a beacon for static sites | `analytics`, `beacon` |
+| [`brocanth-audit`](crates/brocanth-audit/README.md) | Change history: the model layer's changes and the admin's writes, with retention | `audit` |
+| [`brocanth-flags`](crates/brocanth-flags/README.md) | Feature flags: everyone, a percentage, users or groups; read from memory | `flags` |
 | [`brocanth-cli`](crates/brocanth-cli/README.md) | The `brocanth` CLI: `create`, `add`, `check`, `admin eject`, `admin diff`; it hands every other command to the project | |
 | [`brocanth-scaffold`](crates/brocanth-scaffold/README.md) | The contract a scaffold module implements | |
 | [`brocanth-test`](crates/brocanth-test/README.md) | An HTTP test client and an HTML reader for a built `App` | |
