@@ -180,12 +180,19 @@ async fn json_lets_postgres_encode() {
         .from("posts")
         .order_by("id", Order::Desc)
         .to_owned();
-    let rows = db.json(&q).await.unwrap();
+    let mut rows = db.json(&q).await.unwrap();
+    // A workspace build turns on serde_json's `arbitrary_precision` (through
+    // rolldown), and then a `numeric` keeps its scale: 1.50, not 1.5. Compare
+    // the number's value, not its spelling.
+    for row in &mut rows {
+        let score = row["score"].as_f64().expect("score is a number");
+        row["score"] = serde_json::json!(score);
+    }
     assert_eq!(
         rows,
         [
-            serde_json::json!({"id": 2, "title": "b", "score": 2, "meta": null}),
-            serde_json::json!({"id": 1, "title": "a", "score": 1.50, "meta": {"tags": ["x"]}}),
+            serde_json::json!({"id": 2, "title": "b", "score": 2.0, "meta": null}),
+            serde_json::json!({"id": 1, "title": "a", "score": 1.5, "meta": {"tags": ["x"]}}),
         ]
     );
 
