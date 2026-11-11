@@ -35,6 +35,9 @@ pub fn List(ctx: &ListCtx) -> Element {
                 <button class={parts::button()} type="submit">Search</button>
             </form>
         }
+        for link in &ctx.links {
+            <a class={parts::button()} href={&link.href} dp-boost>{&link.label}</a>
+        }
         if ctx.can_create {
             <a class={parts::button_primary()} href={&ctx.create_href} dp-boost>{add_label(ctx)}</a>
         }

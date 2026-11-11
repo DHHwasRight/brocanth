@@ -23,7 +23,7 @@
 //! | method | statement |
 //! |---|---|
 //! | [`AdminData::count`] | `SELECT count(*) … WHERE <search> AND <scope>` |
-//! | [`AdminData::list`] | `SELECT … WHERE <search> AND <scope> ORDER BY … LIMIT … OFFSET …` |
+//! | [`AdminData::list`] | `SELECT … WHERE <search> AND <filter> AND <scope> ORDER BY … LIMIT … OFFSET …` |
 //! | [`AdminData::fetch`] | `SELECT … WHERE <pk> = ? AND <scope>` |
 //! | [`AdminData::update`] | the write, guarded by `<pk> = ? AND <scope>`; report rows changed |
 //! | [`AdminData::delete`] | the same, for a delete |
@@ -175,6 +175,21 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// An exact match on one column: `AND <column> = <value>`.
+///
+/// The admin sets it on [`ListRequest::filter`] to read the children of one
+/// record for an inline (see [`crate::inline`]): the posts whose
+/// `author_id` is the user on the form. `column` is a column of the listed
+/// model, checked against its schema. `value` is typed by that column's
+/// kind, so an integer column gets [`Value::Int`].
+#[derive(Clone, Copy, Debug)]
+pub struct Equals<'a> {
+    /// The column.
+    pub column: &'a str,
+    /// The value it must hold.
+    pub value: &'a Value,
+}
+
 /// One page of a listing, as the data source is asked for it.
 ///
 /// `offset` and `limit` are already clamped by [`crate::paging::Page`], so an
@@ -191,6 +206,11 @@ pub struct ListRequest<'a> {
     pub search: Search<'a>,
     /// The sort to apply, already checked against the schema.
     pub sort: Option<&'a Sort>,
+    /// Only the rows where one column holds one value. `AND` it into the
+    /// `WHERE` clause, beside the search and the scope. **Do not ignore
+    /// it:** an inline that gets every row shows another record's children
+    /// as this one's.
+    pub filter: Option<Equals<'a>>,
     /// The row policy. `AND` it into the `WHERE` clause. The matching
     /// [`AdminData::count`] call gets the same one.
     pub scope: Scope<'a>,

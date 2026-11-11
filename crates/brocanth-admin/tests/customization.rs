@@ -255,6 +255,40 @@ fn a_model_script_is_a_deferred_file_and_never_inline_code() {
     assert!(tag.contains("defer"), "it waits for the document");
 }
 
+#[test]
+fn a_swap_asks_for_the_page_itself_and_brings_its_head() {
+    // dp-swap in header mode asks for the page's own URL, not
+    // `<url>/_fragment.html`, which the admin does not serve: every
+    // boosted link was a 404 and a full load. The line is in the one
+    // inline script a Content-Security-Policy allows by hash.
+    let script = brocanth_admin::INLINE_SCRIPT;
+    assert!(
+        script.ends_with("dpswap.configure({fragmentMode:\"header\"});\n"),
+        "header mode"
+    );
+    // The vendored build merges the response's `<head>`: it adds the files
+    // the live page lacks, which it finds by these selectors.
+    assert!(script.contains("script[src]"), "the head merge is built in");
+    assert!(script.contains(r#"link[rel~="stylesheet"][href]"#));
+
+    // What a swap into the post list gets: the whole document, whose head
+    // names the model's files. dp-swap adds them to the live head.
+    let admin = blog(AdminConfig::new().model("post", |m| {
+        m.script("/assets/posts.js").stylesheet("/p.css")
+    }));
+    let page = list(&admin, "post");
+    assert!(page.source().contains("<head>"));
+    let head = &page.source()[..page.source().find("</head>").expect("a head")];
+    assert!(
+        head.contains(r#"<script src="/assets/posts.js" defer>"#),
+        "{head}"
+    );
+    assert!(
+        head.contains(r#"<link rel="stylesheet" href="/p.css""#),
+        "{head}"
+    );
+}
+
 // ------------------------------------------------------------------- blocks
 
 #[test]

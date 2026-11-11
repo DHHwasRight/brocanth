@@ -329,10 +329,10 @@ assert!(list("post").contains(r#"<script src="/admin/posts.js" defer></script>"#
 assert!(!list("user").contains("/admin/posts.js"));
 ```
 
-dp-swap replaces `<main>` and keeps the `<head>`. A model's script runs
-when a page of that model loads in full, not after a swap into it. Code
-that must run after each swap goes in `AdminConfig::script` and listens
-for `dp:afterSwap`.
+dp-swap replaces `<main>` and merges the response's `<head>`: a
+stylesheet or a script the live page lacks is added, once. So a model's
+script loads on a swap into its screen too, and runs once. Code that must
+act after each swap listens for `dp:afterSwap`.
 
 ### Replace a block: the brand and the user links
 

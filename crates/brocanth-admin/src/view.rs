@@ -435,6 +435,9 @@ pub struct ListCtx {
     pub actions: Vec<ActionChoice>,
     /// Where the action form posts to.
     pub actions_href: String,
+    /// The pages under this model, from
+    /// [`ModelAdmin::page`](crate::ModelAdmin::page).
+    pub links: Vec<RecordLink>,
     /// One line about the action that just ran: "Publish selected: 3
     /// posts."
     pub notice: Option<String>,
@@ -479,8 +482,10 @@ pub struct DetailCtx {
     pub edit_href: Option<String>,
     /// The delete confirmation, when this person may remove it.
     pub delete_href: Option<String>,
-    /// More links about this record, such as its history. See
-    /// [`AdminConfig::record_link`](crate::AdminConfig::record_link).
+    /// More links about this record: the pages under it
+    /// ([`ModelAdmin::record_page`](crate::ModelAdmin::record_page)), then
+    /// such as its history
+    /// ([`AdminConfig::record_link`](crate::AdminConfig::record_link)).
     pub links: Vec<RecordLink>,
 }
 
@@ -544,6 +549,59 @@ pub struct FormCtx {
     pub is_new: bool,
     /// What the submit button says.
     pub submit_label: String,
+    /// The child rows on this form, one set per [`Inline`](crate::Inline)
+    /// this person may see. Rendered inside the same `<form>`.
+    pub inlines: Vec<InlineSet>,
+}
+
+/// One inline on a form: the children of one model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineSet {
+    /// The child model.
+    pub model: ModelHeading,
+    /// The labels of the fields each row shows, in order.
+    pub columns: Vec<String>,
+    /// The rows: the existing children first, then the blank rows for new
+    /// ones.
+    pub rows: Vec<InlineRow>,
+    /// The parent has more children than the form shows. They are not on
+    /// the form, so the POST does not change them.
+    pub more: bool,
+}
+
+/// One child row on a form.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineRow {
+    /// The start of every name this row posts: `post-0`.
+    pub prefix: String,
+    /// The child's key, in its URL form. `None` on a row for a new child.
+    pub key: Option<String>,
+    /// What the child is called. Empty on a row for a new child.
+    pub label: String,
+    /// The child's own detail screen. `None` on a row for a new child.
+    pub href: Option<String>,
+    /// The fields, with the posted values and the errors in them. A field
+    /// this person may not change is [`Widget::ReadOnly`](crate::Widget).
+    pub form: Form,
+    /// Whether this person may delete this child: the row draws a delete
+    /// box.
+    pub can_delete: bool,
+    /// Whether the delete box was ticked, on a re-rendered form.
+    pub delete: bool,
+}
+
+impl InlineRow {
+    /// The name a field of this row posts: `post-0-title`.
+    pub fn name(&self, column: &str) -> String {
+        format!("{}-{column}", self.prefix)
+    }
+
+    /// Whether the row posts its key: an existing child that this person
+    /// may change or delete. Without it the POST leaves the child alone.
+    pub fn posts_key(&self) -> bool {
+        self.key.is_some()
+            && (self.can_delete || self.form.fields.iter().any(|f| f.widget.is_editable()))
+    }
 }
 
 /// The delete confirmation's context.

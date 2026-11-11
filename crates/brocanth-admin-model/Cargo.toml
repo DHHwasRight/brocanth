@@ -63,8 +63,9 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # The test runs against a real database, and the smallest real database is
-# an in-memory SQLite one. `Harness::sqlite` is behind this feature.
-brocanth-model = { workspace = true, features = ["sqlite"] }
+# an in-memory SQLite one. `Harness::sqlite` is behind this feature, and
+# `Harness::postgres` behind the other, for tests/inlines.rs on a server.
+brocanth-model = { workspace = true, features = ["sqlite", "postgres"] }
 serde = { version = "1", features = ["derive"] }
 
 # `tests/policy.rs`: the admin's row policies against a real database,

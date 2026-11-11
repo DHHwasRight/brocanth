@@ -19,6 +19,8 @@ in step with new versions of the admin.
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
 | 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]`, then `brocanth admin diff` after an upgrade | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
 | Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `Panel` | `AdminSite.get_urls()` |
+| Page under a model | a page of your own under one model or one record | `ModelAdmin::{page, record_page}` | `ModelAdmin.get_urls()` |
+| Inlines | a child model's rows on the parent's form | `ModelAdmin::inline(Inline)` | `InlineModelAdmin`, `TabularInline` |
 
 The tests for levels 1 to 5 are in
 `crates/brocanth-admin/tests/customization.rs`. Levels 6 and 7 are in
@@ -209,19 +211,42 @@ the admin to this: a model script adds no inline `<script>`.
 
 ### Scripts and dp-swap
 
-dp-swap replaces the `<main dp-layout="admin">` region and keeps the
-`<head>`. So:
+dp-swap replaces the `<main dp-layout="admin">` region. The response is
+the whole document, and dp-swap merges its `<head>` into the live one:
 
-- A script from `AdminConfig::script` loads on the first page and stays.
-  To act on each screen a swap shows, listen on `document` for
-  `dp:afterSwap`.
-- A script from `ModelAdmin::script` runs when a page of that model loads
-  in full: a reload, a form post, a link typed in. A swap from another
-  screen does not load it. When the code must run after a swap too, load
-  it with `AdminConfig::script`, and on each `dp:afterSwap` look for the
-  markup it works on.
+- A stylesheet the live page does not link yet is added before the swap,
+  so the new screen is never unstyled.
+- A script the live page does not load yet is added after the swap, so
+  it finds its markup. It runs once, the first time a screen names it.
+- Each file is added once. Inline `<script>` and `<style>` are never
+  copied, so the Content-Security-Policy decision above holds.
+- Nothing is removed. A model's stylesheet stays after a swap to another
+  screen, so write its rules for that model's markup.
 
-Stylesheets follow the same rule.
+So a script from `ModelAdmin::script` loads on a swap into its model's
+screen, as on a full load. A script that must act on *every* screen a
+swap shows listens on `document` for `dp:afterSwap`, because it runs
+only once.
+
+**Why the admin sets header mode.** dp-swap's default asks for
+`<url>/_fragment.html`, the prerendered fragment of a static site. The
+admin serves no such path, so every boosted link was a 404, and dp-swap
+fell back to a full load. In header mode dp-swap asks for the page's own
+URL, the admin answers with the whole document, and dp-swap swaps the
+`dp-layout="admin"` region. The admin does not trim the layout for a
+`DP-Partial` request: the whole document is what carries the `<head>`.
+
+The line that sets header mode is appended to `INLINE_SCRIPT`, not put in
+a script of its own, so the one hash a policy holds for it covers it.
+
+**Why in dp-swap.** The fault is in the client: it threw the response's
+`<head>` away. The fix is in dp-swap (`src/head.ts`, commit `d64048f` of
+`brocanth/htmx`, vendored in `crates/brocanth-admin/vendor/` and
+`crates/brocanth-cli/vendor/`), so every server-rendered page that uses
+dp-swap gets it, not only the admin. The tests are in dp-swap
+(`test/head.test.ts`). `tests/customization.rs` holds the admin to its
+half: header mode, the merge in the vendored build, and the model's
+files in the `<head>` of the page a swap gets.
 
 ## Level 3a: replace a block
 
@@ -483,6 +508,77 @@ The closure is synchronous. A page that awaits something, such as a
 database read, implements `Panel`, whose `render` is async. A page key
 that is also a model key stops `Admin::new`, naming both.
 
+## Pages under one model: `ModelAdmin::page` and `record_page`
+
+Django's `ModelAdmin.get_urls()` adds a view under one model:
+`/admin/invoice/overdue`, `/admin/invoice/7/send`. Here a model adds two
+kinds of page:
+
+```rust
+AdminConfig::new().model("invoice", |m| {
+    m.page("overdue", "Overdue", |request, _| {         // {base}/invoice/overdue
+        Ok(match request.path {
+            "" => Some(PanelPage::body("Overdue invoices", render_overdue()?)),
+            _ => None,
+        })
+    })
+    .record_page("send", "Send", |request, invoice| {   // {base}/invoice/7/send
+        let invoice = invoice.expect("a record page gets its record");
+        Ok(Some(match request.post {
+            false => PanelPage::body("Send", render_send_form(invoice)?),
+            true => {
+                send(invoice)?;
+                PanelPage::redirect(request.mount)
+            }
+        }))
+    })
+})
+```
+
+The closure takes the request a panel takes (`PanelRequest`: the path
+below the page, the query, the POST and its form, `can_act`, `mount`)
+and the record, and returns a `PanelPage`. `None` is the admin's 404.
+
+| | Under the model | Under a record |
+|---|---|---|
+| Path | `{base}/{model}/{key}` and below | `{base}/{model}/{record}/{key}` and below |
+| Read | `Action::ViewList` on the model, and the list rule is open | `Action::ViewDetail` on the record, and the record is read under the view rule: a refused record is a 404 |
+| POST | also `Action::Update` on the model | also `Action::Update` on the record and its update rule |
+| Link | a button on the list screen | a button on the detail screen, before the `record_link`s |
+| Layout | the admin's, with the model marked in the sidebar | the same |
+
+The tests are in `crates/brocanth-admin/tests/model_pages.rs`.
+
+**Why the list's and the record's policy, and no new `Action`.** A page
+under a model shows something about that model, so the people who may
+list it may read it; one under a record is about that record, so it
+answers as the detail screen does, with the same 404 for a record the
+rule refuses. A POST changes something, and `Action::Update` is what an
+action over selected rows asks too. A new `Action` variant would break
+every policy that matches on the enum, for a distinction no
+application has asked for yet. `can_act` tells the page whether to draw
+its buttons, as it tells a panel.
+
+**Why not a panel.** A panel is under its own key, has its own tab, and
+asks `ViewPanel` about that key. A page under a model belongs to the
+model: its URL, its sidebar entry, its policy and its link on the
+model's screens. Both take the same request and return the same page, so
+a page moves from one to the other without a rewrite.
+
+**What a page key takes.** A page key wins over a record key at the same
+place, so a record whose key is `overdue` cannot be read. That is
+Django's choice for `add`, and the admin's for `new`. `Admin::new`
+refuses a key that the admin's own screens use there (`new` and `actions`
+under a model, `edit` and `delete` under a record), a key with a slash,
+and two pages with one key, each with a `help:` line.
+
+**What the page writes is its own.** The admin asks the policy and the
+update rule before it calls the page, and passes the record it read. It
+does not guard the page's own writes with that rule, because it does not
+see them. A page that writes the record should go through the same rule
+in its own code, or be an action over selected rows
+(`ModelAdmin::action`), which the admin guards.
+
 ## What is stable API
 
 - The context types in `brocanth_admin::view` and their field names. A
@@ -519,22 +615,123 @@ targets `.bg-white` breaks on the next stylesheet build.
 - **Record links** (`AdminConfig::record_link`): a link on every detail
   screen. Django's History button is one; `brocanth-audit` adds it.
 
+## Inlines: child rows on the parent's form
+
+Django's `InlineModelAdmin`. The posts of a user on the user's create and
+edit form: change a post, delete it, or add one, in the same POST as the
+user.
+
+```rust
+AdminConfig::new().model("user", |m| {
+    m.inline(
+        Inline::new("post")              // the child model's key
+            .fields(["title", "published"]) // default: its form fields
+            .extra(1)                    // blank rows for new posts
+            .max(50),                    // existing rows shown
+    )
+})
+```
+
+`Inline::new` finds the child column that points at the parent from the
+schema. Name it with `Inline::fk("author_id")` when two columns point at
+the parent, or when the schema does not report the relation. `Admin::new`
+stops, with a `help:` line, when the child model is not shown, when no
+column or more than one points back, or when two inlines name one child.
+
+The tests are in `crates/brocanth-admin/tests/inlines.rs` (the fixture)
+and `crates/brocanth-admin-model/tests/inlines.rs` (SQLite, and
+PostgreSQL when `BROCANTH_TEST_DATABASE_URL` is set).
+
+### How it works
+
+- **One form, one POST.** The rows are a table inside the parent's
+  `<form>`. So the one CSRF token the form carries covers them, and the
+  form works without JavaScript. A row posts `{model}-{n}-{column}`, its
+  key in `{model}-{n}-pk` and its delete box in `{model}-{n}-delete`, as
+  Django's formsets do. `n` is the row's place on the form; the key says
+  which child the row changes.
+- **The children are read in the query.** The admin lists the child model
+  with `ListRequest::filter` set to `<fk> = <parent key>`, under the child's
+  list rule, in key order. It reads at most `max` rows; with more, the form
+  shows the first ones and says so. The POST cannot change the rows it did
+  not show.
+- **The child's rules, per row.** Each existing row asks the screen policy
+  `Action::Update` and `Action::Delete` on that record, and the child's
+  row rule for that record (one guarded select when the rule depends on
+  the row). A row the rules refuse is drawn read-only, posts no key, and
+  has no delete box. A new row needs `Action::Create` and a create rule
+  that admits every row, as the child's own create form does. The field
+  mask locks the fields it refuses; the column that points at the parent
+  must be writable to add a child, because the admin writes it.
+- **Everything is checked before anything is written.** The admin
+  validates the parent and every row, asks every rule, and admits every
+  write with the same guarded select the child's own screens use. A POST
+  that changes a row the form drew read-only, or sends a key that is not
+  one of this parent's rows, is refused (403, 409) and writes nothing. A
+  form error on any row re-renders the whole form with 422: each error is
+  beside its field in its row, and every typed value stays.
+- **A blank row adds nothing.** A new row that comes back with every field
+  empty is skipped. A `<select>` on a row always offers the empty choice,
+  so a blank row really posts nothing.
+
+### Decision: no transaction, and a partial save is shown as one
+
+`AdminData` has no transaction, and the admin does not hold the
+connection. So the writes are not atomic: the parent first, then each
+child row in form order. The admin narrows the window it can control:
+every check and every form error comes before the first write. What is
+left is a refusal by the data source itself, such as a unique index, on
+one child row.
+
+Then the admin stops at that row and answers 422. The row shows the
+error; the form says that the record and the rows before the marked one
+were saved. The form that comes back is safe to post again: an added row
+comes back as an existing child with its key, a deleted row is gone, and
+a create form comes back as the new record's edit form. Django wraps the
+same writes in `transaction.atomic`. Here that waits for a transaction
+on `AdminData`.
+
+Two other choices were open:
+
+| Choice | Why not |
+|---|---|
+| A `transaction` method on `AdminData` | Every data source must then implement it, and the in-memory fixture and a source over an HTTP API cannot. It is the right next step for SQL sources, behind a default method. |
+| Write the children first | A new parent has no key until it is written, and a child needs it. |
+
+### Decision: an exact-match filter on `ListRequest`
+
+The children of one record are a filter, not a search: a search is
+`LIKE` on text, and the key is an exact value. So `ListRequest` has a
+`filter: Option<Equals>`, which a data source must `AND` into its `WHERE`
+clause, beside the scope. The value is typed by the child column's kind,
+so an integer column gets an integer bind (PostgreSQL does not compare an
+integer with text). The fixture and `brocanth-admin-model` apply it.
+
+The PostgreSQL test found the same fault in `brocanth-admin-model`'s
+key lookup: it bound the key from the URL as text, so every edit form
+over PostgreSQL answered 500, and SQLite's type affinity hid it.
+`single_key` now binds an integer key as an integer.
+
+The alternative was to fold the filter into the row policy's condition.
+That makes the policy carry something that is not a policy, and the
+fixture applies no condition.
+
 ## Open
 
-- **Inlines.** Django's `TabularInline`: the related rows of a record on
-  its edit form. Not built.
 - **Per-app overrides.** No app grouping exists.
 - **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
   and the two blocks. A `Panel` renders its own body in the crate that
   owns it, so there is no shipped panel template to copy.
-- **Pages under one model.** Django's `get_urls()` on a `ModelAdmin` adds
-  `/admin/invoice/<id>/send`. Here an extra page is under its own key,
-  not under a model. A per-record action is a page that takes the record
-  key in its path: `/admin/invoice-actions/7/send`.
+- **An async page under a model.** `ModelAdmin::page` takes a
+  synchronous closure, as `AdminConfig::page` does. A page that awaits a
+  database read is a `Panel` today, under its own key.
 - **More blocks.** `brand` and `userlinks` exist. `nav-global` and
   `footer` follow the same pattern when an application needs them.
-- **A model script after a swap.** dp-swap keeps the `<head>`, so a
-  model's script does not load on a swap into that model's screen (level
-  3). A fix belongs in dp-swap: merge the `<head>` of the response.
+- **dp-swap's `main`.** The vendored build is `f80aeeb` plus the head
+  merge. The same change is on branch `feat/merge-head-main` of
+  `brocanth/htmx`, on top of its `main`; neither branch is pushed. Moving
+  the admin to dp-swap's `main` also brings its meta-element
+  configuration (`<meta name="dp-config">`), which could replace the
+  appended `configure` line.
 - **A three-way diff.** `brocanth admin diff` is two-way. A three-way diff
   needs the template of the version a copy came from.

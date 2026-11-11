@@ -230,14 +230,21 @@ Done: the `brand` and `userlinks` blocks (`Views::with_brand`,
 `with_userlinks`, `AdminConfig::user_label`); extra pages
 (`AdminConfig::page`, `Page::hidden`, `Panel::in_nav`); per-model
 JavaScript as files (`ModelAdmin::script`, `AdminConfig::script`; no
-inline code, so no hash and no nonce); `brocanth admin diff`.
+inline code, so no hash and no nonce); `brocanth admin diff`; inlines
+(`ModelAdmin::inline(Inline)`: a child model's rows on the parent's
+form, the child's policy per row, `docs/admin-customization.md`,
+"Inlines").
 
 What remains, from `docs/admin-customization.md`, "Open":
 
-1. A model's script does not load on a dp-swap into its screen: dp-swap
-   keeps the `<head>`. The fix is in dp-swap: merge the response's
-   `<head>`.
-2. Pages under one model (Django's `ModelAdmin.get_urls`).
+1. ~~A model's script does not load on a dp-swap into its screen.~~
+   Done: dp-swap merges the response's `<head>` (vendored at `d64048f`),
+   and the admin sets header mode, so a boosted link swaps instead of
+   falling back to a full load.
+2. ~~Pages under one model (Django's `ModelAdmin.get_urls`).~~ Done:
+   `ModelAdmin::page` (`{base}/{model}/{key}`) and `record_page`
+   (`{base}/{model}/{record}/{key}`), with the list's or the record's
+   policy and the admin's layout.
 3. A three-way `admin diff`: it needs the template of the version a copy
    came from.
 

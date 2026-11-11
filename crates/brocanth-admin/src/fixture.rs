@@ -273,6 +273,10 @@ impl AdminData for Fixture {
     async fn list(&self, request: ListRequest<'_>) -> Result<Vec<Row>, DataError> {
         unscoped(request.scope)?;
         let mut rows = self.matching(request.model, request.search);
+        if let Some(filter) = request.filter {
+            let wanted = filter.value.as_input();
+            rows.retain(|row| row.get(filter.column).map(Value::as_input) == Some(wanted.clone()));
+        }
         sorted(&mut rows, request.sort);
         Ok(rows
             .into_iter()

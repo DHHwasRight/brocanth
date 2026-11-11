@@ -1,8 +1,9 @@
 # Vendored, not fetched
 
 `dpswap.min.js` is the same build artefact `brocanth-cli/vendor/` carries,
-from <https://github.com/brocanth/htmx> at commit `f80aeeb`, copied here and
-embedded in the layout with `include_str!`.
+from <https://github.com/brocanth/htmx> at commit `d64048f` (`f80aeeb` plus
+the merge of the response's `<head>`), copied here and embedded in the
+layout with `include_str!`.
 
 A second copy rather than a shared crate, and the reason is that the two
 uses have nothing to do with each other. The CLI writes the file into a
