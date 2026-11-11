@@ -310,6 +310,7 @@ fn a_cursor_from_the_query_string_of_the_wrong_width_is_a_help_line() {
     let params = Params::parse("after=i3").unwrap();
     let error = keyset.after(params.after.as_ref()).unwrap_err();
     assert!(error.to_string().contains("2 key(s)"));
+    assert_eq!(error.status(), 400);
     assert!(error.to_string().contains("help:"));
     let params = Params::parse("after=i3.i4.i5").unwrap();
     assert!(keyset.after(params.after.as_ref()).is_err());
@@ -328,6 +329,7 @@ fn a_cursor_key_of_the_wrong_kind_is_not_a_cursor() {
             "{token}: {error}"
         );
         assert!(error.to_string().contains("help:"), "{token}");
+        assert_eq!(error.status(), 400, "{token}: the client's mistake");
     }
     assert!(keyset.after(Some(&Cursor::parse("i1.i1").unwrap())).is_ok());
 }
@@ -364,6 +366,7 @@ fn an_order_on_a_column_a_cursor_cannot_carry_fails_on_the_first_page() {
     let error = keyset.after(None).unwrap_err();
     assert!(error.to_string().contains("`price`"), "{error}");
     assert!(error.to_string().contains("help:"), "{error}");
+    assert_eq!(error.status(), 500, "the list's bug, not the client's");
     assert!(Keyset::by_key(PriceColumn::Id, Direction::Ascending)
         .after(None)
         .is_ok());

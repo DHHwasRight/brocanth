@@ -218,12 +218,15 @@ fn agents(project: &Project) -> String {
     };
     let keyset = if project.has("policy") {
         "- Build the keyset `WHERE` with `brocanth_pagination::Keyset`:\n\
-         \x20 `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so\n\
-         \x20 a forged cursor only moves the window inside the rule. The column\n\
+         \x20 `rule.and(keyset.after(params.after.as_ref()).map_err(|e|\n\
+         \x20 Error::new(e.status(), e.to_string()))?)`, compiled once, so a\n\
+         \x20 forged cursor only moves the window inside the rule. The column\n\
          \x20 enum implements `brocanth_policy::Sortable`, so a cursor key of the\n\
-         \x20 wrong type is a 400 and not a database error.\n\
+         \x20 wrong type is a 400 and not a database error. Keep the `map_err`:\n\
+         \x20 a bare `?` makes it a 500.\n\
          - A `before=<cursor>` page (the previous link) reads with\n\
-         \x20 `keyset.before(&cursor)?` and `keyset.reversed().order_by()`, then\n\
+         \x20 `keyset.before(&cursor)` (the same `map_err`) and\n\
+         \x20 `keyset.reversed().order_by()`, then\n\
          \x20 `KeysetPage::before` puts the rows back in order.\n"
     } else {
         ""

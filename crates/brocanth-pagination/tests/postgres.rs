@@ -220,6 +220,7 @@ async fn a_text_cursor_on_an_integer_sort_is_a_400_and_not_a_database_error() {
         let message = error.to_string();
         assert!(message.contains("is not a cursor"), "{token}: {message}");
         assert!(message.contains("help:"), "{token}: {message}");
+        assert_eq!(error.status(), 400, "{token}");
     }
 
     exec(&admin, &format!("DROP SCHEMA {schema} CASCADE")).await;

@@ -106,13 +106,15 @@ one `WHERE`:
 
 ```rust,ignore
 let keyset = Keyset::new(PostColumn::CreatedAt, PostColumn::Id, Direction::Descending);
-let pred = policy.list(&who).and(keyset.after(params.after.as_ref())?);
+let after = keyset.after(params.after.as_ref()).map_err(|e| Error::new(e.status(), e.to_string()))?;
+let pred = policy.list(&who).and(after);
 let condition = pred.condition::<Post>(Dialect::Postgres)?;
 let order = keyset.order_by::<Post>()?; // "posts"."created_at" DESC, "posts"."id" DESC
 // SELECT ... WHERE <condition> ORDER BY <order> LIMIT Keyset::fetch(per_page)
 
 // A previous page: the cursor reversed, and the order reversed.
-let pred = policy.list(&who).and(keyset.before(&cursor)?);
+let before = keyset.before(&cursor).map_err(|e| Error::new(e.status(), e.to_string()))?;
+let pred = policy.list(&who).and(before);
 let order = keyset.reversed().order_by::<Post>()?; // ... ASC, ... ASC
 // then KeysetPage::before(rows, per_page, key)
 ```
@@ -123,8 +125,11 @@ only moves the window, because the rule stays in the `WHERE`.
 `Keyset::after` needs the column enum to implement
 `brocanth_policy::Sortable`, which says what each column holds
 (`SortKind::Int` or `SortKind::Text`). A cursor key of another kind, such
-as text for an integer sort, is "not a cursor", a 400. `policy!` writes
-`Sortable` from the column types; a hand-written enum writes one `match`.
+as text for an integer sort, is "not a cursor". `CursorError::status` is
+400 for it, and 500 for an order on a column no cursor can carry. Map it by
+hand: a handler's blanket `From` turns every error into a 500. `policy!`
+writes `Sortable` from the column types; a hand-written enum writes one
+`match`.
 
 ## Decisions
 

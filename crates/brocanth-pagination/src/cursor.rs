@@ -87,6 +87,19 @@ impl CursorError {
         }
     }
 
+    /// The HTTP status to answer with: 400 for a cursor the client sent
+    /// wrong, 500 for an order that no cursor can carry (the list's bug).
+    ///
+    /// A handler's blanket `From` makes every error a 500, so map this one
+    /// by hand: `.map_err(|e| Error::new(e.status(), e.to_string()))?`.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        match self.reason {
+            Reason::NotACursor | Reason::Width(_) => 400,
+            Reason::Unsortable(_) => 500,
+        }
+    }
+
     #[cfg(feature = "policy")]
     pub(crate) fn unsortable(token: String, column: &'static str) -> Self {
         CursorError {

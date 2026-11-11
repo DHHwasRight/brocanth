@@ -2889,12 +2889,15 @@ from `ctx.links()`, which keeps the filters and the sort.
 - A long list or a feed uses a keyset page (`after=<cursor>`), not an
   offset: it reads one index seek, not every row before it.
 - Build the keyset `WHERE` with `brocanth_pagination::Keyset`:
-  `rule.and(keyset.after(params.after.as_ref())?)`, compiled once, so
-  a forged cursor only moves the window inside the rule. The column
+  `rule.and(keyset.after(params.after.as_ref()).map_err(|e|
+  Error::new(e.status(), e.to_string()))?)`, compiled once, so a
+  forged cursor only moves the window inside the rule. The column
   enum implements `brocanth_policy::Sortable`, so a cursor key of the
-  wrong type is a 400 and not a database error.
+  wrong type is a 400 and not a database error. Keep the `map_err`:
+  a bare `?` makes it a 500.
 - A `before=<cursor>` page (the previous link) reads with
-  `keyset.before(&cursor)?` and `keyset.reversed().order_by()`, then
+  `keyset.before(&cursor)` (the same `map_err`) and
+  `keyset.reversed().order_by()`, then
   `KeysetPage::before` puts the rows back in order.
 
 ## Filters
@@ -2940,7 +2943,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9d1965dc754242d0 -->
+<!-- brocanth-digest: 666bea2e3d2fa9d1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
