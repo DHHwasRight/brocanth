@@ -9099,7 +9099,7 @@ available = []
 remember = true
 # Path prefixes that keep no locale segment and are never redirected.
 # A path whose last segment has a `.` (/robots.txt) is never redirected either.
-unprefixed = ["/admin", "/api"]
+unprefixed = ["/admin", "/api", "/realtime", "/files"]
 
 [meta]
 # The site's name: the title of a page with none, and og:site_name.
@@ -19517,7 +19517,7 @@ kind = ["middleware"]
 files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
-adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing"]
+adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing", "realtime", "storage-routes"]
 
 [modules.i18n-routing]
 version = "0.1.0"
@@ -19575,4 +19575,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 807dbcdc7a85cc9e
+# brocanth-digest: 25ed34afee7e0b07
