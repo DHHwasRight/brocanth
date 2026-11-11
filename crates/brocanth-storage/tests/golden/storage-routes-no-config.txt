@@ -2691,7 +2691,7 @@ mod tests {
     async fn a_file_is_served_only_with_a_token() {
         let app = crate::app::build().expect("the application builds");
         let address = "0".repeat(64);
-        let request = Request::new(Verb::Get, &format!("/files/{address}"));
+        let request = Request::new(Verb::Get, format!("/files/{address}"));
         let response = crate::app::handle(&app, request).await;
         assert_eq!(response.status, 403);
     }
