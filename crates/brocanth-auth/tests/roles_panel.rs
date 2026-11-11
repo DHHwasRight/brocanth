@@ -520,8 +520,55 @@ fn page_with_query(admin: &Admin, who: &Staff, path: &str, query: &str) -> Html 
     Html::new(response.html().expect("a page").to_string())
 }
 
-/// What a superuser typed and what a link carries is text on the tab, not
-/// markup: a permission, the error from the redirect.
+/// The redirect carries a code, and the tab shows its own sentence for it.
+/// Text that a link puts in `error=` is not shown at all: a member of staff
+/// could otherwise be sent a page that says what an attacker wrote, in the
+/// admin's own voice.
+#[tokio::test]
+async fn the_roles_tab_shows_only_its_own_messages() {
+    let store = Arc::new(MemoryStore::new());
+    let admin = admin(&store);
+    let ops = superuser(&store).await;
+
+    let response = block_on(admin.dispatch(
+        Principal::new(&ops),
+        "POST",
+        "/admin/roles",
+        "",
+        &form(&[("do", "promote")]),
+    ))
+    .expect("dispatch");
+    assert_eq!(
+        response.location(),
+        Some("/admin/roles?error=no-action"),
+        "the redirect carries a code, not a sentence"
+    );
+
+    let plain = page(&admin, &ops, "/admin/roles").text();
+    for query in [
+        "error=Your+session+expired.+Sign+in+again+at+evil.example",
+        "error=the+form+named+no+action",
+        "error=",
+        "error=no-action-x",
+    ] {
+        let shown = page_with_query(&admin, &ops, "/admin/roles", query);
+        assert!(
+            !shown.text().contains("evil.example"),
+            "{query}: {}",
+            shown.text()
+        );
+        assert_eq!(
+            shown.text(),
+            plain,
+            "{query}: an unknown code shows nothing"
+        );
+    }
+    page_with_query(&admin, &ops, "/admin/roles", "error=no-role")
+        .assert_text("no role has that name");
+}
+
+/// What a superuser typed is text on the tab, not markup. What a link puts
+/// in `error=` is neither: the tab does not show it.
 #[tokio::test]
 async fn the_roles_tab_escapes_what_it_shows() {
     let store = Arc::new(MemoryStore::new());
@@ -547,7 +594,7 @@ async fn the_roles_tab_escapes_what_it_shows() {
     assert!(!html.contains("<img src=x"), "{html}");
     let page = Html::new(html.to_string());
     page.assert_text("<script>alert(1)</script>");
-    page.assert_text("<img src=x onerror=alert(2)>");
+    assert!(!page.text().contains("onerror"), "{html}");
 }
 
 /// `integrate.admin` off for `superuser`: the admin has no policy, so it is
