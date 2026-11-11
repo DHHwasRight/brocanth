@@ -407,7 +407,8 @@ const PG_OPEN: &str = r#"        // The lifecycle hooks are synchronous and open
         // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[cache] needs a Tokio runtime at startup to open its pool ({e})"
+                "[cache] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let cache = {
@@ -521,7 +522,10 @@ const SWEEP: &str = r#"
             return Ok(());
         };
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!("[cache] needs a Tokio runtime to sweep ({e})"))
+            PluginError::new(format!(
+                "[cache] needs a Tokio runtime to sweep ({e})\n\
+                 help: build the application inside the runtime that serves it"
+            ))
         })?;
         let on_error = |e: &brocanth_cache::CacheError| {
             crate::plugins::say!(warn, "[cache] sweep: {e}"; error = %e);

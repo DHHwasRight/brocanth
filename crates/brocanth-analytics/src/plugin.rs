@@ -177,10 +177,12 @@ impl Plugin for Analytics {
             return Ok(());
         }
         std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(last))
-                .join()
-                .map_err(|_| PluginError::new("[analytics] the last flush panicked"))
+            scope.spawn(|| runtime.block_on(last)).join().map_err(|_| {
+                PluginError::new(
+                    "[analytics] the last flush panicked\n\
+                     help: read the panic message above; it names the cause",
+                )
+            })
         })
     }
 }

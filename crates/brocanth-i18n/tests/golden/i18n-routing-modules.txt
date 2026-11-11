@@ -3566,7 +3566,8 @@ impl Plugin for Files {
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.root.is_empty() {
             return Err(PluginError::new(
-                "[storage] root is required; there is no default directory",
+                "[storage] root is required; there is no default directory\n\
+                 help: set `root` under [storage] in the config file, such as \"var/uploads\"",
             ));
         }
         if self.settings.secret.is_empty() {
@@ -3574,12 +3575,14 @@ impl Plugin for Files {
             // stores: addresses stop being keyed, and a token key of no bytes
             // signs tokens anybody can forge.
             return Err(PluginError::new(
-                "[storage] secret is required; it signs file tokens and keys object addresses",
+                "[storage] secret is required; it signs file tokens and keys object addresses\n\
+                 help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
         if self.settings.token_ttl <= 0 {
             return Err(PluginError::new(
-                "[storage] token_ttl must be at least one second, or no token is ever valid",
+                "[storage] token_ttl must be at least one second, or no token is ever valid\n\
+                 help: set `token_ttl` under [storage] to 1 or more seconds",
             ));
         }
         // Synchronous: `std::fs`, a `create_dir_all` and a `canonicalize`.
@@ -3587,7 +3590,11 @@ impl Plugin for Files {
         // `before_start`.
         let disk = LocalDisk::open(&self.settings.root)
             .map_err(|e| {
-                PluginError::new(format!("[storage] opening {:?}: {e}", self.settings.root))
+                PluginError::new(format!(
+                    "[storage] opening {:?}: {e}\n\
+                     help: set `root` under [storage] to a directory this process can create and write",
+                    self.settings.root
+                ))
             })?
             .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
         let store: Arc<dyn Storage> = Arc::new(disk);

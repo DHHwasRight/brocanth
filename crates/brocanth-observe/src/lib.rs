@@ -701,6 +701,11 @@ impl Plugin for ObservePlugin {
     fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
         self.observer
             .flush()
-            .map_err(|e| PluginError::new(format!("flushing the trace exporter: {e}")))
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "flushing the trace exporter: {e}\n\
+                     help: check that the collector answers at `otlp_endpoint` or OTEL_EXPORTER_OTLP_ENDPOINT"
+                ))
+            })
     }
 }

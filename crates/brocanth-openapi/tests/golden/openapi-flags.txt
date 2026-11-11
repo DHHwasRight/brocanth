@@ -2270,15 +2270,21 @@ impl Plugin for OpenApi {
         // The same function `src/app.rs` builds the live table with, so the
         // document describes what this binary actually dispatches.
         let router = crate::pages::router().map_err(|e| {
-            PluginError::new(format!("[openapi] the route table does not build: {e}"))
+            PluginError::new(format!(
+                "[openapi] the route table does not build: {e}\n\
+                 help: fix the route it names under src/pages/; the server refuses the same table"
+            ))
         })?;
         let spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
             .hide(ROUTE, Verb::Get);
 
-        let document = spec
-            .build()
-            .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
+        let document = spec.build().map_err(|e| {
+            PluginError::new(format!(
+                "[openapi] deriving the document: {e}\n\
+                 help: fix the route or the description it names in this file"
+            ))
+        })?;
 
         // The crate's own plugin, held rather than registered. Its
         // `configure` is what makes an invalid document a build failure

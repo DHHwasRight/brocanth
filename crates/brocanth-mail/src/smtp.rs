@@ -164,7 +164,11 @@ impl Smtp {
                 AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(config.relay.clone()),
             ),
         }
-        .map_err(|e| MailError::transport(e.to_string()))?;
+        .map_err(|e| {
+            MailError::transport(format!(
+                "{e}\nhelp: check the relay's host name and its TLS mode"
+            ))
+        })?;
 
         let mut builder = builder.timeout(Some(config.timeout));
         if let Some(port) = config.port {

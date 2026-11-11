@@ -2473,19 +2473,21 @@ impl Plugin for Realtime {
             "disconnect" => Overflow::Disconnect,
             other => {
                 return Err(PluginError::new(format!(
-                    "[realtime] overflow is {other:?}; write drop-oldest, \
-                     drop-newest or disconnect"
+                    "[realtime] overflow is {other:?}, which is not a policy\n\
+                     help: set `overflow` under [realtime] to drop-oldest, drop-newest or disconnect"
                 )))
             }
         };
         if self.settings.queue == 0 {
             return Err(PluginError::new(
-                "[realtime] queue must hold at least one frame",
+                "[realtime] queue is 0, and it must hold at least one frame\n\
+                 help: set `queue` under [realtime] to 1 or more, such as 32",
             ));
         }
         if self.settings.max_clients == 0 {
             return Err(PluginError::new(
-                "[realtime] max_clients is 0, so every connection is refused",
+                "[realtime] max_clients is 0, so every connection is refused\n\
+                 help: set `max_clients` under [realtime] to 1 or more, such as 1000",
             ));
         }
         // Synchronous, allocating a few maps, needing no runtime. Unlike a

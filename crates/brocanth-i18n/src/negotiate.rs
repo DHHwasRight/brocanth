@@ -155,7 +155,8 @@ impl NegotiatorConfig {
                 if !ok {
                     return Err(format!(
                         "[i18n] {field} = {name:?}: a name is ASCII letters, digits, `_` and `-`, \
-                         and not empty"
+                         and not empty\n\
+                         help: set `{field}` under [i18n] to a name such as \"locale\""
                     ));
                 }
             }

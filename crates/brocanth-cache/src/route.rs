@@ -428,13 +428,19 @@ impl AsyncRequestHook for Lookup {
             let key = inner
                 .namespace
                 .key(text)
-                .map_err(|e| PluginError::new(format!("route cache: {e}")))?;
+                .map_err(|e| {
+                    PluginError::new(format!(
+                        "route cache: {e}\n\
+                         help: shorten the key the rule builds from the request, or leave the route out of the rule"
+                    ))
+                })?;
 
-            let stored = inner
-                .cache
-                .get(&key)
-                .await
-                .map_err(|e| PluginError::new(format!("route cache: {e}")))?;
+            let stored = inner.cache.get(&key).await.map_err(|e| {
+                PluginError::new(format!(
+                    "route cache: {e}\n\
+                     help: check that the cache backend answers; its readiness check shows it"
+                ))
+            })?;
             if let Some(response) = stored.as_deref().and_then(decode) {
                 return Ok(Flow::respond(response));
             }

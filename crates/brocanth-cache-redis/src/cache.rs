@@ -198,7 +198,15 @@ impl RedisCache {
         let config = ConnectionManagerConfig::new()
             .set_connection_timeout(Some(TIMEOUT))
             .set_response_timeout(Some(TIMEOUT));
-        let conn = ConnectionManager::new_lazy_with_config(client, config).map_err(backend)?;
+        let conn = ConnectionManager::new_lazy_with_config(client, config).map_err(|e| {
+            CacheError::Backend(
+                format!(
+                    "the Redis connection cannot be set up: {e}\n\
+                     help: check the host, the port and the TLS mode in the Redis URL"
+                )
+                .into(),
+            )
+        })?;
         Ok(Self {
             conn,
             prefix: Arc::from(DEFAULT_PREFIX),

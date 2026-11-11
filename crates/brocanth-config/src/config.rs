@@ -174,7 +174,8 @@ impl fmt::Display for UnknownKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "`{}` is set{}, and `{}`, which owns `[{}]`, has no such key{}; it has: {}",
+            "`{}` is set{}, and `{}`, which owns `[{}]`, has no such key{}; it has: {}\n\
+             help: rename the key to one of those, or remove it",
             self.path,
             at_hint(&self.from),
             self.plugin,
@@ -272,7 +273,10 @@ pub enum ConfigError {
     },
 
     /// A top-level key holding something that is not a section.
-    #[error("`{name}` is a top-level value, but only sections (tables) are allowed there")]
+    #[error(
+        "`{name}` is a top-level value, but only sections (tables) are allowed there\n\
+         help: move `{name}` under the `[section]` of the plugin that reads it"
+    )]
     NotASection {
         /// The offending key.
         name: String,
@@ -280,7 +284,8 @@ pub enum ConfigError {
 
     /// A section no registered plugin claims.
     #[error(
-        "unknown configuration section `[{name}]`{}; known sections: {}",
+        "unknown configuration section `[{name}]`{}; known sections: {}\n\
+         help: rename the section to one of those, or register the plugin that reads it",
         suggestion_hint(.suggestion),
         .known.join(", ")
     )]

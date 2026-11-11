@@ -73,7 +73,8 @@ const OPEN: &str = r#"        // The connection opens on the first command, so n
         // Its task is spawned on the runtime, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[cache] needs a Tokio runtime at startup to connect ({e})"
+                "[cache] needs a Tokio runtime at startup to connect ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let cache = {

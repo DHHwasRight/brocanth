@@ -930,6 +930,16 @@ So open lazily and check in the startup gate:
 - In `shutdown`, wait for an async close only on a multi-thread runtime.
   On a current-thread one, spawn it and return.
 
+Every `PluginError` message ends with a `\nhelp:` line that says what to
+do next: name the setting and its section (set `url` under [db]), the
+file, the variable or the command. A message that only wraps another
+error ends with it (`format!("[db] {e}")`) and adds no help line, because
+the wrapped error carries one. When the wrapped error has none, fix it in
+its own crate, so that every caller gets the line.
+`crates/brocanth-cli/tests/error_help.rs` reads every golden shape and
+every `crates/*/src` file and fails on a message that breaks this rule.
+It cannot see inside a wrapped error, so that half stays a review item.
+
 #### `Slot::CommandsMod`
 
 `pub mod <name>;` in `src/commands/mod.rs`, for a subcommand the module

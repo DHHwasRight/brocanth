@@ -246,7 +246,8 @@ impl Plugin for Validation {{
             "form" => ReportStyle::Form,
             other => {{
                 return Err(PluginError::new(format!(
-                    "[validation] report is {{other:?}}; write json or form"
+                    "[validation] report is {{other:?}}, which is not a report style\n\
+                     help: set `report` under [validation] to json or form"
                 )))
             }}
         }};

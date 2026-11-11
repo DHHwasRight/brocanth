@@ -383,8 +383,8 @@ impl Plugin for Jobs {{
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
 {check_url}        if self.settings.worker && self.settings.queues.is_empty() {{
             return Err(PluginError::new(
-                "[jobs] worker is true and queues is empty, so the worker would claim \
-                 nothing; name a queue or set worker = false",
+                "[jobs] worker is true and queues is empty, so the worker would claim nothing\n\
+                 help: name a queue in `queues` under [jobs], or set worker = false",
             ));
         }}
         Ok(())
@@ -464,7 +464,12 @@ impl Plugin for Jobs {{
             scope
                 .spawn(|| runtime.block_on(finished))
                 .join()
-                .map_err(|_| PluginError::new("[jobs] the stopping thread panicked"))
+                .map_err(|_| {{
+                    PluginError::new(
+                        "[jobs] the stopping thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                }})
         }})?;
         match ended {{
             Some(Ok(report)) => {{
@@ -477,9 +482,13 @@ impl Plugin for Jobs {{
                 );
                 Ok(())
             }}
-            Some(Err(e)) => Err(PluginError::new(format!("[jobs] stopping the worker: {{e}}"))),
+            Some(Err(e)) => Err(PluginError::new(format!(
+                "[jobs] stopping the worker: {{e}}\n\
+                 help: read the panic message above; it names the cause"
+            ))),
             None => Err(PluginError::new(
-                "[jobs] the worker was still giving jobs back at the deadline",
+                "[jobs] the worker was still giving jobs back at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], so the worker has time to give them back",
             )),
         }}
     }}
@@ -548,7 +557,8 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
              // spawns its upkeep task, so it needs the runtime entered.\n        \
              let runtime = tokio::runtime::Handle::try_current().map_err(|e| {\n            \
              PluginError::new(format!(\n                \
-             \"[jobs] needs a Tokio runtime at startup to open its pool ({e})\"\n            \
+             \"[jobs] needs a Tokio runtime at startup to open its pool ({e})\\n\\\n                 \
+             help: build the application inside the runtime that serves it\"\n            \
              ))\n        \
              })?;\n        \
              let queue = {\n            \

@@ -106,7 +106,11 @@ impl Record {
             choice.choice, choice.id, choice.version, version
         );
         let failed = |e: std::io::Error| {
-            PluginError::new(format!("gtag: consent log {}: {e}", self.path.display()))
+            PluginError::new(format!(
+                "gtag: consent log {}: {e}\n\
+                 help: set [gtag] consent_log to a file this process can create and append to",
+                self.path.display()
+            ))
         };
         if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(failed)?;

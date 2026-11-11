@@ -321,10 +321,12 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Plugin for AuthPlugin<S, H, C> {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let config = self
-            .config
-            .take()
-            .ok_or_else(|| PluginError::new("the auth plugin was configured twice"))?;
+        let config = self.config.take().ok_or_else(|| {
+            PluginError::new(
+                "the auth plugin was configured twice\n\
+                 help: build a new plugin for each application; one plugin configures once",
+            )
+        })?;
 
         // Catch a misconfiguration at startup rather than at the first
         // sign-in: a provider whose client id is empty, or an Apple key that
@@ -332,7 +334,8 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Plugin for AuthPlugin<S, H, C> {
         for configured in &config.providers {
             if configured.client.client_id.is_empty() {
                 return Err(PluginError::new(format!(
-                    "provider `{}` has an empty client id",
+                    "provider `{}` has an empty client id\n\
+                     help: set the client id that the provider's console gives for this application",
                     configured.provider.id
                 )));
             }

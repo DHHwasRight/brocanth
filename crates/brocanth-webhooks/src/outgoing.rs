@@ -749,9 +749,12 @@ fn client(config: &OutgoingConfig) -> Result<reqwest::Client, OutError> {
     if !config.allow_private {
         builder = builder.dns_resolver(PublicOnly);
     }
-    builder
-        .build()
-        .map_err(|e| OutError(format!("webhooks: building the HTTP client: {e}")))
+    builder.build().map_err(|e| {
+        OutError(format!(
+            "webhooks: building the HTTP client: {e}\n\
+             help: check that the system's TLS certificates are installed and readable"
+        ))
+    })
 }
 
 /// A resolver that keeps only public addresses.

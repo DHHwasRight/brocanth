@@ -106,7 +106,8 @@ impl AppleKey {
     pub fn client_secret(&self, clock: &dyn Clock) -> Result<String, AuthError> {
         if self.lifetime <= 0 || self.lifetime > MAX_SECRET_LIFETIME {
             return Err(AuthError::misconfigured(format!(
-                "an Apple client secret must live between 1 and {MAX_SECRET_LIFETIME} seconds, not {}",
+                "an Apple client secret must live between 1 and {MAX_SECRET_LIFETIME} seconds, not {}\n\
+                 help: set the secret's lifetime to a value in that range",
                 self.lifetime
             )));
         }
@@ -120,10 +121,20 @@ impl AppleKey {
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
         header.kid = Some(self.key_id.clone());
-        let key = jsonwebtoken::EncodingKey::from_ec_pem(self.private_key_pem.as_bytes())
-            .map_err(|e| AuthError::crypto(format!("the Apple private key is not usable: {e}")))?;
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::crypto(format!("could not sign the Apple client secret: {e}")))
+        let key = jsonwebtoken::EncodingKey::from_ec_pem(self.private_key_pem.as_bytes()).map_err(
+            |e| {
+                AuthError::crypto(format!(
+                    "the Apple private key is not usable: {e}\n\
+                     help: paste the whole `.p8` file from Apple, with its BEGIN and END lines"
+                ))
+            },
+        )?;
+        jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
+            AuthError::crypto(format!(
+                "could not sign the Apple client secret: {e}\n\
+                 help: use the ES256 `.p8` key Apple issued for this key id"
+            ))
+        })
     }
 }
 
