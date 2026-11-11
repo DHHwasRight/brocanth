@@ -40,6 +40,7 @@ brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-admin-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-webhooks = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["out", "postgres", "config", "admin"] }
 serde_json = { version = "1" }  # an outgoing event's payload is JSON
+brocanth-oauth-client = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["admin"] }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1442,6 +1443,7 @@ fn mounted(
     crate::plugins::resource::mount(routes, "/api")?;
     crate::plugins::admin::mount(routes, crate::modules::admin::MODULE.mount_at)?;
     crate::plugins::auth_oauth::mount(routes, crate::modules::auth_oauth::MODULE.mount_at)?;
+    crate::plugins::oauth_client::mount(routes, crate::modules::oauth_client::MODULE.mount_at)?;
     Ok(())
 }
 
@@ -1842,6 +1844,8 @@ mod tests {
             "/account/signup".to_string(),
             "/account/totp".to_string(),
             "/account/verify/{token}".to_string(),
+            "/connections".to_string(),
+            "/connections/{*rest}".to_string(),
             "/openapi.json".to_string(),
             "/openapi.yaml".to_string(),
             "/realtime/events".to_string(),
@@ -1979,6 +1983,7 @@ pub mod jobs;
 pub mod mail;
 pub mod meta;
 pub mod model;
+pub mod oauth_client;
 pub mod observability;
 pub mod openapi;
 pub mod policy;
@@ -2266,6 +2271,9 @@ macro_rules! register {
             .plugin_hooking_from_config::<crate::plugins::webhooks_in::WebhooksIn>("webhooks_in")
             .map_err(|e| e.to_string())?;
         let builder = builder
+            .plugin_from_config::<crate::plugins::oauth_client::OauthClientPlugin>("oauth_client")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
 
@@ -2404,7 +2412,8 @@ type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithSuperuser>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithStorageRoutes>;
 type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithMiddlewareSecurityHeaders>;
-type WithCache = After<crate::plugins::cache::Cache, WithWebhooksIn>;
+type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithWebhooksIn>;
+type WithCache = After<crate::plugins::cache::Cache, WithOauthClient>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithCache>;
 type WithMail = After<crate::plugins::mail::MailPlugin, WithAudit>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMail>;
@@ -2608,6 +2617,10 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // Superusers pass every check; a role holder passes what its roles grant.
     if crate::modules::superuser::MODULE.integrate.admin {
         config = config.with_policy(brocanth_auth::admin::StaffPolicy);
+    }
+    // Every connection, without its tokens, with a Revoke button, as a tab.
+    if crate::modules::oauth_client::MODULE.integrate.admin {
+        config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::installed());
     }
     // The change history: a tab, a link on every record, every admin write.
     if crate::modules::audit::MODULE.integrate.admin {
@@ -3711,6 +3724,105 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "oauth_client.base_url",
+        help: "The scheme and host the providers send the browser back to.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.key",
+        help: "The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.allow_http",
+        help: "Accept http:// provider URLs. Development only, for a local fake provider.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "oauth_client.github_client_id",
+        help: "The client id of the GitHub OAuth app. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.github_client_secret",
+        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.google_client_id",
+        help: "The client id of the Google OAuth client. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.google_client_secret",
+        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.microsoft_client_id",
+        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.microsoft_client_secret",
+        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.gitlab_client_id",
+        help: "The application id of the GitLab application. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.gitlab_client_secret",
+        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "cache.url",
         help: "The Redis or Valkey URL the cache lives in.",
         flag: false,
@@ -4186,6 +4298,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::webhooks_out::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::oauth_client::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::realtime::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -4382,6 +4497,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let webhooks_in = crate::plugins::webhooks_in::Settings::default();
+    let oauth_client = crate::plugins::oauth_client::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let audit = brocanth_audit::AuditConfig::default();
     let mail = crate::plugins::mail::Settings::default();
@@ -4654,6 +4770,47 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("webhooks_in.secret", format!("{:?}", webhooks_in.secret)),
         ("webhooks_in.migrate", format!("{:?}", webhooks_in.migrate)),
+        (
+            "oauth_client.base_url",
+            format!("{:?}", oauth_client.base_url),
+        ),
+        ("oauth_client.key", format!("{:?}", oauth_client.key)),
+        (
+            "oauth_client.allow_http",
+            format!("{:?}", oauth_client.allow_http),
+        ),
+        (
+            "oauth_client.github_client_id",
+            format!("{:?}", oauth_client.github_client_id),
+        ),
+        (
+            "oauth_client.github_client_secret",
+            format!("{:?}", oauth_client.github_client_secret),
+        ),
+        (
+            "oauth_client.google_client_id",
+            format!("{:?}", oauth_client.google_client_id),
+        ),
+        (
+            "oauth_client.google_client_secret",
+            format!("{:?}", oauth_client.google_client_secret),
+        ),
+        (
+            "oauth_client.microsoft_client_id",
+            format!("{:?}", oauth_client.microsoft_client_id),
+        ),
+        (
+            "oauth_client.microsoft_client_secret",
+            format!("{:?}", oauth_client.microsoft_client_secret),
+        ),
+        (
+            "oauth_client.gitlab_client_id",
+            format!("{:?}", oauth_client.gitlab_client_id),
+        ),
+        (
+            "oauth_client.gitlab_client_secret",
+            format!("{:?}", oauth_client.gitlab_client_secret),
+        ),
         ("cache.url", format!("{:?}", cache.url)),
         (
             "audit.retention_days",
@@ -4918,7 +5075,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 8079a1b70a8d55b6
+// brocanth-digest: 5468649662ddc6a1
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6687,6 +6844,95 @@ pub mod webhooks_out {
     }
 }
 
+/// The shape of src/modules/oauth.rs.
+pub mod oauth {
+    /// What src/modules/oauth.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/oauth_client.rs.
+pub mod oauth_client {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[oauth_client]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        BaseUrl,
+        AllowHttp,
+        GithubClientId,
+        GoogleClientId,
+        MicrosoftClientId,
+        GitlabClientId,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::BaseUrl => "oauth_client.base_url",
+                Key::AllowHttp => "oauth_client.allow_http",
+                Key::GithubClientId => "oauth_client.github_client_id",
+                Key::GoogleClientId => "oauth_client.google_client_id",
+                Key::MicrosoftClientId => "oauth_client.microsoft_client_id",
+                Key::GitlabClientId => "oauth_client.gitlab_client_id",
+            }
+        }
+    }
+
+    /// The code `oauth-client` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a tab at /admin/connections: every connection without its
+        /// tokens, and a Revoke button.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/oauth_client.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
+        /// Where the connect pages answer. The redirect URI at each provider is
+        /// <base_url><mount_at>/<provider>/callback.
+        pub mount_at: &'static str,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            integrate: Integrate::DEFAULT,
+            mount_at: "/connections",
+        };
+    }
+}
+
+/// The shape of src/modules/oauth_client_memory.rs.
+pub mod oauth_client_memory {
+    /// What src/modules/oauth_client_memory.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/realtime.rs.
 pub mod realtime {
     pub use super::{Flag, Flags};
@@ -7179,7 +7425,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 84b011bd6db84fcc
+// brocanth-digest: 80126a642ee99669
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -7237,6 +7483,9 @@ pub mod middleware_csrf;
 pub mod middleware_rate_limit;
 pub mod middleware_security_headers;
 pub mod model;
+pub mod oauth;
+pub mod oauth_client;
+pub mod oauth_client_memory;
 pub mod observability;
 pub mod observability_health;
 pub mod observability_logs;
@@ -7314,6 +7563,9 @@ pub const ALL: &[&str] = &[
     "webhooks",
     "webhooks-in",
     "webhooks-out",
+    "oauth",
+    "oauth-client",
+    "oauth-client-memory",
     "realtime",
     "realtime-sse",
     "realtime-websocket",
@@ -7338,7 +7590,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: f54ec4616191ba54
+// brocanth-digest: fd3bec428228a28e
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -8592,6 +8844,75 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/oauth.rs =====
+//! `oauth`: an OAuth 2.0 client for third-party APIs (not sign-in); pick its
+//! parts below.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::oauth::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/oauth_client.rs =====
+//! `oauth-client`: connect pages at /connections; tokens sealed in Postgres,
+//! refreshed once, sent as a bearer.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [oauth_client] in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::oauth_client::{Flag, Flags, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [oauth_client]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::BaseUrl, Flag::As("base-url")),
+    //   (Key::BaseUrl, Flag::Hidden),
+    rename: &[],
+
+    integrate: Integrate {
+        // A tab at /admin/connections: every connection without its tokens, and
+        // a Revoke button. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    // Where the connect pages answer. The redirect URI at each provider is
+    // <base_url><mount_at>/<provider>/callback.
+    mount_at: "/connections",
+
+    ..Module::DEFAULT
+};
+===== src/modules/oauth_client_memory.rs =====
+//! `oauth-client-memory`: the connected accounts in this process's memory; for
+//! tests and development, gone at restart.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::oauth_client_memory::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/realtime.rs =====
 //! `realtime`: one write is a map lookup, not a query per subscriber.
 //!
@@ -9460,6 +9781,37 @@ secret = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ=="
 # Create the idempotency table on the first readiness check.
 # Off, for a project that keeps brocanth_webhooks::PgSeen::SCHEMA in a migration.
 migrate = true
+
+[oauth_client]
+# The providers to offer, by id: github, google, microsoft, gitlab.
+# Each one needs its client id and secret below. The server refuses to
+# start when one is missing, so a Connect button never answers an error.
+providers = ["github"]
+# The scheme and host the providers send the browser back to.
+# Register <base_url>/connections/<provider>/callback at each provider's console.
+base_url = "http://localhost:3000"
+# The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.
+# Make one with: head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
+# Set it in the environment. A new key makes every stored token unreadable.
+# key = ""
+# Accept http:// provider URLs. Development only, for a local fake provider.
+allow_http = false
+# The client id of the GitHub OAuth app. Empty means none.
+# github_client_id = ""
+# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
+# github_client_secret = ""
+# The client id of the Google OAuth client. Empty means none.
+# google_client_id = ""
+# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
+# google_client_secret = ""
+# The application (client) id of the Microsoft Entra app. Empty means none.
+# microsoft_client_id = ""
+# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
+# microsoft_client_secret = ""
+# The application id of the GitLab application. Empty means none.
+# gitlab_client_id = ""
+# The secret of the GitLab application. No flag: it is a secret. Empty means none.
+# gitlab_client_secret = ""
 
 [cache]
 # The Redis or Valkey URL the cache lives in.
@@ -15304,6 +15656,355 @@ impl Plugin for Model {
         }
     }
 }
+===== src/plugins/oauth_client/mod.rs =====
+//! Connected accounts: call a provider's API as a person who connected it.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! The routes, under `mount_at` in `src/modules/oauth_client.rs`:
+//!
+//! | Route | Does |
+//! |---|---|
+//! | `GET /connections` | the signed-in person's connections, a button each |
+//! | `POST /connections/<provider>` | a sealed flow cookie, then a redirect to the provider |
+//! | `GET /connections/<provider>/callback` | the provider's answer: the token is stored |
+//! | `POST /connections/<provider>/disconnect` | revokes at the provider, deletes the row |
+//!
+//! A page of yours links a provider with a form that posts to
+//! `/connections/<provider>`, with an optional `return_to` path.
+//!
+//! The tokens are kept in this process's memory (`oauth-client-memory`):
+//! a restart drops every connection. For tests and development only.
+//!
+//! # Calling the API
+//!
+//! ```ignore
+//! let oauth = ctx.provided::<OauthClient, _>().expect("dispatched");
+//! let github = oauth.http(&account, "github");
+//! let response = github.send(github.get("https://api.github.com/user")).await?;
+//! ```
+//!
+//! `http` refreshes an expired token first, once for every caller at the
+//! same time, and retries once after a 401. `Error::Reconnect` means the
+//! person must connect again. `oauth.app_http("<provider>")` calls as the
+//! application (client credentials).
+//!
+//! # Another provider
+//!
+//! `brocanth_oauth_client::endpoints` has GitHub, Google, Microsoft and
+//! GitLab. For another one, push a `Provider::new(id, name,
+//! Endpoint::new(auth_url, token_url), client_id, secret)` in `providers`.
+
+use std::sync::{Arc, OnceLock};
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::routing::{BuildError, RouterBuilder, Verb};
+use brocanth_auth::session::Privilege;
+use brocanth_auth::AuthError;
+use brocanth_oauth_client::web::{ConnectAnswer, ConnectRequest, ConnectRoutes};
+use brocanth_oauth_client::{Key, MemoryTokenStore, OauthClient, Provider, TokenStore};
+
+use crate::pages::{Ctx, Error, Handler, Response};
+use crate::plugins::auth::Services;
+
+/// The scopes each provider asks for. The code that calls the API needs
+/// them, so they are code here, not settings. Ask for the fewest.
+fn scopes(id: &str) -> &'static [&'static str] {
+    match id {
+        "github" => &["read:user"],
+        "google" => &["openid", "email"],
+        // `offline_access` is what gives a refresh token.
+        "microsoft" => &["offline_access", "User.Read"],
+        "gitlab" => &["read_user"],
+        _ => &[],
+    }
+}
+
+/// Your registration at each provider: `[oauth_client]` in the config file,
+/// or `$<APP>_OAUTH_CLIENT__<KEY>`.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[oauth_client]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The providers to offer, by id.
+    pub providers: Vec<String>,
+    /// The scheme and host the providers send the browser back to.
+    pub base_url: String,
+    /// The key that seals the tokens: 32 random bytes, base64url.
+    pub key: Option<String>,
+    /// Accept `http://` provider URLs. Development only.
+    pub allow_http: bool,
+    /// The client id of the GitHub OAuth app.
+    pub github_client_id: Option<String>,
+    /// The client secret of the GitHub OAuth app. No flag: it is a secret.
+    pub github_client_secret: Option<String>,
+    /// The client id of the Google OAuth client.
+    pub google_client_id: Option<String>,
+    /// The client secret of the Google OAuth client. No flag: it is a secret.
+    pub google_client_secret: Option<String>,
+    /// The application (client) id of the Microsoft Entra app.
+    pub microsoft_client_id: Option<String>,
+    /// The client secret of the Microsoft Entra app. No flag: it is a secret.
+    pub microsoft_client_secret: Option<String>,
+    /// The application id of the GitLab application.
+    pub gitlab_client_id: Option<String>,
+    /// The secret of the GitLab application. No flag: it is a secret.
+    pub gitlab_client_secret: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            providers: vec!["github".to_string()],
+            base_url: "http://localhost:3000".to_string(),
+            key: None,
+            allow_http: false,
+            github_client_id: None,
+            github_client_secret: None,
+            google_client_id: None,
+            google_client_secret: None,
+            microsoft_client_id: None,
+            microsoft_client_secret: None,
+            gitlab_client_id: None,
+            gitlab_client_secret: None,
+        }
+    }
+}
+
+/// Each provider in `providers`, with its registration and its scopes.
+fn providers(settings: &Settings) -> Result<Vec<Provider>, PluginError> {
+    let known: [(&str, &Option<String>, &Option<String>); 4] = [
+        (
+            "github",
+            &settings.github_client_id,
+            &settings.github_client_secret,
+        ),
+        (
+            "google",
+            &settings.google_client_id,
+            &settings.google_client_secret,
+        ),
+        (
+            "microsoft",
+            &settings.microsoft_client_id,
+            &settings.microsoft_client_secret,
+        ),
+        (
+            "gitlab",
+            &settings.gitlab_client_id,
+            &settings.gitlab_client_secret,
+        ),
+    ];
+    let mut out = Vec::new();
+    for id in &settings.providers {
+        let Some((_, client_id, secret)) = known.iter().find(|(known, _, _)| known == id) else {
+            return Err(PluginError::new(format!(
+                "[oauth_client] providers names `{id}`, which this file does not configure\n\
+                 help: use github, google, microsoft or gitlab, or add the provider to \
+                 `providers` in src/plugins/oauth_client/mod.rs"
+            )));
+        };
+        let (Some(client_id), Some(secret)) = (client_id, secret) else {
+            // This project's own tests set no secret: the provider is left
+            // out, and the pages still answer.
+            if cfg!(test) {
+                continue;
+            }
+            return Err(PluginError::new(format!(
+                "[oauth_client] `{id}` has no client id or no client secret\n\
+                 help: set {id}_client_id and {id}_client_secret under [oauth_client], or \
+                 the variables $<APP>_OAUTH_CLIENT__{upper}_CLIENT_ID and \
+                 $<APP>_OAUTH_CLIENT__{upper}_CLIENT_SECRET",
+                upper = id.to_uppercase()
+            )));
+        };
+        if let Some(provider) = Provider::builtin(id, client_id.as_str(), secret.as_str()) {
+            out.push(provider.scopes(scopes(id).iter().copied()));
+        }
+    }
+    Ok(out)
+}
+
+/// The key, from the settings.
+fn key(settings: &Settings) -> Result<Key, PluginError> {
+    match settings.key.as_deref() {
+        Some(raw) => Key::parse(raw).map_err(|e| PluginError::new(format!("[oauth_client] {e}"))),
+        // This project's own tests run with no key. It is fixed and public,
+        // and `cfg(test)` keeps it out of every binary.
+        None if cfg!(test) => Ok(Key::from_bytes([7; 32])),
+        None => Err(PluginError::new(format!(
+            "[oauth_client] no key: the stored tokens are sealed with it\n\
+             help: set $MY_BLOG_OAUTH_CLIENT__KEY; {}",
+            Key::HELP
+        ))),
+    }
+}
+
+/// The routes this run built, for [`mount`]. The route table is built
+/// before the plugins start, so a request reads them when it arrives.
+static ROUTES: OnceLock<ConnectRoutes> = OnceLock::new();
+
+/// Builds the client over the token store, puts it on the context and in
+/// the admin tab.
+pub struct OauthClientPlugin {
+    settings: Settings,
+    client: Option<OauthClient>,
+}
+
+impl Plugin for OauthClientPlugin {
+    type Config = Settings;
+    type Provides = ProvidesContext<OauthClient>;
+    const NAME: &'static str = "oauth_client";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            client: None,
+        }
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let key = key(&self.settings)?;
+        let providers = providers(&self.settings)?;
+        // In memory: `oauth-client-memory`. Remove that module and the
+        // tokens become rows in the `db` module's database.
+        let store = Arc::new(MemoryTokenStore::new());
+        let mount = crate::modules::oauth_client::MODULE.mount_at;
+        let base = format!("{}{mount}", self.settings.base_url.trim_end_matches('/'));
+        let store: Arc<dyn TokenStore> = store;
+        let mut builder = OauthClient::builder(key)
+            .store(store)
+            .callback_base(&base)
+            .allow_http(self.settings.allow_http);
+        for provider in providers {
+            builder = builder.provider(provider);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
+        client.install();
+        let secure = base.starts_with("https://");
+        let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
+        self.client = Some(client);
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        if let Some(client) = &self.client {
+            cx.insert(client.clone());
+        }
+    }
+}
+
+/// The connect pages, under `prefix`.
+pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
+    let prefix = prefix.trim_end_matches('/');
+    let rest = format!("{prefix}/{{*rest}}");
+    routes.route(prefix, Verb::Get, step())?;
+    routes.route(&rest, Verb::Get, step())?;
+    routes.route(&rest, Verb::Post, step())?;
+    Ok(())
+}
+
+/// The signed-in account, or `None`. An operator who impersonates a
+/// person does not connect or disconnect accounts as them.
+async fn account(ctx: &Ctx) -> Result<Option<String>, Error> {
+    let Some(auth) = ctx.provided::<Services, _>() else {
+        return Err(Error::new(
+            503,
+            "oauth_client: the auth services are not on this request\n\
+             help: register the auth plugin in src/plugins/mod.rs",
+        ));
+    };
+    match auth
+        .sessions()
+        .from_cookie_header(ctx.header("cookie").unwrap_or(""))
+        .await
+    {
+        Ok(session)
+            if session.privilege != Privilege::Anonymous && session.impersonation.is_none() =>
+        {
+            Ok(Some(session.account.to_string()))
+        }
+        Err(AuthError::Store(e)) => Err(Error::internal(format!(
+            "oauth_client: reading the session: {e}"
+        ))),
+        _ => Ok(None),
+    }
+}
+
+/// One handler for every page. The routes read the path and decide.
+fn step() -> Handler {
+    Box::new(|ctx: &mut Ctx| {
+        Box::pin(async move {
+            let ctx = &*ctx;
+            let Some(routes) = ROUTES.get() else {
+                return Err(Error::new(
+                    503,
+                    "oauth_client: the plugin did not start\n\
+                     help: register it in src/plugins/mod.rs",
+                ));
+            };
+            let account = account(ctx).await?;
+            let request = ConnectRequest {
+                post: ctx.verb == Verb::Post,
+                path: &ctx.path,
+                query: &ctx.query,
+                body: ctx.body_text().unwrap_or(""),
+                cookies: ctx.header("cookie").unwrap_or(""),
+                account: account.as_deref(),
+            };
+            let answer = routes
+                .answer(request)
+                .await
+                .map_err(|e| Error::internal(format!("oauth_client: {e}")))?;
+            let (response, cookies) = match answer {
+                ConnectAnswer::Redirect { location, cookies } => (
+                    Response::empty(303).with_header("location", location),
+                    cookies,
+                ),
+                ConnectAnswer::Page {
+                    status,
+                    page,
+                    cookies,
+                } => (Response::new(status, stamped(ctx, page.html())), cookies),
+            };
+            Ok(cookies.iter().fold(response, |response, cookie| {
+                response.with_header("set-cookie", cookie.as_str())
+            }))
+        })
+    })
+}
+
+/// The page with the CSRF token in every form that posts.
+///
+/// The connect pages render their own forms and do not know the token.
+/// Without a token on the request, a test that built the context by hand,
+/// the page goes out unchanged.
+fn stamped(ctx: &Ctx, html: String) -> String {
+    match ctx.hooked::<brocanth_middleware::CsrfToken>() {
+        Some(token) => token.stamp_forms(&html),
+        None => html,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn the_connections_page_needs_a_signed_in_account() {
+        let app = crate::app::build().expect("the application builds");
+        let path = crate::modules::oauth_client::MODULE.mount_at;
+        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        assert_eq!(response.status, 401);
+    }
+}
 ===== src/plugins/observability/mod.rs =====
 //! Observability, as this application registers it: a JSON or text line per request on stdout, `/up` and `/readyz`, Prometheus text on `/metrics`, an OTLP span per request.
 //!
@@ -18435,6 +19136,9 @@ request.
 - `webhooks`  signed webhooks: verified deliveries in, signed events out; pick a direction below
 - `webhooks-in`  POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler
 - `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs
+- `oauth`  an OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below
+- `oauth-client`  connect pages at /connections; tokens sealed in Postgres, refreshed once, sent as a bearer
+- `oauth-client-memory`  the connected accounts in this process's memory; for tests and development, gone at restart
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
 - `realtime-websocket`  a duplex socket per subscriber, frames both ways
@@ -18576,6 +19280,14 @@ A webhook secret is a password. It goes in the config file or the
 environment, never in code and never in a flag. Verify every incoming
 delivery through `brocanth_webhooks::Scheme` before you read its body;
 do not compare a signature with `==`, which leaks how many bytes matched.
+
+## Third-party APIs
+
+Call a provider's API through `OauthClient::http(account, provider)`, or
+`OauthClient::app_http(provider)` for the application's own token. They
+refresh an expired token first and retry once after a 401. Do not read
+a token out of the store, and never put one in a log, a page, an error or
+a URL: an access token is a password for that person's account.
 
 ## Realtime over server-sent events
 
@@ -18902,6 +19614,24 @@ not add its path to the CSRF exempt list: the hook answers before the CSRF
 check and only for a verified delivery. A handler returns `Err` to have
 the sender retry; it runs once per idempotency key.
 
+## Connected accounts
+
+`src/plugins/oauth_client/mod.rs` mounts the connect pages at
+`/connections`. A Connect button is a form that posts to
+`/connections/<provider>`, never a link: a GET that starts a connection
+can be fired by any page on the web. Pass `return_to` only as a path on
+this site; anything else is dropped.
+
+When a call fails with `brocanth_oauth_client::Error::Reconnect`, the
+grant is gone: send the person to `/connections` to connect again. Do
+not retry it. The scopes are in `scopes()` in that file: ask for the
+fewest the code needs.
+
+The key that seals the tokens goes in `$<APP>_OAUTH_CLIENT__KEY`, and a
+client secret in `$<APP>_OAUTH_CLIENT__<PROVIDER>_CLIENT_SECRET`, never in
+a committed config file. Changing the key makes every stored token
+unreadable.
+
 ## Views
 
 The markup for a route is a `.rsx` file **next to the page that renders it**:
@@ -19073,6 +19803,14 @@ Do not post to a partner's URL from a page: the delivery log, the
 signature and the retries come from `emit`. Show an endpoint's secret
 once, to the person who registered it, and never log it.
 
+## Connected accounts in memory
+
+The tokens live in this process (`oauth-client-memory`). A restart drops
+every connection, and two processes do not share them. It is for
+development and tests: `brocanth check --deploy` refuses it. Run
+`brocanth remove oauth-client-memory` before production; the tokens then
+go to Postgres.
+
 ## Errors
 
 A page fails with `Err(Error::new(status, message))` or `?`, and
@@ -19214,7 +19952,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 5eb2ba9c4114a138 -->
+<!-- brocanth-digest: a96ea59eae73f11a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -19226,7 +19964,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "storage", "storage-routes", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "storage", "storage-routes", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -19588,6 +20326,30 @@ config = ["webhooks_out"]
 crates = ["brocanth-webhooks", "serde_json"]
 adapted_to = ["config", "admin"]
 
+[modules.oauth]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/oauth.rs"]
+config = []
+crates = ["brocanth-oauth-client"]
+adapted_to = []
+
+[modules.oauth-client]
+version = "0.1.0"
+kind = ["routes", "enhancer"]
+files = ["src/modules/oauth_client.rs", "src/plugins/oauth_client/"]
+config = ["oauth_client"]
+crates = ["brocanth-oauth-client"]
+adapted_to = ["config", "middleware-csrf", "oauth-client-memory", "admin"]
+
+[modules.oauth-client-memory]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/oauth_client_memory.rs"]
+config = []
+crates = []
+adapted_to = []
+
 [modules.realtime]
 version = "0.1.0"
 kind = ["enhancer", "middleware"]
@@ -19764,4 +20526,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: f74c92bac2ace564
+# brocanth-digest: 32a0edd2b8789841

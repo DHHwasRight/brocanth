@@ -3039,7 +3039,10 @@ impl Plugin for Auth {
 
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {
-            return Err(PluginError::new("[auth] cookie_name must not be empty"));
+            return Err(PluginError::new(
+                "[auth] cookie_name must not be empty\n\
+                 help: set `cookie_name` under [auth] in the config file, such as \"__Host-session\"",
+            ));
         }
         // A `__Host-` cookie is `Secure` by definition, so a configuration
         // where the two disagree produces a cookie no browser stores and a
@@ -3047,8 +3050,8 @@ impl Plugin for Auth {
         // can still be answered.
         if self.settings.cookie_name.starts_with("__Host-") && !self.settings.secure {
             return Err(PluginError::new(
-                "[auth] a __Host- cookie is Secure by definition; set secure = true, \
-                 or drop the prefix for plain-HTTP development",
+                "[auth] a __Host- cookie is Secure by definition, and secure is false\n\
+                 help: set secure = true under [auth], or drop the prefix for plain-HTTP development",
             ));
         }
 
@@ -3057,24 +3060,34 @@ impl Plugin for Auth {
             // Rejected rather than stretched. Padding a four-character secret
             // to 32 bytes is how a deployment ends up with a forgeable cookie
             // and no warning anywhere.
-            Ok(raw) => SigningKey::parse(&raw)
-                .map_err(|e| PluginError::new(format!("[auth] ${name}: {e}")))?,
+            Ok(raw) => SigningKey::parse(&raw).map_err(|e| {
+                PluginError::new(format!(
+                    "[auth] ${name}: {e}\n\
+                     help: set it to 32 random bytes, base64url:\n  \
+                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+                ))
+            })?,
             // This project's own tests build the application with no secret
             // in the environment. The key is fixed and public, and `cfg(test)`
             // keeps it out of every binary.
             Err(_) if cfg!(test) => SigningKey::from_bytes([7; 32]),
             Err(_) => {
                 return Err(PluginError::new(format!(
-                    "[auth] ${name} is not set. It is 32 random bytes, base64url:\n  \
-                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
-                     There is no default: a key invented at startup would log every session \
-                     out on each restart and differ between the instances of a fleet."
+                    "[auth] ${name} is not set. There is no default: a key invented at startup \
+                     would log every session out on each restart and differ between the \
+                     instances of a fleet.\n\
+                     help: set it to 32 random bytes, base64url:\n  \
+                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
                 )));
             }
         };
 
-        let passwords = Passwords::recommended()
-            .map_err(|e| PluginError::new(format!("[auth] argon2id: {e}")))?;
+        let passwords = Passwords::recommended().map_err(|e| {
+            PluginError::new(format!(
+                "[auth] argon2id: {e}\n\
+                 help: the parameters are brocanth-auth's own, so this is a bug; report it with this message"
+            ))
+        })?;
 
         let session = SessionConfig {
             cookie_name: self.settings.cookie_name.clone(),
@@ -3252,7 +3265,8 @@ impl Plugin for Database {
         // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[db] needs a Tokio runtime at startup to open its pool ({e})"
+                "[db] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let db = {
@@ -3314,10 +3328,20 @@ impl Plugin for Database {
             scope
                 .spawn(|| runtime.block_on(close))
                 .join()
-                .map_err(|_| PluginError::new("[db] the closing thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "[db] the closing thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })?
         .then_some(())
-        .ok_or_else(|| PluginError::new("[db] connections were still in use at the deadline"))
+        .ok_or_else(|| {
+            PluginError::new(
+                "[db] connections were still in use at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], or end the work that holds a connection",
+            )
+        })
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
