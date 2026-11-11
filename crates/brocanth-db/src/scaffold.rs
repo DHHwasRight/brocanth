@@ -18,7 +18,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The database, as a choice on the `brocanth create` menu.
@@ -71,7 +71,10 @@ impl Module for Database {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/db/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/db/mod.rs",
+            redact_secrets(&plugin_rs(project), &settings(project)),
+        );
         s.at(Slot::PluginsMod).line("pub mod db;");
         configurable(s, project, "db", "Database", settings(project));
         if project.has("commands") {

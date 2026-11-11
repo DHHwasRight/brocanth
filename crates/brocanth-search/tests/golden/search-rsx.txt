@@ -2898,7 +2898,6 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// Nothing deserialises it: `main` builds it from a literal, and the
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
-#[derive(Debug)]
 pub struct Settings {
     /// `postgres://user:password@host:5432/database`.
     pub url: String,
@@ -2922,6 +2921,25 @@ pub struct Settings {
     /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
     /// roots.
     pub ca_file: Option<String>,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("url", &"<redacted>")
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("acquire_timeout", &self.acquire_timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("search_path", &self.search_path)
+            .field("read_only", &self.read_only)
+            .field("application_name", &self.application_name)
+            .field("ca_file", &self.ca_file)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -3080,6 +3098,20 @@ impl Plugin for Database {
         if let Some(db) = &self.db {
             cx.insert(db.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            url: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/policy/mod.rs =====

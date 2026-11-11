@@ -80,7 +80,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 mod lockout;
@@ -134,13 +134,14 @@ impl Module for Auth {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let file = if uses_postgres(project) {
+            postgres_plugin_rs(project)
+        } else {
+            plugin_rs(project)
+        };
         s.file(
             "src/plugins/auth/mod.rs",
-            if uses_postgres(project) {
-                postgres_plugin_rs(project)
-            } else {
-                plugin_rs(project)
-            },
+            redact_secrets(&file, &settings(project)),
         );
         s.at(Slot::PluginsMod).line("pub mod auth;");
         configurable(s, project, "auth", "Auth", settings(project));

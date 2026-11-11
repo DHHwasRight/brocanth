@@ -31,7 +31,7 @@
 //!   once, and works in both shapes: adding `jobs` later moves the send off
 //!   the request with no change to the page.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Mail, as a choice on the `brocanth create` menu.
@@ -68,7 +68,10 @@ impl Module for Mail {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/mail/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/mail/mod.rs",
+            redact_secrets(&plugin_rs(project), &settings(project)),
+        );
         s.at(Slot::PluginsMod).line("pub mod mail;");
         // Where the `folder` transport writes. Mail holds reset links, and a
         // reset link in git is a password in git.

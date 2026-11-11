@@ -15,7 +15,8 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{
-    configurable, configurable_hooking, integration, settings_derive, Hooking, PLUGIN_TRAIT_USE,
+    configurable, configurable_hooking, integration, redact_secrets, settings_derive, Hooking,
+    PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
@@ -106,7 +107,10 @@ impl Module for WebhooksIn {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let db = project.has("db");
-        s.file("src/plugins/webhooks_in/mod.rs", incoming_rs(project, db));
+        s.file(
+            "src/plugins/webhooks_in/mod.rs",
+            redact_secrets(&incoming_rs(project, db), &incoming_settings(db)),
+        );
         s.at(Slot::PluginsMod).line("pub mod webhooks_in;");
         configurable_hooking(
             s,

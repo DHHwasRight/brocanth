@@ -2466,7 +2466,7 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// It derives `Deserialize` because this application reads it from
 /// `[db]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// `postgres://user:password@host:5432/database`.
@@ -2491,6 +2491,25 @@ pub struct Settings {
     /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
     /// roots.
     pub ca_file: Option<String>,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("url", &"<redacted>")
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("acquire_timeout", &self.acquire_timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("search_path", &self.search_path)
+            .field("read_only", &self.read_only)
+            .field("application_name", &self.application_name)
+            .field("ca_file", &self.ca_file)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2651,6 +2670,20 @@ impl Plugin for Database {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            url: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+}
 ===== src/plugins/webhooks_in/mod.rs =====
 //! Incoming webhooks, as this application receives them.
 //!
@@ -2726,7 +2759,7 @@ impl Handler for Example {
 /// It derives `Deserialize` because this application reads it from
 /// `[webhooks_in]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// Where deliveries arrive: `{path}/{source}`.
@@ -2739,6 +2772,20 @@ pub struct Settings {
     pub secret: String,
     /// Create the idempotency table on the first readiness check.
     pub migrate: bool,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("path", &self.path)
+            .field("tolerance", &self.tolerance)
+            .field("max_bytes", &self.max_bytes)
+            .field("secret", &"<redacted>")
+            .field("migrate", &self.migrate)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2854,6 +2901,17 @@ mod tests {
         request.body = br#"{"type":"invoice.paid"}"#.to_vec().into();
         let response = crate::app::handle(&app, request).await;
         assert_eq!(response.status, 401);
+    }
+
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            secret: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== AGENTS.md =====

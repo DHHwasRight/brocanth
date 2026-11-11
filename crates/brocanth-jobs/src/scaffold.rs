@@ -38,7 +38,9 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{
+    configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
+};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Where the generated queue keeps its jobs.
@@ -122,7 +124,10 @@ impl Module for Jobs {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let store = Store::of(project);
-        s.file("src/plugins/jobs/mod.rs", plugin_rs(project, store));
+        s.file(
+            "src/plugins/jobs/mod.rs",
+            redact_secrets(&plugin_rs(project, store), &settings(store)),
+        );
         s.at(Slot::PluginsMod).line("pub mod jobs;");
         configurable(s, project, "jobs", "Jobs", settings(store));
         if !project.has("config") {

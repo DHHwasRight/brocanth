@@ -22,7 +22,9 @@
 //! choosing this module adds a file and a mount, and rewrites nothing that
 //! `auth` wrote.
 
-use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{
+    configurable, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
+};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
 
 /// The providers this module declares settings for, by catalog id.
@@ -75,23 +77,24 @@ impl Module for AuthOauth {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let csrf = project.has("middleware-csrf");
         let (derive, note) = settings_derive(project, "auth_oauth");
+        let file = PLUGIN_RS
+            .replace("@DERIVE@", &derive)
+            .replace("@NOTE@", &note)
+            .replace("@PROVIDER_FIELDS@", &provider_fields())
+            .replace("@PROVIDER_DEFAULTS@", &provider_defaults())
+            .replace("@PROVIDER_LIST@", &provider_list())
+            .replace(
+                "@PAGE@",
+                if csrf {
+                    "stamped(ctx, page.html())"
+                } else {
+                    "page.html()"
+                },
+            )
+            .replace("@STAMPED@", if csrf { STAMPED_FN } else { "" });
         s.file(
             "src/plugins/auth_oauth/mod.rs",
-            PLUGIN_RS
-                .replace("@DERIVE@", &derive)
-                .replace("@NOTE@", &note)
-                .replace("@PROVIDER_FIELDS@", &provider_fields())
-                .replace("@PROVIDER_DEFAULTS@", &provider_defaults())
-                .replace("@PROVIDER_LIST@", &provider_list())
-                .replace(
-                    "@PAGE@",
-                    if csrf {
-                        "stamped(ctx, page.html())"
-                    } else {
-                        "page.html()"
-                    },
-                )
-                .replace("@STAMPED@", if csrf { STAMPED_FN } else { "" }),
+            redact_secrets(&file, &settings()),
         );
         s.at(Slot::PluginsMod).line("pub mod auth_oauth;");
         configurable(s, project, "auth_oauth", "AuthOauth", settings());

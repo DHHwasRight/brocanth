@@ -132,7 +132,7 @@ fn the_lockout_alone_writes_no_page() {
 /// a section, and the button forms carry the token.
 #[test]
 fn provider_sign_in_mounts_the_flow_and_reads_its_section() {
-    shape(
+    let files = shape(
         "auth-oauth",
         &[
             "config",
@@ -142,6 +142,18 @@ fn provider_sign_in_mounts_the_flow_and_reads_its_section() {
             "auth-oauth",
         ],
     );
+    // A printed `Settings` shows no client secret.
+    let plugin = file(&files, "src/plugins/auth_oauth/mod.rs");
+    assert!(!plugin.contains("derive(Debug"), "{plugin}");
+    for provider in ["github", "google", "microsoft", "gitlab"] {
+        assert!(
+            plugin.contains(&format!(
+                "&self.{provider}_client_secret.as_ref().map(|_| \"<redacted>\")"
+            )),
+            "{provider}: {plugin}"
+        );
+    }
+    assert!(plugin.contains("fn a_printed_settings_never_shows_a_secret()"));
 }
 
 /// Superusers and roles with the admin, accounts in Postgres and a command

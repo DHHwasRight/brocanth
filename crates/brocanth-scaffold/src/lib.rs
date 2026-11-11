@@ -1274,6 +1274,10 @@ pub struct Setting {
     /// Whether the command line may set it. Off for a secret: every user on
     /// the machine can read another process's arguments.
     pub flag: bool,
+    /// Whether the value is a secret. Set with [`Setting::secret`]: no
+    /// flag, and the generated `Debug` of the settings struct prints
+    /// `<redacted>` for it (see [`snippet::redact_secrets`]).
+    pub secret: bool,
     /// Whether the field is an `Option`. An empty value, `--x=` or `X=`,
     /// sets `None`; an absent one leaves the layer below in charge. The file
     /// writes the key commented out, because `None` has no TOML spelling.
@@ -1348,6 +1352,7 @@ impl Setting {
             help,
             note: String::new(),
             flag: true,
+            secret: false,
             optional: false,
             commented: false,
             none_as: None,
@@ -1392,9 +1397,12 @@ impl Setting {
     /// No flag for this one: the file and the environment only.
     ///
     /// For a secret. A flag is in `ps` output for every user on the host and
-    /// in the shell history of whoever typed it.
+    /// in the shell history of whoever typed it. The generated `Debug` of
+    /// the settings struct prints `<redacted>` for it, so a log line or a
+    /// panic message that prints the settings leaks nothing.
     pub fn secret(mut self) -> Self {
         self.flag = false;
+        self.secret = true;
         self
     }
 }
@@ -1778,6 +1786,86 @@ pub fn order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SETTINGS_RS: &str = "\
+/// What this plugin is built from.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The relay.
+    pub host: String,
+    /// The relay's password.
+    pub password: String,
+    /// The signing key.
+    pub key: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            password: String::new(),
+            key: None,
+        }
+    }
+}
+";
+
+    #[test]
+    fn a_secret_setting_prints_as_redacted_and_the_file_tests_it() {
+        let settings = [
+            Setting::text("host", "", "The relay."),
+            Setting::text("password", "", "The password.").secret(),
+            Setting::text("key", "", "The key.").optional().secret(),
+        ];
+        let text = snippet::redact_secrets(SETTINGS_RS, &settings);
+        assert!(
+            text.contains("#[derive(serde::Deserialize)]\n#[serde(default"),
+            "{text}"
+        );
+        assert!(!text.contains("derive(Debug"), "{text}");
+        assert!(text.contains(".field(\"host\", &self.host)"), "{text}");
+        assert!(
+            text.contains(".field(\"password\", &\"<redacted>\")"),
+            "{text}"
+        );
+        assert!(
+            text.contains(".field(\"key\", &self.key.as_ref().map(|_| \"<redacted>\"))"),
+            "{text}"
+        );
+        assert!(
+            text.contains("password: \"not-for-the-log\".to_string(),")
+                && text.contains("key: Some(\"not-for-the-log\".to_string()),"),
+            "{text}"
+        );
+        // The file had no tests module: a new one at the end.
+        assert!(
+            text.contains(
+                "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn a_printed_settings_never_shows_a_secret()"
+            ) && text.ends_with("    }\n}\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn settings_without_a_secret_are_left_alone() {
+        let settings = [Setting::text("host", "", "The relay.")];
+        assert_eq!(snippet::redact_secrets(SETTINGS_RS, &settings), SETTINGS_RS);
+    }
+
+    #[test]
+    fn a_secret_goes_into_the_tests_module_the_file_has() {
+        let text = format!(
+            "{SETTINGS_RS}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn mine() {{}}\n}}\n"
+        );
+        let settings = [Setting::text("password", "", "The password.").secret()];
+        let out = snippet::redact_secrets(&text, &settings);
+        assert_eq!(out.matches("mod tests").count(), 1, "{out}");
+        assert!(
+            out.ends_with("    fn mine() {}\n\n    #[test]\n    fn a_printed_settings_never_shows_a_secret() {\n        let settings = super::Settings {\n            password: \"not-for-the-log\".to_string(),\n            ..super::Settings::default()\n        };\n        let printed = format!(\"{settings:?}\");\n        assert!(!printed.contains(\"not-for-the-log\"), \"{printed}\");\n        assert!(printed.contains(\"<redacted>\"), \"{printed}\");\n    }\n}\n"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn a_dotted_key_is_a_subsection_after_the_plain_keys() {
@@ -2458,5 +2546,169 @@ pub mod snippet {
                     .to_string(),
             )
         }
+    }
+
+    /// What a generated `Debug` prints in place of a secret.
+    pub const REDACTED: &str = "<redacted>";
+
+    /// Gives the `Settings` struct of a generated plugin file a `Debug` that
+    /// prints [`REDACTED`] for each secret setting, and a test that proves it.
+    ///
+    /// [`settings_derive`] derives `Debug`, and a derived `Debug` prints every
+    /// field: a `tracing::debug!("{settings:?}")` or a panic message would
+    /// put a password in the log. For each [`Setting::secret`] in `settings`
+    /// this function drops `Debug` from the derive, writes the impl after the
+    /// struct, and writes a test in the file's `#[cfg(test)] mod tests`
+    /// (a new one at the end when the file has none). A file whose settings
+    /// hold no secret comes back unchanged.
+    ///
+    /// It reads the fields from the struct in `text`, so the impl cannot
+    /// miss one. A secret must be a top-level `String` or `Option<String>`
+    /// field, and the struct must implement `Default`. Anything else is a
+    /// scaffold bug and panics.
+    pub fn redact_secrets(text: &str, settings: &[Setting]) -> String {
+        let secrets: Vec<&str> = settings
+            .iter()
+            .filter(|setting| setting.secret)
+            .map(|setting| setting.key)
+            .collect();
+        if secrets.is_empty() {
+            return text.to_string();
+        }
+        const HEAD: &str = "pub struct Settings {\n";
+        let start = text
+            .find(HEAD)
+            .expect("redact_secrets: the file has no `pub struct Settings {`");
+        let body = start + HEAD.len();
+        let close = body
+            + text[body..]
+                .find("\n}\n")
+                .expect("redact_secrets: the settings struct has no end");
+        let fields: Vec<(&str, &str)> = text[body..close]
+            .lines()
+            .filter_map(|line| {
+                let (name, ty) = line.strip_prefix("    pub ")?.split_once(": ")?;
+                Some((name, ty.trim_end_matches(',')))
+            })
+            .collect();
+        assert!(
+            text.contains("impl Default for Settings {") || text[..start].contains("Default"),
+            "redact_secrets: the settings struct has no `Default`"
+        );
+
+        // The derive above the struct, without `Debug`.
+        let derive_at = text[..start]
+            .rfind("#[derive(")
+            .expect("redact_secrets: the settings struct derives nothing");
+        let derive_end = derive_at + text[derive_at..].find('\n').unwrap_or(0) + 1;
+        assert!(
+            text[derive_end..start]
+                .lines()
+                .all(|line| line.starts_with("#[")),
+            "redact_secrets: the last derive before the struct is not its own"
+        );
+        let derive = text[derive_at..derive_end]
+            .replace("Debug, ", "")
+            .replace(", Debug", "")
+            .replace("(Debug)", "()");
+        let derive = if derive == "#[derive()]\n" {
+            String::new()
+        } else {
+            derive
+        };
+
+        let mut calls = String::new();
+        let mut canaries = String::new();
+        for (name, ty) in &fields {
+            let expr = match (secrets.contains(name), *ty) {
+                (false, _) => format!("&self.{name}"),
+                (true, "String") => format!("&{REDACTED:?}"),
+                (true, "Option<String>") => {
+                    format!("&self.{name}.as_ref().map(|_| {REDACTED:?})")
+                }
+                (true, other) => panic!(
+                    "redact_secrets: the secret `{name}` is a `{other}`, not a String or an \
+                     Option<String>"
+                ),
+            };
+            let args = format!("{name:?}, {expr}");
+            // rustfmt's two shapes for a call in a broken chain: on one line
+            // when the arguments fit in 60 columns and the line in 100, else
+            // one argument per line.
+            if args.len() <= 60 && 12 + ".field()".len() + args.len() <= 100 {
+                calls.push_str(&format!("            .field({args})\n"));
+            } else {
+                calls.push_str(&format!(
+                    "            .field(\n                {name:?},\n                {expr},\n            )\n"
+                ));
+            }
+            if secrets.contains(name) {
+                let value = match *ty {
+                    "String" => "\"not-for-the-log\".to_string()",
+                    _ => "Some(\"not-for-the-log\".to_string())",
+                };
+                canaries.push_str(&format!("            {name}: {value},\n"));
+            }
+        }
+        for secret in &secrets {
+            assert!(
+                fields.iter().any(|(name, _)| name == secret),
+                "redact_secrets: the secret `{secret}` is not a field of the settings struct"
+            );
+        }
+
+        let debug = format!(
+            "\n\
+             /// Every field but a secret, which prints as `{REDACTED}`: a log line or\n\
+             /// a panic message that prints the settings leaks no secret.\n\
+             impl std::fmt::Debug for Settings {{\n\
+             \x20   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
+             \x20       f.debug_struct(\"Settings\")\n\
+             {calls}\
+             \x20           .finish()\n\
+             \x20   }}\n\
+             }}\n"
+        );
+        let test = format!(
+            "    #[test]\n\
+             \x20   fn a_printed_settings_never_shows_a_secret() {{\n\
+             \x20       let settings = super::Settings {{\n\
+             {canaries}\
+             \x20           ..super::Settings::default()\n\
+             \x20       }};\n\
+             \x20       let printed = format!(\"{{settings:?}}\");\n\
+             \x20       assert!(!printed.contains(\"not-for-the-log\"), \"{{printed}}\");\n\
+             \x20       assert!(printed.contains({REDACTED:?}), \"{{printed}}\");\n\
+             \x20   }}\n"
+        );
+
+        let mut out = String::with_capacity(text.len() + debug.len() + test.len() + 64);
+        out.push_str(&text[..derive_at]);
+        out.push_str(&derive);
+        out.push_str(&text[derive_end..close + 3]);
+        out.push_str(&debug);
+        out.push_str(&text[close + 3..]);
+        const TESTS: &str = "\n#[cfg(test)]\nmod tests {\n";
+        match out.find(TESTS) {
+            // The tests module is the file's last item: the test goes before
+            // its closing brace.
+            Some(at) => {
+                let end =
+                    at + TESTS.len() - 1 + out[at + TESTS.len() - 1..].find("\n}\n").unwrap_or(0);
+                assert!(
+                    end + 3 == out.len(),
+                    "redact_secrets: the file does not end with its tests module"
+                );
+                out.truncate(out.len() - 2);
+                out.push_str(&format!("\n{test}}}\n"));
+            }
+            None => {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!("{TESTS}{test}}}\n"));
+            }
+        }
+        out
     }
 }

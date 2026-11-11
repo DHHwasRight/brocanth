@@ -25,7 +25,9 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{
+    configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
+};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The cache, as a choice on the `brocanth create` menu.
@@ -214,7 +216,10 @@ pub fn write_plugin(s: &mut Scaffold, project: &Project, backend: Backend) {
         .replace("@OPEN@", backend.open)
         .replace("@READY@", backend.ready)
         .replace("@SWEEP@", pick(SWEEP));
-    s.file("src/plugins/cache/mod.rs", file);
+    s.file(
+        "src/plugins/cache/mod.rs",
+        redact_secrets(&file, &backend.settings),
+    );
     s.at(Slot::PluginsMod).line("pub mod cache;");
     configurable(s, project, "cache", "Cache", backend.settings);
     if !project.has("config") {

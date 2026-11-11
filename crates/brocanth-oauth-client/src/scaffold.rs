@@ -16,7 +16,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{
-    configurable, integration, module_ref, settings_derive, PLUGIN_TRAIT_USE,
+    configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
 
@@ -120,7 +120,13 @@ impl Module for OauthClient {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/oauth_client/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/oauth_client/mod.rs",
+            redact_secrets(
+                &plugin_rs(project),
+                &settings(project.has("oauth-client-memory")),
+            ),
+        );
         s.at(Slot::PluginsMod).line("pub mod oauth_client;");
         configurable(
             s,

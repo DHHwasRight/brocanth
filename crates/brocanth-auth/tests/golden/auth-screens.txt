@@ -5093,7 +5093,7 @@ use brocanth_mail::{
 /// It derives `Deserialize` because this application reads it from
 /// `[mail]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// `smtp`, `log` or `folder`.
@@ -5114,6 +5114,24 @@ pub struct Settings {
     pub smtp_username: String,
     /// The relay's password. Empty for none. A secret: no flag sets it.
     pub smtp_password: String,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("transport", &self.transport)
+            .field("from", &self.from)
+            .field("from_name", &self.from_name)
+            .field("folder", &self.folder)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_security", &self.smtp_security)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -5355,6 +5373,17 @@ mod tests {
         if let Err(e) = crate::app::build() {
             panic!("{e}");
         }
+    }
+
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            smtp_password: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== AGENTS.md =====

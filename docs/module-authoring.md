@@ -992,6 +992,13 @@ A settings struct that `plugin_from_config` reads must derive
 section)` returns the right derive lines and a doc sentence. Without
 config the project then has no parser in its tree.
 
+`settings_derive` derives `Debug`, and a derived `Debug` prints every
+field. When the settings hold a `.secret()`, pass the finished file
+through `snippet::redact_secrets(&text, &settings)`. It removes `Debug`
+from the derive and writes a `Debug` that prints `<redacted>` for each
+secret. It also writes a test into the file's `mod tests`. Reason: a
+`{settings:?}` in a log line or a panic message must not leak a password.
+
 `Slot::ConfigSections` is still there for a section with no plugin
 behind it. Write it only when `project.has("config")`.
 

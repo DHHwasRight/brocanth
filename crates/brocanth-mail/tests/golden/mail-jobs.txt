@@ -2485,7 +2485,7 @@ fn registry() -> JobRegistry {
 /// It derives `Deserialize` because this application reads it from
 /// `[jobs]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// The database the queue lives in. Its own URL, not the models': a
@@ -2499,6 +2499,20 @@ pub struct Settings {
     pub queues: Vec<String>,
     /// How many jobs it runs at once.
     pub concurrency: usize,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("url", &"<redacted>")
+            .field("migrate", &self.migrate)
+            .field("worker", &self.worker)
+            .field("queues", &self.queues)
+            .field("concurrency", &self.concurrency)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2702,6 +2716,20 @@ impl Plugin for Jobs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            url: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+}
 ===== src/plugins/mail/mod.rs =====
 //! Mail, as this application sends it.
 //!
@@ -2752,7 +2780,7 @@ use serde::{Deserialize, Serialize};
 /// It derives `Deserialize` because this application reads it from
 /// `[mail]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// `smtp`, `log` or `folder`.
@@ -2775,6 +2803,25 @@ pub struct Settings {
     pub smtp_password: String,
     /// Run the worker that sends queued mail in this process.
     pub worker: bool,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("transport", &self.transport)
+            .field("from", &self.from)
+            .field("from_name", &self.from_name)
+            .field("folder", &self.folder)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_security", &self.smtp_security)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &"<redacted>")
+            .field("worker", &self.worker)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -3119,6 +3166,17 @@ mod tests {
         assert!(from.contains("help:"), "{from}");
         let name = plugin(|s| s.from_name = "Shop\r\nBcc: list@example.com".to_string());
         assert!(name.sender().is_err(), "a line break in the sender's name");
+    }
+
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            smtp_password: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== AGENTS.md =====

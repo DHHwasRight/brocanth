@@ -2411,7 +2411,6 @@ use brocanth_storage::{FileTokenKey, FileTokens, HashKey, LocalDisk, Storage};
 /// Nothing deserialises it: `main` builds it from a literal, and the
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
-#[derive(Debug)]
 pub struct Settings {
     /// Where the objects live, relative to the working directory or absolute.
     /// Created if it is not there.
@@ -2422,6 +2421,18 @@ pub struct Settings {
     /// How many seconds a file token lives. A token cannot be revoked, so
     /// this is the leak window.
     pub token_ttl: i64,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("root", &self.root)
+            .field("secret", &"<redacted>")
+            .field("token_ttl", &self.token_ttl)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2537,6 +2548,20 @@ impl Plugin for Files {
                 tokens: tokens.clone(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            secret: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/storage_routes/mod.rs =====

@@ -23,7 +23,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 const LOGS: &str = "observability-logs";
@@ -66,7 +66,10 @@ impl Module for Observe {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/observability/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/observability/mod.rs",
+            redact_secrets(&plugin_rs(project), &settings(project)),
+        );
         s.file(
             "src/plugins/observability/serving.rs",
             serving_rs(project.has(METRICS)),

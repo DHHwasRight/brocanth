@@ -37,7 +37,8 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{
-    configurable, configurable_hooking, module_ref, settings_derive, Hooking, PLUGIN_TRAIT_USE,
+    configurable, configurable_hooking, module_ref, redact_secrets, settings_derive, Hooking,
+    PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
     Category, Dep, Hook, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
@@ -74,7 +75,10 @@ impl Module for FileStorage {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/storage/mod.rs", plugin_rs(project));
+        s.file(
+            "src/plugins/storage/mod.rs",
+            redact_secrets(&plugin_rs(project), &settings()),
+        );
         s.at(Slot::PluginsMod).line("pub mod storage;");
         // What makes the store a thing the project reads rather than a
         // field nothing touches. A generated application that warns on its

@@ -2179,7 +2179,7 @@ use brocanth_cache::{CacheHandle, PgCache, Sweeper};
 /// It derives `Deserialize` because this application reads it from
 /// `[cache]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// The Postgres URL the cache lives in. Postgres and nothing else, on
@@ -2190,6 +2190,18 @@ pub struct Settings {
     pub migrate: bool,
     /// Seconds between two sweeps of expired entries; 0 turns the sweep off.
     pub sweep_every: u64,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("url", &"<redacted>")
+            .field("migrate", &self.migrate)
+            .field("sweep_every", &self.sweep_every)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2330,6 +2342,20 @@ impl Plugin for Cache {
         if let Some(handle) = &self.handle {
             cx.insert(handle.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            url: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== AGENTS.md =====

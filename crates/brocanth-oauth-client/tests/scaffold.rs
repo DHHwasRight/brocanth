@@ -88,3 +88,35 @@ fn the_client_without_auth_is_refused_with_the_reason() {
         "{wrong}"
     );
 }
+
+/// The sealing key and each client secret print as `<redacted>`, in both
+/// shapes, and the generated file carries the test that proves it.
+#[test]
+fn a_printed_settings_never_shows_a_secret() {
+    for picks in [
+        &["config", "db", "auth", "oauth", "oauth-client"][..],
+        &["db", "auth", "oauth", "oauth-client", "oauth-client-memory"][..],
+    ] {
+        let files = brocanth_cli::testing::generate("my-app", picks, &MODULES)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let plugin = file(&files, "src/plugins/oauth_client/mod.rs");
+        assert!(!plugin.contains("derive(Debug"), "{plugin}");
+        assert!(
+            plugin.contains("impl std::fmt::Debug for Settings"),
+            "{plugin}"
+        );
+        for secret in [
+            "key",
+            "github_client_secret",
+            "google_client_secret",
+            "microsoft_client_secret",
+            "gitlab_client_secret",
+        ] {
+            assert!(
+                plugin.contains(&format!("&self.{secret}.as_ref().map(|_| \"<redacted>\")")),
+                "{secret} is printed: {plugin}"
+            );
+        }
+        assert!(plugin.contains("fn a_printed_settings_never_shows_a_secret()"));
+    }
+}

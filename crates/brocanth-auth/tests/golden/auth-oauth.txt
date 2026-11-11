@@ -3084,7 +3084,7 @@ use crate::plugins::auth::Services;
 /// It derives `Deserialize` because this application reads it from
 /// `[auth_oauth]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// The providers to offer, by id.
@@ -3112,6 +3112,39 @@ pub struct Settings {
     pub gitlab_client_id: Option<String>,
     /// The secret of the GitLab application. No flag: it is a secret.
     pub gitlab_client_secret: Option<String>,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("providers", &self.providers)
+            .field("base_url", &self.base_url)
+            .field("after_sign_in", &self.after_sign_in)
+            .field("sign_in_page", &self.sign_in_page)
+            .field("github_client_id", &self.github_client_id)
+            .field(
+                "github_client_secret",
+                &self.github_client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("google_client_id", &self.google_client_id)
+            .field(
+                "google_client_secret",
+                &self.google_client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("microsoft_client_id", &self.microsoft_client_id)
+            .field(
+                "microsoft_client_secret",
+                &self.microsoft_client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("gitlab_client_id", &self.gitlab_client_id)
+            .field(
+                "gitlab_client_secret",
+                &self.gitlab_client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -3314,6 +3347,23 @@ fn stamped(ctx: &Ctx, html: String) -> String {
     match ctx.hooked::<brocanth_middleware::CsrfToken>() {
         Some(token) => token.stamp_forms(&html),
         None => html,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            github_client_secret: Some("not-for-the-log".to_string()),
+            google_client_secret: Some("not-for-the-log".to_string()),
+            microsoft_client_secret: Some("not-for-the-log".to_string()),
+            gitlab_client_secret: Some("not-for-the-log".to_string()),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== AGENTS.md =====
