@@ -26,6 +26,13 @@ mod wizard;
 pub mod testing {
     use brocanth_scaffold::Module;
 
+    /// Every module this CLI was built with, in the order the chooser lists
+    /// them. For a check that must cover each module, so a new one cannot
+    /// be left out.
+    pub fn modules() -> &'static [&'static dyn Module] {
+        crate::modules::ALL
+    }
+
     /// The files `brocanth create <name> --with <picks>` writes, with each
     /// module in `extra` beside the modules this CLI was built with.
     ///

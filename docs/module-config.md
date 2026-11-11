@@ -629,19 +629,33 @@ when another module arrives (§4). Settings stay in `contribute`, because
 their values depend on the project (`sessions.cookie` is
 `_<ident>_session`), but their keys do not.
 
-**A test holds the hook list to the code.** Each crate with a `HookSource`
-has a test under its `scaffold` feature: it installs the plugin into a test
-registrar and compares the names with `Manifest::hook`. A crate that adds a
-hook and forgets the manifest fails its own test.
+**A test holds the hook list to the code.** One test compares, for every
+module, the names its plugin registers with `Manifest::hook`. A module
+that adds a hook and forgets the manifest fails it.
 
 Built: `brocanth::plugin_hooks::hook_names(&plugin)` installs a plugin
-into a registrar that keeps nothing and returns the names. The tests are
-`tests/manifest_hooks.rs` in `brocanth-middleware` (csrf, security
-headers, rate limit), `brocanth-analytics` (analytics, beacon) and
-`brocanth-gtag`, and one test in `brocanth-i18n/tests/plugin.rs`. Each
-crate's own dev-dependency turns `scaffold` on, so `cargo test -p <crate>`
-runs it. `logging` has no such test: its plugin is code the CLI writes
-into the project, so no crate can install it.
+into a registrar that keeps nothing and returns the names. The test is
+`crates/brocanth-cli/tests/manifest_hooks.rs`. It walks the CLI's module
+list, so a new module cannot be left out:
+
+- A module that declares a hook must have a row, which builds its plugin
+  with a configuration that installs every hook.
+- A plugin that any golden project registers with `plugin_hooking` must
+  have a row, so a module that hooks and declares nothing fails too.
+- A plugin's `HookSource::HOOKS`, when not empty, must name the same
+  hooks.
+
+`logging`, `storage-routes` and `webhooks-in` write their plugin into the
+project, so no crate can install it. Their rows read the names from the
+generated `install_hooks`, and `mise run generated` builds that code.
+
+Decision: one test in the CLI, not one per crate. Reason: a per-crate
+test exists only when its author remembers to write it; in 2026-11 eight
+of the fifteen hooking plugins had none. The CLI has every module and
+takes the hooking crates as dev-dependencies, so it can check them all.
+These were the per-crate tests in `brocanth-middleware`,
+`brocanth-analytics`, `brocanth-gtag` and `brocanth-i18n`; the CLI test
+replaces them.
 
 ### 3.2 In the core (`brocanth`)
 

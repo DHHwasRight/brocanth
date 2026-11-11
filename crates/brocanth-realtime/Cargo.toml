@@ -90,6 +90,14 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version
 async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# This crate with its `scaffold` side, so `cargo test -p brocanth-realtime` runs
+# tests/scaffold.rs.
+brocanth-realtime = { path = ".", features = ["scaffold"] }
+# The generator and its checks, for tests/scaffold.rs. A cycle through
+# dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 # The HTTP test client, for `tests/panel.rs` only.
 #
 # It brings `brocanth` into the *test* build, which the dependency list
