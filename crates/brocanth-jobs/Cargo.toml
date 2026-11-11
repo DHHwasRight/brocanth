@@ -76,6 +76,11 @@ brocanth-middleware = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# The generator and its checks, for tests/scaffold.rs. A cycle through
+# dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 
 # The engine's backends, so `tests/panel.rs` can render the screens over
@@ -91,7 +96,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # `cargo test -p brocanth-jobs` on a laptop with no server runs the whole
 # suite on the memory backend, and the panel tests render the real screens.
 # A library build gets neither.
-brocanth-jobs = { path = ".", default-features = false, features = ["postgres", "memory", "admin"] }
+brocanth-jobs = { path = ".", default-features = false, features = ["postgres", "memory", "admin", "scaffold"] }
 
 [features]
 # The backend is a compile-time choice made in `Cargo.toml`, which is the whole

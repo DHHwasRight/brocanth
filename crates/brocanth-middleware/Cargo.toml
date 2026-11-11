@@ -55,6 +55,11 @@ flate2 = { version = "1", optional = true }
 brotli = { version = "8", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+# The generator and its checks, for tests/scaffold.rs. A cycle through
+# dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 # `tests/dp.rs` drives the CSRF hook and the dp-swap hook through the real
 # pipeline, and re-renders a form with its faults the way an application
 # does. None of this reaches a library build.

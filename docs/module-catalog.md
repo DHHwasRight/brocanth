@@ -183,9 +183,22 @@ shutdown_grace_secs` has a flag and a variable in every project
    sixteen to three, the starter pages, which stay by decision (gap 11).
    Next: `brocanth-i18n` can provide the negotiated locale through
    `provide_for_request`.
-5. **More module crates on the harness.** `brocanth-robots` keeps its
-   shapes and goldens in its own crate through `brocanth_scaffold::testing`.
-   The other module crates still rely on the CLI's goldens.
+5. **More module crates on the harness.** Twenty crates keep their own
+   shapes and goldens through `brocanth_scaffold::testing` (in
+   `tests/scaffold.rs`), the CLI's goldens beside them. The last five,
+   ordered by the size of their generated output: `middleware`,
+   `realtime`, `admin`, `db` and `jobs`.
+   Remains, still on the CLI's goldens alone: `observe`, `i18n`,
+   `policy`, `openapi`, `analytics`, `input`, `schema`, `gtag`,
+   `resource`, `client`, from the most generated output to the least.
+6. ~~**The gate covers generated projects.**~~ Done. `mise run generated`
+   builds and tests every project of a crate test that calls
+   `testing::build`, then the CLI's golden shapes, in one target
+   directory; `mise run ci` runs it. The `scaffold` task reads its crate
+   list from the manifests (it had left out `brocanth-analytics`). One
+   test in the CLI holds every module's declared hooks to its plugin
+   (`docs/module-config.md` §3.1). The gate is `mise run ci`; there is no
+   GitHub CI.
 
 ### 4. Admin
 

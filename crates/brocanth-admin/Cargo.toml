@@ -65,6 +65,14 @@ brocanth-pagination = { workspace = true, optional = true, features = ["runtime"
 brocanth-scaffold = { workspace = true, optional = true }
 
 [dev-dependencies]
+# This crate with its `scaffold` side, so `cargo test -p brocanth-admin` runs
+# tests/scaffold.rs.
+brocanth-admin = { path = ".", features = ["scaffold"] }
+# The generator and its checks, for tests/scaffold.rs. A cycle through
+# dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 # For the compile-fail cases under tests/ui: an admin resource with no
 # policy must not compile. `brocanth-resource` set the precedent.
 trybuild = "1"

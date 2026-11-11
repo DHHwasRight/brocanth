@@ -716,6 +716,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth",
+ "brocanth-admin",
+ "brocanth-cli",
  "brocanth-middleware",
  "brocanth-pagination",
  "brocanth-policy",
@@ -979,6 +981,8 @@ name = "brocanth-db"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
+ "brocanth-db",
  "brocanth-scaffold",
  "sea-query",
  "sea-query-sqlx",
@@ -1091,6 +1095,7 @@ dependencies = [
  "async-trait",
  "brocanth",
  "brocanth-admin",
+ "brocanth-cli",
  "brocanth-jobs",
  "brocanth-middleware",
  "brocanth-queue",
@@ -1138,6 +1143,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "brocanth",
+ "brocanth-cli",
  "brocanth-config",
  "brocanth-input",
  "brocanth-middleware",
@@ -1327,8 +1333,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brocanth-admin",
+ "brocanth-cli",
  "brocanth-events",
  "brocanth-policy",
+ "brocanth-realtime",
  "brocanth-scaffold",
  "brocanth-server",
  "brocanth-test",
