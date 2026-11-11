@@ -18,27 +18,47 @@ default-run = "my-blog"
 #   brocanth-cache        no cache; every read does the work a hit would have skipped
 #   brocanth-jobs         no queue; slow work happens inside the request that asked for it
 #   brocanth-flags        no feature flags; new code is on for everybody the moment it ships
+#   brocanth-mail         no mail; a password reset or a verification link cannot leave the server
 #   brocanth-auth         no accounts; nothing hashes a password and nothing signs a session cookie
+#   auth-oauth            no provider sign-in; an account has an address and a password
+#   auth-screens          no account pages; the auth services are there and nothing calls them
+#   auth-lockout          no lockout; only a rate limit slows a guessing run
+#   superuser             no operator account; the admin opens only for a policy you write
+#   roles                 no roles; a member of staff is a superuser, and nobody else is
 #   brocanth-policy       no rule algebra; authorisation is whatever each handler remembered to check
 #   brocanth-storage      no file storage; an upload has nowhere to go and no address to be read back from
+#   storage-routes        no upload or download route; a handler stores and serves each file itself
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
 #   brocanth-middleware   no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
 #   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   security-headers      no security headers; a browser sniffs types, frames the pages and runs any inline script
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
+#   conditional-get       no ETag and no 304; a browser downloads an unchanged page again in full
+#   compression           no compression; an HTML page goes over the wire five to ten times its gzip size
+#   flash                 no flash; a page a form redirects to cannot say what the form did
 #   gtag                  no Google tag; nothing on a page talks to Google
 #   brocanth-openapi      no document; a client learns this API by reading the handlers
 #   brocanth-schema       no schema vocabulary; a body is checked by hand, or it is not checked
 #   brocanth-resource     no records API; every CRUD route is a page somebody wrote by hand
 #   brocanth-admin        no backoffice; a row is changed through a page somebody wrote, or SQL
 #   brocanth-admin-model  the admin reads no table; its data source is an empty fixture
+#   brocanth-webhooks     no webhooks; a payment provider or a partner has no verified way in or out
+#   webhooks-in           no incoming webhooks; a sender's POST meets the CSRF check and is refused
+#   webhooks-out          no outgoing webhooks; a partner polls for what changed
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
+#   sanitize              no sanitizer; HTML a user wrote can only be shown escaped, as text
 #   brocanth-robots       no robots.txt; every crawler reads every page, and so does every staging server's
 #   sitemap               no sitemap.xml; a crawler finds only the pages a link reaches
+#   brocanth-pagination   no paginator; each list counts its own offset and writes its own links
+#   brocanth-filters      no typed filters; a list that filters parses its own query string
+#   brocanth-search       no search; a visitor finds a page by its link or not at all
 #   brocanth-i18n         one language, written into each page; nothing negotiates a locale
+#   i18n-routing          the locale comes from the query, a cookie or Accept-Language; a search engine indexes one language
+#   brocanth-meta         every page has the title `pages::TITLE`, and no description, canonical URL or share tags
+#   errors                a missing page answers a plain `Not Found`, a failure a plain `Internal Server Error`
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -1486,9 +1506,31 @@ macro_rules! announce {
         let db: &brocanth_db::Db = cx.extract();
         let connections = db.pool().size();
         crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
+        crate::plugins::warn_hookless($app.pipeline());
     }};
 }
 pub(crate) use announce;
+
+/// A plugin whose module file turns every hook off: registered, and
+/// doing nothing per request. Said once at startup; `brocanth remove`
+/// takes the module out.
+pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {
+    let all_off = |instance: &str, names: &[&str]| {
+        names.iter().all(|name| {
+            pipeline
+                .skipped()
+                .iter()
+                .any(|&(i, n)| i == instance && n == *name)
+        })
+    };
+    // Every hook of `audit` is off in src/modules/audit.rs.
+    if all_off("audit", &["record"]) {
+        crate::plugins::say!(
+            warn,
+            "warning: audit installs no hook; help: brocanth remove audit"
+        );
+    }
+}
 
 /// A line about the application itself: startup, the listener, the stop.
 ///
@@ -1935,7 +1977,23 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
+    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
     Ok(layers.to_string())
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::audit::MODULE.hooks.off() {
+        notes.push((
+            "audit.retention_days",
+            format!("hook audit.{name} is off in src/modules/audit.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -2021,7 +2079,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d52c63c0823b602e
+// brocanth-digest: bacf2f26616a890a
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2865,7 +2923,7 @@ request.
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `audit`  change history: who changed which row, when, and what; rows in your Postgres
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `cache`, `jobs`, `flags`, `auth`, `policy`, `storage`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `static`, `robots`, `sitemap`, `i18n`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2986,7 +3044,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: d96cafe09dd5c6aa -->
+<!-- brocanth-digest: 0b15961f1f756e05 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
