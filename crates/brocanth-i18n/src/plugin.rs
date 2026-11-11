@@ -9,7 +9,9 @@
 //!   `.plugin(..)`.
 //! - [`I18nHook`] negotiates once per request in a request hook, puts the
 //!   [`Negotiated`] in the request's extensions and in the request state, and
-//!   writes `Content-Language` and `Vary` on the way out. Registered with
+//!   writes `Content-Language` and `Vary` on the way out. It also puts the
+//!   [`Negotiated`] on the context, so a page reads it with
+//!   `ctx.provided::<Negotiated<Locale>, _>()`. Registered with
 //!   `.plugin_hooking(..)`, which widens the application's hook record.
 //!
 //! A single plugin that did both would force `.plugin_hooking` on an
@@ -20,13 +22,15 @@
 use std::marker::PhantomData;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::{ContextBuilder, ContextItem, NoContext, ProvidesContext};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::plugin_hooks::{
     BodyShape, Both, Flow, HookRegistrar, HookSource, OnRequest, OnResponse, Request, RequestHook,
     RequestState, ResponseHead, ResponseHook,
 };
 use brocanth::plugin_order::Order;
-use http::header::{HeaderValue, CONTENT_LANGUAGE, COOKIE, LOCATION, SET_COOKIE, VARY};
+use http::header::{
+    HeaderValue, ACCEPT, CONTENT_LANGUAGE, COOKIE, LOCATION, SET_COOKIE, UPGRADE, VARY,
+};
 use http::Method;
 
 use crate::negotiate::{
@@ -34,6 +38,8 @@ use crate::negotiate::{
 };
 
 impl<L: Locales> ContextItem for Negotiator<L> {}
+
+impl<L: Locales> ContextItem for Negotiated<L> {}
 
 impl<L: Locales> Negotiator<L> {
     /// The locale for an `http` request: its query string, every `Cookie`
@@ -90,7 +96,10 @@ pub struct I18nHook<L> {
 
 impl<L: Locales> Plugin for I18nHook<L> {
     type Config = NegotiatorConfig;
-    type Provides = NoContext;
+    /// The locale of the request, on the typed context. A hook cannot read
+    /// the context, which is built after the hooks ran: a hook in another
+    /// crate reads [`Current`] from the request state.
+    type Provides = ProvidesContext<Negotiated<L>>;
     /// Also the configuration section and the flag prefix:
     /// `--i18n.default=fr`. Another crate's hook that reads [`Current`]
     /// orders itself after `i18n.negotiate`.
@@ -105,6 +114,30 @@ impl<L: Locales> Plugin for I18nHook<L> {
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         self.negotiator.check().map_err(PluginError::new)
+    }
+
+    /// A context with no request (`announce!`, a test) gets the default
+    /// locale.
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Negotiated {
+            locale: self.negotiator.default_locale(),
+            source: Source::Default,
+        });
+    }
+
+    /// The locale the `negotiate` hook chose. Without it (the hook is off),
+    /// the request's own query, cookie and header decide here.
+    fn provide_for_request(
+        &self,
+        request: &Request,
+        state: &RequestState,
+        cx: &mut ContextBuilder,
+    ) {
+        let negotiated = state
+            .get::<Negotiated<L>>()
+            .copied()
+            .unwrap_or_else(|| self.negotiator.negotiate_request(request));
+        cx.insert(negotiated);
     }
 }
 
@@ -194,7 +227,7 @@ impl<L: Locales> Negotiate<L> {
         let negotiated = self.negotiator.negotiate_request(request);
         record(request, state, negotiated);
         let read = matches!(*request.method(), Method::GET | Method::HEAD);
-        if !(read && self.negotiator.redirects(&path)) {
+        if !(read && !socket_or_stream(request) && self.negotiator.redirects(&path)) {
             // A form posts where it was told to: with no segment, the
             // query, the cookie or the browser chooses, as without `paths`.
             return Ok(Flow::Continue);
@@ -211,6 +244,21 @@ impl<L: Locales> Negotiate<L> {
             .map_err(|e| PluginError::new(format!("i18n: the redirect is not a response: {e}")))?;
         Ok(Flow::respond(response))
     }
+}
+
+/// Whether the request opens a WebSocket or an event stream. Neither gets
+/// the locale redirect, wherever its route is: a socket does not follow a
+/// redirect, and a stream has no locale.
+fn socket_or_stream(request: &Request) -> bool {
+    let headers = request.headers();
+    headers.contains_key(UPGRADE)
+        || headers
+            .get_all(ACCEPT)
+            .iter()
+            .filter_map(text)
+            .flat_map(|value| value.split(','))
+            .filter_map(|range| range.split(';').next())
+            .any(|kind| kind.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 /// Puts the locale where the pages and the other hooks read it.

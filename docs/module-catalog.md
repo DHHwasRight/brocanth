@@ -181,8 +181,16 @@ shutdown_grace_secs` has a flag and a variable in every project
 4. ~~**Smaller seams.**~~ Done: `Plugin::provide_for_request` sees the
    request (gap 10), and the `rsx` branches in `create.rs` went from
    sixteen to three, the starter pages, which stay by decision (gap 11).
-   Next: `brocanth-i18n` can provide the negotiated locale through
-   `provide_for_request`.
+   Also done: `brocanth-i18n` provides the negotiated locale through
+   `provide_for_request`, and a page reads it with `ctx.provided`.
+6. ~~**A module reads another module.**~~ Done
+   (`docs/module-config.md` §9): generated code reads
+   `crate::modules::<key>::MODULE.<field>` where it uses the value, and
+   never copies it into a setting. `i18n-routing` reads `storage-routes`'
+   `path` and `admin`'s `mount_at`, and never redirects a socket or a
+   stream. Remains: `sitemap`, `analytics` and `gtag` copy `/admin` into
+   their `exclude` settings; `add` does not print a field a newer module
+   adds.
 5. **More module crates on the harness.** `brocanth-robots` keeps its
    shapes and goldens in its own crate through `brocanth_scaffold::testing`.
    The other module crates still rely on the CLI's goldens.

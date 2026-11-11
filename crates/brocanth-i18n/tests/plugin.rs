@@ -63,7 +63,10 @@ fn a_cookie_name_nothing_can_send_stops_the_application() {
 
 type Hooks = Both<<I18nHook<Locale> as HookSource>::Families, NoHooks>;
 
-fn hooked() -> App<Base, Hooks> {
+/// The hook provides the negotiated locale, so it is on the provider list.
+type Hooked = After<I18nHook<Locale>, Base>;
+
+fn hooked() -> App<Hooked, Hooks> {
     AppBuilder::new()
         .plugin_hooking(I18nHook::<Locale>::new(NegotiatorConfig::default()))
         .build()
@@ -79,7 +82,7 @@ fn get(uri: &str, headers: &[(&str, &str)]) -> Request {
 }
 
 /// Runs one request; the handler answers with what the hook negotiated.
-fn run(app: &App<Base, Hooks>, mut request: Request) -> Response {
+fn run(app: &App<Hooked, Hooks>, mut request: Request) -> Response {
     let mut state = RequestState::new();
     app.run(&mut request, &mut state, |request, _state| {
         let negotiated = request
@@ -204,7 +207,7 @@ fn the_manifest_declares_every_hook_the_plugin_registers() {
     assert_eq!(registered, declared);
 }
 
-fn routed() -> App<Base, Hooks> {
+fn routed() -> App<Hooked, Hooks> {
     AppBuilder::new()
         .plugin_hooking(I18nHook::<Locale>::new(
             NegotiatorConfig::default().with_paths(true),
@@ -215,7 +218,7 @@ fn routed() -> App<Base, Hooks> {
 
 /// Runs one request; the handler answers with the path it was given and
 /// the locale the hook chose.
-fn run_routed(app: &App<Base, Hooks>, mut request: Request) -> Response {
+fn run_routed(app: &App<Hooked, Hooks>, mut request: Request) -> Response {
     let mut state = RequestState::new();
     app.run(&mut request, &mut state, |request, state| {
         let negotiated = state.get::<Negotiated<Locale>>().copied().expect("ran");
@@ -288,7 +291,7 @@ fn a_kept_prefix_that_is_not_a_path_stops_the_application() {
     assert!(why.contains("help:") && why.contains("\"/admin\""), "{why}");
 }
 
-fn routed_with(config: NegotiatorConfig) -> App<Base, Hooks> {
+fn routed_with(config: NegotiatorConfig) -> App<Hooked, Hooks> {
     AppBuilder::new()
         .plugin_hooking(I18nHook::<Locale>::new(config.with_paths(true)))
         .build()
@@ -560,4 +563,73 @@ fn a_kept_prefix_with_a_slash_and_the_default_are_accepted() {
         ))
         .build();
     assert!(built.is_err(), "a prefix with no `/` was accepted");
+}
+
+#[test]
+fn a_kept_prefix_from_code_survives_a_setting_that_names_none() {
+    // As a generated project registers it: the file's list, then the routes
+    // other modules own, read from their module files.
+    let app = routed_with(
+        NegotiatorConfig {
+            unprefixed: Vec::new(),
+            ..NegotiatorConfig::default()
+        }
+        .keep_unprefixed("/uploads")
+        .keep_unprefixed("/uploads"),
+    );
+    let r = run_routed(&app, get("/uploads/abc?token=x", &[]));
+    assert_eq!(r.status(), 200);
+    assert_eq!(body(r), "/uploads/abc?token=x en Default -");
+    assert_eq!(run_routed(&app, get("/about", &[])).status(), 307);
+    let config = NegotiatorConfig::default().keep_unprefixed("/admin");
+    assert_eq!(config.unprefixed, ["/admin", "/api"], "no duplicate");
+}
+
+#[test]
+fn a_socket_or_a_stream_is_never_redirected_wherever_it_is() {
+    let app = routed();
+    for headers in [
+        &[("upgrade", "websocket"), ("connection", "upgrade")][..],
+        &[("accept", "text/event-stream")][..],
+        &[("accept", "text/html, Text/Event-Stream;q=0.9")][..],
+    ] {
+        let r = run_routed(&app, get("/live/feed?topics=a/*", headers));
+        assert_eq!(r.status(), 200, "{headers:?}");
+        assert_eq!(body(r), "/live/feed?topics=a/* en Default -");
+    }
+    // A plain GET to the same path still gets its segment.
+    let r = run_routed(&app, get("/live/feed", &[("accept", "text/html")]));
+    assert_eq!(r.headers()["location"], "/en/live/feed");
+}
+
+#[test]
+fn a_page_reads_the_negotiated_locale_from_the_context() {
+    let app: App<Hooked, Hooks> = AppBuilder::new()
+        .plugin_hooking(I18nHook::<Locale>::new(NegotiatorConfig::default()))
+        .build()
+        .expect("an application");
+    // No request: the default locale.
+    let cx = app.context();
+    let negotiated: &Negotiated<Locale> = cx.get();
+    assert_eq!(negotiated.locale, Locale::En);
+    assert_eq!(negotiated.source, Source::Default);
+
+    // A request: what the hook chose, as `src/app.rs` builds the context.
+    let mut request = get("/cart", &[("accept-language", "fr")]);
+    let mut state = RequestState::new();
+    let mut seen = None;
+    app.run(&mut request, &mut state, |request, state| {
+        let cx = app.context_for(request, state);
+        let negotiated: &Negotiated<Locale> = cx.get();
+        seen = Some(*negotiated);
+        Ok(http::Response::new(Vec::new().into()))
+    });
+    let seen = seen.expect("the handler ran");
+    assert_eq!(seen.locale, Locale::Fr);
+    assert_eq!(seen.source, Source::AcceptLanguage);
+
+    // With the hook off, the provider negotiates itself.
+    let cx = app.context_for(&get("/", &[("cookie", "locale=fr")]), &RequestState::new());
+    let negotiated: &Negotiated<Locale> = cx.get();
+    assert_eq!(negotiated.source, Source::Cookie);
 }

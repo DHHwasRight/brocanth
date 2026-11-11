@@ -2677,10 +2677,14 @@ mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
 
+    // Where src/modules/storage_routes.rs puts the routes, so a moved path
+    // is tested where it went.
+    const PATH: &str = crate::modules::storage_routes::MODULE.path;
+
     #[tokio::test]
     async fn nobody_may_upload_until_may_upload_says_who() {
         let app = crate::app::build().expect("the application builds");
-        let mut request = Request::new(Verb::Post, "/files")
+        let mut request = Request::new(Verb::Post, PATH)
             .with_header("content-type", "multipart/form-data; boundary=b");
         request.body = b"--b--\r\n".to_vec().into();
         let response = crate::app::handle(&app, request).await;
@@ -2691,7 +2695,7 @@ mod tests {
     async fn a_file_is_served_only_with_a_token() {
         let app = crate::app::build().expect("the application builds");
         let address = "0".repeat(64);
-        let request = Request::new(Verb::Get, format!("/files/{address}"));
+        let request = Request::new(Verb::Get, format!("{PATH}/{address}"));
         let response = crate::app::handle(&app, request).await;
         assert_eq!(response.status, 403);
     }

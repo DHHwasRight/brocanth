@@ -7,7 +7,7 @@
 use brocanth::plugin_api::Plugin;
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_body::Body;
-use brocanth::plugin_context::Base;
+use brocanth::plugin_context::{After, Base};
 use brocanth::plugin_hooks::{HookFamilies, Response};
 use brocanth::plugin_routes::{Handler, RouteCx};
 use brocanth::routing::{Router, Verb};
@@ -50,10 +50,14 @@ impl Locales for Locale {
     }
 }
 
+/// The i18n hook puts the negotiated locale on the context, so it is on
+/// the provider list.
+type Provided = After<I18nHook<Locale>, Base>;
+
 const PAGE: &str = "<!DOCTYPE html><html><body><main>Hello</main></body></html>";
 
-fn page() -> Handler<Base> {
-    Box::new(|_cx: &mut RouteCx<'_, Base>| {
+fn page<E: 'static>() -> Handler<E> {
+    Box::new(|_cx: &mut RouteCx<'_, E>| {
         Ok::<Response, _>(
             http::Response::builder()
                 .status(200)
@@ -64,7 +68,7 @@ fn page() -> Handler<Base> {
     })
 }
 
-fn client() -> TestClient<Base, impl HookFamilies, Handler<Base>> {
+fn client() -> TestClient<Provided, impl HookFamilies, Handler<Provided>> {
     let app = AppBuilder::new()
         .plugin_hooking(I18nHook::<Locale>::new(NegotiatorConfig::default()))
         .plugin_hooking(Gtag::new(GtagConfig::default().measuring("G-ABC123")))

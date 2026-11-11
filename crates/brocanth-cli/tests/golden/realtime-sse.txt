@@ -2309,7 +2309,8 @@ mod tests {
     async fn status(target: &str) -> u16 {
         let app = crate::app::build().expect("the application builds");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        let mut request = Request::new(Verb::Get, path);
+        // As a browser's `EventSource` asks.
+        let mut request = Request::new(Verb::Get, path).with_header("accept", "text/event-stream");
         request.query = query.to_string();
         crate::app::handle(&app, request).await.status
     }

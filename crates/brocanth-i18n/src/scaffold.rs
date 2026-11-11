@@ -17,7 +17,7 @@
 //! formats. It gets one language, the `default` setting's, because an
 //! export sends no `Accept-Language` and a file cannot vary by request.
 
-use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
+use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
 use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// Translations checked at build time, and a locale per request.
@@ -51,12 +51,12 @@ impl Module for I18n {
             "the hook reads the locale from the path's first segment and redirects a GET without one",
         )
         .adapts_to(
-            "realtime",
-            "with `i18n-routing`, `/realtime` is unprefixed: a stream or a socket has no locale",
+            "admin",
+            "with `i18n-routing`, the admin's `mount_at` is unprefixed, read from src/modules/admin.rs",
         )
         .adapts_to(
             "storage-routes",
-            "with `i18n-routing`, `/files` is unprefixed: a stored file has no locale",
+            "with `i18n-routing`, the file routes' `path` is unprefixed, read from src/modules/storage_routes.rs",
         )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
@@ -112,24 +112,16 @@ impl Module for I18n {
         let routing = project.has("i18n-routing");
         let mut settings = settings();
         if routing {
-            // A route that serves no page keeps no locale segment: a
-            // redirect would break a stream, a socket or a file link.
-            // The `path` option of `storage-routes` can move `/files`, so the
-            // list is a default to edit with it.
-            let mut unprefixed = vec!["/admin", "/api"];
-            for (key, prefix) in [("realtime", "/realtime"), ("storage-routes", "/files")] {
-                if project.has(key) {
-                    unprefixed.push(prefix);
-                }
-            }
             settings.push(
                 Setting::list(
                     "unprefixed",
-                    &unprefixed,
+                    &["/admin", "/api"],
                     "Path prefixes that keep no locale segment and are never redirected.",
                 )
                 .note(
-                    "A path whose last segment has a `.` (/robots.txt) is never redirected either.",
+                    "A path whose last segment has a `.` (/robots.txt) is never redirected either,\n\
+                     nor a socket or a stream. The routes of other modules are kept in\n\
+                     src/plugins/mod.rs, from their files in src/modules/.",
                 ),
             );
         }
@@ -145,7 +137,7 @@ impl Module for I18n {
                 // Structural: the module turns paths on, and removing the
                 // module turns them off. Not a setting, so a file cannot
                 // leave a project with links that point nowhere.
-                adjust: routing.then(|| ".with_paths(true)".to_string()),
+                adjust: routing.then(|| routing_adjust(project)),
             },
             settings,
         );
@@ -162,6 +154,24 @@ impl Module for I18n {
         }
         s.at(Slot::AgentsSections).block(agents);
     }
+}
+
+/// The chain on the `[i18n]` configuration with `i18n-routing`: paths on,
+/// and the routes another module owns kept unprefixed.
+///
+/// Such a route serves no page, so a redirect would break a file link. Its
+/// path is read from the owner's module file, never copied into the
+/// `unprefixed` setting: a project that moves the route edits one file
+/// (docs/module-config.md §9). A socket and a stream need no entry: the
+/// hook never redirects them.
+fn routing_adjust(project: &Project) -> String {
+    let mut chain = ".with_paths(true)".to_string();
+    for (key, field) in [("admin", "mount_at"), ("storage-routes", "path")] {
+        if project.has(key) {
+            chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
+        }
+    }
+    chain
 }
 
 /// One URL per locale: `/fr/about`, and a redirect from `/about`.
@@ -393,11 +403,12 @@ pub type I18n = brocanth_i18n::I18nHook<Locale>;
 /// The locale the `i18n` hook chose for this request.
 ///
 /// The hook reads `?locale=`, then the cookie, then `Accept-Language`,
-/// then the `default` setting. The fallback here is only for a context
-/// the hook did not see, such as a test that builds a `Ctx` by hand.
+/// then the `default` setting, and the plugin puts the result on the
+/// context: this compiles only while the plugin is registered. The
+/// fallback is only for a `Ctx` built by hand in a test.
 #[allow(dead_code)]
 pub fn locale(ctx: &Ctx) -> Locale {
-    ctx.hooked::<Negotiated<Locale>>()
+    ctx.provided::<Negotiated<Locale>, _>()
         .map_or(Locale::DEFAULT, |negotiated| negotiated.locale)
 }
 
