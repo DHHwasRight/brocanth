@@ -73,7 +73,8 @@ enum Reason {
     /// A token with another number of keys.
     Width(usize),
     /// The order sorts on a column that a cursor cannot carry. The list's
-    /// fault, not the client's.
+    /// fault, not the client's. Only `Keyset` (feature `policy`) finds it.
+    #[cfg(feature = "policy")]
     Unsortable(&'static str),
 }
 
@@ -96,6 +97,7 @@ impl CursorError {
     pub fn status(&self) -> u16 {
         match self.reason {
             Reason::NotACursor | Reason::Width(_) => 400,
+            #[cfg(feature = "policy")]
             Reason::Unsortable(_) => 500,
         }
     }
@@ -124,6 +126,7 @@ impl fmt::Display for CursorError {
                  help: follow the `next` link of the previous page, or drop `after` to start at the first page",
                 self.token
             ),
+            #[cfg(feature = "policy")]
             Reason::Unsortable(column) => write!(
                 f,
                 "the list sorts on `{column}`, and a cursor cannot carry its values\n\
