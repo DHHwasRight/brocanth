@@ -63,13 +63,18 @@ impl LockoutPolicy {
         if max_failures < 3 {
             return Err(AuthError::misconfigured(format!(
                 "a lockout needs 3 failures or more, not {max_failures}: fewer locks out \
-                 people who mistype"
+                 people who mistype\n{}",
+                help("max_failures", "max_failures", "3 or more")
             )));
         }
-        for (name, value) in [("window", window), ("lock_for", lock_for)] {
+        for (name, option, value) in [
+            ("window", "window_secs", window),
+            ("lock_for", "lock_for_secs", lock_for),
+        ] {
             if !(60..=86_400).contains(&value) {
                 return Err(AuthError::misconfigured(format!(
-                    "the lockout {name} is between 60 and 86400 seconds, not {value}"
+                    "the lockout {name} is between 60 and 86400 seconds, not {value}\n{}",
+                    help(name, option, "a value from 60 to 86400 seconds")
                 )));
             }
         }
@@ -94,6 +99,15 @@ impl LockoutPolicy {
     pub fn lock_for(&self) -> i64 {
         self.lock_for
     }
+}
+
+/// The `help:` line of a refused policy: the argument of
+/// [`LockoutPolicy::new`] and the `auth-lockout` option that sets it.
+fn help(argument: &str, option: &str, bound: &str) -> String {
+    format!(
+        "help: set `{option}` in src/modules/auth_lockout.rs (the `{argument}` argument \
+         of `LockoutPolicy::new`) to {bound}"
+    )
 }
 
 impl Default for LockoutPolicy {
@@ -509,5 +523,31 @@ mod tests {
         assert!(LockoutPolicy::new(5, 10, 600).is_err());
         assert!(LockoutPolicy::new(5, 600, 2 * 86_400).is_err());
         assert_eq!(LockoutPolicy::default(), LockoutPolicy::recommended());
+    }
+
+    fn refusal(max_failures: u32, window: i64, lock_for: i64) -> String {
+        LockoutPolicy::new(max_failures, window, lock_for)
+            .expect_err("a refused policy")
+            .to_string()
+    }
+
+    #[test]
+    fn a_refused_policy_names_the_option_and_its_bound() {
+        let help = |e: String| e.lines().last().map(str::to_owned).unwrap_or_default();
+        assert_eq!(
+            help(refusal(2, 600, 600)),
+            "help: set `max_failures` in src/modules/auth_lockout.rs (the `max_failures` \
+             argument of `LockoutPolicy::new`) to 3 or more"
+        );
+        assert_eq!(
+            help(refusal(5, 59, 600)),
+            "help: set `window_secs` in src/modules/auth_lockout.rs (the `window` \
+             argument of `LockoutPolicy::new`) to a value from 60 to 86400 seconds"
+        );
+        assert_eq!(
+            help(refusal(5, 600, 86_401)),
+            "help: set `lock_for_secs` in src/modules/auth_lockout.rs (the `lock_for` \
+             argument of `LockoutPolicy::new`) to a value from 60 to 86400 seconds"
+        );
     }
 }
