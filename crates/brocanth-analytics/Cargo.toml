@@ -61,6 +61,13 @@ brocanth-config.workspace = true
 # collector must answer it before the CSRF hook refuses it.
 brocanth-middleware.workspace = true
 
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 default = ["runtime", "postgres"]
 # The plugin, the hook, the collector, the beacon and the stores: what an
