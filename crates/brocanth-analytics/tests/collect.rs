@@ -69,6 +69,8 @@ fn config() -> AnalyticsConfig {
         country_header: Some("cf-ipcountry".to_string()),
         ..AnalyticsConfig::default()
     }
+    // As a generated project keeps the admin out: from its module file.
+    .exclude_path("/admin")
 }
 
 struct Rig<H: HookFamilies> {

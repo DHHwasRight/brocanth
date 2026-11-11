@@ -185,7 +185,10 @@ pub struct GtagConfig {
     /// removed before a page view leaves, and so is a parameter or a path
     /// segment that holds an `@`.
     pub allow_params: Vec<String>,
-    /// Paths that never get the tag, each with everything under it.
+    /// Paths that never get the tag, each with everything under it. Empty
+    /// by default: this crate does not know where an application mounts
+    /// its admin. A generated project adds the admin's path with
+    /// [`exclude_path`](Self::exclude_path).
     pub exclude: Vec<String>,
     /// The domain Google's cookies are set on and removed from, such as
     /// `example.co.uk`. `None`: the tag picks it, and withdrawal removes
@@ -230,7 +233,7 @@ impl Default for GtagConfig {
             ]
             .map(String::from)
             .to_vec(),
-            exclude: vec!["/admin".into()],
+            exclude: Vec::new(),
             cookie_domain: None,
             consent_log: None,
             banner: Banner::default(),
@@ -245,6 +248,22 @@ impl GtagConfig {
     pub fn measuring(mut self, id: impl Into<String>) -> Self {
         self.enabled = true;
         self.measurement_id = id.into();
+        self
+    }
+
+    /// Adds a prefix to [`exclude`](Self::exclude).
+    ///
+    /// For a path another module owns, read from its module file:
+    /// `.exclude_path(crate::modules::admin::MODULE.mount_at)`. A generated
+    /// project calls it after the file and the flags were read, so a file
+    /// that sets `exclude` cannot put the tag on the admin, and a moved
+    /// admin needs no edit here.
+    #[must_use]
+    pub fn exclude_path(mut self, prefix: impl Into<String>) -> Self {
+        let prefix = prefix.into();
+        if !self.exclude.contains(&prefix) {
+            self.exclude.push(prefix);
+        }
         self
     }
 
@@ -580,7 +599,14 @@ mod tests {
 
     #[test]
     fn exclusions_cover_the_path_and_everything_under_it_only() {
-        let config = GtagConfig::default();
+        assert!(
+            GtagConfig::default().tracks("/admin"),
+            "no exclusion by default"
+        );
+        let config = GtagConfig::default()
+            .exclude_path("/admin")
+            .exclude_path("/admin");
+        assert_eq!(config.exclude, ["/admin"], "no duplicate");
         assert!(!config.tracks("/admin"));
         assert!(!config.tracks("/admin/users/3"));
         assert!(config.tracks("/administrator"));

@@ -92,9 +92,10 @@ pub struct NegotiatorConfig {
     /// With `paths`: the prefixes that keep no locale segment and are
     /// never redirected. A path whose last segment has a `.` (a file, such
     /// as `/robots.txt`) is never redirected either, and neither is a
-    /// socket or a stream. The default names the backoffice and the
-    /// records API, where brocanth mounts them. A generated project adds
-    /// the routes of other modules with
+    /// socket or a stream. The default names the records API, `/api`. It
+    /// names no backoffice: this crate does not know where an application
+    /// mounts one. A generated project adds the routes of other modules,
+    /// the admin's among them, with
     /// [`keep_unprefixed`](Self::keep_unprefixed), after this list is read.
     pub unprefixed: Vec<String>,
 }
@@ -108,7 +109,7 @@ impl Default for NegotiatorConfig {
             available: Vec::new(),
             remember: true,
             paths: false,
-            unprefixed: vec!["/admin".to_string(), "/api".to_string()],
+            unprefixed: vec!["/api".to_string()],
         }
     }
 }

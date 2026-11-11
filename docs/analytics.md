@@ -29,7 +29,8 @@ A request is a page view when all of these hold:
 - the method is `GET` (not `HEAD`);
 - the status is 2xx, except 204 and 206;
 - the response `content-type` starts with `text/html`;
-- the path is not under an `exclude` entry (default `/admin`);
+- the path is not under an `exclude` entry (empty by default; a
+  generated project adds the admin's path, read from its module file);
 - it is not a prefetch: `Sec-Purpose`, `Purpose` or `X-Moz` does not say
   `prefetch`;
 - the user agent does not read as a bot (a list of words in

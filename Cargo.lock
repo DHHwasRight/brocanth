@@ -753,6 +753,7 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-analytics",
+ "brocanth-cli",
  "brocanth-config",
  "brocanth-db",
  "brocanth-middleware",
@@ -1045,6 +1046,7 @@ name = "brocanth-gtag"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-config",
  "brocanth-gtag",
  "brocanth-i18n",

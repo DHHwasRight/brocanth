@@ -13,7 +13,7 @@ The wizard calls it: *Count visits with Google Analytics, after consent*.
 | Part of | none |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`i18n`](i18n.md) |
+| Adapts to | [`config`](config.md), [`admin`](admin.md), [`i18n`](i18n.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the hook runs in the static export too |
 | Crates | `brocanth-gtag` |
@@ -67,7 +67,7 @@ Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key i
 | `consent_days` | integer | `182` | `--gtag.consent_days` | How long a choice is kept before the banner asks again, in days. Six months is what the CNIL recommends. |
 | `send_title` | bool | `false` | `--gtag.send_title` | Send the page title. Off: the scrubbed path stands in for it. |
 | `allow_params` | list | the five `utm_*` | none (a list) | The query parameters that reach Google; every other one is removed. |
-| `exclude` | list | `["/admin"]` | none (a list) | Paths that never get the tag, each with everything under it. |
+| `exclude` | list | `[]` | none (a list) | Paths that never get the tag, each with everything under it. With `admin`, the registration adds the admin's `mount_at`, read from `src/modules/admin.rs`. |
 | `cookie_domain` | text | `""` | `--gtag.cookie_domain` | The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. |
 | `consent_log` | text | `""` | `--gtag.consent_log` | A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. A server only: a static export has no one to report a choice to. |
 | `banner.text` | text | English | `--gtag.banner.text` | The sentence the banner asks with. |

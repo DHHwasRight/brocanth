@@ -43,7 +43,8 @@ fn rig(origins: &[&str]) -> Rig<impl HookFamilies> {
             ip_header: Some("fly-client-ip".to_string()),
             collector_origins: origins.iter().map(|o| o.to_string()).collect(),
             ..AnalyticsConfig::default()
-        },
+        }
+        .exclude_path("/admin"),
         store.clone(),
     );
     let recorder = analytics.recorder();

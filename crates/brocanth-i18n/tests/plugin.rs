@@ -240,7 +240,8 @@ fn a_get_with_no_segment_is_sent_to_the_negotiated_locale() {
 
 #[test]
 fn a_file_a_kept_prefix_and_a_post_are_not_redirected() {
-    let app = routed();
+    // The admin's path, kept as a generated project keeps it.
+    let app = routed_with(NegotiatorConfig::default().keep_unprefixed("/admin"));
     for uri in ["/robots.txt", "/admin", "/admin/users", "/api/posts"] {
         let r = run_routed(&app, get(uri, &[]));
         assert_eq!(r.status(), 200, "{uri}");
@@ -534,7 +535,7 @@ fn a_kept_prefix_with_a_slash_and_the_default_are_accepted() {
         ..NegotiatorConfig::default()
     };
     assert!(config.check().is_ok());
-    assert_eq!(NegotiatorConfig::default().unprefixed, ["/admin", "/api"]);
+    assert_eq!(NegotiatorConfig::default().unprefixed, ["/api"]);
     assert!(!NegotiatorConfig::default().paths, "off by default");
     let built = AppBuilder::new()
         .plugin_hooking(I18nHook::<Locale>::new(
@@ -564,8 +565,10 @@ fn a_kept_prefix_from_code_survives_a_setting_that_names_none() {
     assert_eq!(r.status(), 200);
     assert_eq!(body(r), "/uploads/abc?token=x en Default -");
     assert_eq!(run_routed(&app, get("/about", &[])).status(), 307);
-    let config = NegotiatorConfig::default().keep_unprefixed("/admin");
-    assert_eq!(config.unprefixed, ["/admin", "/api"], "no duplicate");
+    let config = NegotiatorConfig::default()
+        .keep_unprefixed("/admin")
+        .keep_unprefixed("/api");
+    assert_eq!(config.unprefixed, ["/api", "/admin"], "no duplicate");
 }
 
 #[test]

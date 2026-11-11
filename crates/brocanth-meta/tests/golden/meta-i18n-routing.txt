@@ -3176,8 +3176,8 @@ answers `/about` and `ctx.path` is `/about`. A GET to `/about` gets a
 Write a link with `ctx.href("/about")`, which keeps the page's
 locale. A language switcher links to `/fr/about`, and the hook
 remembers the choice in the cookie. A path under an `unprefixed`
-prefix of `[i18n]` (`/admin`, `/api`) and a file such as
-`/robots.txt` keep no segment.
+prefix of `[i18n]` (`/api`), the routes of other modules (the admin,
+the file routes) and a file such as `/robots.txt` keep no segment.
 
 ## Page metadata
 
@@ -3221,7 +3221,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 7101df45c95a8e4a -->
+<!-- brocanth-digest: e01e42c58c82dadd -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

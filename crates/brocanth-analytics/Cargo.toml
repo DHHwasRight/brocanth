@@ -60,6 +60,10 @@ brocanth-config.workspace = true
 # `tests/collector.rs`: a beacon is a cross-site POST with no token, so the
 # collector must answer it before the CSRF hook refuses it.
 brocanth-middleware.workspace = true
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator. A cycle through dev-dependencies, which cargo allows.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
 default = ["runtime", "postgres"]

@@ -1437,7 +1437,7 @@ macro_rules! register {
         // the only thing to decide is which paths are exempt -- a webhook,
         // or anything else whose caller is not a browser:
         //
-        //     exempt = ["/webhooks"]    under [csrf] in config/<env>.toml
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
         //
         // The token for the request is `ctx.hooked::<CsrfToken>()`;
         // `token.hidden_field()` is the input a form carries.
@@ -2354,7 +2354,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6218c52d6d1ea25b
+// brocanth-digest: 8c859213ab32b4d3
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

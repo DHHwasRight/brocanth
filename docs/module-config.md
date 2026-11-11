@@ -971,8 +971,10 @@ The spec leftovers are built too:
 ## 9. A module that reads another module
 
 Status: **built** for `i18n-routing` (`storage-routes`' `path`,
-`admin`'s `mount_at`, the realtime routes) and for the negotiated locale
-on the context.
+`admin`'s `mount_at`, the realtime routes), for the `exclude` of
+`sitemap`, `analytics` and `gtag` (`admin`'s `mount_at`), for the
+generated tests of `robots` and `admin`, and for the negotiated locale on
+the context.
 
 ### The problem
 
@@ -1042,6 +1044,42 @@ request state. **Reason:** the context is built after the request hooks
 ran, so no hook can read it, and a crate other than the project cannot
 name `Locale`.
 
+**Decision 4: the admin's path is read where it is used, in every
+module.** The first build wrote `"/admin"` into the `exclude` settings of
+`sitemap`, `analytics` and `gtag`, and into the expected text of the
+generated robots.txt test. A project that changed `mount_at` listed,
+counted and tagged its admin, and its own tests failed. Now:
+
+| Module | Where it reads `admin`'s `mount_at` |
+|---|---|
+| `analytics` | the registration: `.exclude_path(crate::modules::admin::MODULE.mount_at)` (`AnalyticsConfig::exclude_path`) |
+| `gtag` | the registration: `.exclude_path(..)` (`GtagConfig::exclude_path`), after `.translate(..)` |
+| `sitemap` | the plugin's `new`, which adds the path to `exclude`; the generated sitemap test asks that the admin is not listed |
+| `robots` | the rule (§8, wave 2); with no config file, the generated test's expected text is a `format!` of the path |
+| `admin` | its own generated test dispatches at `mount_at` |
+
+Each setting starts without the admin and keeps only the project's own
+paths. **Reason:** as decision 1. A file that sets `exclude = []` cannot
+put the admin back in, because the code adds it after the file was read,
+as `keep_unprefixed` does.
+
+**Decision 5: a library default names no path of another crate.** The
+defaults of `AnalyticsConfig::exclude` and `GtagConfig::exclude` are
+empty, and `NegotiatorConfig::unprefixed` is `["/api"]`. They named
+`/admin`. **Reason:** a project with no config file starts from the
+plugin's `Default`. A literal `/admin` there is the same copy as in a
+setting: after a move, a new page at `/admin` was excluded or kept
+unprefixed. The crate does not know where an application mounts its
+admin. The application does, and passes it with `exclude_path` or
+`keep_unprefixed`. The `i18n` `unprefixed` setting starts as `["/api"]`
+for the same reason.
+
+The tests: each of `analytics`, `gtag` and `robots` (`sitemap` and
+`robots`) has a test in `tests/scaffold.rs` that checks the generated
+code and the file, then, with `BROCANTH_BUILD=1`, moves the admin to
+`/backoffice` with `brocanth_cli::testing::move_admin` and builds and
+tests the project.
+
 ### Rejected
 
 | Alternative | Why not |
@@ -1057,6 +1095,12 @@ name `Locale`.
 - `add` does not print a field that a newer module adds (§8). This
   mechanism reads a field. It does not say that a field is new: that
   needs the old manifest, which the CLI does not keep.
-- The `exclude` settings of `sitemap`, `analytics` and `gtag` copy
-  `/admin` as a literal, so they miss a moved admin. The fix is decision
-  1: read `admin`'s `mount_at` in code, as `robots` does.
+- The route table test in `src/pages/mod.rs` lists the admin's two
+  patterns (`/admin`, `/admin/{*rest}`) as literals. A project that moves
+  the admin edits that list too; `move_admin` does the same edit. The
+  list is the written record of every route (`Slot::PagesRoutes`), and
+  it is sorted when it is generated, so a value read at `cargo build`
+  does not fit it. A fix: the test sorts a list that it builds with
+  `MODULE.mount_at`.
+- A manifest's integration text and some comments still say "a tab at
+  `/admin/<name>`". They are words, not values: nothing reads them.

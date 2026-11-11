@@ -2336,6 +2336,9 @@ mod tests {
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{'), "{xml}");
         assert!(!xml.contains("sitemap.xml"), "{xml}");
+        // The admin, wherever src/modules/admin.rs mounts it.
+        let admin = format!("{}</loc>", crate::modules::admin::MODULE.mount_at);
+        assert!(!xml.contains(&admin), "{xml}");
     }
 }
 ===== src/plugins/admin/mod.rs =====
@@ -2528,14 +2531,16 @@ mod tests {
 
     use crate::pages::Ctx;
 
-    /// The admin is in the table, and it answers 403 until somebody opens it.
+    /// The admin is in the table, where src/modules/admin.rs mounts it, and
+    /// it answers 403 until somebody opens it.
     #[tokio::test]
     async fn the_admin_is_mounted_and_ships_locked() {
+        let at = crate::modules::admin::MODULE.mount_at;
         let router = crate::pages::router().expect("the table builds");
-        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
-            panic!("/admin is not in the table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, at) else {
+            panic!("{at} is not in the table");
         };
-        let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
+        let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
@@ -2599,7 +2604,7 @@ impl Default for Settings {
         Self {
             base_url: "http://localhost:3000".to_string(),
             extra: Vec::new(),
-            exclude: vec!["/admin".to_string()],
+            exclude: Vec::new(),
         }
     }
 }
@@ -2632,7 +2637,13 @@ impl Plugin for Sitemap {
     type Provides = NoContext;
     const NAME: &'static str = "sitemap";
 
-    fn new(config: Settings) -> Self {
+    fn new(mut config: Settings) -> Self {
+        // The admin, where src/modules/admin.rs mounts it: no page a
+        // visitor reads.
+        let admin = crate::modules::admin::MODULE.mount_at.to_string();
+        if !config.exclude.contains(&admin) {
+            config.exclude.push(admin);
+        }
         Self { settings: config }
     }
 

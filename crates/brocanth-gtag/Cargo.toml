@@ -41,6 +41,10 @@ brocanth-gtag = { path = ".", features = ["config", "i18n", "scaffold"] }
 # `tests/i18n.rs` negotiates a locale with the real hook.
 brocanth-i18n = { path = "../brocanth-i18n", features = ["plugin"] }
 brocanth-config.workspace = true
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator. A cycle through dev-dependencies, which cargo allows.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
 default = ["runtime"]

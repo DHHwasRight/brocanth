@@ -51,7 +51,9 @@ This section comes first because it is the one a reader must not misread.
   parameter not on `allow_params`. A path segment or a parameter that holds
   an `@` is removed too. The title is replaced by the path unless
   `send_title` is on. The referrer is cut to its origin.
-- `/admin` never gets the tag (`exclude`).
+- The admin never gets the tag. The registration reads its path from
+  `src/modules/admin.rs` (`GtagConfig::exclude_path`), so a moved admin
+  needs no edit.
 - The tag is off until a deployment sets `enabled`, so a developer's visits
   are not counted.
 
@@ -198,7 +200,7 @@ module writes the policy. The `gtag` module needs nothing from it.
 | `consent_days` | `182` | The CNIL's six months. |
 | `send_title` | `false` | A title can hold a name or an order number. |
 | `allow_params` | the five `utm_*` | Campaign tracking keeps working; tokens, emails and search terms do not leave. |
-| `exclude` | `["/admin"]` | The backoffice is staff, not visitors. |
+| `exclude` | `[]` | The project's own paths. The admin is added in code, from its module file: the backoffice is staff, not visitors. |
 | `cookie_domain` | none | The domain Google's cookies live on, such as `example.co.uk`. Without it, the tag picks the domain, and withdrawal removes `_ga` cookies from the host and every parent domain (a browser ignores a public suffix such as `co.uk`). |
 | `consent_log` | none | A file for the consent log above. A server only. |
 | `banner.*` | English | Every string is a setting. With `i18n`, the catalogs override them per locale. |

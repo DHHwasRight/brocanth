@@ -215,7 +215,9 @@ impl Module for Csrf {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let exempt = if project.has("config") {
-            "        //     exempt = [\"/webhooks\"]    under [csrf] in config/<env>.toml\n"
+            // Not `/webhooks`: the `webhooks` module answers before this
+            // check and needs no entry, and its path is its own setting.
+            "        //     exempt = [\"/callbacks\"]    under [csrf] in config/<env>.toml\n"
         } else {
             "        //     a list has no flag: `brocanth add config` gives `exempt`\n\
              \x20       //     a home under [csrf] in config/<env>.toml\n"

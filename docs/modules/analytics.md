@@ -19,8 +19,10 @@ The wizard calls it: *Count page views on the server: no cookie, no script, no t
 | Crates | `brocanth-analytics` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no page-view counts; nothing is measured, so nothing needs consent |
 
-With [`admin`](admin.md), a tab at `/admin/analytics`, in the generated
-`plugins::admin_panels`. `integrate.admin` in `src/modules/analytics.rs` turns
+With [`admin`](admin.md), the admin is never counted: the registration
+calls `.exclude_path(crate::modules::admin::MODULE.mount_at)`, so a moved
+admin needs no edit ([module-config.md](../module-config.md) §9). Also a
+`analytics` tab in the admin, in the generated `plugins::admin_panels`. `integrate.admin` in `src/modules/analytics.rs` turns
 it off. `hooks.count` and `hooks.collect` in the same file turn off a hook: a
 server that only collects beacons sets `count: false`.
 
@@ -64,7 +66,7 @@ Section `[analytics]`. Environment variable: `$<APP>_ANALYTICS__<KEY>`. Flag: `-
 |---|---|---|---|---|
 | `enabled` | bool | `false` (the development file; the plugin's default is `true`) | `--analytics.enabled` | Count page views. Off installs no hook. |
 | `site` | text | the project name | `--analytics.site` | The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host. |
-| `exclude` | list | `["/admin"]` | none (list) | Paths never counted, each with everything under it. |
+| `exclude` | list | `[]` | none (list) | Paths never counted, each with everything under it. With `admin`, the registration adds the admin's `mount_at`, read from `src/modules/admin.rs`. |
 | `query_allow` | list | the five `utm_*` | none (list) | Query parameters kept on the stored path. Every other one is dropped. |
 | `retention_days` | integer | `760` | `--analytics.retention_days` | Days a row is kept. 0 keeps rows forever. |
 | `flush_interval` | integer | `10` | `--analytics.flush_interval` | Seconds between two writes of the buffer. |

@@ -47,7 +47,7 @@ Section `[sitemap]`. Environment variable: `$<APP>_SITEMAP__<KEY>`. Flag: `--sit
 |---|---|---|---|---|
 | `base_url` | text | `"http://localhost:3000"` | `--sitemap.base_url` | The site's address: scheme, host, and base path if any. |
 | `extra` | list | `[]` | none | More paths to list, such as the pages of a route with a parameter. |
-| `exclude` | list | `[]` (`/admin`, `/status`, `/realtime` with `admin`, `jt`, `realtime-sse`) | none | Path prefixes kept out of the sitemap. |
+| `exclude` | list | `[]` (`/status`, `/realtime` with `jt`, `realtime-sse`) | none | Path prefixes kept out of the sitemap. With `admin`, the plugin adds the admin's `mount_at`, read from `src/modules/admin.rs`. |
 
 Set `base_url` in production, or every `<loc>` names localhost. A base URL
 that is not a full `http(s)` address stops the build with a `help:` line.
