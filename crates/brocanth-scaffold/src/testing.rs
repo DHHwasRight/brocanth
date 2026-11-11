@@ -55,6 +55,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A generated project: `(path, contents)` per file, in the order the
 /// generator wrote them.
@@ -240,7 +241,14 @@ pub fn build(files: &Files) -> Result<(), String> {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "project".to_string());
-    let dir = std::env::temp_dir().join(format!("brocanth-testing-{name}-{}", std::process::id()));
+    // Tests run in parallel in one process, so the process id alone names
+    // one directory for all of them: a counter keeps each call apart.
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "brocanth-testing-{name}-{}-{}",
+        std::process::id(),
+        CALLS.fetch_add(1, Ordering::Relaxed)
+    ));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
