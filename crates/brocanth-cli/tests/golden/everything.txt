@@ -12696,9 +12696,9 @@ fn actor(_ctx: &Ctx) -> Option<String> {
 //! the address exists, because the expensive hash runs on both paths.
 //!
 //! `brocanth-auth` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no accounts and links nothing to hash a
-//! password with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no accounts and links nothing
+//! to hash a password with.
 //!
 //! # Signing somebody in
 //!
@@ -14343,8 +14343,9 @@ mod tests {
 //! rather than a decode failure on a worker at three in the morning.
 //!
 //! `brocanth-jobs` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application runs no jobs and links nothing to run them with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application runs no jobs and links nothing to
+//! run them with.
 //!
 //! # Enqueuing, and what does not work yet
 //!
@@ -15454,9 +15455,10 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
 //! add a file under `src/pages` and the document grows an operation.
 //!
 //! `brocanth-openapi` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs`, this file
-//! and `src/pages/openapi.json.rs`, and the application describes nothing and
-//! links nothing to describe it with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`,
+//! this file, `src/pages/openapi.json.rs` and `src/pages/openapi.yaml.rs`,
+//! and the application describes nothing and links nothing to describe it
+//! with.
 //!
 //! # What is derived, and what is not
 //!
@@ -15637,9 +15639,9 @@ impl Plugin for OpenApi {
 //! first; `Verified` is the second; the two are not alternatives.
 //!
 //! `brocanth-policy` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no rule algebra and links nothing to have one
-//! with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no rule algebra and links
+//! nothing to have one with.
 //!
 //! # The bug this file cannot have
 //!
@@ -15925,9 +15927,9 @@ impl Plugin for Policies {
 //! about 180 ms on Postgres at six hundred of them.
 //!
 //! `brocanth-realtime` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application broadcasts nothing and links nothing to do
-//! it with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application broadcasts nothing and links
+//! nothing to do it with.
 //!
 //! # Publishing
 //!
@@ -17272,9 +17274,9 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 //! touches the filesystem.
 //!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application stores no files and links nothing to store
-//! them with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application stores no files and links
+//! nothing to store them with.
 //!
 //! # Uploading
 //!
@@ -17806,9 +17808,9 @@ impl Plugin for Superuser {
 //! the check on the way in cannot drift apart.
 //!
 //! `brocanth-schema` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application validates nothing and links nothing to
-//! validate with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application validates nothing and links
+//! nothing to validate with.
 //!
 //! # The proof, and why a handler asks for it
 //!

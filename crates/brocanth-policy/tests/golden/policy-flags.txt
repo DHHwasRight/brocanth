@@ -2074,9 +2074,9 @@ pub const MODULE: Module = Module {
 //! first; `Verified` is the second; the two are not alternatives.
 //!
 //! `brocanth-policy` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no rule algebra and links nothing to have one
-//! with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no rule algebra and links
+//! nothing to have one with.
 //!
 //! # The bug this file cannot have
 //!

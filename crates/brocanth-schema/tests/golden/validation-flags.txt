@@ -2079,9 +2079,9 @@ pub const MODULE: Module = Module {
 //! the check on the way in cannot drift apart.
 //!
 //! `brocanth-schema` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application validates nothing and links nothing to
-//! validate with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application validates nothing and links
+//! nothing to validate with.
 //!
 //! # The proof, and why a handler asks for it
 //!

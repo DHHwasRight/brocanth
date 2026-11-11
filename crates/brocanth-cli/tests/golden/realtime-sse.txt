@@ -2347,9 +2347,9 @@ mod tests {
 //! about 180 ms on Postgres at six hundred of them.
 //!
 //! `brocanth-realtime` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application broadcasts nothing and links nothing to do
-//! it with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application broadcasts nothing and links
+//! nothing to do it with.
 //!
 //! # Publishing
 //!

@@ -2166,8 +2166,9 @@ concurrency = 5
 //! rather than a decode failure on a worker at three in the morning.
 //!
 //! `brocanth-jobs` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application runs no jobs and links nothing to run them with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application runs no jobs and links nothing to
+//! run them with.
 //!
 //! # Enqueuing, and what does not work yet
 //!

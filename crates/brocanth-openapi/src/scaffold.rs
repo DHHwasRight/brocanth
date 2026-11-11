@@ -251,9 +251,10 @@ fn plugin_rs(project: &Project) -> String {
 //! add a file under `src/pages` and the document grows an operation.
 //!
 //! `brocanth-openapi` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs`, this file
-//! and `src/pages/openapi.json.rs`, and the application describes nothing and
-//! links nothing to describe it with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`,
+//! this file, `src/pages/openapi.json.rs` and `src/pages/openapi.yaml.rs`,
+//! and the application describes nothing and links nothing to describe it
+//! with.
 //!
 //! # What is derived, and what is not
 //!

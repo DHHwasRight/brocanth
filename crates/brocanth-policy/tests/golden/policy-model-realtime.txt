@@ -2869,9 +2869,9 @@ impl Plugin for Model {
 //! first; `Verified` is the second; the two are not alternatives.
 //!
 //! `brocanth-policy` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no rule algebra and links nothing to have one
-//! with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no rule algebra and links
+//! nothing to have one with.
 //!
 //! # The bug this file cannot have
 //!
@@ -3157,9 +3157,9 @@ impl Plugin for Policies {
 //! about 180 ms on Postgres at six hundred of them.
 //!
 //! `brocanth-realtime` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application broadcasts nothing and links nothing to do
-//! it with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application broadcasts nothing and links
+//! nothing to do it with.
 //!
 //! # Publishing
 //!
