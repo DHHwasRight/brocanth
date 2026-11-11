@@ -1106,12 +1106,15 @@ install it. A required hook that a setting decides is still
 `Hook::required()`; say when it installs in its `what`, which the file's
 header prints.
 
-Hold the list to the code with a test under the `scaffold` feature:
+Hold the list to the code with a test.
 `brocanth::plugin_hooks::hook_names(&plugin)` returns the names the
 plugin registers. Configure the plugin so that every hook installs, and
-compare with `manifest().hooks`. `brocanth-middleware/tests/manifest_hooks.rs`
-is the example. Add `scaffold` to the crate's own dev-dependency, so
-`cargo test -p <crate>` runs it.
+compare with `manifest().hooks`. In this repository, one test does this
+for every module: `crates/brocanth-cli/tests/manifest_hooks.rs`. It fails
+for a module that declares a hook, or hooks in a golden project, and has
+no row there, so add a row for a new module. A crate outside the
+repository writes the same comparison in its own tests, under its
+`scaffold` feature; the `names` function of that file is the pattern.
 
 **Integrations.** Write the code only when the host is in the project,
 and through `snippet::integration`, which puts it behind the guard:
@@ -1248,6 +1251,14 @@ fn the_module_writes_this_project() {
 `crates/brocanth-robots/tests/scaffold.rs` uses it: the two `robots`
 shapes and their goldens moved there from the CLI. It also generates a
 module that the CLI does not list.
+
+In this repository, `mise run generated` runs the builds. It sets
+`BROCANTH_BUILD=1` and one `BROCANTH_BUILD_TARGET` under `target/`, then
+runs each crate test that calls `testing::build` and the CLI's
+`the_golden_shapes_build_and_pass_their_own_tests`. It finds the crate
+tests with `grep`, so a new test that calls `testing::build` runs without
+a change to the task. `mise run ci` includes it. The runs are sequential,
+because two processes must not share one target directory.
 
 `brocanth-cli` is a binary and a library. The library compiles the same
 modules and exposes only `testing`; its unit tests run in the binary. A

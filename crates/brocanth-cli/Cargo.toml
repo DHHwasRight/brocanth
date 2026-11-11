@@ -129,3 +129,12 @@ toml_edit = "0.25"
 # runs, so a scaffold whose own loader would reject its own file cannot ship.
 brocanth.workspace = true
 brocanth-config = { path = "../brocanth-config", version = "0.1.0" }
+# The hooking plugins, for tests/manifest_hooks.rs alone: it builds each
+# plugin and compares the hooks it registers with the hooks its module
+# declares. The runtime side, without databases.
+brocanth-analytics = { workspace = true, features = ["runtime"] }
+brocanth-audit = { workspace = true, features = ["runtime"] }
+brocanth-errors = { workspace = true, features = ["runtime"] }
+brocanth-gtag = { workspace = true }
+brocanth-i18n = { workspace = true, features = ["plugin"] }
+brocanth-middleware = { workspace = true, features = ["compression"] }
