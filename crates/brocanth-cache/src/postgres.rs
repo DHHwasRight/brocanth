@@ -61,7 +61,8 @@ fn postgres_url(url: &str) -> Result<()> {
     Err(CacheError::Config(format!(
         "`{}` is not a Postgres URL. brocanth-cache is Postgres only on \
          purpose; a cache for a SQLite deployment is a separate crate \
-         implementing the same `Cache` trait.",
+         implementing the same `Cache` trait.\n\
+         help: use a `postgres://` URL, or implement `Cache` over the other store",
         url.split(':').next().unwrap_or(url)
     )))
 }
@@ -94,7 +95,16 @@ impl PgCache {
     /// [`CacheError::Backend`] for a URL the driver cannot parse.
     pub fn connect_lazy(url: &str) -> Result<Self> {
         postgres_url(url)?;
-        Ok(Self::from_pool(PgPool::connect_lazy(url)?))
+        let pool = PgPool::connect_lazy(url).map_err(|e| {
+            CacheError::Backend(
+                format!(
+                    "the Postgres URL does not parse: {e}\n\
+                     help: write `postgres://user:password@host:5432/database`"
+                )
+                .into(),
+            )
+        })?;
+        Ok(Self::from_pool(pool))
     }
 
     /// Builds a cache on a pool the application already has.

@@ -210,7 +210,8 @@ impl<L: Locales> Negotiate<L> {
             }
             *request.uri_mut() = target.parse().map_err(|_| {
                 PluginError::new(format!(
-                    "i18n: `{target}`, the path without its locale, is not a URI"
+                    "i18n: `{target}`, the path without its locale, is not a URI\n\
+                     help: this is a bug in brocanth-i18n; report it with this path"
                 ))
             })?;
             record(
@@ -241,7 +242,12 @@ impl<L: Locales> Negotiate<L> {
             .status(307)
             .header(LOCATION, location)
             .body(Vec::new().into())
-            .map_err(|e| PluginError::new(format!("i18n: the redirect is not a response: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "i18n: the redirect is not a response: {e}\n\
+                     help: this is a bug in brocanth-i18n; report it with this message"
+                ))
+            })?;
         Ok(Flow::respond(response))
     }
 }
@@ -295,7 +301,8 @@ impl<L: Locales> ResponseHook for Stamp<L> {
         if !head.headers.contains_key(CONTENT_LANGUAGE) {
             let tag = HeaderValue::from_str(negotiated.locale.tag()).map_err(|_| {
                 PluginError::new(format!(
-                    "i18n: the locale tag `{}` is not a header value",
+                    "i18n: the locale tag `{}` is not a header value\n\
+                     help: name the locale with a BCP 47 tag, such as `fr` or `pt-BR`, in the catalog",
                     negotiated.locale.tag()
                 ))
             })?;

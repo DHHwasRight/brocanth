@@ -2664,7 +2664,8 @@ impl Plugin for Policies {
             "sqlite" => Dialect::Sqlite,
             other => {
                 return Err(PluginError::new(format!(
-                    "[policy] dialect is {other:?}; write postgres or sqlite"
+                    "[policy] dialect is {other:?}, which is not a SQL dialect\n\
+                     help: set `dialect` under [policy] to postgres or sqlite"
                 )))
             }
         };
@@ -2677,7 +2678,12 @@ impl Plugin for Policies {
         let condition = PostPolicy
             .list(&Visitor::anonymous())
             .condition::<Post>(dialect)
-            .map_err(|e| PluginError::new(format!("[policy] posts: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "[policy] posts: {e}\n\
+                     help: fix the rule in `PostPolicy` above: a column is a bare identifier, and every value binds"
+                ))
+            })?;
         let sql = condition.sql();
         crate::plugins::say!(info, "[policy] posts, anonymous: {sql}"; sql);
 

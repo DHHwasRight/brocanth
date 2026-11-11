@@ -2230,7 +2230,10 @@ impl Plugin for Cache {
             return Ok(());
         };
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!("[cache] needs a Tokio runtime to sweep ({e})"))
+            PluginError::new(format!(
+                "[cache] needs a Tokio runtime to sweep ({e})\n\
+                 help: build the application inside the runtime that serves it"
+            ))
         })?;
         let on_error = |e: &brocanth_cache::CacheError| {
             crate::plugins::say!(warn, "[cache] sweep: {e}"; error = %e);

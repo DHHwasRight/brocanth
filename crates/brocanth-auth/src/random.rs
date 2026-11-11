@@ -27,7 +27,11 @@ pub const SECRET_BYTES: usize = 32;
 /// worse than a failed request.
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, AuthError> {
     let mut buf = vec![0u8; n];
-    getrandom::fill(&mut buf).map_err(|e| AuthError::crypto(format!("no OS randomness: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| {
+        AuthError::crypto(format!(
+            "no OS randomness: {e}\nhelp: let the process read the OS random source (getrandom(2) or /dev/urandom)"
+        ))
+    })?;
     Ok(buf)
 }
 

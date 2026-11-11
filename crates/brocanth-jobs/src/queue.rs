@@ -197,7 +197,14 @@ impl Queue {
         match scheme {
             #[cfg(feature = "postgres")]
             "postgres" | "postgresql" => Ok(Self::from_pool(
-                sqlx::postgres::PgPoolOptions::new().connect_lazy(url)?,
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy(url)
+                    .map_err(|e| {
+                        Error::Backend(format!(
+                            "the Postgres URL does not parse: {e}\n\
+                             help: write `postgres://user:password@host:5432/database`"
+                        ))
+                    })?,
             )),
             #[cfg(not(feature = "postgres"))]
             "postgres" | "postgresql" => Err(Error::Backend(

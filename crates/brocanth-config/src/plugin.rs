@@ -228,7 +228,12 @@ impl Plugin for ConfigPlugin {
         let claims = self
             .claims
             .lock()
-            .map_err(|_| PluginError::new("the configuration claim list is poisoned"))?
+            .map_err(|_| {
+                PluginError::new(
+                    "the configuration claim list is poisoned\n\
+                     help: a plugin panicked while it claimed a section; read the panic message above",
+                )
+            })?
             .clone();
 
         self.config

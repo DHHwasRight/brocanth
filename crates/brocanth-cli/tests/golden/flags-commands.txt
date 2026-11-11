@@ -2335,7 +2335,10 @@ impl Plugin for Sessions {
         if self.cookie.is_empty() {
             // A missing or ill-typed key fails at startup, not at first use,
             // and the plugin never quietly chooses a name the operator did not.
-            return Err(PluginError::new("[sessions] cookie must not be empty"));
+            return Err(PluginError::new(
+                "[sessions] cookie must not be empty\n\
+                 help: set `cookie` under [sessions] in the config file, such as \"_session\"",
+            ));
         }
         Ok(())
     }

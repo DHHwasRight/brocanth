@@ -131,7 +131,13 @@ impl PgStore {
     /// driver cannot parse it.
     pub fn connect_lazy(url: &str) -> Result<Self, StoreError> {
         postgres_url(url)?;
-        Ok(Self::from_pool(PgPool::connect_lazy(url).map_err(backend)?))
+        let pool = PgPool::connect_lazy(url).map_err(|e| {
+            StoreError::backend(format!(
+                "the Postgres URL does not parse: {e}\n\
+                 help: write `postgres://user:password@host:5432/database`"
+            ))
+        })?;
+        Ok(Self::from_pool(pool))
     }
 
     /// Runs `SELECT 1` on a pooled connection. For a readiness check.

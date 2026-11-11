@@ -129,12 +129,16 @@ impl CorsConfig {
         if self.credentials && self.origins == Origins::Any {
             return Err(
                 "credentials cannot be allowed for every origin: name the origins instead \
-                 of `Origins::Any`, because a browser refuses `*` with credentials",
+                 of `Origins::Any`, because a browser refuses `*` with credentials\n\
+                 help: name the origins with `Origins::These`, or set `credentials` to false",
             );
         }
         if let Origins::These(list) = &self.origins {
             if list.is_empty() {
-                return Err("no origin is allowed, so every cross-origin request is refused");
+                return Err(
+                    "no origin is allowed, so every cross-origin request is refused\n\
+                     help: name at least one origin in `Origins::These`, or leave the plugin out",
+                );
             }
         }
         Ok(())
@@ -301,10 +305,10 @@ impl ResponseHook for Hook {
 
 fn put(headers: &mut http::HeaderMap, name: &'static str, value: &str) -> Result<(), PluginError> {
     let value = http::HeaderValue::from_str(value).map_err(|_| {
-        PluginError::new(format!(
-            "cors: {}",
-            "a configured value is not a header value"
-        ))
+        PluginError::new(
+            "cors: a configured value is not a header value\n\
+             help: remove control characters and non-ASCII text from the origins, methods and headers",
+        )
     })?;
     headers.insert(http::header::HeaderName::from_static(name), value);
     Ok(())

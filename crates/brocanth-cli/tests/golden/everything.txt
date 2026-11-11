@@ -12937,7 +12937,8 @@ impl Plugin for Auth {
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.url.is_empty() {
             return Err(PluginError::new(
-                "[auth] url is required; accounts live in a Postgres database",
+                "[auth] url is required; accounts live in a Postgres database\n\
+                 help: set `url` under [auth] in the config file, or the variable for `auth.url`",
             ));
         }
         Ok(())
@@ -12945,7 +12946,10 @@ impl Plugin for Auth {
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {
-            return Err(PluginError::new("[auth] cookie_name must not be empty"));
+            return Err(PluginError::new(
+                "[auth] cookie_name must not be empty\n\
+                 help: set `cookie_name` under [auth] in the config file, such as \"__Host-session\"",
+            ));
         }
         // A `__Host-` cookie is `Secure` by definition, so a configuration
         // where the two disagree produces a cookie no browser stores and a
@@ -12953,8 +12957,8 @@ impl Plugin for Auth {
         // can still be answered.
         if self.settings.cookie_name.starts_with("__Host-") && !self.settings.secure {
             return Err(PluginError::new(
-                "[auth] a __Host- cookie is Secure by definition; set secure = true, \
-                 or drop the prefix for plain-HTTP development",
+                "[auth] a __Host- cookie is Secure by definition, and secure is false\n\
+                 help: set secure = true under [auth], or drop the prefix for plain-HTTP development",
             ));
         }
 
@@ -12963,24 +12967,34 @@ impl Plugin for Auth {
             // Rejected rather than stretched. Padding a four-character secret
             // to 32 bytes is how a deployment ends up with a forgeable cookie
             // and no warning anywhere.
-            Ok(raw) => SigningKey::parse(&raw)
-                .map_err(|e| PluginError::new(format!("[auth] ${name}: {e}")))?,
+            Ok(raw) => SigningKey::parse(&raw).map_err(|e| {
+                PluginError::new(format!(
+                    "[auth] ${name}: {e}\n\
+                     help: set it to 32 random bytes, base64url:\n  \
+                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+                ))
+            })?,
             // This project's own tests build the application with no secret
             // in the environment. The key is fixed and public, and `cfg(test)`
             // keeps it out of every binary.
             Err(_) if cfg!(test) => SigningKey::from_bytes([7; 32]),
             Err(_) => {
                 return Err(PluginError::new(format!(
-                    "[auth] ${name} is not set. It is 32 random bytes, base64url:\n  \
-                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')\n\
-                     There is no default: a key invented at startup would log every session \
-                     out on each restart and differ between the instances of a fleet."
+                    "[auth] ${name} is not set. There is no default: a key invented at startup \
+                     would log every session out on each restart and differ between the \
+                     instances of a fleet.\n\
+                     help: set it to 32 random bytes, base64url:\n  \
+                     export {name}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
                 )));
             }
         };
 
-        let passwords = Passwords::recommended()
-            .map_err(|e| PluginError::new(format!("[auth] argon2id: {e}")))?;
+        let passwords = Passwords::recommended().map_err(|e| {
+            PluginError::new(format!(
+                "[auth] argon2id: {e}\n\
+                 help: the parameters are brocanth-auth's own, so this is a bug; report it with this message"
+            ))
+        })?;
 
         let session = SessionConfig {
             cookie_name: self.settings.cookie_name.clone(),
@@ -13004,7 +13018,8 @@ impl Plugin for Auth {
         // spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[auth] needs a Tokio runtime at startup to open its pool ({e})"
+                "[auth] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let store = {
@@ -13774,7 +13789,8 @@ impl Plugin for Cache {
         // Its task is spawned on the runtime, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[cache] needs a Tokio runtime at startup to connect ({e})"
+                "[cache] needs a Tokio runtime at startup to connect ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let cache = {
@@ -13940,7 +13956,8 @@ impl Plugin for Database {
         // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[db] needs a Tokio runtime at startup to open its pool ({e})"
+                "[db] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let db = {
@@ -14002,10 +14019,20 @@ impl Plugin for Database {
             scope
                 .spawn(|| runtime.block_on(close))
                 .join()
-                .map_err(|_| PluginError::new("[db] the closing thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "[db] the closing thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })?
         .then_some(())
-        .ok_or_else(|| PluginError::new("[db] connections were still in use at the deadline"))
+        .ok_or_else(|| {
+            PluginError::new(
+                "[db] connections were still in use at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], or end the work that holds a connection",
+            )
+        })
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
@@ -14514,8 +14541,8 @@ impl Plugin for Jobs {
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.worker && self.settings.queues.is_empty() {
             return Err(PluginError::new(
-                "[jobs] worker is true and queues is empty, so the worker would claim \
-                 nothing; name a queue or set worker = false",
+                "[jobs] worker is true and queues is empty, so the worker would claim nothing\n\
+                 help: name a queue in `queues` under [jobs], or set worker = false",
             ));
         }
         Ok(())
@@ -14605,7 +14632,12 @@ impl Plugin for Jobs {
             scope
                 .spawn(|| runtime.block_on(finished))
                 .join()
-                .map_err(|_| PluginError::new("[jobs] the stopping thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "[jobs] the stopping thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })?;
         match ended {
             Some(Ok(report)) => {
@@ -14618,9 +14650,13 @@ impl Plugin for Jobs {
                 );
                 Ok(())
             }
-            Some(Err(e)) => Err(PluginError::new(format!("[jobs] stopping the worker: {e}"))),
+            Some(Err(e)) => Err(PluginError::new(format!(
+                "[jobs] stopping the worker: {e}\n\
+                 help: read the panic message above; it names the cause"
+            ))),
             None => Err(PluginError::new(
-                "[jobs] the worker was still giving jobs back at the deadline",
+                "[jobs] the worker was still giving jobs back at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], so the worker has time to give them back",
             )),
         }
     }
@@ -15595,7 +15631,10 @@ impl Plugin for OpenApi {
         // The same function `src/app.rs` builds the live table with, so the
         // document describes what this binary actually dispatches.
         let router = crate::pages::router().map_err(|e| {
-            PluginError::new(format!("[openapi] the route table does not build: {e}"))
+            PluginError::new(format!(
+                "[openapi] the route table does not build: {e}\n\
+                 help: fix the route it names under src/pages/; the server refuses the same table"
+            ))
         })?;
         let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
@@ -15628,9 +15667,12 @@ impl Plugin for OpenApi {
             });
         }
 
-        let document = spec
-            .build()
-            .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
+        let document = spec.build().map_err(|e| {
+            PluginError::new(format!(
+                "[openapi] deriving the document: {e}\n\
+                 help: fix the route or the description it names in this file"
+            ))
+        })?;
 
         // The crate's own plugin, held rather than registered. Its
         // `configure` is what makes an invalid document a build failure
@@ -15915,7 +15957,8 @@ impl Plugin for Policies {
             "sqlite" => Dialect::Sqlite,
             other => {
                 return Err(PluginError::new(format!(
-                    "[policy] dialect is {other:?}; write postgres or sqlite"
+                    "[policy] dialect is {other:?}, which is not a SQL dialect\n\
+                     help: set `dialect` under [policy] to postgres or sqlite"
                 )))
             }
         };
@@ -15928,7 +15971,12 @@ impl Plugin for Policies {
         let condition = PostPolicy
             .list(&Visitor::anonymous())
             .condition::<Post>(dialect)
-            .map_err(|e| PluginError::new(format!("[policy] posts: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "[policy] posts: {e}\n\
+                     help: fix the rule in `PostPolicy` above: a column is a bare identifier, and every value binds"
+                ))
+            })?;
         let sql = condition.sql();
         crate::plugins::say!(info, "[policy] posts, anonymous: {sql}"; sql);
 
@@ -16080,19 +16128,21 @@ impl Plugin for Realtime {
             "disconnect" => Overflow::Disconnect,
             other => {
                 return Err(PluginError::new(format!(
-                    "[realtime] overflow is {other:?}; write drop-oldest, \
-                     drop-newest or disconnect"
+                    "[realtime] overflow is {other:?}, which is not a policy\n\
+                     help: set `overflow` under [realtime] to drop-oldest, drop-newest or disconnect"
                 )))
             }
         };
         if self.settings.queue == 0 {
             return Err(PluginError::new(
-                "[realtime] queue must hold at least one frame",
+                "[realtime] queue is 0, and it must hold at least one frame\n\
+                 help: set `queue` under [realtime] to 1 or more, such as 32",
             ));
         }
         if self.settings.max_clients == 0 {
             return Err(PluginError::new(
-                "[realtime] max_clients is 0, so every connection is refused",
+                "[realtime] max_clients is 0, so every connection is refused\n\
+                 help: set `max_clients` under [realtime] to 1 or more, such as 1000",
             ));
         }
         // Synchronous, allocating a few maps, needing no runtime. Unlike a
@@ -17035,7 +17085,10 @@ impl Plugin for Sessions {
         if self.cookie.is_empty() {
             // A missing or ill-typed key fails at startup, not at first use,
             // and the plugin never quietly chooses a name the operator did not.
-            return Err(PluginError::new("[sessions] cookie must not be empty"));
+            return Err(PluginError::new(
+                "[sessions] cookie must not be empty\n\
+                 help: set `cookie` under [sessions] in the config file, such as \"_session\"",
+            ));
         }
         Ok(())
     }
@@ -17447,7 +17500,8 @@ impl Plugin for Files {
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.root.is_empty() {
             return Err(PluginError::new(
-                "[storage] root is required; there is no default directory",
+                "[storage] root is required; there is no default directory\n\
+                 help: set `root` under [storage] in the config file, such as \"var/uploads\"",
             ));
         }
         if self.settings.secret.is_empty() {
@@ -17455,12 +17509,14 @@ impl Plugin for Files {
             // stores: addresses stop being keyed, and a token key of no bytes
             // signs tokens anybody can forge.
             return Err(PluginError::new(
-                "[storage] secret is required; it signs file tokens and keys object addresses",
+                "[storage] secret is required; it signs file tokens and keys object addresses\n\
+                 help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
         if self.settings.token_ttl <= 0 {
             return Err(PluginError::new(
-                "[storage] token_ttl must be at least one second, or no token is ever valid",
+                "[storage] token_ttl must be at least one second, or no token is ever valid\n\
+                 help: set `token_ttl` under [storage] to 1 or more seconds",
             ));
         }
         // Synchronous: `std::fs`, a `create_dir_all` and a `canonicalize`.
@@ -17468,7 +17524,11 @@ impl Plugin for Files {
         // `before_start`.
         let disk = LocalDisk::open(&self.settings.root)
             .map_err(|e| {
-                PluginError::new(format!("[storage] opening {:?}: {e}", self.settings.root))
+                PluginError::new(format!(
+                    "[storage] opening {:?}: {e}\n\
+                     help: set `root` under [storage] to a directory this process can create and write",
+                    self.settings.root
+                ))
             })?
             .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
         let store: Arc<dyn Storage> = Arc::new(disk);
@@ -17965,7 +18025,8 @@ impl Plugin for Validation {
             "form" => ReportStyle::Form,
             other => {
                 return Err(PluginError::new(format!(
-                    "[validation] report is {other:?}; write json or form"
+                    "[validation] report is {other:?}, which is not a report style\n\
+                     help: set `report` under [validation] to json or form"
                 )))
             }
         };

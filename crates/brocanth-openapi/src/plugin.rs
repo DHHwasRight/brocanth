@@ -225,19 +225,23 @@ impl Plugin for OpenApiPlugin {
         // An invalid document is a build failure, not a 500 somebody finds
         // later. `configure` is the first hook of the first stage, so this
         // runs before any plugin opens a socket.
-        self.document
-            .validate()
-            .map_err(|error| PluginError::new(error.to_string()))?;
+        self.document.validate().map_err(|error| {
+            PluginError::new(format!(
+                "{error}\nhelp: fix each problem above in the code that describes the routes"
+            ))
+        })?;
         for path in [&self.json_route, &self.yaml_route] {
             if !path.starts_with('/') {
                 return Err(PluginError::new(format!(
-                    "the openapi route `{path}` does not start with `/`"
+                    "the openapi route `{path}` does not start with `/`\n\
+                     help: write it from the root of the site, such as \"/openapi.json\""
                 )));
             }
         }
         if self.json_route == self.yaml_route {
             return Err(PluginError::new(format!(
-                "the JSON and YAML documents cannot both be served at `{}`",
+                "the JSON and YAML documents cannot both be served at `{}`\n\
+                 help: give each document its own route",
                 self.json_route
             )));
         }

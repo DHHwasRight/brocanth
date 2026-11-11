@@ -270,12 +270,21 @@ impl Plugin for JobsPlugin {
             scope
                 .spawn(|| runtime.block_on(finished))
                 .join()
-                .map_err(|_| PluginError::new("the jobs stopping thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "the jobs stopping thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })? {
             Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => Err(PluginError::new(format!("stopping the job workers: {e}"))),
+            Some(Err(e)) => Err(PluginError::new(format!(
+                "stopping the job workers: {e}\n\
+                 help: read the panic message above; it names the cause"
+            ))),
             None => Err(PluginError::new(
-                "the job workers were still giving jobs back at the deadline",
+                "the job workers were still giving jobs back at the deadline\n\
+                 help: give the shutdown a longer grace period, so the workers have time to give them back",
             )),
         }
     }

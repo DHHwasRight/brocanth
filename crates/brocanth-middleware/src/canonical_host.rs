@@ -126,7 +126,10 @@ impl RequestHook for Hook {
         response.headers_mut().insert(
             http::header::LOCATION,
             http::HeaderValue::from_str(&target).map_err(|_| {
-                PluginError::new(format!("canonical-host: {}", "the target is not a URL"))
+                PluginError::new(
+                    "canonical-host: the target is not a URL\n\
+                     help: give `CanonicalHostConfig::to` a scheme and a host only, such as \"https://example.com\"",
+                )
             })?,
         );
         Ok(Flow::respond(response))

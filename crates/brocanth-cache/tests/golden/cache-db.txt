@@ -2902,7 +2902,10 @@ impl Plugin for Cache {
             return Ok(());
         };
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!("[cache] needs a Tokio runtime to sweep ({e})"))
+            PluginError::new(format!(
+                "[cache] needs a Tokio runtime to sweep ({e})\n\
+                 help: build the application inside the runtime that serves it"
+            ))
         })?;
         let on_error = |e: &brocanth_cache::CacheError| {
             crate::plugins::say!(warn, "[cache] sweep: {e}"; error = %e);
@@ -3057,7 +3060,8 @@ impl Plugin for Database {
         // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[db] needs a Tokio runtime at startup to open its pool ({e})"
+                "[db] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let db = {
@@ -3119,10 +3123,20 @@ impl Plugin for Database {
             scope
                 .spawn(|| runtime.block_on(close))
                 .join()
-                .map_err(|_| PluginError::new("[db] the closing thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "[db] the closing thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })?
         .then_some(())
-        .ok_or_else(|| PluginError::new("[db] connections were still in use at the deadline"))
+        .ok_or_else(|| {
+            PluginError::new(
+                "[db] connections were still in use at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], or end the work that holds a connection",
+            )
+        })
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {

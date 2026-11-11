@@ -323,7 +323,10 @@ impl HookSource for FlashPlugin {
             _ => {
                 let mut bytes = vec![0u8; 32];
                 getrandom::fill(&mut bytes).map_err(|e| {
-                    PluginError::new(format!("flash: no OS randomness for a key: {e}"))
+                    PluginError::new(format!(
+                        "flash: no OS randomness for a key: {e}\n\
+                         help: set the variable that `key_env` names, or let the process read the OS random source"
+                    ))
                 })?;
                 bytes
             }
@@ -426,8 +429,12 @@ impl Hook {
         if self.config.secure {
             line.push_str("; Secure");
         }
-        let value = http::HeaderValue::from_str(&line)
-            .map_err(|_| PluginError::new("flash: the cookie is not a header value"))?;
+        let value = http::HeaderValue::from_str(&line).map_err(|_| {
+            PluginError::new(
+                "flash: the cookie is not a header value\n\
+                 help: set `cookie` under [flash] to letters, digits, `_` and `-`",
+            )
+        })?;
         head.headers.append(http::header::SET_COOKIE, value);
         Ok(())
     }

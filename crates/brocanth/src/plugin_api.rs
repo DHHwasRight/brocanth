@@ -244,7 +244,8 @@ impl<'a> Lifecycle<'a> {
         self.services.get::<T>().ok_or_else(|| {
             PluginError::new(format!(
                 "`{}` needs `{}` in the application's services, and no registered plugin \
-                 published one; the plugin that provides it has to be named in `main` too",
+                 published one\n\
+                 help: register the plugin that provides it, before this one",
                 self.instance,
                 type_name::<T>(),
             ))
@@ -266,7 +267,8 @@ impl<'a> Lifecycle<'a> {
             None => String::new(),
         };
         Err(PluginError::new(format!(
-            "`{}` needs the instance `{}`, which is not registered{}; registered: {}",
+            "`{}` needs the instance `{}`, which is not registered{}; registered: {}\n\
+             help: register that instance, or fix the name this plugin asks for",
             self.instance,
             name,
             hint,

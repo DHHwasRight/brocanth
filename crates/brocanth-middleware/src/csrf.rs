@@ -293,7 +293,11 @@ impl HookSource for Csrf {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         self.config
             .check()
-            .map_err(|why| PluginError::new(format!("csrf: {}", why)))?;
+            .map_err(|why| {
+                PluginError::new(format!(
+                    "csrf: {why}\nhelp: set `cookie`, `field` and `header` under [csrf] to letters, digits, `_` and `-`"
+                ))
+            })?;
         registrar.request(
             "check",
             // After the method override, so a POST that asked to be a
@@ -449,8 +453,12 @@ impl ResponseHook for Hook {
         if self.config.secure {
             cookie.push_str("; Secure");
         }
-        let value = http::HeaderValue::from_str(&cookie)
-            .map_err(|_| PluginError::new("csrf: the cookie is not a header value"))?;
+        let value = http::HeaderValue::from_str(&cookie).map_err(|_| {
+            PluginError::new(
+                "csrf: the cookie is not a header value\n\
+                 help: set `cookie` under [csrf] to letters, digits, `_` and `-`",
+            )
+        })?;
         head.headers.append(http::header::SET_COOKIE, value);
         Ok(())
     }
@@ -500,8 +508,12 @@ fn ours(value: &str) -> bool {
 /// line saying why.
 fn mint() -> Result<String, PluginError> {
     let mut bytes = [0u8; TOKEN_BYTES];
-    getrandom::fill(&mut bytes)
-        .map_err(|e| PluginError::new(format!("csrf: no OS randomness, so no token: {e}")))?;
+    getrandom::fill(&mut bytes).map_err(|e| {
+        PluginError::new(format!(
+            "csrf: no OS randomness, so no token: {e}\n\
+             help: let the process read the OS random source (getrandom(2) or /dev/urandom)"
+        ))
+    })?;
     let mut out = String::with_capacity(TOKEN_CHARS);
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble is one hex digit"));
