@@ -5919,9 +5919,20 @@ mod tests {
             for step in [lint, &["test"][..], &["async-page"][..], lint, streams] {
                 if step == ["async-page"] {
                     std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
-                    std::fs::write(root.join("src/pages/ticks.rs"), STREAM_PAGE).unwrap();
+                    // With `i18n-routing`, a path without a locale answers
+                    // 307, so a page's test asks for the default one.
+                    let localized = |page: &str, path: &str| {
+                        if picks.contains(&"i18n-routing") {
+                            page.replace(&format!("\"{path}\""), &format!("\"/en{path}\""))
+                        } else {
+                            page.to_string()
+                        }
+                    };
+                    let ticks = localized(STREAM_PAGE, "/ticks");
+                    std::fs::write(root.join("src/pages/ticks.rs"), ticks).unwrap();
                     if has_db {
-                        std::fs::write(root.join("src/pages/pinged.rs"), DB_PAGE).unwrap();
+                        let pinged = localized(DB_PAGE, "/pinged");
+                        std::fs::write(root.join("src/pages/pinged.rs"), pinged).unwrap();
                         // Without a config file, the same values come from
                         // the environment; see `closed_db` above.
                         let config = root.join("config/development.toml");
