@@ -4724,7 +4724,10 @@ fn warn_hookless_fn(a: &Answers, built: &Built) -> Option<String> {
             shape.key
         );
         let say = format!("crate::plugins::say!(warn, {message});");
-        let say = if 8 + say.len() <= 100 {
+        // rustfmt keeps a call on one line when it fits in 100 columns and
+        // its arguments in 60 (`fn_call_width`), macros included.
+        let args = "warn, ".len() + message.len();
+        let say = if 8 + say.len() <= 100 && args <= 60 {
             format!("        {say}\n")
         } else {
             format!("        crate::plugins::say!(\n            warn,\n            {message}\n        );\n")
