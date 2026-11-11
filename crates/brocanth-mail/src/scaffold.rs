@@ -471,6 +471,10 @@ impl Outbox {
     }
 
     /// Sends the message now, and waits for the transport to take it.
+    ///
+    /// `allow(dead_code)`: it is here for the first page that sends at once,
+    /// and a project that only queues mail has none.
+    #[allow(dead_code)]
     pub async fn send(&self, message: &Message) -> Result<(), MailError> {
         self.mail.send(message).await
     }
@@ -478,6 +482,7 @@ impl Outbox {
 @DELIVER_LATER@
 
     /// Where mail goes: `smtp`, `log` or `folder`.
+    #[allow(dead_code)]
     pub fn transport(&self) -> &str {
         &self.transport
     }
