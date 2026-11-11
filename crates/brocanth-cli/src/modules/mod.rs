@@ -180,6 +180,12 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_webhooks::scaffold::Webhooks,
     &brocanth_webhooks::scaffold::WebhooksIn,
     &brocanth_webhooks::scaffold::WebhooksOut,
+    // An OAuth 2.0 client for third-party APIs, not a sign-in: connect
+    // pages, sealed tokens, one refresh per key. After the admin, whose
+    // connections tab is an integration of `oauth-client`.
+    &brocanth_oauth_client::scaffold::Oauth,
+    &brocanth_oauth_client::scaffold::OauthClient,
+    &brocanth_oauth_client::scaffold::OauthClientMemory,
     // The broker, and no transport: see its own module documentation for
     // what the core must change before there is one.
     &brocanth_realtime::scaffold::Realtime,

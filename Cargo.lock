@@ -915,6 +915,7 @@ dependencies = [
  "brocanth-mail",
  "brocanth-meta",
  "brocanth-middleware",
+ "brocanth-oauth-client",
  "brocanth-observe",
  "brocanth-openapi",
  "brocanth-pagination",

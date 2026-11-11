@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 71 modules. Each name links to its own page
+what to build next. There are 74 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -64,7 +64,7 @@ nothing holds this page.
 | [`pagination`](modules/pagination.md) | Offset and keyset pages, with links that keep the query; the admin and `resource` page with it too |  |  |  | static-site safe |
 | [`filters`](modules/filters.md) | Typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE |  |  | needs `policy`: a filter is a `Pred` over a policy entity's columns | static-site safe |
 
-### Routes (13)
+### Routes (14)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -72,6 +72,7 @@ nothing holds this page.
 | [`admin-model`](modules/admin-model.md) | The admin's rows over SeaORM, one line per entity |  |  | part of `admin`, off until you tick it; needs `model`: it reads rows through the ORM, and without `model` there is none |  |
 | [`auth-oauth`](modules/auth-oauth.md) | Sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Enhancer |  | part of `auth`, off until you tick it |  |
 | [`auth-screens`](modules/auth-screens.md) | Sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account | Enhancer |  | part of `auth`, off until you tick it | needs `rsx`, `input`, `middleware-csrf`, `mail`, `flash` |
+| [`oauth-client`](modules/oauth-client.md) | Connect pages at /connections; tokens sealed in Postgres, refreshed once, sent as a bearer | Enhancer |  | part of `oauth`, ticked with its parent; needs `auth`: a connection belongs to a signed-in account; `db`: the tokens are rows | with `admin`: a connections tab |
 | [`observability-health`](modules/observability-health.md) | /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM |  | yes | part of `observability`, ticked with its parent |  |
 | [`observability-metrics`](modules/observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues |  | yes | part of `observability`, ticked with its parent |  |
 | [`openapi`](modules/openapi.md) | An OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Enhancer |  |  |  |
@@ -82,7 +83,7 @@ nothing holds this page.
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
-### Enhancer (21)
+### Enhancer (23)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -106,6 +107,8 @@ nothing holds this page.
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
 | [`webhooks`](modules/webhooks.md) | Signed webhooks in both directions; pick a direction below |  |  |  |  |
 | [`webhooks-out`](modules/webhooks-out.md) | Signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs |  |  | part of `webhooks`, off until you tick it; needs `db`: the endpoints and the log are rows; `jobs`: a delivery is a job | with `admin`: a deliveries tab |
+| [`oauth`](modules/oauth.md) | An OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below |  |  |  |  |
+| [`oauth-client-memory`](modules/oauth-client-memory.md) | The connected accounts in this process's memory; for tests and development, gone at restart |  |  | part of `oauth`, off until you tick it; needs `oauth-client` | `check --deploy` refuses it |
 | [`superuser`](modules/superuser.md) | Operator accounts that pass every admin check, and a createsuperuser command |  |  | needs `auth`: a superuser is an account with a flag, and `auth` holds the accounts |  |
 
 ### External (6)

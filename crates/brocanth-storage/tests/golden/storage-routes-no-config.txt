@@ -47,6 +47,8 @@ edition = "2021"
 #   brocanth-webhooks     no webhooks; a payment provider or a partner has no verified way in or out
 #   webhooks-in           no incoming webhooks; a sender's POST meets the CSRF check and is refused
 #   webhooks-out          no outgoing webhooks; a partner polls for what changed
+#   oauth                 no OAuth client; a call to a third-party API carries a token you manage by hand
+#   oauth-client          no connected accounts; nothing calls a provider's API for a person
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
@@ -2729,7 +2731,7 @@ request.
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 - `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2796,7 +2798,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ea3305c477a9a11c -->
+<!-- brocanth-digest: 5d7cc68aa9384133 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

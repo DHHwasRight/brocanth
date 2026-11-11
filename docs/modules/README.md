@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 71. For all
+One page per module that `brocanth create` offers. There are 74. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -105,6 +105,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`webhooks`](webhooks.md) | signed webhooks: verified deliveries in, signed events out; pick a direction below | Enhancer |  |
 | [`webhooks-in`](webhooks-in.md) | POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler | Middleware | webhooks |
 | [`webhooks-out`](webhooks-out.md) | signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs | Enhancer | webhooks |
+| [`oauth`](oauth.md) | an OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below | Enhancer |  |
+| [`oauth-client`](oauth-client.md) | connect pages at /connections; tokens sealed in Postgres, refreshed once, sent as a bearer | Routes, Enhancer | oauth |
+| [`oauth-client-memory`](oauth-client-memory.md) | the connected accounts in this process's memory; for tests and development, gone at restart | Enhancer | oauth |
 | [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber | Enhancer, Middleware |  |
 | [`realtime-sse`](realtime-sse.md) | one long response per subscriber, frames written as they are made | Routes | realtime |
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |

@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 53 crates under `crates/` and two examples under
+A Cargo workspace of 54 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -196,6 +196,7 @@ puts the crate in a new project.
 | [`brocanth-realtime`](crates/brocanth-realtime/README.md) | A realtime broker by topic and audience; `realtime-sse` and `realtime-websocket` carry it to a browser | `realtime` |
 | [`brocanth-static`](crates/brocanth-static/README.md) | Writes the application to files: every GET page, partials per layout depth, the assets | `static` |
 | [`brocanth-webhooks`](crates/brocanth-webhooks/README.md) | Webhooks in both directions: verified, deduplicated deliveries in; signed, retried events out | `webhooks`, `webhooks-in`, `webhooks-out` |
+| [`brocanth-oauth-client`](crates/brocanth-oauth-client/README.md) | An OAuth 2.0 client for third-party APIs, over the `oauth2` crate: connect pages, sealed tokens, one refresh per key, a bearer HTTP client | `oauth`, `oauth-client`, `oauth-client-memory` |
 | [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin`; actions over selected rows | `admin`, `admin-actions` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
