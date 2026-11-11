@@ -77,6 +77,13 @@ sqlx = { version = "0.9", default-features = false, features = [
 tokio = { version = "1", features = ["rt", "macros"] }
 proptest = "1"
 
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 default = []
 # The property-test harness of PLAN.md §9 obligation 1. A `policy!` with an
