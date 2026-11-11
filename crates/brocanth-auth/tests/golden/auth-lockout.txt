@@ -2826,6 +2826,7 @@ pub mod flash {
 
     /// A setting of `[flash]` that has a flag. A secret or a list has no flag,
     /// so it has no variant here and cannot be renamed.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Cookie,
@@ -2883,7 +2884,7 @@ pub mod auth_lockout {
     }
 }
 
-// brocanth-digest: 99af5eab42f250b9
+// brocanth-digest: 9859f1a28bbee627
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -5292,6 +5293,10 @@ impl Outbox {
     }
 
     /// Sends the message now, and waits for the transport to take it.
+    ///
+    /// `allow(dead_code)`: it is here for the first page that sends at once,
+    /// and a project that only queues mail has none.
+    #[allow(dead_code)]
     pub async fn send(&self, message: &Message) -> Result<(), MailError> {
         self.mail.send(message).await
     }
@@ -5303,6 +5308,7 @@ impl Outbox {
     }
 
     /// Where mail goes: `smtp`, `log` or `folder`.
+    #[allow(dead_code)]
     pub fn transport(&self) -> &str {
         &self.transport
     }

@@ -1,5 +1,5 @@
 //! Tests for a module crate: format a generated project, compare it with a
-//! golden file, and build it.
+//! golden file, and build and test it.
 //!
 //! On under the `testing` feature. A module crate takes it as a
 //! dev-dependency:
@@ -40,7 +40,7 @@
 //!             &[&brocanth_robots::scaffold::Robots],
 //!         )
 //!         .expect("the project generates");
-//!         testing::build(&files).expect("the project builds");
+//!         testing::build(&files).expect("the project builds and passes its tests");
 //!     }
 //! }
 //! ```
@@ -49,12 +49,18 @@
 //!
 //! * `BROCANTH_BLESS=1` writes the golden file instead of comparing.
 //! * `BROCANTH_BUILD=1` makes [`building`] true, so a test builds the
-//!   project. Off by default: a build fetches and compiles the framework,
-//!   which takes minutes.
+//!   project and runs its own tests. Off by default: a build fetches and
+//!   compiles the framework, which takes minutes.
+//! * `BROCANTH_BUILD_TARGET=<dir>` gives every build one target directory,
+//!   so the framework compiles once for all of them. Unset, each project
+//!   has its own, deleted with it. The builds of one process then run one
+//!   at a time; do not point two processes at the same directory.
 
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// A generated project: `(path, contents)` per file, in the order the
 /// generator wrote them.
@@ -80,8 +86,8 @@ pub fn blessing() -> bool {
     std::env::var("BROCANTH_BLESS").is_ok_and(|v| !v.is_empty())
 }
 
-/// Whether this run builds generated projects: `BROCANTH_BUILD` is set and
-/// not empty.
+/// Whether this run builds and tests generated projects: `BROCANTH_BUILD`
+/// is set and not empty.
 pub fn building() -> bool {
     std::env::var("BROCANTH_BUILD").is_ok_and(|v| !v.is_empty())
 }
@@ -216,8 +222,10 @@ pub fn write(dir: &Path, files: &Files) -> std::io::Result<()> {
 }
 
 /// Writes the project into a fresh directory under the system's temporary
-/// directory and runs `cargo build` in it. The directory is deleted when
-/// the build passes, and kept for a look when it fails.
+/// directory and runs `cargo test` in it: cargo builds the project, then
+/// runs the tests the generator wrote into it. A build alone proves the
+/// code compiles, not that the project passes its own tests. The directory
+/// is deleted when the tests pass, and kept for a look when they fail.
 ///
 /// The project must name its brocanth crates by path or by a source cargo
 /// can reach. `brocanth_cli::testing::generate_for_build` writes path
@@ -225,8 +233,8 @@ pub fn write(dir: &Path, files: &Files) -> std::io::Result<()> {
 ///
 /// # Errors
 ///
-/// When a file cannot be written, or cargo fails. The error holds cargo's
-/// output.
+/// When a file cannot be written, the project does not build, or a test
+/// fails. The error holds cargo's output.
 pub fn build(files: &Files) -> Result<(), String> {
     let name = files
         .iter()
@@ -238,29 +246,51 @@ pub fn build(files: &Files) -> Result<(), String> {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "project".to_string());
-    let dir = std::env::temp_dir().join(format!("brocanth-testing-{name}-{}", std::process::id()));
+    // Tests run in parallel in one process, so the process id alone names
+    // one directory for all of them: a counter keeps each call apart.
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "brocanth-testing-{name}-{}-{}",
+        std::process::id(),
+        CALLS.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Cargo leaves a root package's path out of its hash, so two projects
+    // named alike share one test binary in a shared target directory, and
+    // cargo judges it fresh by the mtimes of the sources. One shared build
+    // at a time, with the files written inside the turn: files written
+    // while another build ran are older than its binary, and cargo would
+    // run that binary for this project.
+    static SHARED: Mutex<()> = Mutex::new(());
+    let shared = std::env::var_os("BROCANTH_BUILD_TARGET").filter(|t| !t.is_empty());
+    let _turn = shared
+        .is_some()
+        .then(|| SHARED.lock().unwrap_or_else(PoisonError::into_inner));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     write(&dir, files).map_err(|e| format!("{}: {e}", dir.display()))?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    // Its own target directory, so the build does not wait on the lock of
-    // the test that runs it.
-    let out = Command::new(cargo)
-        .args(["build", "--quiet"])
+    // Not the target directory of the test that runs it, so the build does
+    // not wait on that lock: the project's own, or `BROCANTH_BUILD_TARGET`.
+    let mut command = Command::new(cargo);
+    command
+        .args(["test", "--quiet"])
         .current_dir(&dir)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .map_err(|e| format!("cargo: {e}"))?;
+        .env_remove("CARGO_TARGET_DIR");
+    if let Some(target) = shared {
+        command.env("CARGO_TARGET_DIR", target);
+    }
+    let out = command.output().map_err(|e| format!("cargo: {e}"))?;
     if out.status.success() {
         // A target directory of a few gigabytes per project.
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     } else {
         Err(format!(
-            "error: the generated project in {} does not build\n{}\n\
-             help: open the directory and run `cargo build` to read the error in place",
+            "error: the generated project in {} does not build or fails its tests\n{}{}\n\
+             help: open the directory and run `cargo test` to read the error in place",
             dir.display(),
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ))
     }

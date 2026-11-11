@@ -50,6 +50,14 @@ impl Module for I18n {
             "i18n-routing",
             "the hook reads the locale from the path's first segment and redirects a GET without one",
         )
+        .adapts_to(
+            "realtime",
+            "with `i18n-routing`, `/realtime` is unprefixed: a stream or a socket has no locale",
+        )
+        .adapts_to(
+            "storage-routes",
+            "with `i18n-routing`, `/files` is unprefixed: a stored file has no locale",
+        )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
         .outside_runtime()
@@ -104,10 +112,20 @@ impl Module for I18n {
         let routing = project.has("i18n-routing");
         let mut settings = settings();
         if routing {
+            // A route that serves no page keeps no locale segment: a
+            // redirect would break a stream, a socket or a file link.
+            // The `path` option of `storage-routes` can move `/files`, so the
+            // list is a default to edit with it.
+            let mut unprefixed = vec!["/admin", "/api"];
+            for (key, prefix) in [("realtime", "/realtime"), ("storage-routes", "/files")] {
+                if project.has(key) {
+                    unprefixed.push(prefix);
+                }
+            }
             settings.push(
                 Setting::list(
                     "unprefixed",
-                    &["/admin", "/api"],
+                    &unprefixed,
                     "Path prefixes that keep no locale segment and are never redirected.",
                 )
                 .note(

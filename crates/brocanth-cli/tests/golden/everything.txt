@@ -6284,6 +6284,7 @@ pub mod flash {
 
     /// A setting of `[flash]` that has a flag. A secret or a list has no flag,
     /// so it has no variant here and cannot be renamed.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Cookie,
@@ -7164,7 +7165,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: f1ee7ffaa2aef2fb
+// brocanth-digest: d4dd98249f1ccfa7
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -9098,7 +9099,7 @@ available = []
 remember = true
 # Path prefixes that keep no locale segment and are never redirected.
 # A path whose last segment has a `.` (/robots.txt) is never redirected either.
-unprefixed = ["/admin", "/api"]
+unprefixed = ["/admin", "/api", "/realtime", "/files"]
 
 [meta]
 # The site's name: the title of a page with none, and og:site_name.
@@ -14708,6 +14709,10 @@ impl Outbox {
     }
 
     /// Sends the message now, and waits for the transport to take it.
+    ///
+    /// `allow(dead_code)`: it is here for the first page that sends at once,
+    /// and a project that only queues mail has none.
+    #[allow(dead_code)]
     pub async fn send(&self, message: &Message) -> Result<(), MailError> {
         self.mail.send(message).await
     }
@@ -14728,6 +14733,7 @@ impl Outbox {
     }
 
     /// Where mail goes: `smtp`, `log` or `folder`.
+    #[allow(dead_code)]
     pub fn transport(&self) -> &str {
         &self.transport
     }
@@ -17609,7 +17615,7 @@ mod tests {
     async fn a_file_is_served_only_with_a_token() {
         let app = crate::app::build().expect("the application builds");
         let address = "0".repeat(64);
-        let request = Request::new(Verb::Get, &format!("/files/{address}"));
+        let request = Request::new(Verb::Get, format!("/files/{address}"));
         let response = crate::app::handle(&app, request).await;
         assert_eq!(response.status, 403);
     }
@@ -19511,7 +19517,7 @@ kind = ["middleware"]
 files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
-adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing"]
+adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing", "realtime", "storage-routes"]
 
 [modules.i18n-routing]
 version = "0.1.0"
@@ -19569,4 +19575,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 807dbcdc7a85cc9e
+# brocanth-digest: 25ed34afee7e0b07

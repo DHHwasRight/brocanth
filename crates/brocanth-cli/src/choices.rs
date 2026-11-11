@@ -309,6 +309,15 @@ impl Flag {
 }
 "#;
 
+/// Whether clippy's `enum_variant_names` refuses `variant` in `enum Key`:
+/// its first or its last camel-case word is `Key`.
+fn names_the_enum(variant: &str) -> bool {
+    let first = variant
+        .strip_prefix("Key")
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_lowercase()));
+    first || variant.ends_with("Key")
+}
+
 fn shape_mod(shape: &Shape) -> String {
     let ident = shape.ident();
     let mut body = String::new();
@@ -322,6 +331,16 @@ fn shape_mod(shape: &Shape) -> String {
         );
         for line in wrap(&doc, 72) {
             body.push_str(&format!("    /// {line}\n"));
+        }
+        // A setting such as `key_env` makes `Key::KeyEnv`, which clippy's
+        // `enum_variant_names` refuses. The name comes from the setting, so
+        // the lint is off for this enum alone.
+        if shape
+            .keys
+            .iter()
+            .any(|(variant, _)| names_the_enum(variant))
+        {
+            body.push_str("    #[allow(clippy::enum_variant_names)]\n");
         }
         body.push_str(
             "    #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
@@ -1048,5 +1067,18 @@ pub const RENAMES: &[(&str, &str)] = &[
     fn a_key_in_a_comment_is_not_named() {
         let text = "    rename: &[(Key::Cookie, Flag::As(\"c\"))], // Key::Secure\n    //   (Key::Site, Flag::Hidden),\n";
         assert_eq!(keys_named(text), ["Cookie"]);
+    }
+
+    #[test]
+    fn a_variant_that_starts_or_ends_with_key_names_the_enum() {
+        for (variant, names) in [
+            ("KeyEnv", true),
+            ("Key", true),
+            ("SigningKey", true),
+            ("Keyboard", false),
+            ("Cookie", false),
+        ] {
+            assert_eq!(names_the_enum(variant), names, "{variant}");
+        }
     }
 }

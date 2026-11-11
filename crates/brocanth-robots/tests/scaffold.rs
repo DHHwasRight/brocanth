@@ -3,7 +3,7 @@
 //! The pattern for a module crate, in the repository or outside it: generate
 //! a project with the module under test, check that rustfmt leaves every
 //! Rust file alone, and compare the project with a golden file. Bless with
-//! `BROCANTH_BLESS=1`; build each project too with `BROCANTH_BUILD=1`.
+//! `BROCANTH_BLESS=1`; build and test each project too with `BROCANTH_BUILD=1`.
 //!
 //! The module is passed as a `&dyn Module`, so the test runs the module this
 //! crate compiles, and a module the CLI does not list works the same way.
