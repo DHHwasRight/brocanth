@@ -238,7 +238,7 @@ form, the child's policy per row, `docs/admin-customization.md`,
 What remains, from `docs/admin-customization.md`, "Open":
 
 1. ~~A model's script does not load on a dp-swap into its screen.~~
-   Done: dp-swap merges the response's `<head>` (vendored at `d64048f`),
+   Done: dp-swap merges the response's `<head>` (vendored at `54049d1`),
    and the admin sets header mode, so a boosted link swaps instead of
    falling back to a full load.
 2. ~~Pages under one model (Django's `ModelAdmin.get_urls`).~~ Done:

@@ -15,7 +15,7 @@ claim about brocanth is a claim about source text.
 Three mechanisms bound every proposal, and a gap that fights one of them is a
 finding rather than an oversight:
 
-1. **dp-swap** (`crates/brocanth-cli/vendor/dpswap.min.js`, commit `f80aeeb`).
+1. **dp-swap** (`crates/brocanth-cli/vendor/dpswap.min.js`, commit `54049d1`: `f80aeeb` plus the head merge).
    It has no mutating verb. Any answer that needs a POST is blocked on the
    server half that PLAN.md §5 reserves.
 2. **rsx**. Templates compile into the binary. There is no client-side

@@ -1,9 +1,9 @@
 # Vendored, not fetched
 
 `dpswap.min.js` is a build artefact of <https://github.com/brocanth/htmx>,
-copied here at commit `d64048f` and embedded in the `brocanth` binary with
+copied here at commit `54049d1` and embedded in the `brocanth` binary with
 `include_str!`. That commit is `f80aeeb` plus the merge of the response's
-`<head>` (branch `feat/merge-head`; the same change on `main` is branch
+`<head>` on a navigation and its review fixes (branch `feat/merge-head`; the same change on `main` is branch
 `feat/merge-head-main`).
 
 Vendored rather than fetched, for the reason the rest of this tool is built

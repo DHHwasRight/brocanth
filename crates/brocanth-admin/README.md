@@ -330,9 +330,11 @@ assert!(!list("user").contains("/admin/posts.js"));
 ```
 
 dp-swap replaces `<main>` and merges the response's `<head>`: a
-stylesheet or a script the live page lacks is added, once. So a model's
-script loads on a swap into its screen too, and runs once. Code that must
-act after each swap listens for `dp:afterSwap`.
+same-origin stylesheet or script the live page lacks is added, once, and
+the swap waits for a new sheet (3 s at most). So a model's script loads on
+a swap into its screen too, and its top level runs once. Code that must act
+after each swap also listens for `dp:headLoaded`, which fires once the
+swap's new scripts have run. `dp:afterSwap` comes before they load.
 
 ### Replace a block: the brand and the user links
 
