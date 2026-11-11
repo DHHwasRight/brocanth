@@ -2790,10 +2790,7 @@ impl Admin {
             return Ok(false);
         }
         let names: Vec<&str> = values.iter().map(|(name, _)| name.as_str()).collect();
-        match self
-            .rules(entry)
-            .check(&principal, Write::Update, &names)
-        {
+        match self.rules(entry).check(&principal, Write::Update, &names) {
             Ok(()) => {}
             Err(MaskViolation::Forbidden { .. }) => return Ok(false),
             Err(unknown) => return Err(AdminError::Mask(unknown)),
