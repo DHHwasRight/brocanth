@@ -1473,9 +1473,9 @@ macro_rules! register {
         // -- brocanth-gtag: Google Analytics, after consent ----------
         //
         // A banner on every HTML page, and Google's tag only once the
-        // visitor accepts. Global Privacy Control counts as a refusal, the
-        // page URL loses every query parameter not on the allow-list, and
-        // /admin never gets the tag. Off until production turns it on:
+        // visitor accepts. Global Privacy Control counts as a refusal, and
+        // the page URL loses every query parameter not on the allow-list.
+        // Off until production turns it on:
         // `enabled = true` and `measurement_id` under
         // [gtag] in config/production.toml.
         //
@@ -2291,7 +2291,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 7e5f160e1952a89b
+// brocanth-digest: ca66295abe6b4e79
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2890,8 +2890,8 @@ consent_days = 182
 send_title = false
 # The query parameters that reach Google; every other one is removed.
 allow_params = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
-# Paths that never get the tag, each with everything under it.
-exclude = ["/admin"]
+# Paths that never get the tag, each with everything under it: "/drafts".
+exclude = []
 # The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none.
 # cookie_domain = ""
 # A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.

@@ -2918,8 +2918,9 @@ parameters are stored; an email-shaped segment is replaced, but a name
 or an account number is not. Do not add a column to
 `brocanth_analytics_views` that identifies a person.
 
-With the admin, the numbers are at `/admin/analytics`, behind the
-admin's policy like every tab.
+With the admin, the numbers are on its `analytics` tab, behind the
+admin's policy like every tab, and the admin's own pages are never
+counted.
 
 ## Decisions that belong to the person
 
@@ -2949,7 +2950,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 7bafb0713a7f4225 -->
+<!-- brocanth-digest: 15c2d12a3bce7734 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
