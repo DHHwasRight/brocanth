@@ -372,7 +372,8 @@ No database and no environment variable is needed.
 - **Modules.** `src/modules/mod.rs` checks each manifest in `ALL`.
 - **A module crate's own goldens.** The crate is also a library,
   `brocanth_cli::testing`, so a module crate generates projects in its
-  own tests. `brocanth-robots` keeps its two shapes in
+  own tests. Every module crate in this repository does, in
+  `tests/scaffold.rs`; `brocanth-robots` keeps its shapes in
   `crates/brocanth-robots/tests/golden/`. Bless them the same way:
   `BROCANTH_BLESS=1 cargo test -p brocanth-robots --test scaffold`.
 - **Binary tests.** `tests/migrate.rs` and `tests/plain_text.rs` run the
