@@ -142,13 +142,13 @@ impl Module for Gtag {
                 Setting::text(
                     "cookie_domain",
                     "",
-                    "The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it.",
+                    "The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it.",
                 )
                 .optional(),
                 Setting::text(
                     "consent_log",
                     "",
-                    "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none.",
+                    "A file each consent choice is appended to, such as `log/consent.jsonl`.",
                 )
                 .note("A server only: a static export has no one to report a choice to.")
                 .optional(),
@@ -167,7 +167,7 @@ impl Module for Gtag {
                 Setting::text(
                     "banner.policy_url",
                     "",
-                    "A link to the privacy policy, such as `/privacy`. Empty means no link.",
+                    "A link to the privacy policy, such as `/privacy`.",
                 )
                 .optional(),
                 Setting::text("banner.policy", "Privacy policy", "The text of that link."),

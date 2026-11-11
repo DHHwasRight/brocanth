@@ -2712,7 +2712,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.cookie_domain",
-        help: "The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.",
+        help: "The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -2721,7 +2721,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.consent_log",
-        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.",
+        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -2766,7 +2766,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.banner.policy_url",
-        help: "A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.",
+        help: "A link to the privacy policy, such as `/privacy`. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -4908,7 +4908,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 989d38ef7dfc59ef
+// brocanth-digest: 5c7f8da854bf821f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -9055,9 +9055,9 @@ send_title = false
 allow_params = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
 # Paths that never get the tag, each with everything under it.
 exclude = ["/admin"]
-# The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.
+# The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none.
 # cookie_domain = ""
-# A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.
+# A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.
 # A server only: a static export has no one to report a choice to.
 # consent_log = ""
 
@@ -9070,7 +9070,7 @@ accept = "Accept"
 refuse = "Refuse"
 # The button that opens the banner again.
 manage = "Cookie settings"
-# A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.
+# A link to the privacy policy, such as `/privacy`. Empty means none.
 # policy_url = ""
 # The text of that link.
 policy = "Privacy policy"
