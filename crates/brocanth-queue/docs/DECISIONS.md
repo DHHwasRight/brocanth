@@ -513,8 +513,11 @@ dialect choice.
 - `jobs` keeps Postgres as the default. With `db`, it builds the queue on
   the `db` pool (`Queue::from_pool`) and has no `url` setting.
 - `jobs-memory` is a child module, off by default: the queue lives in the
-  process. `brocanth check --deploy` reports it as an error
-  (`deploy/development-only`).
+  process. Its manifest marks it `development_only`, the flag
+  `cache-memory` has too, so `brocanth check --deploy` reports it as an
+  error (`deploy/development-only`). One flag and one check serve every
+  memory backend: a second flag for the same finding would let the two
+  drift.
 - With `admin`, the admin mounts `JobsPanel` at `/admin/jobs`.
 
 ### 6.6 What this part does not do

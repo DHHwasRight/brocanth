@@ -158,7 +158,7 @@ impl Module for JobsMemory {
                 .feature("memory")
                 .note("the queue in memory, for development"),
         )
-        .not_for_production(
+        .development_only(
             "the jobs live in the process: a restart loses every waiting and every dead job, \
              and two processes do not share one queue",
         )

@@ -16,7 +16,7 @@
 //!   check (`docs/module-config.md`, section 3.3): a bad flag name stops
 //!   every command of the binary, `check` included, because each one
 //!   builds the flags. `deploy/development-only`, with `--deploy`: a
-//!   module for tests and development (`cache-memory`) is in a project
+//!   module for tests and development (`cache-memory`, `jobs-memory`) is in a project
 //!   about to run in production. An error: the project runs,
 //!   and loses what that module holds at every restart.
 //! * **The configuration and source checks are the project's.** A project
@@ -118,17 +118,6 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
             count(errors, "error"),
             count(warnings, "warning")
         ));
-    }
-
-    // A development-only module in a production build is an error: the
-    // project runs, and loses its data at the first restart.
-    if args.deploy {
-        let mut errors = development_only(&project);
-        errors.retain(|d| !d.code.as_ref().is_some_and(|c| args.allow.contains(c)));
-        for d in &errors {
-            ui.diagnostic(d);
-        }
-        failed |= !errors.is_empty();
     }
 
     // An empty list is a marker from before the list: try the project.
@@ -367,6 +356,15 @@ mod tests {
         );
         assert!(development_only(&project(&["config", "cache"])).is_empty());
 
+        let found = development_only(&project(&["jobs", "jobs-memory"]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.contains("`jobs-memory`"),
+            "{}",
+            found[0].message
+        );
+        assert!(development_only(&project(&["jobs"])).is_empty());
+
         let args = |deploy: bool, env: Option<&str>| CheckArgs {
             deploy,
             env: env.map(str::to_owned),
@@ -453,16 +451,6 @@ mod tests {
             header.contains(&format!("brocanth-admin {}", recorded["admin"])),
             "{header}"
         );
-    }
-
-    #[test]
-    fn a_development_only_module_is_a_deploy_error() {
-        let found = development_only(&project(&["jobs", "jobs-memory"]));
-        assert_eq!(found.len(), 1, "{found:?}");
-        let d = &found[0];
-        assert_eq!(d.code.as_deref(), Some("deploy/development-only"));
-        assert!(d.message.contains("jobs-memory"), "{}", d.message);
-        assert!(development_only(&project(&["jobs"])).is_empty());
     }
 
     #[test]

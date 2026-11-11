@@ -97,7 +97,7 @@ nothing holds this page.
 | [`flags`](modules/flags.md) | Feature flags: on for all, a percentage, users or groups; rows in your Postgres |  |  | needs `db`: the rules are rows in the database the `db` module opens |  |
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
-| [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | not for production |
+| [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | `check --deploy` refuses it |
 | [`mail`](modules/mail.md) | Send mail through SMTP, or to the log or a folder in development |  |  |  | with `jobs`: `deliver_later` goes on the `mail` queue |
 | [`auth-lockout`](modules/auth-lockout.md) | Locks an account for minutes after too many wrong passwords |  |  | part of `auth`, off until you tick it | with `auth-screens`: sign-in counts wrong passwords |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |

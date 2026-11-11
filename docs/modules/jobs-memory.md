@@ -15,7 +15,7 @@ The queue in this process's memory; for development and tests, gone at restart.
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-jobs` (feature `memory`) |
-| Not for production | yes: `brocanth check --deploy` reports `deploy/development-only` |
+| Development only | yes: `brocanth check --deploy` reports `deploy/development-only` |
 
 ## What it writes
 

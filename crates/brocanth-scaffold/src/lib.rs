@@ -231,13 +231,6 @@ pub struct Manifest {
     ///
     /// [`needs`]: Manifest::needs
     pub recommends: Vec<(&'static str, &'static str)>,
-    /// Why this module must not reach production, for a module that is for
-    /// development and tests only: a backend that keeps its data in the
-    /// process, say. Set with [`Manifest::not_for_production`].
-    ///
-    /// `brocanth check --deploy` reports a project that has it as an error
-    /// (`deploy/development-only`), with this sentence as the note.
-    pub not_for_production: Option<&'static str>,
     /// The version of the code that writes this module, when it is not the
     /// CLI's own. Set with [`Manifest::version`].
     ///
@@ -296,7 +289,6 @@ impl Manifest {
             conflicts: Vec::new(),
             adapts_to: Vec::new(),
             recommends: Vec::new(),
-            not_for_production: None,
             version: None,
             hooks: Vec::new(),
             integrations: Vec::new(),
@@ -393,13 +385,6 @@ impl Manifest {
     /// project without the other module still builds and runs.
     pub fn recommends(mut self, key: &'static str, why: &'static str) -> Self {
         self.recommends.push((key, why));
-        self
-    }
-
-    /// Mark this module as for development and tests only. `why` says what
-    /// goes wrong in production, and `brocanth check --deploy` prints it.
-    pub fn not_for_production(mut self, why: &'static str) -> Self {
-        self.not_for_production = Some(why);
         self
     }
 
