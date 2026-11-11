@@ -11,12 +11,30 @@ run = "cargo test --workspace"
 run = "cargo clippy --all-targets -- -D warnings"
 # Every module crate as the CLI takes it: the scaffold side alone, with the
 # runtime off. Its own tests run too; doctests are the runtime's and stay in
-# `test`.
+# `test`. The list is every crate with a `scaffold` feature, read from the
+# manifests, so a new module crate cannot be left out.
 [tasks.scaffold]
 run = """
-for c in admin audit auth cache cache-redis client db errors filters flags gtag i18n input jobs mail meta middleware observe openapi pagination policy realtime resource robots sanitize schema search storage webhooks; do
-  cargo test -p brocanth-$c --no-default-features --features scaffold --lib || exit 1
+for toml in crates/*/Cargo.toml; do
+  grep -q '^scaffold *=' "$toml" || continue
+  c=$(basename "$(dirname "$toml")")
+  cargo test -p "$c" --no-default-features --features scaffold --lib || exit 1
 done
 """
+# Generated projects, built and tested: each crate test that calls
+# `brocanth_scaffold::testing::build`, then the CLI's golden shapes. This
+# takes many minutes. All projects use one target directory, so the framework
+# compiles once. The runs are sequential: two processes must not share that
+# directory.
+[tasks.generated]
+run = """
+# Absolute: cargo runs in each project's own directory.
+export BROCANTH_BUILD=1 BROCANTH_BUILD_TARGET="$PWD/target/generated"
+for test in $(grep -l 'testing::build' crates/*/tests/*.rs); do
+  c=$(echo "$test" | cut -d/ -f2)
+  cargo test -p "$c" --test "$(basename "$test" .rs)" || exit 1
+done
+cargo test -p brocanth-cli --bin brocanth -- --ignored the_golden_shapes_build_and_pass_their_own_tests
+"""
 [tasks.ci]
-depends = ["build", "lint", "test", "scaffold"]
+depends = ["build", "lint", "test", "scaffold", "generated"]

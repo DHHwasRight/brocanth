@@ -5864,11 +5864,16 @@ mod tests {
             .expect("the framework is beside the cli");
         let wanted = std::env::var("BROCANTH_SHAPES").ok();
         let base = std::env::temp_dir().join(format!("brocanth-shapes-{}", std::process::id()));
-        // Each shape has a target directory of a few gigabytes. The guard
-        // deletes them when the test ends, passed or failed, so a failed run
+        // The projects and their target directory take a few gigabytes. The
+        // guard deletes them when the test ends, passed or failed, so a failed run
         // cannot fill the disk. `BROCANTH_SHAPES_KEEP=1` keeps them to debug.
         let _cleanup = TempDir(base.clone());
-        let target = base.join("target");
+        // `BROCANTH_BUILD_TARGET`, as `brocanth_scaffold::testing::build`
+        // reads it: `mise run generated` builds the crates' projects and
+        // these shapes in one directory, so the framework compiles once.
+        let target = std::env::var_os("BROCANTH_BUILD_TARGET")
+            .filter(|t| !t.is_empty())
+            .map_or_else(|| base.join("target"), std::path::PathBuf::from);
         let mut failed = Vec::new();
         for (name, picks) in shapes() {
             if wanted
