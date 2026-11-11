@@ -421,9 +421,10 @@ fn serving_rs(metrics: bool) -> String {
 
 const SERVING_RS: &str = r#"//! The `Observer` around the whole server: a server wrap.
 //!
-//! `src/plugins/mod.rs` composes it with any other wrap. It answers `/up`,
-//! `/readyz` and `/metrics` itself, and logs and counts every other request
-//! by its route template.
+//! `src/plugins/mod.rs` composes it with any other wrap. It answers the
+//! probes and `/metrics` itself, while their modules are here. Every other
+//! request gets a request id, and the log line, the count and the span of
+//! the modules chosen, under its route template.
 
 use crate::plugins::{Handler, ServerWrap};
 
@@ -444,8 +445,9 @@ impl ServerWrap for Serving {
         ))
     }
 @SIDE_LISTENERS@
-    /// `/readyz` fails at once, so a load balancer stops sending requests;
-    /// the listener closes `[observability] drain_delay_secs` later.
+    /// Readiness fails at once, so a load balancer stops sending requests,
+    /// and the listener closes after the drain delay: `drain_delay_secs`
+    /// with `observability-health`, zero without it.
     fn before_stop(app: &crate::app::App) -> impl std::future::Future<Output = ()> {
         let observer = observer(app);
         async move { observer.drain().await }
