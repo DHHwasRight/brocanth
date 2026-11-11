@@ -58,6 +58,14 @@ impl Module for I18n {
             "storage-routes",
             "with `i18n-routing`, the file routes' `path` is unprefixed, read from src/modules/storage_routes.rs",
         )
+        .adapts_to(
+            "auth-oauth",
+            "with `i18n-routing`, the sign-in routes' `mount_at` is unprefixed, read from src/modules/auth_oauth.rs",
+        )
+        .adapts_to(
+            "oauth-client",
+            "with `i18n-routing`, the connect pages' `mount_at` is unprefixed, read from src/modules/oauth_client.rs",
+        )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
         .outside_runtime()
@@ -166,7 +174,15 @@ impl Module for I18n {
 /// hook never redirects them.
 fn routing_adjust(project: &Project) -> String {
     let mut chain = ".with_paths(true)".to_string();
-    for (key, field) in [("admin", "mount_at"), ("storage-routes", "path")] {
+    // A provider sends the browser back to `<mount_at>/<provider>/callback`
+    // exactly as registered at its console, so the OAuth routes keep no
+    // locale segment either.
+    for (key, field) in [
+        ("admin", "mount_at"),
+        ("storage-routes", "path"),
+        ("auth-oauth", "mount_at"),
+        ("oauth-client", "mount_at"),
+    ] {
         if project.has(key) {
             chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
         }

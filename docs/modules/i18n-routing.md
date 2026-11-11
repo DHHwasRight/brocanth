@@ -26,7 +26,9 @@ Slots:
 - src/plugins/mod.rs (the builder chain): `.with_paths(true)` on the
   `i18n` plugin, and `.keep_unprefixed(..)` with the path of each module
   that owns a route that is not a page: `admin`'s `mount_at`,
-  `storage-routes`' `path`
+  `storage-routes`' `path`, and the `mount_at` of `auth-oauth` and
+  `oauth-client`. A provider sends the browser back to the callback path
+  registered at its console, so that path must keep no locale segment.
 - config/<env>.toml: `unprefixed` in `[i18n]`
 - src/pages/mod.rs: `ctx.href(path)` and the `locale_paths` tests
 - AGENTS.md: `## One URL per locale`
