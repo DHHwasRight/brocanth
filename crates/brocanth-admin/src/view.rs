@@ -435,6 +435,9 @@ pub struct ListCtx {
     pub actions: Vec<ActionChoice>,
     /// Where the action form posts to.
     pub actions_href: String,
+    /// The pages under this model, from
+    /// [`ModelAdmin::page`](crate::ModelAdmin::page).
+    pub links: Vec<RecordLink>,
     /// One line about the action that just ran: "Publish selected: 3
     /// posts."
     pub notice: Option<String>,
@@ -479,8 +482,10 @@ pub struct DetailCtx {
     pub edit_href: Option<String>,
     /// The delete confirmation, when this person may remove it.
     pub delete_href: Option<String>,
-    /// More links about this record, such as its history. See
-    /// [`AdminConfig::record_link`](crate::AdminConfig::record_link).
+    /// More links about this record: the pages under it
+    /// ([`ModelAdmin::record_page`](crate::ModelAdmin::record_page)), then
+    /// such as its history
+    /// ([`AdminConfig::record_link`](crate::AdminConfig::record_link)).
     pub links: Vec<RecordLink>,
 }
 

@@ -228,7 +228,10 @@ What remains, from `docs/admin-customization.md`, "Open":
    Done: dp-swap merges the response's `<head>` (vendored at `d64048f`),
    and the admin sets header mode, so a boosted link swaps instead of
    falling back to a full load.
-2. Pages under one model (Django's `ModelAdmin.get_urls`).
+2. ~~Pages under one model (Django's `ModelAdmin.get_urls`).~~ Done:
+   `ModelAdmin::page` (`{base}/{model}/{key}`) and `record_page`
+   (`{base}/{model}/{record}/{key}`), with the list's or the record's
+   policy and the admin's layout.
 3. A three-way `admin diff`: it needs the template of the version a copy
    came from.
 

@@ -66,6 +66,28 @@ pub struct ModelAdmin {
     actions: Vec<crate::actions::BulkAction>,
     without_actions: Vec<String>,
     inlines: Vec<crate::inline::Inline>,
+    pages: Vec<ModelPage>,
+}
+
+/// Renders one request of a page under a model: the request, and the record
+/// for a page under one record. See [`ModelAdmin::page`].
+pub type ModelPageFn = Box<
+    dyn Fn(
+            &crate::panel::PanelRequest<'_>,
+            Option<&Row>,
+        ) -> Result<Option<crate::panel::PanelPage>, crate::AdminError>
+        + Send
+        + Sync,
+>;
+
+/// A page of the application's own under one model, or under one record.
+pub(crate) struct ModelPage {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    /// Under one record: `{base}/{model}/{key}/{page}`. Otherwise under the
+    /// model: `{base}/{model}/{page}`.
+    pub(crate) record: bool,
+    pub(crate) render: ModelPageFn,
 }
 
 /// The screens one model replaces. `None` is the admin's own view.
@@ -119,6 +141,7 @@ impl ModelAdmin {
             actions: Vec::new(),
             without_actions: Vec::new(),
             inlines: Vec::new(),
+            pages: Vec::new(),
         }
     }
 
@@ -394,6 +417,94 @@ impl ModelAdmin {
     /// The inlines, in the order they were added.
     pub fn inlines(&self) -> &[crate::inline::Inline] {
         &self.inlines
+    }
+
+    /// Adds a page of your own under this model, at `{base}/{model}/{key}`
+    /// and every path below it. Django's `ModelAdmin.get_urls()`.
+    ///
+    /// The admin's layout wraps it, the sidebar marks this model, and the
+    /// list screen links it with `label`. The policy is the list's: reading
+    /// it asks `Action::ViewList` on the model and the list rule; a POST
+    /// also asks `Action::Update` on the model, as an action over selected
+    /// rows does. [`PanelRequest::can_act`](crate::panel::PanelRequest)
+    /// says whether a POST would pass. The record argument is `None`.
+    ///
+    /// ```
+    /// use brocanth_admin::panel::PanelPage;
+    /// use brocanth_admin::AdminConfig;
+    ///
+    /// let config = AdminConfig::new().model("invoice", |m| {
+    ///     m.page("overdue", "Overdue", |request, _| {
+    ///         Ok(match request.path {
+    ///             "" => Some(PanelPage::body("Overdue invoices", "<p>…</p>")),
+    ///             _ => None,
+    ///         })
+    ///     })
+    /// });
+    /// # let _ = config;
+    /// ```
+    ///
+    /// A key wins over a record key at the same place: a record whose key
+    /// is `overdue` cannot be read. `Admin::new` refuses `new` and
+    /// `actions`, which the admin uses there.
+    pub fn page<F>(mut self, key: impl Into<String>, label: impl Into<String>, render: F) -> Self
+    where
+        F: Fn(
+                &crate::panel::PanelRequest<'_>,
+                Option<&Row>,
+            ) -> Result<Option<crate::panel::PanelPage>, crate::AdminError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pages.push(ModelPage {
+            key: key.into(),
+            label: label.into(),
+            record: false,
+            render: Box::new(render),
+        });
+        self
+    }
+
+    /// Adds a page of your own under each record of this model, at
+    /// `{base}/{model}/{record}/{key}` and every path below it: "Send" on
+    /// an invoice.
+    ///
+    /// The detail screen links it with `label`. The policy is the
+    /// record's: reading it asks `Action::ViewDetail` on the record and
+    /// reads the record under the view rule, so a record the rule refuses
+    /// is a 404. A POST also asks `Action::Update` on the record and its
+    /// update rule. The render function gets the record.
+    ///
+    /// `Admin::new` refuses `edit` and `delete`, which the admin uses
+    /// there.
+    pub fn record_page<F>(
+        mut self,
+        key: impl Into<String>,
+        label: impl Into<String>,
+        render: F,
+    ) -> Self
+    where
+        F: Fn(
+                &crate::panel::PanelRequest<'_>,
+                Option<&Row>,
+            ) -> Result<Option<crate::panel::PanelPage>, crate::AdminError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pages.push(ModelPage {
+            key: key.into(),
+            label: label.into(),
+            record: true,
+            render: Box::new(render),
+        });
+        self
+    }
+
+    /// The pages under this model and under its records.
+    pub(crate) fn pages(&self) -> &[ModelPage] {
+        &self.pages
     }
 
     /// The inlines, for `Admin::new` to resolve their columns.

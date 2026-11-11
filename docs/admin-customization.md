@@ -19,6 +19,7 @@ in step with new versions of the admin.
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
 | 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]`, then `brocanth admin diff` after an upgrade | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
 | Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `Panel` | `AdminSite.get_urls()` |
+| Page under a model | a page of your own under one model or one record | `ModelAdmin::{page, record_page}` | `ModelAdmin.get_urls()` |
 | Inlines | a child model's rows on the parent's form | `ModelAdmin::inline(Inline)` | `InlineModelAdmin`, `TabularInline` |
 
 The tests for levels 1 to 5 are in
@@ -507,6 +508,77 @@ The closure is synchronous. A page that awaits something, such as a
 database read, implements `Panel`, whose `render` is async. A page key
 that is also a model key stops `Admin::new`, naming both.
 
+## Pages under one model: `ModelAdmin::page` and `record_page`
+
+Django's `ModelAdmin.get_urls()` adds a view under one model:
+`/admin/invoice/overdue`, `/admin/invoice/7/send`. Here a model adds two
+kinds of page:
+
+```rust
+AdminConfig::new().model("invoice", |m| {
+    m.page("overdue", "Overdue", |request, _| {         // {base}/invoice/overdue
+        Ok(match request.path {
+            "" => Some(PanelPage::body("Overdue invoices", render_overdue()?)),
+            _ => None,
+        })
+    })
+    .record_page("send", "Send", |request, invoice| {   // {base}/invoice/7/send
+        let invoice = invoice.expect("a record page gets its record");
+        Ok(Some(match request.post {
+            false => PanelPage::body("Send", render_send_form(invoice)?),
+            true => {
+                send(invoice)?;
+                PanelPage::redirect(request.mount)
+            }
+        }))
+    })
+})
+```
+
+The closure takes the request a panel takes (`PanelRequest`: the path
+below the page, the query, the POST and its form, `can_act`, `mount`)
+and the record, and returns a `PanelPage`. `None` is the admin's 404.
+
+| | Under the model | Under a record |
+|---|---|---|
+| Path | `{base}/{model}/{key}` and below | `{base}/{model}/{record}/{key}` and below |
+| Read | `Action::ViewList` on the model, and the list rule is open | `Action::ViewDetail` on the record, and the record is read under the view rule: a refused record is a 404 |
+| POST | also `Action::Update` on the model | also `Action::Update` on the record and its update rule |
+| Link | a button on the list screen | a button on the detail screen, before the `record_link`s |
+| Layout | the admin's, with the model marked in the sidebar | the same |
+
+The tests are in `crates/brocanth-admin/tests/model_pages.rs`.
+
+**Why the list's and the record's policy, and no new `Action`.** A page
+under a model shows something about that model, so the people who may
+list it may read it; one under a record is about that record, so it
+answers as the detail screen does, with the same 404 for a record the
+rule refuses. A POST changes something, and `Action::Update` is what an
+action over selected rows asks too. A new `Action` variant would break
+every policy that matches on the enum, for a distinction no
+application has asked for yet. `can_act` tells the page whether to draw
+its buttons, as it tells a panel.
+
+**Why not a panel.** A panel is under its own key, has its own tab, and
+asks `ViewPanel` about that key. A page under a model belongs to the
+model: its URL, its sidebar entry, its policy and its link on the
+model's screens. Both take the same request and return the same page, so
+a page moves from one to the other without a rewrite.
+
+**What a page key takes.** A page key wins over a record key at the same
+place, so a record whose key is `overdue` cannot be read. That is
+Django's choice for `add`, and the admin's for `new`. `Admin::new`
+refuses a key that the admin's own screens use there (`new` and `actions`
+under a model, `edit` and `delete` under a record), a key with a slash,
+and two pages with one key, each with a `help:` line.
+
+**What the page writes is its own.** The admin asks the policy and the
+update rule before it calls the page, and passes the record it read. It
+does not guard the page's own writes with that rule, because it does not
+see them. A page that writes the record should go through the same rule
+in its own code, or be an action over selected rows
+(`ModelAdmin::action`), which the admin guards.
+
 ## What is stable API
 
 - The context types in `brocanth_admin::view` and their field names. A
@@ -650,10 +722,9 @@ fixture applies no condition.
 - **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
   and the two blocks. A `Panel` renders its own body in the crate that
   owns it, so there is no shipped panel template to copy.
-- **Pages under one model.** Django's `get_urls()` on a `ModelAdmin` adds
-  `/admin/invoice/<id>/send`. Here an extra page is under its own key,
-  not under a model. A per-record action is a page that takes the record
-  key in its path: `/admin/invoice-actions/7/send`.
+- **An async page under a model.** `ModelAdmin::page` takes a
+  synchronous closure, as `AdminConfig::page` does. A page that awaits a
+  database read is a `Panel` today, under its own key.
 - **More blocks.** `brand` and `userlinks` exist. `nav-global` and
   `footer` follow the same pattern when an application needs them.
 - **dp-swap's `main`.** The vendored build is `f80aeeb` plus the head

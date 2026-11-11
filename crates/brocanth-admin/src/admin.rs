@@ -274,6 +274,24 @@ impl Admin {
                 }
             }
         }
+        // A page under a model takes a path segment the admin's own
+        // screens would otherwise answer. Refused now, naming the page.
+        for entry in &entries {
+            let pages = entry.admin.pages();
+            for (index, page) in pages.iter().enumerate() {
+                check_page(&entry.descriptor.key, page);
+                if pages[..index]
+                    .iter()
+                    .any(|other| other.record == page.record && other.key == page.key)
+                {
+                    panic!(
+                        "the admin has two pages called `{}` under `{}`.\nhelp: give each page \
+                         its own key",
+                        page.key, entry.descriptor.key
+                    );
+                }
+            }
+        }
         // An inline names a child model and the column that points back.
         // Resolved now, so a misspelt model or an ambiguous column stops the
         // build of the admin and not the first edit form.
@@ -508,6 +526,15 @@ impl Admin {
                 })
                 .collect(),
             actions_href: self.actions_url(model),
+            links: admin
+                .pages()
+                .iter()
+                .filter(|page| !page.record)
+                .map(|page| RecordLink {
+                    label: page.label.clone(),
+                    href: format!("{}/{}", self.list_url(model), page.key),
+                })
+                .collect(),
             notice: done.and_then(|(key, count)| {
                 let action = self.offered(entry).into_iter().find(|a| a.key == key)?;
                 let noun = match count {
@@ -588,20 +615,30 @@ impl Admin {
             rows,
             links: {
                 let key = record.to_segment();
+                // The pages under this record first, then the links other
+                // crates add, such as its history.
+                let pages =
+                    admin
+                        .pages()
+                        .iter()
+                        .filter(|page| page.record)
+                        .map(|page| RecordLink {
+                            label: page.label.clone(),
+                            href: format!("{}/{}", self.detail_url(model, &record), page.key),
+                        });
                 let at = RecordRef {
                     base_path: &self.base_path,
                     model,
                     table: &entry.descriptor.table,
                     key: &key,
                 };
-                self.record_links
-                    .iter()
-                    .filter_map(|(label, href)| {
+                pages
+                    .chain(self.record_links.iter().filter_map(|(label, href)| {
                         href(&at).map(|href| RecordLink {
                             label: label.clone(),
                             href,
                         })
-                    })
+                    }))
                     .collect()
             },
             label: label.clone(),
@@ -963,6 +1000,9 @@ impl Admin {
         query: &str,
         submission: &Submission,
     ) -> Result<Response, AdminError> {
+        if let Some(route) = self.page_route(method, path) {
+            return self.model_page(principal, route, query, submission).await;
+        }
         let keys = self.panel_keys();
         let Some(route) = Route::parse(&self.base_path, method, path, &keys) else {
             return self.missing(principal);
@@ -1039,6 +1079,144 @@ impl Admin {
             }),
             Some(PanelPage::Body { heading, html }) => {
                 self.page(200, principal, key, heading, html)
+            }
+        }
+    }
+
+    /// A path that reaches a page under a model or under a record, if it
+    /// is one. Asked before [`Route::parse`], because a page key wins over
+    /// a record key at the same place.
+    fn page_route<'a>(&self, method: &str, path: &'a str) -> Option<PageRoute<'a>> {
+        let post = method.eq_ignore_ascii_case("post");
+        if !post && !method.eq_ignore_ascii_case("get") {
+            return None;
+        }
+        let rest = match self.base_path.is_empty() {
+            true => path,
+            false => path.strip_prefix(self.base_path.as_str())?,
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
+        let rest = rest.trim_matches('/');
+        let mut parts = rest.splitn(3, '/');
+        let model = parts.next()?;
+        let second = parts.next()?;
+        let after = parts.next().unwrap_or("");
+        let entry = self.entry(model)?;
+        let pages = entry.admin.pages();
+        if pages.iter().any(|p| !p.record && p.key == second) {
+            return Some(PageRoute {
+                model,
+                record: None,
+                page: second,
+                rest: after,
+                post,
+            });
+        }
+        let (page, rest) = after.split_once('/').unwrap_or((after, ""));
+        pages
+            .iter()
+            .any(|p| p.record && p.key == page)
+            .then_some(PageRoute {
+                model,
+                record: Some(second),
+                page,
+                rest,
+                post,
+            })
+    }
+
+    /// A page under a model or under a record, with the list's or the
+    /// record's policy asked first.
+    async fn model_page(
+        &self,
+        principal: Principal<'_>,
+        route: PageRoute<'_>,
+        query: &str,
+        submission: &Submission,
+    ) -> Result<Response, AdminError> {
+        let model = route.model;
+        let Some(entry) = self.entry(model) else {
+            return self.missing(principal);
+        };
+        let Some(page) = entry
+            .admin
+            .pages()
+            .iter()
+            .find(|p| p.record == route.record.is_some() && p.key == route.page)
+        else {
+            return self.missing(principal);
+        };
+        let (mount, row, can_act) = match route.record {
+            None => {
+                // The list's policy: the screen and the list rule.
+                if !self.allows(principal, Request::new(Action::ViewList, model)) {
+                    return self.refuse(principal, Action::ViewList);
+                }
+                if !self.opens(principal, entry, RowAction::List) {
+                    return self.refuse(principal, Action::ViewList);
+                }
+                let can_act = entry.admin.allows_update()
+                    && self.allows(principal, Request::new(Action::Update, model));
+                (
+                    format!("{}/{}", self.list_url(model), page.key),
+                    None,
+                    can_act,
+                )
+            }
+            Some(raw) => {
+                let Some(record) = PrimaryKey::parse(&entry.descriptor, raw) else {
+                    return self.missing(principal);
+                };
+                // The detail's policy: the screen, then one guarded select
+                // under the view rule. Refused and missing are one answer.
+                if !self.allows(principal, Request::on(Action::ViewDetail, model, &record)) {
+                    return self.refuse(principal, Action::ViewDetail);
+                }
+                let gate = self.gate(principal, entry, RowAction::View)?;
+                let Some(scope) = gate.scope() else {
+                    return self.refuse(principal, Action::ViewDetail);
+                };
+                let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+                    return self.missing(principal);
+                };
+                let screen = entry.admin.allows_update()
+                    && self.allows(principal, Request::on(Action::Update, model, &record));
+                if route.post && !screen {
+                    return self.refuse(principal, Action::Update);
+                }
+                // A record the update rule refuses has no edit form, and no
+                // POST here either: the same 404.
+                let rule = self
+                    .admits(principal, entry, RowAction::Update, &record)
+                    .await?;
+                if route.post && !rule {
+                    return self.missing(principal);
+                }
+                let mount = format!("{}/{}", self.detail_url(model, &record), page.key);
+                (mount, Some(row), screen && rule)
+            }
+        };
+        if route.post && !can_act {
+            return self.refuse(principal, Action::Update);
+        }
+        let request = PanelRequest {
+            path: route.rest,
+            query,
+            post: route.post,
+            can_act,
+            submission,
+            mount: &mount,
+        };
+        match (page.render)(&request, row.as_ref())? {
+            None => self.missing(principal),
+            Some(PanelPage::Redirect { location }) => Ok(Response::Redirect {
+                status: 303,
+                location,
+            }),
+            Some(PanelPage::Body { heading, html }) => {
+                self.page(200, principal, model, heading, html)
             }
         }
     }
@@ -2601,6 +2779,40 @@ fn row_of(values: &[(String, Value)]) -> Row {
         row.set(name.clone(), value.clone());
     }
     row
+}
+
+/// A path that reaches a page under a model (`record` is `None`) or under
+/// one record.
+#[derive(Clone, Copy, Debug)]
+struct PageRoute<'a> {
+    model: &'a str,
+    record: Option<&'a str>,
+    page: &'a str,
+    rest: &'a str,
+    post: bool,
+}
+
+/// Refuses a page key that is empty, holds a slash, or is a segment the
+/// admin's own screens use at that place.
+fn check_page(model: &str, page: &crate::config::ModelPage) {
+    let key = page.key.as_str();
+    let (method, reserved): (&str, &[&str]) = match page.record {
+        false => ("page", &["new", "actions"]),
+        true => ("record_page", &["edit", "delete"]),
+    };
+    if key.is_empty() || key.contains('/') {
+        panic!(
+            "the admin's page `{key}` under `{model}` is not one path segment.\nhelp: give \
+             `ModelAdmin::{method}` a key with no slash, such as `report`"
+        );
+    }
+    if reserved.contains(&key) {
+        panic!(
+            "the admin's page `{key}` under `{model}` takes a path the admin uses.\nhelp: \
+             `ModelAdmin::{method}` cannot use {}; choose another key",
+            reserved.join(" or ")
+        );
+    }
 }
 
 /// The child column an inline reads and the parent column it holds.
