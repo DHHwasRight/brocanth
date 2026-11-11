@@ -150,6 +150,12 @@ generated project skips the hook pipeline. Every test that reads a test
 database variable treats an empty value as unset. `[server]
 shutdown_grace_secs` has a flag and a variable in every project
 (`docs/module-flags.md`, "The framework's own settings").
+Every `PluginError` in generated code and in the runtime plugins has a
+`help:` line, and `crates/brocanth-cli/tests/error_help.rs` holds the
+rule (`docs/module-authoring.md`, the startup gate). Remains: some
+library errors put the help on the same line (`. help: …`, in
+`brocanth-middleware`, `brocanth-gtag` and `brocanth-i18n`), and the
+test cannot see inside a wrapped error.
 
 ### 2. New modules
 
