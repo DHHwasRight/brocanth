@@ -24,7 +24,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls-ring",
 ] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-tokio = { version = "1", features = ["rt", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

@@ -749,3 +749,18 @@ async fn the_archive_answers_how_much_finished() {
     assert_eq!(after - before, 2, "the archive is where the history is");
     clear(&pool).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_wakeups_receiver_gives_the_listener_connection_back() {
+    // A worker that stops drops its receiver. If the listener task kept its
+    // connection, `PgPool::close` would wait for it forever.
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let rx = brocanth_queue_postgres::wakeups(&pool)
+        .await
+        .expect("listen");
+    drop(rx);
+    tokio::time::timeout(std::time::Duration::from_secs(10), pool.close())
+        .await
+        .expect("the pool closes once the receiver is gone");
+}

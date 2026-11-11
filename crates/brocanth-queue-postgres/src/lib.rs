@@ -779,6 +779,10 @@ pub struct DeadRow {
 /// [`brocanth_queue::Budget`]. A notification sent while the listener is
 /// reconnecting is lost, which is why this only ever shortens a poll and is
 /// never the way work is found.
+///
+/// The listener ends when the last receiver is dropped, and its connection
+/// goes back to the pool. Without that, `PgPool::close` waits for it forever
+/// after the worker stops.
 pub async fn wakeups(pool: &PgPool) -> Result<tokio::sync::watch::Receiver<u64>, sqlx::Error> {
     let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
     listener.listen(NOTIFY_CHANNEL).await?;
@@ -786,7 +790,11 @@ pub async fn wakeups(pool: &PgPool) -> Result<tokio::sync::watch::Receiver<u64>,
     tokio::spawn(async move {
         let mut n = 0u64;
         loop {
-            match listener.recv().await {
+            let got = tokio::select! {
+                got = listener.recv() => got,
+                () = tx.closed() => return,
+            };
+            match got {
                 Ok(_) => {
                     n += 1;
                     if tx.send(n).is_err() {
@@ -797,7 +805,10 @@ pub async fn wakeups(pool: &PgPool) -> Result<tokio::sync::watch::Receiver<u64>,
                     // The connection dropped. `recv` reconnects on the next
                     // call, and whatever was sent in between is gone. The
                     // poll interval is the backstop.
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        () = tx.closed() => return,
+                    }
                 }
             }
         }
