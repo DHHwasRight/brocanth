@@ -753,6 +753,7 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-analytics",
+ "brocanth-cli",
  "brocanth-config",
  "brocanth-db",
  "brocanth-middleware",
@@ -929,6 +930,7 @@ name = "brocanth-client"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-input",
  "brocanth-scaffold",
  "clap",
@@ -1045,6 +1047,7 @@ name = "brocanth-gtag"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-config",
  "brocanth-gtag",
  "brocanth-i18n",
@@ -1060,6 +1063,7 @@ name = "brocanth-i18n"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-i18n",
  "brocanth-scaffold",
  "brocanth-test",
@@ -1082,6 +1086,7 @@ name = "brocanth-input"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-scaffold",
  "brocanth-server",
  "serde_json",
@@ -1209,6 +1214,7 @@ name = "brocanth-observe"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-jobs",
  "brocanth-scaffold",
  "brocanth-server",
@@ -1230,6 +1236,7 @@ dependencies = [
  "async-trait",
  "brocanth",
  "brocanth-admin",
+ "brocanth-cli",
  "brocanth-scaffold",
  "brocanth-test",
  "http",
@@ -1264,6 +1271,7 @@ dependencies = [
 name = "brocanth-policy"
 version = "0.1.0"
 dependencies = [
+ "brocanth-cli",
  "brocanth-policy-macros",
  "brocanth-scaffold",
  "proptest",
@@ -1354,6 +1362,7 @@ name = "brocanth-resource"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-events",
  "brocanth-pagination",
  "brocanth-policy",
@@ -1403,6 +1412,7 @@ name = "brocanth-schema"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-cli",
  "brocanth-scaffold",
  "brocanth-schema-derive",
  "regex",
