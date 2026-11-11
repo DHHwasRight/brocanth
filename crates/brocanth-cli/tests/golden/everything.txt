@@ -2091,9 +2091,11 @@ macro_rules! register {
         // -- brocanth-gtag: Google Analytics, after consent ----------
         //
         // A banner on every HTML page, and Google's tag only once the
-        // visitor accepts. Global Privacy Control counts as a refusal, the
-        // page URL loses every query parameter not on the allow-list, and
-        // /admin never gets the tag. Off until production turns it on:
+        // visitor accepts. Global Privacy Control counts as a refusal, and
+        // the page URL loses every query parameter not on the allow-list.
+        // The admin never gets the tag, wherever src/modules/admin.rs
+        // mounts it.
+        // Off until production turns it on:
         // `enabled = true` and `measurement_id` under
         // [gtag] in config/production.toml.
         //
@@ -2102,7 +2104,9 @@ macro_rules! register {
         // `banner.*` settings are the fallback.
         let builder = builder
             .plugin_hooking_from_config_with::<brocanth_gtag::Gtag>("gtag", |config| {
-                config.translate(crate::modules::gtag::MODULE.integrate.i18n)
+                config
+                    .translate(crate::modules::gtag::MODULE.integrate.i18n)
+                    .exclude_path(crate::modules::admin::MODULE.mount_at)
             })
             .map_err(|e| e.to_string())?;
         let builder = builder
@@ -2153,7 +2157,7 @@ macro_rules! register {
         // the only thing to decide is which paths are exempt -- a webhook,
         // or anything else whose caller is not a browser:
         //
-        //     exempt = ["/webhooks"]    under [csrf] in config/<env>.toml
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
         //
         // The token for the request is `ctx.hooked::<CsrfToken>()`;
         // `token.hidden_field()` is the input a form carries.
@@ -2183,8 +2187,14 @@ macro_rules! register {
         // visitor is a hash whose salt is deleted when the day ends. The
         // views go in two tables of the `[db]` database, written every
         // `flush_interval` seconds, never during a request.
+        //
+        // The admin is never counted, wherever src/modules/admin.rs
+        // mounts it.
         let builder = builder
-            .plugin_hooking_from_config::<brocanth_analytics::Analytics>("analytics")
+            .plugin_hooking_from_config_with::<brocanth_analytics::Analytics>(
+                "analytics",
+                |config| config.exclude_path(crate::modules::admin::MODULE.mount_at),
+            )
             .map_err(|e| e.to_string())?;
         let builder = builder.hooks_off_from(
             "analytics",
@@ -4908,7 +4918,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 989d38ef7dfc59ef
+// brocanth-digest: 4fdce712378f03a6
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -9053,8 +9063,10 @@ consent_days = 182
 send_title = false
 # The query parameters that reach Google; every other one is removed.
 allow_params = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
-# Paths that never get the tag, each with everything under it.
-exclude = ["/admin"]
+# Paths that never get the tag, each with everything under it: "/drafts".
+# The admin never gets the tag: src/plugins/mod.rs reads its path from
+# src/modules/admin.rs.
+exclude = []
 # The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.
 # cookie_domain = ""
 # A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.
@@ -9104,7 +9116,7 @@ remember = true
 # A path whose last segment has a `.` (/robots.txt) is never redirected either,
 # nor a socket or a stream. The routes of other modules are kept in
 # src/plugins/mod.rs, from their files in src/modules/.
-unprefixed = ["/admin", "/api"]
+unprefixed = ["/api"]
 
 [meta]
 # The site's name: the title of a page with none, and og:site_name.
@@ -9292,7 +9304,9 @@ base_url = "http://localhost:3000"
 # More paths to list, such as the pages of a route with a parameter: "/users/7".
 extra = []
 # Path prefixes kept out of the sitemap: "/drafts".
-exclude = ["/admin", "/status", "/realtime"]
+# The admin is never listed: src/plugins/sitemap/mod.rs reads its path from
+# src/modules/admin.rs.
+exclude = ["/status", "/realtime"]
 
 [analytics]
 # Count page views. Off installs no hook.
@@ -9302,8 +9316,10 @@ exclude = ["/admin", "/status", "/realtime"]
 enabled = false
 # The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.
 site = "my-blog"
-# Paths never counted, each with everything under it.
-exclude = ["/admin"]
+# Paths never counted, each with everything under it: "/drafts".
+# The admin is never counted: src/plugins/mod.rs reads its path from
+# src/modules/admin.rs.
+exclude = []
 # Query parameters kept on the stored path. Every other one is dropped.
 # A token or an email in a URL never reaches the database.
 query_allow = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
@@ -12271,6 +12287,9 @@ mod tests {
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{'), "{xml}");
         assert!(!xml.contains("sitemap.xml"), "{xml}");
+        // The admin, wherever src/modules/admin.rs mounts it.
+        let admin = format!("{}</loc>", crate::modules::admin::MODULE.mount_at);
+        assert!(!xml.contains(&admin), "{xml}");
     }
 }
 ===== src/pages/status.jt =====
@@ -12612,14 +12631,16 @@ mod tests {
 
     use crate::pages::Ctx;
 
-    /// The admin is in the table, and it answers 403 until somebody opens it.
+    /// The admin is in the table, where src/modules/admin.rs mounts it, and
+    /// it answers 403 until somebody opens it.
     #[tokio::test]
     async fn the_admin_is_mounted_and_ships_locked() {
+        let at = crate::modules::admin::MODULE.mount_at;
         let router = crate::pages::router().expect("the table builds");
-        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
-            panic!("/admin is not in the table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, at) else {
+            panic!("{at} is not in the table");
         };
-        let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
+        let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
@@ -17102,11 +17123,7 @@ impl Default for Settings {
         Self {
             base_url: "http://localhost:3000".to_string(),
             extra: Vec::new(),
-            exclude: vec![
-                "/admin".to_string(),
-                "/status".to_string(),
-                "/realtime".to_string(),
-            ],
+            exclude: vec!["/status".to_string(), "/realtime".to_string()],
         }
     }
 }
@@ -17139,7 +17156,13 @@ impl Plugin for Sitemap {
     type Provides = NoContext;
     const NAME: &'static str = "sitemap";
 
-    fn new(config: Settings) -> Self {
+    fn new(mut config: Settings) -> Self {
+        // The admin, where src/modules/admin.rs mounts it: no page a
+        // visitor reads.
+        let admin = crate::modules::admin::MODULE.mount_at.to_string();
+        if !config.exclude.contains(&admin) {
+            config.exclude.push(admin);
+        }
         Self { settings: config }
     }
 
@@ -18542,8 +18565,8 @@ answers `/about` and `ctx.path` is `/about`. A GET to `/about` gets a
 Write a link with `ctx.href("/about")`, which keeps the page's
 locale. A language switcher links to `/fr/about`, and the hook
 remembers the choice in the cookie. A path under an `unprefixed`
-prefix of `[i18n]` (`/admin`, `/api`) and a file such as
-`/robots.txt` keep no segment.
+prefix of `[i18n]` (`/api`), the routes of other modules (the admin,
+the file routes) and a file such as `/robots.txt` keep no segment.
 
 ## Page metadata
 
@@ -18660,8 +18683,9 @@ parameters are stored; an email-shaped segment is replaced, but a name
 or an account number is not. Do not add a column to
 `brocanth_analytics_views` that identifies a person.
 
-With the admin, the numbers are at `/admin/analytics`, behind the
-admin's policy like every tab.
+With the admin, the numbers are on its `analytics` tab, behind the
+admin's policy like every tab, and the admin's own pages are never
+counted.
 
 ## Feature flags
 
@@ -19048,7 +19072,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 8d63ffc5cfcd5622 -->
+<!-- brocanth-digest: eb1d9c0889ad5eda -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -19348,7 +19372,7 @@ kind = ["middleware"]
 files = ["src/modules/gtag.rs"]
 config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
-adapted_to = ["config", "i18n"]
+adapted_to = ["config", "admin", "i18n"]
 
 [modules.openapi]
 version = "0.1.0"
@@ -19598,4 +19622,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 6f8e336641740e39
+# brocanth-digest: f74c92bac2ace564

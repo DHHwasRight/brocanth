@@ -42,8 +42,12 @@ fn client(config: GtagConfig) -> TestClient<Base, impl HookFamilies, Handler<Bas
     TestClient::serving(app, table.build().expect("a table"))
 }
 
+/// On, with the admin kept out as a generated project keeps it: from the
+/// admin's module file, through `exclude_path`.
 fn on() -> GtagConfig {
-    GtagConfig::default().measuring("G-ABC123")
+    GtagConfig::default()
+        .measuring("G-ABC123")
+        .exclude_path("/admin")
 }
 
 #[test]

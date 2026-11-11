@@ -60,6 +60,68 @@ fn a_static_site_exports_sitemap_xml_and_robots_txt_names_it() {
     );
 }
 
+fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
+    files
+        .iter()
+        .find(|(p, _)| p == path)
+        .map(|(_, text)| text.as_str())
+        .unwrap_or_else(|| panic!("{path} is generated"))
+}
+
+/// Generates `picks` with the admin moved to `/backoffice`, then builds the
+/// project and runs its tests, with `BROCANTH_BUILD=1`.
+fn build_with_a_moved_admin(picks: &[&'static str]) {
+    if !testing::building() {
+        return;
+    }
+    let mut files =
+        brocanth_cli::testing::generate_for_build("my-blog", picks, &[&Robots, &Sitemap])
+            .unwrap_or_else(|e| panic!("{e}"));
+    brocanth_cli::testing::move_admin(&mut files, "/backoffice").unwrap_or_else(|e| panic!("{e}"));
+    testing::build(&files).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The sitemap never lists the admin, wherever src/modules/admin.rs mounts
+/// it. The plugin reads `mount_at` and the `exclude` setting does not copy
+/// it (docs/module-config.md §9). The project's own sitemap test asks that
+/// the admin's path is not listed, so `BROCANTH_BUILD=1` proves it at the
+/// moved path.
+#[test]
+fn a_moved_admin_stays_out_of_the_sitemap_with_no_other_edit() {
+    let picks = ["config", "admin", "sitemap"];
+    let files = brocanth_cli::testing::generate("my-blog", &picks, &[&Robots, &Sitemap])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let plugin = file(&files, "src/plugins/sitemap/mod.rs");
+    assert!(
+        plugin.contains("crate::modules::admin::MODULE.mount_at"),
+        "{plugin}"
+    );
+    assert!(!plugin.contains("\"/admin\""), "{plugin}");
+    let exclude = file(&files, "config/development.toml")
+        .lines()
+        .find(|line| line.starts_with("exclude = "))
+        .expect("[sitemap] exclude");
+    assert_eq!(exclude, "exclude = []", "the admin's path is not copied");
+    build_with_a_moved_admin(&picks);
+}
+
+/// robots.txt keeps crawlers out of a moved admin, and the project's own
+/// test expects the moved path. Without a config file the file is open, so
+/// the admin's `Disallow:` line is what the test reads.
+#[test]
+fn a_moved_admin_stays_disallowed_with_no_other_edit() {
+    let picks = ["admin", "robots"];
+    let files = brocanth_cli::testing::generate("my-blog", &picks, &[&Robots, &Sitemap])
+        .unwrap_or_else(|e| panic!("{e}"));
+    testing::assert_formatted(&files);
+    let page = file(&files, "src/pages/robots.txt.rs");
+    assert!(
+        page.contains("\"User-agent: *\\nDisallow: {}\\n\",\n            crate::modules::admin::MODULE.mount_at"),
+        "the test reads the admin's path from its module file:\n{page}"
+    );
+    build_with_a_moved_admin(&picks);
+}
+
 /// A key no module has comes back as an error with its help line.
 #[test]
 fn a_refused_project_says_why() {

@@ -207,9 +207,12 @@ shutdown_grace_secs` has a flag and a variable in every project
    `crate::modules::<key>::MODULE.<field>` where it uses the value, and
    never copies it into a setting. `i18n-routing` reads `storage-routes`'
    `path` and `admin`'s `mount_at`, and never redirects a socket or a
-   stream. Remains: `sitemap`, `analytics` and `gtag` copy `/admin` into
-   their `exclude` settings; `add` does not print a field a newer module
-   adds.
+   stream. `sitemap`, `analytics` and `gtag` read `admin`'s `mount_at`
+   for their exclusion, and the generated `robots` and `admin` tests
+   follow a moved admin (§9, decisions 4 and 5). No library default names
+   `/admin`. Remains: `add` does not print a field a newer module adds;
+   the route table test of `src/pages/mod.rs` lists the admin's patterns
+   as literals, so a move edits it too.
 
 ### 4. Admin
 

@@ -115,7 +115,7 @@ impl Module for I18n {
             settings.push(
                 Setting::list(
                     "unprefixed",
-                    &["/admin", "/api"],
+                    &["/api"],
                     "Path prefixes that keep no locale segment and are never redirected.",
                 )
                 .note(
@@ -269,8 +269,8 @@ const ROUTING_AGENTS: &str = "\n\
     Write a link with `ctx.href(\"/about\")`, which keeps the page's\n\
     locale. A language switcher links to `/fr/about`, and the hook\n\
     remembers the choice in the cookie. A path under an `unprefixed`\n\
-    prefix of `[i18n]` (`/admin`, `/api`) and a file such as\n\
-    `/robots.txt` keep no segment.\n";
+    prefix of `[i18n]` (`/api`), the routes of other modules (the admin,\n\
+    the file routes) and a file such as `/robots.txt` keep no segment.\n";
 
 /// The `[i18n]` settings every project with the module has.
 fn settings() -> Vec<Setting> {

@@ -26,7 +26,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable_hooking, integration, Hooking};
+use brocanth_scaffold::snippet::{configurable_hooking, integration, module_ref, Hooking};
 use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// First-party analytics, as a choice on the `brocanth create` menu.
@@ -86,8 +86,17 @@ impl Module for PageViews {
                 section: "analytics",
                 ty: "brocanth_analytics::Analytics",
                 config_ty: "brocanth_analytics::AnalyticsConfig",
-                prelude: PRELUDE.to_string(),
-                adjust: None,
+                prelude: if project.has("admin") {
+                    format!("{PRELUDE}{PRELUDE_ADMIN}")
+                } else {
+                    PRELUDE.to_string()
+                },
+                // The admin is never counted. Its path is read from its
+                // module file, never copied into `exclude`: a moved admin
+                // needs no edit here (docs/module-config.md §9).
+                adjust: project
+                    .has("admin")
+                    .then(|| format!(".exclude_path({})", module_ref("admin", "mount_at"))),
             },
             settings(project),
         );
@@ -116,7 +125,17 @@ fn settings(project: &Project) -> Vec<Setting> {
             project.name,
             "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
         ),
-        Setting::list("exclude", &["/admin"], "Paths never counted, each with everything under it."),
+        Setting::list(
+            "exclude",
+            &[],
+            "Paths never counted, each with everything under it: \"/drafts\".",
+        )
+        .note(if project.has("admin") {
+            "The admin is never counted: src/plugins/mod.rs reads its path from\n\
+             src/modules/admin.rs."
+        } else {
+            ""
+        }),
         Setting::list(
             "query_allow",
             &["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"],
@@ -274,6 +293,12 @@ const PRELUDE: &str = r#"
         // `flush_interval` seconds, never during a request.
 "#;
 
+/// With `admin`: why the registration names the admin's path.
+const PRELUDE_ADMIN: &str = r#"        //
+        // The admin is never counted, wherever src/modules/admin.rs
+        // mounts it.
+"#;
+
 /// What the generated `AGENTS.md` says about analytics.
 const AGENTS: &str = "\n\
     ## Analytics\n\
@@ -288,5 +313,6 @@ const AGENTS: &str = "\n\
     or an account number is not. Do not add a column to\n\
     `brocanth_analytics_views` that identifies a person.\n\
     \n\
-    With the admin, the numbers are at `/admin/analytics`, behind the\n\
-    admin's policy like every tab.\n";
+    With the admin, the numbers are on its `analytics` tab, behind the\n\
+    admin's policy like every tab, and the admin's own pages are never\n\
+    counted.\n";

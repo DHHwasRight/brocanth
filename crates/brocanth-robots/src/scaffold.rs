@@ -219,9 +219,45 @@ fn generated_literal(text: &str) -> String {
     }
 }
 
+/// The test's expected text. A literal, unless it names the admin: then a
+/// function that reads the admin's path from src/modules/admin.rs, so a
+/// moved admin does not fail the project's own test
+/// (docs/module-config.md §9).
+fn generated_item(project: &Project) -> (String, &'static str) {
+    let text = expected(project);
+    let rule = "Disallow: /admin\n";
+    if !text.contains(rule) {
+        let item = format!(
+            "    /// What this project answered the day it was generated. Change the\n\
+             \x20   /// `[robots]` settings and this line with them.\n\
+             \x20   const GENERATED: &str ={};\n",
+            generated_literal(&text)
+        );
+        return (item, "GENERATED");
+    }
+    let template = text
+        .replace('{', "{{")
+        .replace('}', "}}")
+        .replace(rule, "Disallow: {}\n");
+    let item = format!(
+        "    /// What this project answered the day it was generated, with the admin\n\
+         \x20   /// where src/modules/admin.rs mounts it. Change the `[robots]` settings\n\
+         \x20   /// and this text with them.\n\
+         \x20   fn generated() -> String {{\n\
+         \x20       format!(\n\
+         \x20           {template:?},\n\
+         \x20           {}\n\
+         \x20       )\n\
+         \x20   }}\n",
+        module_ref("admin", "mount_at")
+    );
+    (item, "generated()")
+}
+
 /// `src/pages/robots.txt.rs`: the route, and a test that sends a request
 /// through the whole application.
 fn page_rs(project: &Project) -> String {
+    let (generated, call) = generated_item(project);
     format!(
         r#"{PAGE_RS}
 #[cfg(test)]
@@ -229,10 +265,7 @@ mod tests {{
     use brocanth::routing::Verb;
     use brocanth_server::Request;
 
-    /// What this project answered the day it was generated. Change the
-    /// `[robots]` settings and this line with them.
-    const GENERATED: &str ={expected};
-
+{generated}
     #[tokio::test]
     async fn the_application_answers_robots_txt_as_text() {{
         let app = crate::app::build().expect("the application builds");
@@ -243,11 +276,10 @@ mod tests {{
             Some("text/plain; charset=utf-8")
         );
         let body = response.body.bytes().expect("a whole body");
-        assert_eq!(std::str::from_utf8(body).expect("utf-8"), GENERATED);
+        assert_eq!(std::str::from_utf8(body).expect("utf-8"), {call});
     }}
 }}
-"#,
-        expected = generated_literal(&expected(project))
+"#
     )
 }
 

@@ -83,7 +83,7 @@ matches a named group follows that group only, not the `*` rules (RFC
 | With | What changes |
 |---|---|
 | `config` | settings come from `[robots]`, not a literal |
-| `admin` | `disallow` starts as `["/admin"]` |
+| `admin` | the plugin disallows the admin's `mount_at`, read from `src/modules/admin.rs` (`integrate.admin`); the `disallow` setting stays empty |
 | `static` | the file says `index = true`, because `export` reads that file and the export is the published site |
 
 `outside_runtime`: the static export asks every GET route for its answer.

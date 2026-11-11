@@ -18,7 +18,10 @@ pub struct AnalyticsConfig {
     /// beacons is a site named by its origin's host.
     pub site: String,
     /// Paths never counted, each with everything under it: `/admin`
-    /// covers `/admin/users` and not `/administrators`.
+    /// covers `/admin/users` and not `/administrators`. Empty by default:
+    /// this crate does not know where an application mounts its admin. A
+    /// generated project adds the admin's path with
+    /// [`exclude_path`](Self::exclude_path).
     pub exclude: Vec<String>,
     /// Query parameters kept on the stored path. Every other parameter is
     /// dropped before the row is built, so a token or an email in a URL
@@ -59,7 +62,7 @@ impl Default for AnalyticsConfig {
         Self {
             enabled: true,
             site: "app".to_string(),
-            exclude: vec!["/admin".to_string()],
+            exclude: Vec::new(),
             query_allow: [
                 "utm_source",
                 "utm_medium",
@@ -82,6 +85,22 @@ impl Default for AnalyticsConfig {
 }
 
 impl AnalyticsConfig {
+    /// Adds a prefix to [`exclude`](Self::exclude).
+    ///
+    /// For a path another module owns, read from its module file:
+    /// `.exclude_path(crate::modules::admin::MODULE.mount_at)`. A generated
+    /// project calls it after the file and the flags were read, so a file
+    /// that sets `exclude` cannot count the admin, and a moved admin needs
+    /// no edit here.
+    #[must_use]
+    pub fn exclude_path(mut self, prefix: impl Into<String>) -> Self {
+        let prefix = prefix.into();
+        if !self.exclude.contains(&prefix) {
+            self.exclude.push(prefix);
+        }
+        self
+    }
+
     /// Whether `path` is excluded: equal to an entry, or under it.
     pub fn excludes(&self, path: &str) -> bool {
         self.exclude.iter().any(|prefix| {
@@ -103,10 +122,23 @@ mod tests {
 
     #[test]
     fn an_excluded_prefix_covers_its_subtree_and_nothing_else() {
-        let config = AnalyticsConfig::default();
+        let config = AnalyticsConfig::default().exclude_path("/admin");
         assert!(config.excludes("/admin"));
         assert!(config.excludes("/admin/users/3"));
         assert!(!config.excludes("/administrators"));
         assert!(!config.excludes("/"));
+    }
+
+    #[test]
+    fn the_default_excludes_nothing_and_an_added_path_is_kept_once() {
+        assert!(!AnalyticsConfig::default().excludes("/admin"));
+        let config = AnalyticsConfig {
+            exclude: vec!["/drafts".to_string()],
+            ..AnalyticsConfig::default()
+        }
+        .exclude_path("/backoffice")
+        .exclude_path("/backoffice");
+        assert_eq!(config.exclude, ["/drafts", "/backoffice"]);
+        assert!(config.excludes("/backoffice/users/3"));
     }
 }

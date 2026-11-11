@@ -67,7 +67,7 @@ It adds one key to the `[i18n]` section of [`i18n`](i18n.md):
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `unprefixed` | list | `["/admin", "/api"]` | none (a list) | Path prefixes that keep no locale segment and are never redirected. The routes of other modules are added in code, after this list. |
+| `unprefixed` | list | `["/api"]` | none (a list) | Path prefixes that keep no locale segment and are never redirected. The routes of other modules are added in code, after this list. |
 
 ## Read more
 

@@ -20,7 +20,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The base URL a new project starts with: the address `serve` listens on.
@@ -41,7 +41,10 @@ impl Module for Sitemap {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to("admin", "/admin is excluded")
+        .adapts_to(
+            "admin",
+            "the admin is excluded, at the path src/modules/admin.rs mounts it",
+        )
         .adapts_to("jt", "the JSON page /status is excluded")
         .adapts_to("realtime-sse", "the event stream /realtime/events is excluded")
         .adapts_to(
@@ -61,7 +64,7 @@ impl Module for Sitemap {
         s.file("src/plugins/sitemap/mod.rs", plugin_rs(project));
         // The last dot is the extension, so this file answers
         // `/sitemap.xml`, and the static export writes it as `sitemap.xml`.
-        s.file("src/pages/sitemap.xml.rs", page_rs());
+        s.file("src/pages/sitemap.xml.rs", page_rs(project));
         s.at(Slot::PagesRoutes).line("/sitemap.xml");
         s.at(Slot::PluginsMod).line("pub mod sitemap;");
         configurable(s, project, "sitemap", "Sitemap", settings(project));
@@ -71,12 +74,14 @@ impl Module for Sitemap {
     }
 }
 
-/// The page paths other modules write that are not pages a visitor reads.
+/// The page paths other modules write that are not pages a visitor reads,
+/// as the `exclude` setting starts.
+///
+/// Page files only: their path is the file's, not an option. The admin is
+/// not here: its path is an option in src/modules/admin.rs, so the plugin
+/// reads it there ([`admin_exclusion`], docs/module-config.md §9).
 fn excluded(project: &Project) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if project.has("admin") {
-        out.push("/admin");
-    }
     if project.has("jt") {
         out.push("/status");
     }
@@ -112,11 +117,50 @@ fn settings(project: &Project) -> Vec<Setting> {
             "exclude",
             &excluded(project),
             "Path prefixes kept out of the sitemap: \"/drafts\".",
-        ),
+        )
+        .note(if project.has("admin") {
+            "The admin is never listed: src/plugins/sitemap/mod.rs reads its path from\n\
+             src/modules/admin.rs."
+        } else {
+            ""
+        }),
     ]
 }
 
-fn page_rs() -> String {
+/// The plugin's `new`. With `admin`, it adds the admin's path to `exclude`,
+/// read from src/modules/admin.rs and never copied into the setting: a
+/// moved admin needs no edit, and a file that sets `exclude` cannot list
+/// the admin (docs/module-config.md §9).
+fn admin_exclusion(project: &Project) -> String {
+    if !project.has("admin") {
+        return "    fn new(config: Settings) -> Self {\n        \
+                Self { settings: config }\n    }\n"
+            .to_string();
+    }
+    format!(
+        "    fn new(mut config: Settings) -> Self {{\n\
+         \x20       // The admin, where src/modules/admin.rs mounts it: no page a\n\
+         \x20       // visitor reads.\n\
+         \x20       let admin = {}.to_string();\n\
+         \x20       if !config.exclude.contains(&admin) {{\n\
+         \x20           config.exclude.push(admin);\n\
+         \x20       }}\n\
+         \x20       Self {{ settings: config }}\n\
+         \x20   }}\n",
+        module_ref("admin", "mount_at")
+    )
+}
+
+/// `src/pages/sitemap.xml.rs`, with its test. With `admin`, the test checks
+/// that the admin is not listed, wherever it is mounted.
+fn page_rs(project: &Project) -> String {
+    let admin = if project.has("admin") {
+        "        // The admin, wherever src/modules/admin.rs mounts it.\n        \
+         let admin = format!(\"{}</loc>\", crate::modules::admin::MODULE.mount_at);\n        \
+         assert!(!xml.contains(&admin), \"{xml}\");\n"
+    } else {
+        ""
+    };
     format!(
         r#"{PAGE_RS}
 #[cfg(test)]
@@ -141,7 +185,7 @@ mod tests {{
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{{'), "{{xml}}");
         assert!(!xml.contains("sitemap.xml"), "{{xml}}");
-    }}
+{admin}    }}
 }}
 "#
     )
@@ -184,7 +228,9 @@ fn plugin_rs(project: &Project) -> String {
         .collect();
     // rustfmt keeps a `vec!` on one line while its items fit in 60
     // columns, and writes one item per line after that.
-    let exclude = if items.join(", ").len() <= 60 {
+    let exclude = if items.is_empty() {
+        "Vec::new()".to_string()
+    } else if items.join(", ").len() <= 60 {
         format!("vec![{}]", items.join(", "))
     } else {
         let lines: String = items
@@ -193,6 +239,7 @@ fn plugin_rs(project: &Project) -> String {
             .collect();
         format!("vec![\n{lines}            ]")
     };
+    let new = admin_exclusion(project);
     format!(
         r##"//! The sitemap.xml, as this application answers it.
 //!
@@ -283,10 +330,7 @@ impl Plugin for Sitemap {{
     type Provides = NoContext;
     const NAME: &'static str = "sitemap";
 
-    fn new(config: Settings) -> Self {{
-        Self {{ settings: config }}
-    }}
-
+{new}
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         let routes = crate::pages::handlers()
             .iter()

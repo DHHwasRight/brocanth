@@ -26,6 +26,10 @@ impl Module for Gtag {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to(
+            "admin",
+            "the admin never gets the tag, at the path src/modules/admin.rs mounts it",
+        )
         .integration(
             "i18n",
             "the banner's words come from the catalogs, in the request's locale",
@@ -73,6 +77,12 @@ impl Module for Gtag {
         } else {
             ""
         };
+        let admin = if project.has("admin") {
+            "\n        // The admin never gets the tag, wherever src/modules/admin.rs\n        \
+             // mounts it."
+        } else {
+            ""
+        };
         configurable_hooking(
             s,
             project,
@@ -83,12 +93,9 @@ impl Module for Gtag {
                 config_ty: "brocanth_gtag::GtagConfig",
                 prelude: PRELUDE
                     .replace("@TURN_ON@", turn_on)
+                    .replace("@ADMIN@", admin)
                     .replace("@WORDS@", words),
-                // The catalogs' words, behind `integrate.i18n`. The
-                // feature stays on; the field decides at build time.
-                adjust: project.has("i18n").then(|| {
-                    format!(".translate({})", module_ref("gtag", "integrate.i18n"))
-                }),
+                adjust: adjust(project),
             },
             vec![
                 Setting::bool(
@@ -136,9 +143,15 @@ impl Module for Gtag {
                 ),
                 Setting::list(
                     "exclude",
-                    &["/admin"],
-                    "Paths that never get the tag, each with everything under it.",
-                ),
+                    &[],
+                    "Paths that never get the tag, each with everything under it: \"/drafts\".",
+                )
+                .note(if project.has("admin") {
+                    "The admin never gets the tag: src/plugins/mod.rs reads its path from\n\
+                     src/modules/admin.rs."
+                } else {
+                    ""
+                }),
                 Setting::text(
                     "cookie_domain",
                     "",
@@ -181,15 +194,39 @@ impl Module for Gtag {
     }
 }
 
+/// The chain on the `[gtag]` configuration, after the file and the flags.
+///
+/// With `i18n`: the catalogs' words, behind `integrate.i18n`. The feature
+/// stays on; the field decides at build time. With `admin`: the admin's
+/// path, read from its module file and never copied into `exclude`, so a
+/// moved admin needs no edit (docs/module-config.md §9).
+fn adjust(project: &Project) -> Option<String> {
+    let mut chain = String::new();
+    if project.has("i18n") {
+        chain.push_str(&format!(
+            ".translate({})",
+            module_ref("gtag", "integrate.i18n")
+        ));
+    }
+    if project.has("admin") {
+        chain.push_str(&format!(
+            ".exclude_path({})",
+            module_ref("admin", "mount_at")
+        ));
+    }
+    (!chain.is_empty()).then_some(chain)
+}
+
 /// The comment above the registration. `@TURN_ON@` says where to turn it
-/// on, which depends on whether there is a file.
+/// on, which depends on whether there is a file; `@ADMIN@` names the
+/// admin, when there is one.
 const PRELUDE: &str = r#"
         // -- brocanth-gtag: Google Analytics, after consent ----------
         //
         // A banner on every HTML page, and Google's tag only once the
-        // visitor accepts. Global Privacy Control counts as a refusal, the
-        // page URL loses every query parameter not on the allow-list, and
-        // /admin never gets the tag. Off until production turns it on:
+        // visitor accepts. Global Privacy Control counts as a refusal, and
+        // the page URL loses every query parameter not on the allow-list.@ADMIN@
+        // Off until production turns it on:
         // @TURN_ON@.@WORDS@
 "#;
 
