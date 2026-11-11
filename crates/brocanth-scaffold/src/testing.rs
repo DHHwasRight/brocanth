@@ -51,6 +51,9 @@
 //! * `BROCANTH_BUILD=1` makes [`building`] true, so a test builds the
 //!   project and runs its own tests. Off by default: a build fetches and
 //!   compiles the framework, which takes minutes.
+//! * `BROCANTH_BUILD_TARGET=<dir>` gives every build one target directory,
+//!   so the framework compiles once for all of them. Unset, each project
+//!   has its own, deleted with it.
 
 use std::io::Write;
 use std::path::Path;
@@ -254,14 +257,17 @@ pub fn build(files: &Files) -> Result<(), String> {
     }
     write(&dir, files).map_err(|e| format!("{}: {e}", dir.display()))?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    // Its own target directory, so the build does not wait on the lock of
-    // the test that runs it.
-    let out = Command::new(cargo)
+    // Not the target directory of the test that runs it, so the build does
+    // not wait on that lock: the project's own, or `BROCANTH_BUILD_TARGET`.
+    let mut command = Command::new(cargo);
+    command
         .args(["test", "--quiet"])
         .current_dir(&dir)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .map_err(|e| format!("cargo: {e}"))?;
+        .env_remove("CARGO_TARGET_DIR");
+    if let Some(target) = std::env::var_os("BROCANTH_BUILD_TARGET").filter(|t| !t.is_empty()) {
+        command.env("CARGO_TARGET_DIR", target);
+    }
+    let out = command.output().map_err(|e| format!("cargo: {e}"))?;
     if out.status.success() {
         // A target directory of a few gigabytes per project.
         let _ = std::fs::remove_dir_all(&dir);

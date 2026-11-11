@@ -1243,7 +1243,7 @@ fn the_module_writes_this_project() {
 | `testing::assert_formatted(files)` | Fails when rustfmt changes a generated `.rs` file. Skips when rustfmt is not on `PATH`. |
 | `testing::snapshot(files)` | The project as one text, in the CLI's golden format. |
 | `testing::golden(path, text)` | Compares with the file, or writes it under `BROCANTH_BLESS=1`. |
-| `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo test` in a temporary directory, so the project builds and its own tests run. It deletes the directory when they pass. |
+| `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo test` in a temporary directory, so the project builds and its own tests run. It deletes the directory when they pass. `BROCANTH_BUILD_TARGET=<dir>` shares one target directory between the builds, so the framework compiles once. |
 
 `crates/brocanth-robots/tests/scaffold.rs` uses it: the two `robots`
 shapes and their goldens moved there from the CLI. It also generates a
