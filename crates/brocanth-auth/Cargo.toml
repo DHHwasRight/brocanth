@@ -121,6 +121,11 @@ brocanth-scaffold = { workspace = true, optional = true }
 # neither the admin nor rsx.
 brocanth-admin = { workspace = true, optional = true }
 
+# `Staff::gate`: a staff permission as a row predicate, so a role check and a
+# row rule travel in one `condition()`. Optional and off. The crate depends
+# on `thiserror` alone, so the cost is one small crate.
+brocanth-policy = { workspace = true, optional = true }
+
 # The templates, compiled in by the macro. Only reachable through `admin`: a
 # login does not render HTML.
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version = "0.1.0", optional = true }
@@ -142,7 +147,7 @@ trybuild = "1.0.122"
 # on a context struct. A screen that compiles and produces the wrong page is
 # the failure worth catching. The ordinary dependency tree is unaffected: a
 # published build links no admin and no rsx.
-brocanth-auth = { path = ".", features = ["admin", "conformance"] }
+brocanth-auth = { path = ".", features = ["admin", "conformance", "policy"] }
 
 # The HTML assertions, and only those: `Html::assert_button` answers "is there
 # a button that says End every session", where `body.contains(..)` answers
@@ -150,6 +155,12 @@ brocanth-auth = { path = ".", features = ["admin", "conformance"] }
 # itself needs a built `App` and this test drives `Admin::dispatch`, so only
 # `Html` is used.
 brocanth-test.workspace = true
+
+# `tests/scaffold.rs`: the modules this crate writes (`auth-oauth`,
+# `superuser`, `roles`), generated into a project by the CLI and compared
+# with `tests/golden/`. The CLI also turns this crate's `scaffold` on.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
 # Empty by default, and that is the §8 rule rather than an oversight. The plan
@@ -190,6 +201,9 @@ scaffold = ["dep:brocanth-scaffold"]
 # means the code is absent and not merely unreachable: `src/admin.rs` and the
 # templates beside it are `#[cfg]`-ed out of the crate entirely.
 admin = ["runtime", "dep:brocanth-admin", "dep:rsx"]
+
+# `Staff::gate`, over `brocanth-policy`. See the dependency line above.
+policy = ["runtime", "dep:brocanth-policy"]
 
 # `PgStore`: the storage traits over Postgres. See the dependency line above.
 postgres = ["runtime", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]

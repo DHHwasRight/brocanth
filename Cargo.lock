@@ -800,6 +800,8 @@ dependencies = [
  "brocanth",
  "brocanth-admin",
  "brocanth-auth",
+ "brocanth-cli",
+ "brocanth-policy",
  "brocanth-scaffold",
  "brocanth-test",
  "getrandom 0.4.3",

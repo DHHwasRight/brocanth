@@ -57,6 +57,7 @@
 //! reads a row. [`PgStore::sweep`] deletes the dead rows so the tables stay
 //! small. Run it from a job every few minutes.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -71,7 +72,8 @@ use crate::otp::OtpChallengeId;
 use crate::session::{Privilege, SessionId};
 use crate::storage::{
     AccountDirectory, AuthStore, MfaStore, NewAccount, NewProviderLink, OtpChallengeRecord,
-    OtpStore, SessionRecord, SignInLocationStore, StoreError, TokenRecord, TotpSecretRecord,
+    OtpStore, Role, SessionRecord, SignInLocationStore, StaffStore, StoreError, TokenRecord,
+    TotpSecretRecord,
 };
 use crate::tokens::TokenPurpose;
 
@@ -919,5 +921,139 @@ impl SignInLocationStore for PgStore {
             .await
             .map_err(backend)?
             .rows_affected())
+    }
+}
+
+/// The first column of every row, as text.
+async fn texts(
+    pool: &PgPool,
+    statement: &'static str,
+    key: &str,
+) -> Result<Vec<String>, StoreError> {
+    sqlx::query(statement)
+        .bind(key)
+        .fetch_all(pool)
+        .await
+        .map_err(backend)?
+        .iter()
+        .map(|row| row.try_get::<String, _>(0).map_err(backend))
+        .collect()
+}
+
+#[async_trait]
+impl StaffStore for PgStore {
+    async fn set_superuser(&self, account: &AccountId, superuser: bool) -> Result<(), StoreError> {
+        let statement = if superuser {
+            sql::GRANT_SUPERUSER
+        } else {
+            sql::REVOKE_SUPERUSER
+        };
+        sqlx::query(statement)
+            .bind(account.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn is_superuser(&self, account: &AccountId) -> Result<bool, StoreError> {
+        Ok(sqlx::query(sql::IS_SUPERUSER)
+            .bind(account.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend)?
+            .is_some())
+    }
+
+    async fn superusers(&self) -> Result<Vec<AccountId>, StoreError> {
+        let rows = sqlx::query(sql::SUPERUSERS)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend)?;
+        rows.iter()
+            .map(|row| row.try_get::<String, _>(0).map(AccountId::new))
+            .collect::<Result<_, _>>()
+            .map_err(backend)
+    }
+
+    async fn put_role(&self, role: &Role) -> Result<(), StoreError> {
+        let permissions: Vec<&str> = role.permissions.iter().map(String::as_str).collect();
+        sqlx::query(sql::PUT_ROLE)
+            .bind(&role.name)
+            .bind(&permissions)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn delete_role(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(sqlx::query(sql::DELETE_ROLE)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?
+            .rows_affected()
+            > 0)
+    }
+
+    async fn roles(&self) -> Result<Vec<Role>, StoreError> {
+        let rows = sqlx::query(sql::ROLES)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend)?;
+        rows.iter()
+            .map(|row| {
+                Ok(Role {
+                    name: row.try_get("name").map_err(backend)?,
+                    permissions: row
+                        .try_get::<Vec<String>, _>("permissions")
+                        .map_err(backend)?
+                        .into_iter()
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    async fn assign_role(&self, account: &AccountId, role: &str) -> Result<bool, StoreError> {
+        let found: i64 = sqlx::query(sql::ASSIGN_ROLE)
+            .bind(account.as_str())
+            .bind(role)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend)?
+            .try_get(0)
+            .map_err(backend)?;
+        Ok(found > 0)
+    }
+
+    async fn unassign_role(&self, account: &AccountId, role: &str) -> Result<(), StoreError> {
+        sqlx::query(sql::UNASSIGN_ROLE)
+            .bind(account.as_str())
+            .bind(role)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn roles_of(&self, account: &AccountId) -> Result<Vec<String>, StoreError> {
+        texts(&self.pool, sql::ROLES_OF, account.as_str()).await
+    }
+
+    async fn members(&self, role: &str) -> Result<Vec<AccountId>, StoreError> {
+        Ok(texts(&self.pool, sql::MEMBERS, role)
+            .await?
+            .into_iter()
+            .map(AccountId::new)
+            .collect())
+    }
+
+    async fn permissions_of(&self, account: &AccountId) -> Result<BTreeSet<String>, StoreError> {
+        Ok(texts(&self.pool, sql::PERMISSIONS_OF, account.as_str())
+            .await?
+            .into_iter()
+            .collect())
     }
 }

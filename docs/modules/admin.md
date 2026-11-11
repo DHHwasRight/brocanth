@@ -13,7 +13,7 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`admin-model`](admin-model.md), [`commands`](commands.md) |
+| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`superuser`](superuser.md), [`admin-model`](admin-model.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-admin` (no default features) |

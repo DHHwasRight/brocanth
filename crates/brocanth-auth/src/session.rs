@@ -200,7 +200,7 @@ pub enum SameSite {
 }
 
 impl SameSite {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             SameSite::Strict => "Strict",
             SameSite::Lax => "Lax",
@@ -272,12 +272,28 @@ impl SetCookie {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A cookie this crate wrote by hand: a flow state, a pending link.
+    pub(crate) fn raw(value: String) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Display for SetCookie {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// One cookie's value from a `Cookie` request header, or `None`.
+///
+/// The first pair with that exact name wins. The value is returned as sent:
+/// a sealed value is base64url and a dot, and needs no decoding.
+pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').find_map(|pair| {
+        let (key, value) = pair.trim().split_once('=')?;
+        (key == name).then_some(value)
+    })
 }
 
 /// A new session and the cookie that carries it.
@@ -311,6 +327,25 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     /// The configuration in force.
     pub fn config(&self) -> &SessionConfig {
         &self.config
+    }
+
+    /// The key, for the other values this crate seals with it: a flow state,
+    /// a pending provider link.
+    pub(crate) fn key(&self) -> &SigningKey {
+        &self.key
+    }
+
+    /// The session a request's `Cookie` header carries, or
+    /// [`AuthError::NoSession`].
+    ///
+    /// [`Sessions::load`] after [`cookie`] has found this configuration's
+    /// cookie in the header.
+    ///
+    /// # Errors
+    /// As [`Sessions::load`].
+    pub async fn from_cookie_header(&self, header: &str) -> Result<SessionRecord, AuthError> {
+        let value = cookie(header, &self.config.cookie_name).ok_or(AuthError::NoSession)?;
+        self.load(value).await
     }
 
     /// Opens a pre-login session: a cart, a flash message, no identity.

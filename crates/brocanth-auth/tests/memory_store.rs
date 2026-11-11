@@ -18,6 +18,7 @@ brocanth_auth::account_directory_conformance!(fresh);
 brocanth_auth::mfa_store_conformance!(fresh);
 brocanth_auth::otp_store_conformance!(fresh);
 brocanth_auth::sign_in_location_store_conformance!(fresh);
+brocanth_auth::staff_store_conformance!(fresh);
 
 #[test]
 fn a_memory_store_says_it_is_not_durable() {

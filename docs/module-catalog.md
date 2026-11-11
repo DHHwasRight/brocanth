@@ -69,6 +69,7 @@ nothing holds this page.
 |---|---|---|---|---|---|
 | [`admin`](modules/admin.md) | A Django-shaped backoffice at /admin, locked until you say who may in | Enhancer |  |  |  |
 | [`admin-model`](modules/admin-model.md) | The admin's rows over SeaORM, one line per entity |  |  | part of `admin`, off until you tick it; needs `model`: it reads rows through the ORM, and without `model` there is none |  |
+| [`auth-oauth`](modules/auth-oauth.md) | Sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Enhancer |  | part of `auth`, off until you tick it |  |
 | [`observability-health`](modules/observability-health.md) | /up for liveness, /readyz runs every plugin's check and fails first on SIGTERM |  | yes | part of `observability`, ticked with its parent |  |
 | [`observability-metrics`](modules/observability-metrics.md) | Prometheus text on /metrics: requests by route and status, in-flight, job queues |  | yes | part of `observability`, ticked with its parent |  |
 | [`openapi`](modules/openapi.md) | An OpenAPI 3.1 document derived from src/pages, served at /openapi.json | Enhancer |  |  |  |
@@ -97,9 +98,11 @@ nothing holds this page.
 | [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | not for production |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
+| [`roles`](modules/roles.md) | Roles that grant permissions, stored with the accounts, for staff and the admin |  |  | needs `superuser`: only a superuser gives a role, and `superuser` reads the signed-in member of staff |  |
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
 | [`webhooks`](modules/webhooks.md) | Signed webhooks in both directions; pick a direction below |  |  |  |  |
 | [`webhooks-out`](modules/webhooks-out.md) | Signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs |  |  | part of `webhooks`, off until you tick it; needs `db`: the endpoints and the log are rows; `jobs`: a delivery is a job | with `admin`: a deliveries tab |
+| [`superuser`](modules/superuser.md) | Operator accounts that pass every admin check, and a createsuperuser command |  |  | needs `auth`: a superuser is an account with a flag, and `auth` holds the accounts |  |
 
 ### External (6)
 

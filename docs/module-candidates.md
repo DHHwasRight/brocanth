@@ -21,13 +21,13 @@ then what the module unblocks. Both scans put `mail` first.
 | 1 | `mail` | Sends mail from a project; `deliver_later` through `jobs`. The `brocanth-mail` crate exists; no module adds it. | Action Mailer, django.core.mail, react-email, PocketBase mail | S |
 | 2 | `flash` | Messages that survive a redirect after a form POST | contrib.messages, Rails flash | S |
 | 3 | `auth-screens` | Sign-up, sign-in, reset, verify, TOTP screens over `brocanth-auth`, which has the flows and no pages. Needs `mail` and `flash`. | Devise, allauth, Rails 8 auth generator | M |
-| 4 | `auth-oauth` | Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |
+| 4 | `auth-oauth` | **Built** ([page](modules/auth-oauth.md)). Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |
 | 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. **Built:** `brocanth-meta`, `docs/modules/meta.md`. | Next.js metadata, next-seo, django-meta | M |
 | 6 | `storage-routes` | **Built** ([page](modules/storage-routes.md)). Upload and download routes, `?thumb=`, protected file tokens over `storage` | Active Storage, uploadthing, PocketBase files | S |
 | 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. **Built:** `brocanth-errors`, `docs/modules/errors.md`. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
 | 8 | `compression` | gzip and brotli on responses. **Built** as `middleware-compression`. | GZipMiddleware, Rack::Deflater | S |
 | 9 | `conditional-get` | Dynamic `ETag` and 304. **Built** as `middleware-conditional-get`. | ConditionalGetMiddleware, `fresh_when` | S |
-| 10 | `superuser` | Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |
+| 10 | `superuser` | **Built** ([page](modules/superuser.md)). Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |
 | 11 | `webhooks-in` | **Built** ([page](modules/webhooks-in.md)). Incoming webhooks: signature check, replay window, idempotency key | Stripe/svix receivers, PocketHost | S |
 | 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown. **Built**: crate `brocanth-sanitize`. | bleach/nh3, Rails sanitize | S |
 | 13 | `pagination` | One public paginator, offset and keyset. **Built** (`brocanth-pagination`); admin and `resource` page with it. | pagy, kaminari, Django Paginator | S |
@@ -37,7 +37,7 @@ then what the module unblocks. Both scans put `mail` first.
 | 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE`. **Built** (`brocanth-filters`). | django-filter, ransack | M |
 | 18 | `webhooks-out` | **Built** ([page](modules/webhooks-out.md)). Signed outgoing webhooks with retries, over row changes, `jobs` and the outbox | svix, PocketHost webhooks | M |
 | 19 | `audit` | Change history over `RowChange`, with an admin history page. **Built** (`brocanth-audit`). | paper_trail, django-simple-history | M |
-| 20 | `roles` | Groups and permissions for staff and admin access | django.contrib.auth groups, pundit roles | M |
+| 20 | `roles` | **Built** ([page](modules/roles.md)). Groups and permissions for staff and admin access | django.contrib.auth groups, pundit roles | M |
 | 21 | `flags` | Feature flags with an admin panel. **Built** (`brocanth-flags`). | Flipper, django-waffle, Vercel flags | M |
 | 22 | `admin-actions` | Bulk actions with a confirm page, then inlines. **Built**, without inlines (`brocanth-admin`). | Django admin actions, ActiveAdmin batch actions | M |
 

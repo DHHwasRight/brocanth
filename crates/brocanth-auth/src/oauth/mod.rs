@@ -24,6 +24,7 @@
 
 pub mod oidc;
 pub mod pkce;
+pub mod web;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

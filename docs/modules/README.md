@@ -76,6 +76,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`jobs`](jobs.md) | a queue in Postgres with retries and a dead letter; a worker in this process | Enhancer |  |
 | [`jobs-memory`](jobs-memory.md) | the queue in this process's memory; for development and tests, gone at restart | Enhancer | jobs |
 | [`auth`](auth.md) | argon2id accounts and signed sessions; no provider, so no HTTP client | Middleware, Enhancer |  |
+| [`auth-oauth`](auth-oauth.md) | sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Routes, Enhancer | auth |
+| [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
+| [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |
 | [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails | Middleware | storage |

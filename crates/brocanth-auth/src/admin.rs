@@ -61,6 +61,10 @@ use crate::identity::{Account, AccountId};
 use crate::session::Privilege;
 use crate::storage::{AccountDirectory, SessionRecord, StoreError};
 
+mod staff;
+
+pub use staff::{permission, MemberRow, RoleRow, RolesCtx, RolesPanel, StaffPolicy, ROLES_KEY};
+
 /// The panel's stylesheet, built from `style/panel.css`. Inlined by every
 /// screen, because the admin mounts no asset route and a panel is in no
 /// position to add one. See `style/README.md`.

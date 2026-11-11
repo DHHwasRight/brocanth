@@ -69,6 +69,10 @@ impl Module for Backoffice {
         )
         .adapts_to("middleware-csrf", "every form carries the CSRF token")
         .adapts_to(
+            "superuser",
+            "the principal is the signed-in member of staff, read from the session",
+        )
+        .adapts_to(
             "admin-model",
             "the rows are read through the ORM, from `src/plugins/admin/models.rs`",
         )
@@ -125,6 +129,22 @@ impl Module for Backoffice {
                 .replace(
                     "@PICK@",
                     pick("            let admin = admin.for_request(ctx);\n", ""),
+                )
+                .replace(
+                    "@WHO@",
+                    if project.has("superuser") {
+                        WHO_STAFF
+                    } else {
+                        WHO
+                    },
+                )
+                .replace(
+                    "@PRINCIPAL@",
+                    if project.has("superuser") {
+                        PRINCIPAL_STAFF
+                    } else {
+                        PRINCIPAL
+                    },
                 )
                 .replace("@TITLE@", &format!("{title:?}"))
                 .replace("@DERIVE@", &derive)
@@ -705,8 +725,7 @@ fn screen(admin: Arc<@HELD@>) -> Handler {
                 _ => "GET",
             };
             let form = submission(ctx);
-            let who = principal(ctx);
-            // `?` on the admin's own failure: a data source that failed, or
+@WHO@            // `?` on the admin's own failure: a data source that failed, or
             // a template that did not render. A refusal is not one: it is a
             // page.
             let answer = admin
@@ -722,19 +741,7 @@ fn screen(admin: Arc<@HELD@>) -> Handler {
     })
 }
 
-@STAMPED@/// Who is asking, as the admin's policy sees it.
-///
-/// Anonymous until this reads your user off the request. When a plugin
-/// publishes one, this is one line:
-///
-/// ```ignore
-/// ctx.provided::<CurrentUser, _>()
-///     .map_or_else(Principal::anonymous, |user| Principal::new(user))
-/// ```
-fn principal(_ctx: &Ctx) -> Principal<'_> {
-    Principal::anonymous()
-}
-
+@STAMPED@@PRINCIPAL@
 /// The form a POST sent. Anything that is not urlencoded is an empty form,
 /// so the screen shows its errors and writes nothing.
 fn submission(ctx: &Ctx) -> Submission {
@@ -766,6 +773,43 @@ mod tests {
     }
 }
 "##;
+
+/// How `screen` asks who is asking, without `superuser`.
+const WHO: &str = "            let who = principal(ctx);\n";
+
+/// With `superuser`: the signed-in member of staff, read from the session.
+const WHO_STAFF: &str = "            let staff = crate::plugins::superuser::staff(ctx).await?;\n\
+     \x20           let who = principal(staff.as_ref());\n";
+
+/// `principal`, without `superuser`.
+const PRINCIPAL: &str = r#"/// Who is asking, as the admin's policy sees it.
+///
+/// Anonymous until this reads your user off the request. When a plugin
+/// publishes one, this is one line:
+///
+/// ```ignore
+/// ctx.provided::<CurrentUser, _>()
+///     .map_or_else(Principal::anonymous, |user| Principal::new(user))
+/// ```
+fn principal(_ctx: &Ctx) -> Principal<'_> {
+    Principal::anonymous()
+}
+"#;
+
+/// `principal`, with `superuser`.
+const PRINCIPAL_STAFF: &str = r#"/// Who is asking, as the admin's policy sees it: the signed-in member of
+/// staff, or anonymous.
+///
+/// `StaffPolicy` reads it, behind `integrate.admin` in
+/// `src/modules/superuser.rs`. A policy of your own can read it too:
+/// `principal.downcast::<brocanth_auth::Staff>()`.
+fn principal(staff: Option<&brocanth_auth::Staff>) -> Principal<'_> {
+    match staff {
+        Some(staff) => Principal::new(staff),
+        None => Principal::anonymous(),
+    }
+}
+"#;
 
 /// The `AGENTS.md` section.
 const AGENTS: &str = "\n\
