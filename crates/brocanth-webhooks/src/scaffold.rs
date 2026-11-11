@@ -449,7 +449,7 @@ const SIGNED_TEST: &str = r##"
         let again = crate::app::handle(&app, delivery()).await;
         assert_eq!(again.status, 200);
         let text = again.body.bytes().expect("a whole body");
-        assert_eq!(text, b"already received");
+        assert_eq!(text, "already received");
     }
 "##;
 
