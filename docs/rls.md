@@ -26,7 +26,6 @@ let mine = SqlExpr::col("tenant_id").eq(tenant.get());
 
 let schema = Schema::new()
     .role(member.clone())
-    .setting(tenant.clone())
     .table(posts.clone().grant(&member, Privilege::CRUD))
     .policy(
         Policy::new("posts_tenant", &posts)
@@ -45,10 +44,10 @@ let schema = Schema::new()
 | `.force()` | `ALTER TABLE … FORCE ROW LEVEL SECURITY` | |
 | `.grant(&role, privileges)` | `GRANT SELECT, … ON … TO …` | |
 | `Policy::new(name, &table)` | `CREATE POLICY` | `AS PERMISSIVE FOR ALL TO PUBLIC` |
-| `.restrictive()`, `.for_(Command::Select)`, `.to(&role)` | `AS RESTRICTIVE`, `FOR SELECT`, `TO "role"` | |
+| `.restrictive()`, `.command(Command::Select)`, `.to(&role)` | `AS RESTRICTIVE`, `FOR SELECT`, `TO "role"` | |
 | `.using(expr)`, `.with_check(expr)` | `USING (…)`, `WITH CHECK (…)` | none |
 | `crud(&table, &role, read, modify)` | four policies, as Drizzle's `crudPolicy` | |
-| `Setting::new(key, type)` | `NULLIF(current_setting('brocanth.key', true), '')::type` | |
+| `Setting::new(key, type)` | `CAST(NULLIF(current_setting('brocanth.key', TRUE), '') AS type)` | |
 | `Function::new(name, returns)` | `CREATE OR REPLACE FUNCTION … LANGUAGE sql STABLE` | `SECURITY INVOKER` |
 
 `crud(table, role, read, modify)` follows Drizzle: `read` and `modify` are
@@ -67,8 +66,9 @@ policy knows what it needs without a parser.
 
 - A column is `SqlExpr::col("tenant_id")`, written `"tenant_id"`.
 - A value is `SqlExpr::val(v)`. DDL takes no bind parameter, so sea-query
-  writes the value as a literal with its own escaping (`'O''Brien'`). The
-  value never passes through `format!`.
+  writes the value as a literal with its own escaping (`E'O\'Brien'`, a
+  line break as `\n`). The value never passes through `format!`, and a
+  value cannot put a line `-- down` into the migration file.
 - `SqlExpr::exists(select)` takes a `sea_query::SelectStatement`, for a
   membership test. `.uses(&other)` adds the definitions of an expression the
   select contains, because sea-query cannot report them.
@@ -103,8 +103,10 @@ Function ─▶ Function
 - A role's membership needs the role.
 - A function needs each function its body calls. A cycle is refused, with
   the names on it.
-- A setting is not a node: it creates nothing in Postgres. The schema lists
-  the settings, so `Principal` can be checked against them.
+- A setting is not a node: it creates nothing in Postgres.
+  `Schema::settings()` lists the settings the expressions read, and
+  `Schema::check_principal` refuses a `Principal` key no policy reads: a
+  typo would otherwise read as `NULL` and admit no row, with no error.
 
 `Schema::snapshot()` checks the graph: a policy on an undeclared table, a
 `TO` role that is neither `Role::new` nor `Role::existing`, a function
@@ -211,7 +213,7 @@ any other file. With `model`, `rls make` writes a SeaORM migration file,
 A policy reads who is asking from the transaction:
 
 ```sql
-USING ("tenant_id" = CAST(NULLIF(current_setting('brocanth.tenant_id', true), '') AS bigint))
+USING ("tenant_id" = CAST(NULLIF(current_setting('brocanth.tenant_id', TRUE), '') AS bigint))
 ```
 
 `brocanth-db` sets it:
@@ -315,7 +317,11 @@ masks.
 
 - The `brocanth-policy` bridge (§5).
 - Expression drift in `rls check`. It compares structure only.
-- Column-level grants, sequences' grants (`USAGE` on `serial` sequences for
-  `INSERT`), and default privileges. Grant them in a SQL migration.
+- `USAGE` on a schema other than `public`, column-level grants, sequence
+  grants (`USAGE` on a `serial` sequence for `INSERT`), and default
+  privileges. Grant them in a SQL migration.
+- Turning a `Role::new` into a `Role::existing` leaves the snapshot, so the
+  next migration drops the role. Remove it from the snapshot by hand
+  first if the role must stay.
 - Policies on views, and `security_invoker` views.
 - Functions in other languages than SQL.

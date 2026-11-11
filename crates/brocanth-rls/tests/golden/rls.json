@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "roles": {
+    "app_member": {
+      "inherit": true,
+      "createdb": false,
+      "createrole": false,
+      "members": [
+        "app_login"
+      ]
+    }
+  },
+  "functions": {
+    "app.current_tenant": {
+      "schema": "app",
+      "name": "current_tenant",
+      "args": [],
+      "returns": "bigint",
+      "volatility": "STABLE",
+      "definer": null,
+      "body": "CAST(NULLIF(current_setting('brocanth.tenant_id', TRUE), '') AS bigint)",
+      "uses": []
+    }
+  },
+  "tables": {
+    "app.notes": {
+      "schema": "app",
+      "name": "notes",
+      "force": false,
+      "grants": {
+        "app_member": [
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      },
+      "policies": {
+        "notes_app_member_delete": {
+          "as": "PERMISSIVE",
+          "for": "DELETE",
+          "to": [
+            "app_member"
+          ],
+          "using": "\"owner_id\" = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)",
+          "with_check": null,
+          "uses": []
+        },
+        "notes_app_member_insert": {
+          "as": "PERMISSIVE",
+          "for": "INSERT",
+          "to": [
+            "app_member"
+          ],
+          "using": null,
+          "with_check": "\"owner_id\" = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)",
+          "uses": []
+        },
+        "notes_app_member_select": {
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "app_member"
+          ],
+          "using": "\"owner_id\" = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)",
+          "with_check": null,
+          "uses": []
+        },
+        "notes_app_member_update": {
+          "as": "PERMISSIVE",
+          "for": "UPDATE",
+          "to": [
+            "app_member"
+          ],
+          "using": "\"owner_id\" = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)",
+          "with_check": "\"owner_id\" = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)",
+          "uses": []
+        }
+      }
+    },
+    "app.posts": {
+      "schema": "app",
+      "name": "posts",
+      "force": true,
+      "grants": {
+        "app_member": [
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      },
+      "policies": {
+        "posts_tenant": {
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "app_member",
+            "app_owner"
+          ],
+          "using": "\"tenant_id\" = \"app\".\"current_tenant\"()",
+          "with_check": "\"tenant_id\" = \"app\".\"current_tenant\"()",
+          "uses": [
+            "app.current_tenant"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -66,6 +66,8 @@ brocanth-search = { workspace = true, default-features = false, features = ["sca
 brocanth-errors = { workspace = true, default-features = false, features = ["scaffold"] }
 brocanth-meta = { workspace = true, default-features = false, features = ["scaffold"] }
 brocanth-policy = { workspace = true, features = ["scaffold"] }
+# Row-level security, for its scaffold module alone: no driver, no sea-query.
+brocanth-rls = { workspace = true, default-features = false, features = ["scaffold"] }
 # `default-features = false` keeps `regex`, the `Validate` proc macro and a
 # second copy of the core out of the CLI. What a generated project gets is
 # unaffected: that comes from `Dep::brocanth(..)`, not from this line.
