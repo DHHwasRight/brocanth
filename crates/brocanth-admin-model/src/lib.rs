@@ -75,8 +75,8 @@ mod source;
 
 pub use async_trait::async_trait;
 pub use source::{
-    columns_of, count_of, delete_of, entry_of, insert_of, json_of, order_of, row_of, rows_of,
-    scope_of, search_of, single_key, update_of,
+    columns_of, count_of, delete_of, entry_of, equals_of, insert_of, json_of, order_of, row_of,
+    rows_of, scope_of, search_of, single_key, update_of, value_of,
 };
 
 /// A module path the source was not given an entity for.

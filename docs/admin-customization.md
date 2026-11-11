@@ -19,6 +19,7 @@ in step with new versions of the admin.
 | 7. Replace the layout | the whole shell | `Views::with_layout` | `admin/base_site.html` or `admin/base.html` |
 | 8. Eject a screen | start from the shipped screen, then edit | `brocanth admin eject <screen> [--model <key>]`, then `brocanth admin diff` after an upgrade | `vendor:publish` (Laravel); copying from `django/contrib/admin/templates` |
 | Extra page | a page of your own with the admin's chrome | `AdminConfig::page`, `Panel` | `AdminSite.get_urls()` |
+| Inlines | a child model's rows on the parent's form | `ModelAdmin::inline(Inline)` | `InlineModelAdmin`, `TabularInline` |
 
 The tests for levels 1 to 5 are in
 `crates/brocanth-admin/tests/customization.rs`. Levels 6 and 7 are in
@@ -519,10 +520,109 @@ targets `.bg-white` breaks on the next stylesheet build.
 - **Record links** (`AdminConfig::record_link`): a link on every detail
   screen. Django's History button is one; `brocanth-audit` adds it.
 
+## Inlines: child rows on the parent's form
+
+Django's `InlineModelAdmin`. The posts of a user on the user's create and
+edit form: change a post, delete it, or add one, in the same POST as the
+user.
+
+```rust
+AdminConfig::new().model("user", |m| {
+    m.inline(
+        Inline::new("post")              // the child model's key
+            .fields(["title", "published"]) // default: its form fields
+            .extra(1)                    // blank rows for new posts
+            .max(50),                    // existing rows shown
+    )
+})
+```
+
+`Inline::new` finds the child column that points at the parent from the
+schema. Name it with `Inline::fk("author_id")` when two columns point at
+the parent, or when the schema does not report the relation. `Admin::new`
+stops, with a `help:` line, when the child model is not shown, when no
+column or more than one points back, or when two inlines name one child.
+
+The tests are in `crates/brocanth-admin/tests/inlines.rs` (the fixture)
+and `crates/brocanth-admin-model/tests/inlines.rs` (SQLite, and
+PostgreSQL when `BROCANTH_TEST_DATABASE_URL` is set).
+
+### How it works
+
+- **One form, one POST.** The rows are a table inside the parent's
+  `<form>`. So the one CSRF token the form carries covers them, and the
+  form works without JavaScript. A row posts `{model}-{n}-{column}`, its
+  key in `{model}-{n}-pk` and its delete box in `{model}-{n}-delete`, as
+  Django's formsets do. `n` is the row's place on the form; the key says
+  which child the row changes.
+- **The children are read in the query.** The admin lists the child model
+  with `ListRequest::filter` set to `<fk> = <parent key>`, under the child's
+  list rule, in key order. It reads at most `max` rows; with more, the form
+  shows the first ones and says so. The POST cannot change the rows it did
+  not show.
+- **The child's rules, per row.** Each existing row asks the screen policy
+  `Action::Update` and `Action::Delete` on that record, and the child's
+  row rule for that record (one guarded select when the rule depends on
+  the row). A row the rules refuse is drawn read-only, posts no key, and
+  has no delete box. A new row needs `Action::Create` and a create rule
+  that admits every row, as the child's own create form does. The field
+  mask locks the fields it refuses; the column that points at the parent
+  must be writable to add a child, because the admin writes it.
+- **Everything is checked before anything is written.** The admin
+  validates the parent and every row, asks every rule, and admits every
+  write with the same guarded select the child's own screens use. A POST
+  that changes a row the form drew read-only, or sends a key that is not
+  one of this parent's rows, is refused (403, 409) and writes nothing. A
+  form error on any row re-renders the whole form with 422: each error is
+  beside its field in its row, and every typed value stays.
+- **A blank row adds nothing.** A new row that comes back with every field
+  empty is skipped. A `<select>` on a row always offers the empty choice,
+  so a blank row really posts nothing.
+
+### Decision: no transaction, and a partial save is shown as one
+
+`AdminData` has no transaction, and the admin does not hold the
+connection. So the writes are not atomic: the parent first, then each
+child row in form order. The admin narrows the window it can control:
+every check and every form error comes before the first write. What is
+left is a refusal by the data source itself, such as a unique index, on
+one child row.
+
+Then the admin stops at that row and answers 422. The row shows the
+error; the form says that the record and the rows before the marked one
+were saved. The form that comes back is safe to post again: an added row
+comes back as an existing child with its key, a deleted row is gone, and
+a create form comes back as the new record's edit form. Django wraps the
+same writes in `transaction.atomic`. Here that waits for a transaction
+on `AdminData`.
+
+Two other choices were open:
+
+| Choice | Why not |
+|---|---|
+| A `transaction` method on `AdminData` | Every data source must then implement it, and the in-memory fixture and a source over an HTTP API cannot. It is the right next step for SQL sources, behind a default method. |
+| Write the children first | A new parent has no key until it is written, and a child needs it. |
+
+### Decision: an exact-match filter on `ListRequest`
+
+The children of one record are a filter, not a search: a search is
+`LIKE` on text, and the key is an exact value. So `ListRequest` has a
+`filter: Option<Equals>`, which a data source must `AND` into its `WHERE`
+clause, beside the scope. The value is typed by the child column's kind,
+so an integer column gets an integer bind (PostgreSQL does not compare an
+integer with text). The fixture and `brocanth-admin-model` apply it.
+
+The PostgreSQL test found the same fault in `brocanth-admin-model`'s
+key lookup: it bound the key from the URL as text, so every edit form
+over PostgreSQL answered 500, and SQLite's type affinity hid it.
+`single_key` now binds an integer key as an integer.
+
+The alternative was to fold the filter into the row policy's condition.
+That makes the policy carry something that is not a policy, and the
+fixture applies no condition.
+
 ## Open
 
-- **Inlines.** Django's `TabularInline`: the related rows of a record on
-  its edit form. Not built.
 - **Per-app overrides.** No app grouping exists.
 - **Ejecting a panel.** `brocanth admin eject` copies the shipped screens
   and the two blocks. A `Panel` renders its own body in the crate that

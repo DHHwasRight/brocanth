@@ -81,6 +81,8 @@ pub mod fixture;
 #[cfg(feature = "runtime")]
 pub mod form;
 #[cfg(feature = "runtime")]
+pub mod inline;
+#[cfg(feature = "runtime")]
 pub mod journal;
 #[cfg(feature = "runtime")]
 pub mod model;
@@ -163,7 +165,9 @@ pub mod parts {
 #[cfg(feature = "runtime")]
 pub use config::{AdminConfig, ModelAdmin};
 #[cfg(feature = "runtime")]
-pub use data::{AdminData, DataError, FieldErrors, ListRequest, Scope, Search, SharedData};
+pub use data::{AdminData, DataError, Equals, FieldErrors, ListRequest, Scope, Search, SharedData};
+#[cfg(feature = "runtime")]
+pub use inline::Inline;
 #[cfg(feature = "runtime")]
 pub use rows::{AdminResource, RowAction};
 

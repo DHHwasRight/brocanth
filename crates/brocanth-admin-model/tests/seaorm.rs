@@ -261,6 +261,7 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
                 columns: &columns,
             },
             sort: None,
+            filter: None,
             scope: Scope::Unscoped,
         })
         .await
@@ -279,6 +280,7 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
             limit: 10,
             search: no_search(),
             sort: Some(&sort),
+            filter: None,
             scope: Scope::Unscoped,
         })
         .await;

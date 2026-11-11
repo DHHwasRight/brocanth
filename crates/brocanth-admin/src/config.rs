@@ -65,6 +65,7 @@ pub struct ModelAdmin {
     views: ModelViews,
     actions: Vec<crate::actions::BulkAction>,
     without_actions: Vec<String>,
+    inlines: Vec<crate::inline::Inline>,
 }
 
 /// The screens one model replaces. `None` is the admin's own view.
@@ -117,6 +118,7 @@ impl ModelAdmin {
             views: ModelViews::default(),
             actions: Vec::new(),
             without_actions: Vec::new(),
+            inlines: Vec::new(),
         }
     }
 
@@ -374,6 +376,28 @@ impl ModelAdmin {
     /// Whether an action added for every model is left off this one.
     pub(crate) fn drops_action(&self, key: &str) -> bool {
         self.without_actions.iter().any(|k| k == key)
+    }
+
+    /// Puts another model's records that point at this one on this model's
+    /// create and edit form. Django's `ModelAdmin.inlines`. See
+    /// [`crate::inline`].
+    ///
+    /// `Admin::new` stops when the child model is not shown, when no
+    /// column of it points at this model, or when two inlines name one
+    /// child model.
+    pub fn inline(mut self, inline: crate::inline::Inline) -> Self {
+        self.inlines.push(inline);
+        self
+    }
+
+    /// The inlines, in the order they were added.
+    pub fn inlines(&self) -> &[crate::inline::Inline] {
+        &self.inlines
+    }
+
+    /// The inlines, for `Admin::new` to resolve their columns.
+    pub(crate) fn inlines_mut(&mut self) -> &mut [crate::inline::Inline] {
+        &mut self.inlines
     }
 
     /// Whether this configuration permits creating. The policy is asked as

@@ -104,6 +104,34 @@ pub fn search_of<E: EntityTrait>(search: Search<'_>) -> Result<Condition, DataEr
     Ok(any)
 }
 
+/// `WHERE column = ?` for the admin's exact-match filter: the children of
+/// one record, for an inline.
+///
+/// The column went through `FromStr` and the value is a bind, as in
+/// [`single_key`].
+pub fn equals_of<E: EntityTrait>(
+    filter: Option<brocanth_admin::data::Equals<'_>>,
+) -> Result<Condition, DataError> {
+    let Some(filter) = filter else {
+        return Ok(Condition::all());
+    };
+    let column = columns_of::<E>(filter.column)?;
+    Ok(Condition::all().add(column.eq(value_of(filter.value))))
+}
+
+/// One admin value as a SeaORM bind, with its own type: an integer binds as
+/// an integer, so PostgreSQL compares it with an integer column.
+pub fn value_of(value: &brocanth_admin::model::Value) -> brocanth_model::sea_orm::Value {
+    use brocanth_admin::model::Value;
+    match value {
+        Value::Null => Option::<String>::None.into(),
+        Value::Text(s) => s.clone().into(),
+        Value::Int(n) => (*n).into(),
+        Value::Float(f) => (*f).into(),
+        Value::Bool(b) => (*b).into(),
+    }
+}
+
 /// `ORDER BY`, applied to a select.
 pub fn order_of<E: EntityTrait>(
     select: Select<E>,
@@ -127,6 +155,7 @@ pub async fn rows_of<E: EntityTrait>(
 ) -> Result<Vec<Row>, DataError> {
     let select = E::find()
         .filter(search_of::<E>(request.search)?)
+        .filter(equals_of::<E>(request.filter)?)
         .filter(scope_of(request.scope, db.get_database_backend())?);
     let select = order_of::<E>(select, request.sort)?;
     let found = select
@@ -180,12 +209,32 @@ where
 ///
 /// The value is bound and never interpolated, and the column went through
 /// `FromStr`, so neither half of this reaches SQL as text.
+///
+/// The key arrives as text, from a URL. It binds as an integer when the
+/// column is one: PostgreSQL has no `integer = text` operator, so a text
+/// bind fails there, while SQLite's type affinity hides the difference.
 pub fn single_key<E: EntityTrait>(
     key: &brocanth_admin::model::PrimaryKey,
     table: &str,
 ) -> Result<Condition, DataError> {
-    let (name, value) = crate::one_key(key, table)?;
+    use brocanth_model::sea_orm::sea_query::ColumnType;
+    let (name, text) = crate::one_key(key, table)?;
     let column = columns_of::<E>(&name)?;
+    let integer = matches!(
+        column.def().get_column_type(),
+        ColumnType::TinyInteger
+            | ColumnType::SmallInteger
+            | ColumnType::Integer
+            | ColumnType::BigInteger
+            | ColumnType::TinyUnsigned
+            | ColumnType::SmallUnsigned
+            | ColumnType::Unsigned
+            | ColumnType::BigUnsigned
+    );
+    let value: brocanth_model::sea_orm::Value = match (integer, text.parse::<i64>()) {
+        (true, Ok(n)) => n.into(),
+        _ => text.into(),
+    };
     Ok(Condition::all().add(column.eq(value)))
 }
 

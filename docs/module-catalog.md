@@ -217,7 +217,10 @@ Done: the `brand` and `userlinks` blocks (`Views::with_brand`,
 `with_userlinks`, `AdminConfig::user_label`); extra pages
 (`AdminConfig::page`, `Page::hidden`, `Panel::in_nav`); per-model
 JavaScript as files (`ModelAdmin::script`, `AdminConfig::script`; no
-inline code, so no hash and no nonce); `brocanth admin diff`.
+inline code, so no hash and no nonce); `brocanth admin diff`; inlines
+(`ModelAdmin::inline(Inline)`: a child model's rows on the parent's
+form, the child's policy per row, `docs/admin-customization.md`,
+"Inlines").
 
 What remains, from `docs/admin-customization.md`, "Open":
 
