@@ -2717,14 +2717,16 @@ mod tests {
 
     use crate::pages::Ctx;
 
-    /// The admin is in the table, and it answers 403 until somebody opens it.
+    /// The admin is in the table, where src/modules/admin.rs mounts it, and
+    /// it answers 403 until somebody opens it.
     #[tokio::test]
     async fn the_admin_is_mounted_and_ships_locked() {
+        let at = crate::modules::admin::MODULE.mount_at;
         let router = crate::pages::router().expect("the table builds");
-        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
-            panic!("/admin is not in the table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, at) else {
+            panic!("{at} is not in the table");
         };
-        let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
+        let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
