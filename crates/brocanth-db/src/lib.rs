@@ -10,6 +10,8 @@
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
 //! - [`migrate`]: plain SQL migrations, for a project with no ORM.
+//! - [`Principal`]: who a transaction runs as, for row-level security.
+//!   [`Db::transact_as`] and [`Tx::assume`] set it.
 //!
 //! [`sea_query`] and [`sqlx`] are re-exported, so an application names one
 //! dependency and gets the versions this crate was built against.
@@ -24,6 +26,8 @@ pub mod error;
 pub mod exec;
 #[cfg(feature = "runtime")]
 pub mod migrate;
+#[cfg(feature = "runtime")]
+pub mod principal;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 #[cfg(feature = "runtime")]
@@ -37,6 +41,8 @@ pub use db::{Db, Tx};
 pub use error::DbError;
 #[cfg(feature = "runtime")]
 pub use exec::{Exec, WriteStatement};
+#[cfg(feature = "runtime")]
+pub use principal::Principal;
 
 #[cfg(feature = "runtime")]
 pub use sea_query;

@@ -118,6 +118,31 @@ db.ping().await?; // for a readiness probe
 # }
 ```
 
+### The principal, for row-level security
+
+`Db::transact_as` runs a transaction as a `Principal`: `SET LOCAL ROLE`,
+then `set_config('brocanth.<key>', $value, true)` for each value. A policy
+reads `current_setting('brocanth.<key>', true)`. Both end with the
+transaction, so the next user of the connection starts as the login role
+with no value. `brocanth-rls` declares the policies; `docs/rls.md` has the
+design.
+
+```rust,no_run
+use brocanth_db::sea_query::Query;
+use brocanth_db::{Db, DbError, Exec, Principal};
+
+# async fn example(db: Db) -> Result<(), DbError> {
+let me = Principal::new().role("app_member").set("tenant_id", 7);
+let q = Query::select().column("title").from("posts").to_owned();
+let titles: Vec<(String,)> = db.transact_as(&me, async |tx| tx.all(&q).await).await?;
+# let _ = titles;
+# Ok(())
+# }
+```
+
+A value is a bind parameter. The role is a quoted identifier, because `SET`
+takes no parameter. A key is `[a-z][a-z0-9_]*`.
+
 ## Settings
 
 | Field | Default | Effect |
