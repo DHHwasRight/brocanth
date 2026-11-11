@@ -789,7 +789,8 @@ impl AdminConfig {
     /// Every screen of that model then goes through the policy: the list and
     /// its count filter in the query, a record is read with a guarded select,
     /// a write is guarded by the condition it was checked against, and a form
-    /// accepts only the columns `Policy::writable` allows. See
+    /// accepts only the columns its mask allows (`Policy::writable_on_create`
+    /// on a create, `Policy::writable` on an update). See
     /// [`crate::rows`].
     ///
     /// A discovered model with no resource answers `403` to every screen,

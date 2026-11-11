@@ -12,6 +12,8 @@
 //! * a staff member lists and views only their own posts; a superuser sees
 //!   every post;
 //! * a post may be changed by its author while it is a draft;
+//! * a superuser may create a post, and name any author on it; nobody changes
+//!   the author of a post that exists;
 //! * a staff member may write the title and nothing else.
 
 use std::sync::Arc;
@@ -89,9 +91,18 @@ brocanth_policy::policy! {
             who.superuser => always,
             author_id == who.id,
         }
+        create {
+            who.superuser => always,
+        }
         update: author_id == who.id && status == "draft",
         delete: author_id == who.id,
+        // `update` reads the stored row, so `author_id` in this mask would
+        // let a writer give a post away.
         writable {
+            who.superuser => except [id, author_id],
+            only [title],
+        }
+        writable_on_create {
             who.superuser => except [id],
             only [title],
         }
@@ -500,9 +511,51 @@ async fn the_form_offers_only_writable_fields_and_a_post_with_another_is_refused
 }
 
 #[tokio::test]
+async fn the_author_is_set_on_create_and_never_changed_by_an_update() {
+    let db = database().await;
+    let root = client(Arc::new(Models::new(db.conn().clone())), ROOT);
+
+    // The create form takes the author: `writable_on_create`.
+    root.get_async("/admin/post/new")
+        .await
+        .html()
+        .assert_field("author_id");
+    root.post_async(
+        "/admin/post",
+        &[("title", "mine"), ("status", "draft"), ("author_id", "99")],
+    )
+    .await
+    .assert_status(303);
+    let id = 1;
+    assert_eq!(column(db.conn(), id, "author_id").await, "99");
+
+    // The edit form does not: `writable`. The update rule admits the row,
+    // because it reads the author as stored, so only the mask stops this.
+    let html = root
+        .get_async(&format!("/admin/post/{id}/edit"))
+        .await
+        .html();
+    html.assert_field("title");
+    assert!(
+        html.field("author_id").is_none(),
+        "author_id is not an input on the edit form"
+    );
+    let refused = root
+        .post_async(
+            &format!("/admin/post/{id}"),
+            &[("title", "given away"), ("author_id", "1")],
+        )
+        .await;
+    refused.assert_status(403);
+    refused.html().assert_text("author_id");
+    assert_eq!(column(db.conn(), id, "author_id").await, "99");
+    assert_eq!(column(db.conn(), id, "title").await, "mine");
+}
+
+#[tokio::test]
 async fn a_rule_that_is_never_is_forbidden_without_reading_a_row() {
-    // `Policy::create` is not written, so it is `Never`: 403 on the form and
-    // on the POST, and no "add" link on the list.
+    // A staff member's `Policy::create` is `Never`: 403 on the form and on
+    // the POST, and no "add" link on the list.
     let db = database().await;
     let ada = client(Arc::new(Models::new(db.conn().clone())), ADA);
     ada.get_async("/admin/post/new").await.assert_status(403);
