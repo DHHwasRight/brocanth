@@ -211,22 +211,52 @@ the admin to this: a model script adds no inline `<script>`.
 
 ### Scripts and dp-swap
 
-dp-swap replaces the `<main dp-layout="admin">` region. The response is
-the whole document, and dp-swap merges its `<head>` into the live one:
+dp-swap replaces the `<main dp-layout="admin">` region. Every admin link
+is a `dp-boost` link, so every swap is a navigation. The response is the
+whole document, and on a navigation dp-swap merges its `<head>` into the
+live one:
 
 - A stylesheet the live page does not link yet is added before the swap,
-  so the new screen is never unstyled.
+  and the swap waits until it has loaded or failed, for 3 seconds at
+  most (dp-swap's `styleTimeout`). A sheet slower than that arrives after
+  the screen.
 - A script the live page does not load yet is added after the swap, so
-  it finds its markup. It runs once, the first time a screen names it.
+  it finds its markup. Its top level runs once, the first time a screen
+  names it. `DOMContentLoaded` does not fire again.
+- When every new script has loaded or failed, dp-swap fires
+  `dp:headLoaded` on `document`. It fires after each navigation, also
+  when no script was new.
 - Each file is added once. Inline `<script>` and `<style>` are never
-  copied, so the Content-Security-Policy decision above holds.
+  copied, and a copy carries no `on*` attribute, so the
+  Content-Security-Policy decision above holds.
+- Only a file of the page's origin is added. A model script or sheet on
+  a CDN loads on a full load and not on a swap, unless an every-screen
+  script (`AdminConfig::script`) allows that origin:
+  `dpswap.configure({ headOrigins: ["https://cdn.example.com"] })`. That
+  script runs after dp-swap, because it is deferred.
 - Nothing is removed. A model's stylesheet stays after a swap to another
   screen, so write its rules for that model's markup.
 
-So a script from `ModelAdmin::script` loads on a swap into its model's
-screen, as on a full load. A script that must act on *every* screen a
-swap shows listens on `document` for `dp:afterSwap`, because it runs
-only once.
+So a script from `ModelAdmin::script` starts in one of two places: at
+top level, which covers a full load and the first swap into its screen,
+and on `dp:headLoaded`, which covers each later swap. Use both when the
+script works on the screen's markup, and make the setup safe to run
+twice on the same element:
+
+```js
+// /admin/invoices.js
+function setup() {
+  for (const el of document.querySelectorAll("[data-total]:not([data-ready])")) {
+    el.dataset.ready = "";
+    // ...
+  }
+}
+setup();
+document.addEventListener("dp:headLoaded", setup);
+```
+
+Do not wait for `dp:afterSwap` in a merged script: it fires before the
+script has loaded, so the script misses the swap that brought it.
 
 **Why the admin sets header mode.** dp-swap's default asks for
 `<url>/_fragment.html`, the prerendered fragment of a static site. The
@@ -240,13 +270,15 @@ The line that sets header mode is appended to `INLINE_SCRIPT`, not put in
 a script of its own, so the one hash a policy holds for it covers it.
 
 **Why in dp-swap.** The fault is in the client: it threw the response's
-`<head>` away. The fix is in dp-swap (`src/head.ts`, commit `d64048f` of
+`<head>` away. The fix is in dp-swap (`src/head.ts`, commit `54049d1` of
 `brocanth/htmx`, vendored in `crates/brocanth-admin/vendor/` and
 `crates/brocanth-cli/vendor/`), so every server-rendered page that uses
 dp-swap gets it, not only the admin. The tests are in dp-swap
 (`test/head.test.ts`). `tests/customization.rs` holds the admin to its
-half: header mode, the merge in the vendored build, and the model's
-files in the `<head>` of the page a swap gets.
+half: header mode, the merge and `dp:headLoaded` in the vendored build,
+a response that starts with its doctype (dp-swap tells a whole document
+by its start), and the model's files in the `<head>` of the page a swap
+gets.
 
 ## Level 3a: replace a block
 
@@ -807,7 +839,7 @@ fixture applies no condition.
 - **More blocks.** `brand` and `userlinks` exist. `nav-global` and
   `footer` follow the same pattern when an application needs them.
 - **dp-swap's `main`.** The vendored build is `f80aeeb` plus the head
-  merge. The same change is on branch `feat/merge-head-main` of
+  merge and its fixes (`54049d1`). The same change is on branch `feat/merge-head-main` of
   `brocanth/htmx`, on top of its `main`; neither branch is pushed. Moving
   the admin to dp-swap's `main` also brings its meta-element
   configuration (`<meta name="dp-config">`), which could replace the

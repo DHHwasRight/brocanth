@@ -344,10 +344,16 @@ impl ModelAdmin {
     /// and no nonce. A file on another origin needs that origin in
     /// `script-src`: `Csp::allow("script-src", ["https://cdn.example.com"])`.
     ///
-    /// dp-swap replaces the `<main>` region and merges the response's
-    /// `<head>`, so the script loads on a full load and on a swap into
-    /// this model's screen, once. See `docs/admin-customization.md`,
-    /// level 3.
+    /// dp-swap replaces the `<main>` region and, on a navigation, merges
+    /// the response's `<head>`, so the script loads on a full load and on
+    /// a swap into this model's screen, once. Its top level runs then;
+    /// `DOMContentLoaded` does not fire on a swap. To act on each later
+    /// screen, also listen for `dp:headLoaded` on `document`, which fires
+    /// after the swap's new scripts have run. dp-swap merges only files
+    /// of the page's origin: a file on another origin loads on a full
+    /// load only, unless an every-screen script calls
+    /// `dpswap.configure({ headOrigins: [..] })`. See
+    /// `docs/admin-customization.md`, level 3.
     pub fn script(mut self, src: impl Into<String>) -> Self {
         self.scripts.push(src.into());
         self
@@ -977,7 +983,9 @@ impl AdminConfig {
     /// The same rules as [`ModelAdmin::script`]: a file the application
     /// serves, no inline code. A script loaded here stays in the page
     /// across dp-swap navigation. To act on each screen a swap shows, listen
-    /// for the `dp:afterSwap` event on `document`.
+    /// for the `dp:headLoaded` event on `document`: it fires after each
+    /// swap, once the scripts that swap added have run. Deferred, it runs
+    /// after dp-swap, so it may call `dpswap.configure`.
     pub fn script(mut self, src: impl Into<String>) -> Self {
         self.scripts.push(src.into());
         self

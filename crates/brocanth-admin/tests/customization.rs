@@ -270,6 +270,12 @@ fn a_swap_asks_for_the_page_itself_and_brings_its_head() {
     // the live page lacks, which it finds by these selectors.
     assert!(script.contains("script[src]"), "the head merge is built in");
     assert!(script.contains(r#"link[rel~="stylesheet"][href]"#));
+    // A model script starts at top level or on this event, which fires
+    // once the scripts a swap added have run.
+    assert!(
+        script.contains("dp:headLoaded"),
+        "the merge's lifecycle event"
+    );
 
     // What a swap into the post list gets: the whole document, whose head
     // names the model's files. dp-swap adds them to the live head.
@@ -277,6 +283,14 @@ fn a_swap_asks_for_the_page_itself_and_brings_its_head() {
         m.script("/assets/posts.js").stylesheet("/p.css")
     }));
     let page = list(&admin, "post");
+    // dp-swap tells a whole document by how it starts. A page that opened
+    // with anything but its doctype would be swapped as a fragment, and
+    // its head ignored.
+    assert!(
+        page.source().trim_start().starts_with("<!DOCTYPE html>"),
+        "{}",
+        &page.source()[..page.source().len().min(80)]
+    );
     assert!(page.source().contains("<head>"));
     let head = &page.source()[..page.source().find("</head>").expect("a head")];
     assert!(
