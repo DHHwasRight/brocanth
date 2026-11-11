@@ -53,12 +53,14 @@
 //!   compiles the framework, which takes minutes.
 //! * `BROCANTH_BUILD_TARGET=<dir>` gives every build one target directory,
 //!   so the framework compiles once for all of them. Unset, each project
-//!   has its own, deleted with it.
+//!   has its own, deleted with it. The builds of one process then run one
+//!   at a time; do not point two processes at the same directory.
 
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// A generated project: `(path, contents)` per file, in the order the
 /// generator wrote them.
@@ -252,6 +254,17 @@ pub fn build(files: &Files) -> Result<(), String> {
         std::process::id(),
         CALLS.fetch_add(1, Ordering::Relaxed)
     ));
+    // Cargo leaves a root package's path out of its hash, so two projects
+    // named alike share one test binary in a shared target directory, and
+    // cargo judges it fresh by the mtimes of the sources. One shared build
+    // at a time, with the files written inside the turn: files written
+    // while another build ran are older than its binary, and cargo would
+    // run that binary for this project.
+    static SHARED: Mutex<()> = Mutex::new(());
+    let shared = std::env::var_os("BROCANTH_BUILD_TARGET").filter(|t| !t.is_empty());
+    let _turn = shared
+        .is_some()
+        .then(|| SHARED.lock().unwrap_or_else(PoisonError::into_inner));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -264,7 +277,7 @@ pub fn build(files: &Files) -> Result<(), String> {
         .args(["test", "--quiet"])
         .current_dir(&dir)
         .env_remove("CARGO_TARGET_DIR");
-    if let Some(target) = std::env::var_os("BROCANTH_BUILD_TARGET").filter(|t| !t.is_empty()) {
+    if let Some(target) = shared {
         command.env("CARGO_TARGET_DIR", target);
     }
     let out = command.output().map_err(|e| format!("cargo: {e}"))?;
