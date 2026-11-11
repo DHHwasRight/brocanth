@@ -20,6 +20,14 @@ serde_json = { version = "1", optional = true }
 # gets. A copy of that in the CLI rots the first time a name here changes.
 brocanth-scaffold = { workspace = true, optional = true }
 
+[dev-dependencies]
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 default = ["runtime"]
 # The entrance hook: everything but the scaffold module. The CLI turns it off

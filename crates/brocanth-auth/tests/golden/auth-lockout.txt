@@ -3986,9 +3986,9 @@ pub fn Layout(children: Element) -> Element {
 //! the address exists, because the expensive hash runs on both paths.
 //!
 //! `brocanth-auth` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no accounts and links nothing to hash a
-//! password with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no accounts and links nothing
+//! to hash a password with.
 //!
 //! # Signing somebody in
 //!

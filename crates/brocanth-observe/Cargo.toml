@@ -67,6 +67,13 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 brocanth-jobs = { path = "../brocanth-jobs", version = "0.1.0", default-features = false, features = ["memory"] }
 serde = { version = "1", features = ["derive"] }
 
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's
+# own generator and checked with `brocanth_scaffold::testing`. A cycle
+# through dev-dependencies, which cargo allows: the CLI takes this crate's
+# `scaffold` side.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
 [features]
 # Logs and metrics are what every deployed application wants on day 2, and
 # both are small. Traces need a collector, so they wait to be asked for.

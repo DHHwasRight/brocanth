@@ -60,9 +60,15 @@ use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Sett
 ///
 /// A unit struct, because a module is asked once per run and everything it
 /// needs arrives in [`Project`].
-pub struct Policy;
+///
+/// Named `Authorisation` and not `Policy`, which is this crate's own trait.
+/// A second item under that name in the crate makes rustc print the full
+/// path in every error that names the trait, and a UI test in
+/// `brocanth-resource` pins that error. A crate whose tests take the CLI
+/// compiles this module, so the name must not collide.
+pub struct Authorisation;
 
-impl Module for Policy {
+impl Module for Authorisation {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "policy",
@@ -173,9 +179,9 @@ fn plugin_rs(project: &Project, dialect: &str) -> String {
 //! first; `Verified` is the second; the two are not alternatives.
 //!
 //! `brocanth-policy` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no rule algebra and links nothing to have one
-//! with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no rule algebra and links
+//! nothing to have one with.
 //!
 //! # The bug this file cannot have
 //!
@@ -245,18 +251,21 @@ pub enum PostColumn {{
     AuthorId,
     /// `draft` or `published`.
     Status,
+    /// The text.
+    Body,
 }}
 
 impl Column for PostColumn {{
     /// Required rather than derived: a changed-field name that is not one of
     /// these is rejected instead of quietly permitted.
-    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status];
+    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status, Self::Body];
 
     fn name(&self) -> &'static str {{
         match self {{
             Self::Id => "id",
             Self::AuthorId => "author_id",
             Self::Status => "status",
+            Self::Body => "body",
         }}
     }}
 }}
@@ -337,10 +346,11 @@ impl Policy for PostPolicy {{
         if who.admin {{
             FieldMask::except([PostColumn::Id])
         }} else {{
-            // The author edits the body, never the status. The mask is the
-            // other half of the rule: `update` says which rows, this says
-            // which columns.
-            FieldMask::only([PostColumn::AuthorId])
+            // The author edits the body, never the status. `AuthorId` is
+            // here because a create writes it, and `create` above admits
+            // only the author's own id. The mask is the other half of the
+            // rule: `update` says which rows, this says which columns.
+            FieldMask::only([PostColumn::Body, PostColumn::AuthorId])
         }}
     }}
 }}

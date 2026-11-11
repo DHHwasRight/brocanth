@@ -2320,9 +2320,9 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! touches the filesystem.
 //!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
-//! through no other route. Delete the registration in `src/app.rs` and delete
-//! this file, and the application stores no files and links nothing to store
-//! them with.
+//! through no other route. Delete the registration in `src/plugins/mod.rs`
+//! and delete this file, and the application stores no files and links
+//! nothing to store them with.
 //!
 //! # Uploading
 //!

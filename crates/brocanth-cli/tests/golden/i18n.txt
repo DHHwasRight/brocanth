@@ -1515,9 +1515,9 @@ macro_rules! register {
         // -- brocanth-gtag: Google Analytics, after consent ----------
         //
         // A banner on every HTML page, and Google's tag only once the
-        // visitor accepts. Global Privacy Control counts as a refusal, and
-        // the page URL loses every query parameter not on the allow-list.
-        // Off until production turns it on:
+        // visitor accepts. Global Privacy Control counts as a refusal, the
+        // page URL loses every query parameter not on the allow-list, and
+        // /admin never gets the tag. Off until production turns it on:
         // `--gtag.enabled=true` and
         // `--gtag.measurement_id=G-…`, or the environment
         // variables `--help` names.
@@ -1716,7 +1716,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.cookie_domain",
-        help: "The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. Empty means none.",
+        help: "The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -1725,7 +1725,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.consent_log",
-        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. Empty means none.",
+        help: "A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -1770,7 +1770,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "gtag.banner.policy_url",
-        help: "A link to the privacy policy, such as `/privacy`. Empty means no link. Empty means none.",
+        help: "A link to the privacy policy, such as `/privacy`. Empty means none.",
         flag: true,
         file: "src/modules/gtag.rs",
         flags: crate::modules::gtag::MODULE.flags,
@@ -2295,7 +2295,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 2e37a5b976576328
+// brocanth-digest: c3e4f69283a03c86
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

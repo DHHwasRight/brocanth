@@ -126,7 +126,7 @@ pub const ALL: &[&dyn Module] = &[
     // The rule algebra. `after("model")` and not `needs`: a condition
     // inverts into a broadcast key as well as a `WHERE`, so requiring an
     // ORM would refuse a project that broadcasts and stores nothing.
-    &brocanth_policy::scaffold::Policy,
+    &brocanth_policy::scaffold::Authorisation,
     // Uploads on a local disk. The first module to write a `.gitignore`
     // line, which is also why that slot is now read.
     &brocanth_storage::scaffold::FileStorage,

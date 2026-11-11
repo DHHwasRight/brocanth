@@ -68,13 +68,13 @@ Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key i
 | `send_title` | bool | `false` | `--gtag.send_title` | Send the page title. Off: the scrubbed path stands in for it. |
 | `allow_params` | list | the five `utm_*` | none (a list) | The query parameters that reach Google; every other one is removed. |
 | `exclude` | list | `[]` | none (a list) | Paths that never get the tag, each with everything under it. With `admin`, the registration adds the admin's `mount_at`, read from `src/modules/admin.rs`. |
-| `cookie_domain` | text | `""` | `--gtag.cookie_domain` | The domain Google's cookies live on, such as `example.co.uk`. Empty: the tag picks it. |
-| `consent_log` | text | `""` | `--gtag.consent_log` | A file each consent choice is appended to, such as `log/consent.jsonl`. Empty: none. A server only: a static export has no one to report a choice to. |
+| `cookie_domain` | text | `""` | `--gtag.cookie_domain` | The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none. |
+| `consent_log` | text | `""` | `--gtag.consent_log` | A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none. A server only: a static export has no one to report a choice to. |
 | `banner.text` | text | English | `--gtag.banner.text` | The sentence the banner asks with. |
 | `banner.accept` | text | `"Accept"` | `--gtag.banner.accept` | The button that accepts. |
 | `banner.refuse` | text | `"Refuse"` | `--gtag.banner.refuse` | The button that refuses. |
 | `banner.manage` | text | `"Cookie settings"` | `--gtag.banner.manage` | The button that opens the banner again. |
-| `banner.policy_url` | text | `""` | `--gtag.banner.policy_url` | A link to the privacy policy, such as `/privacy`. Empty means no link. |
+| `banner.policy_url` | text | `""` | `--gtag.banner.policy_url` | A link to the privacy policy, such as `/privacy`. Empty means none. |
 | `banner.policy` | text | `"Privacy policy"` | `--gtag.banner.policy` | The text of that link. |
 
 ## Read more
