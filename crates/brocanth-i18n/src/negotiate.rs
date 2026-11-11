@@ -91,8 +91,11 @@ pub struct NegotiatorConfig {
     pub paths: bool,
     /// With `paths`: the prefixes that keep no locale segment and are
     /// never redirected. A path whose last segment has a `.` (a file, such
-    /// as `/robots.txt`) is never redirected either. The default names the
-    /// backoffice and the records API, where brocanth mounts them.
+    /// as `/robots.txt`) is never redirected either, and neither is a
+    /// socket or a stream. The default names the backoffice and the
+    /// records API, where brocanth mounts them. A generated project adds
+    /// the routes of other modules with
+    /// [`keep_unprefixed`](Self::keep_unprefixed), after this list is read.
     pub unprefixed: Vec<String>,
 }
 
@@ -115,6 +118,22 @@ impl NegotiatorConfig {
     #[must_use]
     pub fn with_paths(mut self, on: bool) -> Self {
         self.paths = on;
+        self
+    }
+
+    /// Adds a prefix to [`unprefixed`](Self::unprefixed).
+    ///
+    /// For a route another module owns, read from its module file:
+    /// `.keep_unprefixed(crate::modules::storage_routes::MODULE.path)`. A
+    /// generated project calls it after the file and the flags were read,
+    /// so a file that sets `unprefixed` cannot send that route through a
+    /// redirect, and a moved route needs no edit here.
+    #[must_use]
+    pub fn keep_unprefixed(mut self, prefix: impl Into<String>) -> Self {
+        let prefix = prefix.into();
+        if !self.unprefixed.contains(&prefix) {
+            self.unprefixed.push(prefix);
+        }
         self
     }
 

@@ -953,3 +953,96 @@ The spec leftovers are built too:
 | `cache`, `jobs`, `auth` admin panels | not declared | No module writes them into a project on `main`. |
 | Which setting the report marks | the module's `enabled`, else its first setting | One line per module a reader looks at first. A module with no setting has nothing to mark. |
 | Where the warning runs | `announce!`, which `src/app.rs` already calls after `build()` | No change to the project's own `src/app.rs`. |
+
+## 9. A module that reads another module
+
+Status: **built** for `i18n-routing` (`storage-routes`' `path`,
+`admin`'s `mount_at`, the realtime routes) and for the negotiated locale
+on the context.
+
+### The problem
+
+`i18n-routing` sends a GET without a locale segment to `/<locale>/...`.
+A route that serves no page must not get that redirect: a stored file, a
+socket, a stream. The first build wrote those routes into the `[i18n]
+unprefixed` setting as literals: `"/files"` with `storage-routes`,
+`"/realtime"` with `realtime`. `storage-routes` has a `path` option in
+`src/modules/storage_routes.rs`. A project that changed it to `/uploads`
+had to edit the `unprefixed` list too. Without the edit, every download
+got a 307 to `/en/uploads/...`, and the generated storage tests failed.
+
+The cause: a setting copied the choice of another module. A setting is a
+literal in `config/<env>.toml`. It cannot follow a file in `src/modules/`.
+
+### Two kinds of fact, two channels
+
+| Fact | Example | When it is known | Channel |
+|---|---|---|---|
+| a choice of a module | `storage-routes`' `path`, `admin`'s `mount_at` | `cargo build` | generated code reads `crate::modules::<key>::MODULE.<field>` where it uses the value |
+| a fact of one request | the negotiated locale | each request | a request hook writes it into the request state; `Plugin::provide_for_request` puts it on the typed context |
+
+**Decision 1: a module reads another module's choice in generated code,
+at the place that uses it.** The reader's scaffold writes
+`snippet::module_ref(key, field)`, only when `project.has(key)`. It
+never copies the value into a setting or a literal. **Reason:** the module
+file is the one source. A change there reaches every reader at the next
+`cargo build`, and the compiler checks the field name. `robots` already
+reads `admin`'s `mount_at` this way (§8, wave 2), and the storage plugin
+reads its own `path`. So this adds no new mechanism: it is a rule.
+
+For `i18n-routing`, the registration in `src/plugins/mod.rs` is:
+
+```rust
+.plugin_hooking_from_config_with::<crate::plugins::i18n::I18n>("i18n", |config| {
+    config
+        .with_paths(true)
+        .keep_unprefixed(crate::modules::admin::MODULE.mount_at)
+        .keep_unprefixed(crate::modules::storage_routes::MODULE.path)
+})
+```
+
+`NegotiatorConfig::keep_unprefixed` adds a prefix after the file and the
+flags were read. **Reason:** these prefixes are structural, like
+`with_paths(true)`. A config file that sets `unprefixed = []` must not
+send the file routes through a redirect. The setting keeps the project's
+own prefixes (`/api`, a webhook).
+
+**Decision 2: a rule about a kind of request is a check on the request,
+not a path.** The `i18n` hook never redirects a WebSocket upgrade (an
+`Upgrade` header) or a request that accepts `text/event-stream`. A
+socket does not follow a redirect, and a stream has no locale. The
+realtime routes are page files (`src/pages/realtime/`), not an option, so
+there is no choice to read. **Reason:** the check works wherever the
+project puts a stream or a socket, also one it writes itself. A path list
+works only for the paths the generator knew. A plain GET to a stream
+(curl) still gets the redirect, and the stream answers under the locale.
+
+**Decision 3: a request fact goes on the typed context.** The
+`I18nHook` plugin provides `Negotiated<L>`: `provide` gives the default
+locale, and `provide_for_request` moves the value the `negotiate` hook
+wrote into the request state. A page reads it with
+`ctx.provided::<Negotiated<Locale>, _>()`, which compiles only when the
+plugin is registered. `crate::plugins::i18n::locale(ctx)` reads it so.
+A hook in another crate keeps reading `brocanth_i18n::Current` from the
+request state. **Reason:** the context is built after the request hooks
+ran, so no hook can read it, and a crate other than the project cannot
+name `Locale`.
+
+### Rejected
+
+| Alternative | Why not |
+|---|---|
+| A plugin publishes its mount path as a service; the other plugin reads it in `after_config` | The value is a constant, known at `cargo build`, so a run-time lookup adds a failure mode and no power. Two module crates would need a shared type: a new core concept ("a path that is not a page") or a dependency between them. `admin` does not mount itself: `src/pages/mod.rs` does, so the admin plugin does not know its path. A module the CLI hosts has no plugin. |
+| The generator writes the value it reads from the module file | The project owns the file and changes it after generation. `add` would parse Rust, and the copy goes stale at the next edit: the bug again. |
+| One registry of options by name: `option("storage-routes", "path")` | A string key, checked at run time. `MODULE.path` is checked by the compiler. |
+| The `i18n` hook asks the router whether a path is a page | The router does not know a page from a file route, and the hook runs before dispatch. |
+| A `path` option on `realtime` | Its routes are page files. An option that moved them would need a second router for two pages. Decision 2 makes the path not matter. |
+
+### Still open
+
+- `add` does not print a field that a newer module adds (§8). This
+  mechanism reads a field. It does not say that a field is new: that
+  needs the old manifest, which the CLI does not keep.
+- The `exclude` settings of `sitemap`, `analytics` and `gtag` copy
+  `/admin` as a literal, so they miss a moved admin. The fix is decision
+  1: read `admin`'s `mount_at` in code, as `robots` does.

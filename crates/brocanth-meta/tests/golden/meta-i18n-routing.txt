@@ -2815,11 +2815,12 @@ pub type I18n = brocanth_i18n::I18nHook<Locale>;
 /// The locale the `i18n` hook chose for this request.
 ///
 /// The hook reads `?locale=`, then the cookie, then `Accept-Language`,
-/// then the `default` setting. The fallback here is only for a context
-/// the hook did not see, such as a test that builds a `Ctx` by hand.
+/// then the `default` setting, and the plugin puts the result on the
+/// context: this compiles only while the plugin is registered. The
+/// fallback is only for a `Ctx` built by hand in a test.
 #[allow(dead_code)]
 pub fn locale(ctx: &Ctx) -> Locale {
-    ctx.hooked::<Negotiated<Locale>>()
+    ctx.provided::<Negotiated<Locale>, _>()
         .map_or(Locale::DEFAULT, |negotiated| negotiated.locale)
 }
 
