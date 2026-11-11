@@ -16,4 +16,16 @@ pub(crate) const STYLE: &str = include_str!("admin.css");
 /// dp-swap, vendored in `vendor/`. It enhances links and deliberately omits
 /// mutating verbs, so every form here is a real POST that reloads the page.
 /// PLAN.md §5 is the argument and the list of what is left for the server.
-pub(crate) const SCRIPT: &str = include_str!("../vendor/dpswap.min.js");
+///
+/// Then one line that sets header mode. dp-swap's default asks for
+/// `<url>/_fragment.html`, a prerendered file that a static site has and
+/// the admin does not: every boosted link got a 404 and fell back to a full
+/// load. In header mode dp-swap asks for the page's own URL, the admin
+/// answers with the whole document, and dp-swap swaps the
+/// `dp-layout="admin"` region and merges the `<head>`. The line is in this
+/// constant and not in a script of its own, so the one hash a
+/// Content-Security-Policy holds for [`crate::INLINE_SCRIPT`] covers it.
+pub(crate) const SCRIPT: &str = concat!(
+    include_str!("../vendor/dpswap.min.js"),
+    "dpswap.configure({fragmentMode:\"header\"});\n"
+);

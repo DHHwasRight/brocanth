@@ -304,9 +304,10 @@ impl ModelAdmin {
     /// and no nonce. A file on another origin needs that origin in
     /// `script-src`: `Csp::allow("script-src", ["https://cdn.example.com"])`.
     ///
-    /// dp-swap replaces the `<main>` region and keeps the `<head>`. So the
-    /// script runs when a page of this model loads in full, and not when a
-    /// swap shows one. See `docs/admin-customization.md`, level 3.
+    /// dp-swap replaces the `<main>` region and merges the response's
+    /// `<head>`, so the script loads on a full load and on a swap into
+    /// this model's screen, once. See `docs/admin-customization.md`,
+    /// level 3.
     pub fn script(mut self, src: impl Into<String>) -> Self {
         self.scripts.push(src.into());
         self

@@ -210,19 +210,42 @@ the admin to this: a model script adds no inline `<script>`.
 
 ### Scripts and dp-swap
 
-dp-swap replaces the `<main dp-layout="admin">` region and keeps the
-`<head>`. So:
+dp-swap replaces the `<main dp-layout="admin">` region. The response is
+the whole document, and dp-swap merges its `<head>` into the live one:
 
-- A script from `AdminConfig::script` loads on the first page and stays.
-  To act on each screen a swap shows, listen on `document` for
-  `dp:afterSwap`.
-- A script from `ModelAdmin::script` runs when a page of that model loads
-  in full: a reload, a form post, a link typed in. A swap from another
-  screen does not load it. When the code must run after a swap too, load
-  it with `AdminConfig::script`, and on each `dp:afterSwap` look for the
-  markup it works on.
+- A stylesheet the live page does not link yet is added before the swap,
+  so the new screen is never unstyled.
+- A script the live page does not load yet is added after the swap, so
+  it finds its markup. It runs once, the first time a screen names it.
+- Each file is added once. Inline `<script>` and `<style>` are never
+  copied, so the Content-Security-Policy decision above holds.
+- Nothing is removed. A model's stylesheet stays after a swap to another
+  screen, so write its rules for that model's markup.
 
-Stylesheets follow the same rule.
+So a script from `ModelAdmin::script` loads on a swap into its model's
+screen, as on a full load. A script that must act on *every* screen a
+swap shows listens on `document` for `dp:afterSwap`, because it runs
+only once.
+
+**Why the admin sets header mode.** dp-swap's default asks for
+`<url>/_fragment.html`, the prerendered fragment of a static site. The
+admin serves no such path, so every boosted link was a 404, and dp-swap
+fell back to a full load. In header mode dp-swap asks for the page's own
+URL, the admin answers with the whole document, and dp-swap swaps the
+`dp-layout="admin"` region. The admin does not trim the layout for a
+`DP-Partial` request: the whole document is what carries the `<head>`.
+
+The line that sets header mode is appended to `INLINE_SCRIPT`, not put in
+a script of its own, so the one hash a policy holds for it covers it.
+
+**Why in dp-swap.** The fault is in the client: it threw the response's
+`<head>` away. The fix is in dp-swap (`src/head.ts`, commit `d64048f` of
+`brocanth/htmx`, vendored in `crates/brocanth-admin/vendor/` and
+`crates/brocanth-cli/vendor/`), so every server-rendered page that uses
+dp-swap gets it, not only the admin. The tests are in dp-swap
+(`test/head.test.ts`). `tests/customization.rs` holds the admin to its
+half: header mode, the merge in the vendored build, and the model's
+files in the `<head>` of the page a swap gets.
 
 ## Level 3a: replace a block
 
@@ -633,8 +656,11 @@ fixture applies no condition.
   key in its path: `/admin/invoice-actions/7/send`.
 - **More blocks.** `brand` and `userlinks` exist. `nav-global` and
   `footer` follow the same pattern when an application needs them.
-- **A model script after a swap.** dp-swap keeps the `<head>`, so a
-  model's script does not load on a swap into that model's screen (level
-  3). A fix belongs in dp-swap: merge the `<head>` of the response.
+- **dp-swap's `main`.** The vendored build is `f80aeeb` plus the head
+  merge. The same change is on branch `feat/merge-head-main` of
+  `brocanth/htmx`, on top of its `main`; neither branch is pushed. Moving
+  the admin to dp-swap's `main` also brings its meta-element
+  configuration (`<meta name="dp-config">`), which could replace the
+  appended `configure` line.
 - **A three-way diff.** `brocanth admin diff` is two-way. A three-way diff
   needs the template of the version a copy came from.
