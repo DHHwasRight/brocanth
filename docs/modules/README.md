@@ -106,6 +106,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`pagination`](pagination.md) | offset and keyset pages, with links that keep the query; no dependency | Renderer |  |
 | [`filters`](filters.md) | typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE | Renderer |  |
 | [`search`](search.md) | Postgres full-text and trigram search: a site index, its migration, a page at /search | Routes |  |
+| [`i18n-routing`](i18n-routing.md) | a locale segment in the path (/fr/about), a redirect from a path without one | Middleware, Renderer | i18n |
+| [`meta`](meta.md) | a title, a description, a canonical URL and Open Graph tags for each page | Renderer, Enhancer |  |
+| [`errors`](errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Renderer, Middleware |  |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |

@@ -2245,8 +2245,10 @@ pub mod snippet {
         };
         // rustfmt keeps the call and the constructor on the `let` line when
         // they fit in 100 columns. Else on one line after `let builder =`,
-        // when they fit there, which a short type name does. Else it breaks
-        // both calls.
+        // when that line is at most 95 columns, which a short type name
+        // gives. Else it breaks both calls. The 95 is measured, not
+        // documented: rustfmt 1.9 breaks a 96-column line of this shape,
+        // whatever the argument (`brocanth_errors::Errors` is 98).
         let call = format!("builder.plugin_hooking(<{ty} as brocanth::plugin_api::Plugin>::new(");
         let head = format!("            {call}");
         if 8 + "let builder = ".len() + call.len() <= 100 {
@@ -2256,7 +2258,7 @@ pub mod snippet {
                  \x20       ));\n",
                 value(12)
             )
-        } else if head.len() <= 100 {
+        } else if head.len() <= 95 {
             format!(
                 "        let builder =\n\
                  {head}\n\

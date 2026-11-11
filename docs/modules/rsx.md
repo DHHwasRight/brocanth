@@ -13,7 +13,7 @@ The wizard calls it: *Templates compiled into the binary*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`rsx-tailwind`](rsx-tailwind.md), [`rsx-htmx`](rsx-htmx.md) |
+| Adapts to | [`rsx-tailwind`](rsx-tailwind.md), [`rsx-htmx`](rsx-htmx.md), [`meta`](meta.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `rsx` |
@@ -25,7 +25,7 @@ Files:
 
 - `src/pages/about.rsx`
 - `src/pages/index.rsx`
-- `src/pages/layout.rsx`
+- `src/pages/layout.rsx`. With [`meta`](meta.md), it declares `meta: &Head` and writes the page's title, language and tags.
 - `src/pages/users/[id].rsx`
 - `src/pages/users/layout.rsx`
 

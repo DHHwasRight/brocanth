@@ -84,6 +84,16 @@ pub struct NegotiatorConfig {
     /// when both the query and the cookie are on. The cookie holds the
     /// choice the visitor made and nothing else, so it needs no consent.
     pub remember: bool,
+    /// The locale is the path's first segment: `/fr/about`. The hook takes
+    /// the segment off, so the page answers at `/about`, and sends a GET
+    /// with no locale segment to the negotiated one. Off by default; the
+    /// `i18n-routing` module turns it on.
+    pub paths: bool,
+    /// With `paths`: the prefixes that keep no locale segment and are
+    /// never redirected. A path whose last segment has a `.` (a file, such
+    /// as `/robots.txt`) is never redirected either. The default names the
+    /// backoffice and the records API, where brocanth mounts them.
+    pub unprefixed: Vec<String>,
 }
 
 impl Default for NegotiatorConfig {
@@ -94,11 +104,20 @@ impl Default for NegotiatorConfig {
             default: None,
             available: Vec::new(),
             remember: true,
+            paths: false,
+            unprefixed: vec!["/admin".to_string(), "/api".to_string()],
         }
     }
 }
 
 impl NegotiatorConfig {
+    /// Turns the locale path segment on or off: the `paths` field.
+    #[must_use]
+    pub fn with_paths(mut self, on: bool) -> Self {
+        self.paths = on;
+        self
+    }
+
     /// Refuses a name that cannot appear in a query string or a `Cookie`
     /// header. Called by the plugins at start-up, so a typo stops the
     /// application rather than silently never matching.
@@ -119,6 +138,15 @@ impl NegotiatorConfig {
                          and not empty"
                     ));
                 }
+            }
+        }
+        for prefix in &self.unprefixed {
+            if !prefix.starts_with('/') {
+                return Err(format!(
+                    "[i18n] unprefixed names {prefix:?}, which is not a path from the root. \
+                     help: write it with a leading `/`: \"/{}\"",
+                    prefix.trim_start_matches('/')
+                ));
             }
         }
         Ok(())
@@ -155,6 +183,10 @@ pub enum Source {
     Query,
     Cookie,
     AcceptLanguage,
+    /// The path's first segment: `/fr/about`. Only with
+    /// [`NegotiatorConfig::paths`], and then it wins over every other
+    /// source, because the URL is what a search engine indexes.
+    Path,
     /// Nothing the client sent matched a catalog.
     Default,
 }
@@ -396,6 +428,124 @@ impl<L: Locales> Negotiator<L> {
 
     fn best(&self, tag: &str) -> Option<L> {
         best_match(tag, &self.offered)
+    }
+
+    /// The offered locale a path's first segment names, and the path
+    /// without it: `/fr/about` is `(fr, "/about")`, `/fr` is `(fr, "/")`.
+    /// The segment must be an offered tag exactly, ignoring case: `/fr-CH`
+    /// names no locale when only `fr` is offered, because one page must
+    /// have one URL.
+    pub fn split_path<'a>(&self, path: &'a str) -> Option<(L, &'a str)> {
+        let rest = path.strip_prefix('/')?;
+        let (first, tail) = match rest.find('/') {
+            Some(cut) => rest.split_at(cut),
+            None => (rest, ""),
+        };
+        let locale = self
+            .offered
+            .iter()
+            .copied()
+            .find(|l| same_tag(l.tag(), first))?;
+        Some((locale, if tail.is_empty() { "/" } else { tail }))
+    }
+
+    /// Whether a GET to a path with no locale segment is sent to the
+    /// negotiated one. Not a file (a last segment with a `.`), and not
+    /// under a prefix of [`NegotiatorConfig::unprefixed`].
+    pub fn redirects(&self, path: &str) -> bool {
+        let file = path
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| last.contains('.'));
+        let kept = self.config.unprefixed.iter().any(|prefix| {
+            let prefix = prefix.trim_end_matches('/');
+            prefix.is_empty()
+                || path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        });
+        !file && !kept
+    }
+
+    /// What a page is told about a locale its path named.
+    pub fn path_locale(&self, locale: L) -> PathLocale {
+        PathLocale {
+            tag: locale.tag(),
+            offered: self.offered.iter().map(|l| l.tag()).collect(),
+        }
+    }
+}
+
+/// The locale a path named, for a page: `/fr/about` answers with `fr`, and
+/// the page sees `/about`.
+///
+/// The `i18n` hook puts one in the request state when
+/// [`NegotiatorConfig::paths`] is on and the path had a locale segment. A
+/// page reads it with `ctx.hooked::<PathLocale>()` to write its links and
+/// its `hreflang` alternates. Cheap to clone: the offered tags are shared.
+///
+/// ```
+/// use brocanth_i18n::PathLocale;
+///
+/// let fr = PathLocale::new("fr", &["en", "fr"]);
+/// assert_eq!(fr.href("/about"), "/fr/about");
+/// assert_eq!(fr.href("/"), "/fr");
+/// assert_eq!(
+///     fr.alternates("/about"),
+///     [("en", "/en/about".to_string()), ("fr", "/fr/about".to_string()), ("x-default", "/about".to_string())]
+/// );
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathLocale {
+    tag: &'static str,
+    offered: Arc<[&'static str]>,
+}
+
+impl PathLocale {
+    /// A path locale, for a test or a page built by hand.
+    pub fn new(tag: &'static str, offered: &[&'static str]) -> Self {
+        Self {
+            tag,
+            offered: offered.into(),
+        }
+    }
+
+    /// The tag the path named: `fr`.
+    pub fn tag(&self) -> &'static str {
+        self.tag
+    }
+
+    /// Every offered tag, in catalog order.
+    pub fn offered(&self) -> &[&'static str] {
+        &self.offered
+    }
+
+    /// A path of this site in this locale: `/about` is `/fr/about`.
+    pub fn href(&self, path: &str) -> String {
+        prefixed(self.tag, path)
+    }
+
+    /// The same page in every offered locale, then `x-default`: the path
+    /// with no segment, which sends a visitor to the locale they ask for.
+    pub fn alternates(&self, path: &str) -> Vec<(&'static str, String)> {
+        self.offered
+            .iter()
+            .map(|tag| (*tag, prefixed(tag, path)))
+            .chain(std::iter::once(("x-default", path.to_string())))
+            .collect()
+    }
+}
+
+/// `path` under the segment `tag`: `/about` is `/fr/about`, and `/` is
+/// `/fr`.
+pub fn prefixed(tag: &str, path: &str) -> String {
+    if path == "/" || path.is_empty() {
+        format!("/{tag}")
+    } else if path.starts_with('/') {
+        format!("/{tag}{path}")
+    } else {
+        format!("/{tag}/{path}")
     }
 }
 

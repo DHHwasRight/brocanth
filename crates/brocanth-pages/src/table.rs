@@ -65,7 +65,25 @@ const VERBS: [(&str, &str, Verb); 7] = [
     ("handle_options", "Options", Verb::Options),
 ];
 
-pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> TokenStream2 {
+/// The words after the path in `pages!("src/pages", describe, mounts)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Words {
+    /// Emit `described()`, what every route takes and gives.
+    pub describe: bool,
+    /// Call `crate::pages::mounted`, for routes a module contributed.
+    pub mounts: bool,
+    /// Send a page's failure to `crate::pages::caught`, with the nearest
+    /// `not-found.rsx` and `error.rsx`, and emit `not_found` for a path no
+    /// route matched.
+    pub errors: bool,
+}
+
+pub fn expand(root: &Path, manifest: &Path, words: Words) -> TokenStream2 {
+    let Words {
+        describe,
+        mounts,
+        errors,
+    } = words;
     let absolute = manifest.join(root);
     let mut pages = Vec::new();
     if let Err(message) = collect(&absolute, &absolute, &mut pages) {
@@ -94,7 +112,19 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> Tok
         }
     }
 
+    // The error pages, read before the rows: each row names the ones
+    // nearest its page.
+    let caught = if errors {
+        match crate::caught::read(root, manifest) {
+            Ok(caught) => Some(caught),
+            Err(message) => return error(&message),
+        }
+    } else {
+        None
+    };
+
     let mods = modules(&pages);
+    let caught_ref = caught.as_ref();
     let rows = pages.iter().flat_map(|page| {
         let file = &page.route_file;
         let path = page.module.iter().map(|part| ident(part));
@@ -130,11 +160,22 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> Tok
                     })
                 })),
             };
+            // With `errors`, every handler goes through `catching`, which
+            // hands a failure to the error pages nearest this page. Chosen
+            // here, at compile time, because a page's directory is known.
+            let register = match caught_ref {
+                Some(caught) => {
+                    let (not_found, failed) = caught.nearest_to_file(file);
+                    quote!(catching(#register, #not_found, #failed))
+                }
+                None => register,
+            };
             quote! {
                 routes.file(#file, "", Verb::#verb, #register)?;
             }
         })
     });
+    let caught_items = caught.as_ref().map(crate::caught::Caught::items);
 
     // A page that is added, removed or whose handlers change is a page whose
     // file changed, and this is what makes cargo notice. A brand-new file is
@@ -183,6 +224,8 @@ pub fn expand(root: &Path, manifest: &Path, describe: bool, mounts: bool) -> Tok
         #described
 
         #handlers
+
+        #caught_items
 
         /// The table, read off `src/pages` while this crate was compiled.
         ///
@@ -636,7 +679,7 @@ mod tests {
 
     fn table(files: &[(&str, &str)]) -> String {
         let root = tree(files);
-        let out = expand(Path::new("src/pages"), &root, false, false).to_string();
+        let out = expand(Path::new("src/pages"), &root, Words::default()).to_string();
         let _ = std::fs::remove_dir_all(&root);
         out
     }
@@ -647,10 +690,18 @@ mod tests {
         // project that mounts nothing must not be told to call a function
         // nobody wrote.
         let root = tree(&[("index.rs", "pub fn handle() {}")]);
-        let plain = expand(Path::new("src/pages"), &root, false, false).to_string();
+        let plain = expand(Path::new("src/pages"), &root, Words::default()).to_string();
         assert!(!plain.contains("mounted"), "{plain}");
 
-        let mounting = expand(Path::new("src/pages"), &root, false, true).to_string();
+        let mounting = expand(
+            Path::new("src/pages"),
+            &root,
+            Words {
+                mounts: true,
+                ..Words::default()
+            },
+        )
+        .to_string();
         assert!(
             mounting.contains("crate :: pages :: mounted (& mut routes)"),
             "{mounting}"

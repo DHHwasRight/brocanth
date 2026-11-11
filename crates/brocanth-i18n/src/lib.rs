@@ -82,7 +82,9 @@
 
 mod negotiate;
 
-pub use negotiate::{Asked, Current, Locales, Negotiated, Negotiator, NegotiatorConfig, Source};
+pub use negotiate::{
+    prefixed, Asked, Current, Locales, Negotiated, Negotiator, NegotiatorConfig, PathLocale, Source,
+};
 
 #[cfg(feature = "runtime")]
 mod format;

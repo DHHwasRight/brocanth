@@ -22,9 +22,9 @@ then what the module unblocks. Both scans put `mail` first.
 | 2 | `flash` | Messages that survive a redirect after a form POST | contrib.messages, Rails flash | S |
 | 3 | `auth-screens` | Sign-up, sign-in, reset, verify, TOTP screens over `brocanth-auth`, which has the flows and no pages. Needs `mail` and `flash`. | Devise, allauth, Rails 8 auth generator | M |
 | 4 | `auth-oauth` | Provider settings and the callback route; the provider code is in `brocanth-auth`. | Auth.js, better-auth, allauth social, PocketBase OAuth2 | M |
-| 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. | Next.js metadata, next-seo, django-meta | M |
+| 5 | `meta` | Title, description, canonical and Open Graph per page; every page shares `pages::TITLE` today. Base for OG images and hreflang. **Built:** `brocanth-meta`, `docs/modules/meta.md`. | Next.js metadata, next-seo, django-meta | M |
 | 6 | `storage-routes` | Upload and download routes, `?thumb=`, protected file tokens over `storage` | Active Storage, uploadthing, PocketBase files | S |
-| 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
+| 7 | `errors` | HTML 404 and 500 pages in the layout chain, a dev error page, a reporter hook; a missing page answers plain `Not Found` today. **Built:** `brocanth-errors`, `docs/modules/errors.md`. | Next.js not-found/error, Django 404/500 templates, Sentry | M |
 | 8 | `compression` | gzip and brotli on responses. **Built** as `middleware-compression`. | GZipMiddleware, Rack::Deflater | S |
 | 9 | `conditional-get` | Dynamic `ETag` and 304. **Built** as `middleware-conditional-get`. | ConditionalGetMiddleware, `fresh_when` | S |
 | 10 | `superuser` | Operator accounts and a `createsuperuser` command, so the admin is usable without writing a policy first | createsuperuser, PocketBase superusers | S |
@@ -32,7 +32,7 @@ then what the module unblocks. Both scans put `mail` first.
 | 12 | `sanitize` | Allow-list HTML sanitizer; unblocks rich text, comments, Markdown. **Built**: crate `brocanth-sanitize`. | bleach/nh3, Rails sanitize | S |
 | 13 | `pagination` | One public paginator, offset and keyset. **Built** (`brocanth-pagination`); admin and `resource` page with it. | pagy, kaminari, Django Paginator | S |
 | 14 | `auth-lockout` | Locks an account after failed logins | django-axes, Devise lockable | S |
-| 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed | next-intl, i18n_patterns | S |
+| 15 | `i18n-routing` | `/fr/...` paths and hreflang; a query or cookie locale is not indexed. **Built:** in `brocanth-i18n`, `docs/modules/i18n-routing.md`. | next-intl, i18n_patterns | S |
 | 16 | `search` | Postgres full-text and trigram search, with a migration and a search page. **Built** (`brocanth-search`). | pg_search, contrib.postgres.search, PocketBase FTS plugins | M |
 | 17 | `filters` | Typed query-string filters compiled into the `policy` `WHERE`. **Built** (`brocanth-filters`). | django-filter, ransack | M |
 | 18 | `webhooks-out` | Signed outgoing webhooks with retries, over row changes, `jobs` and the outbox | svix, PocketHost webhooks | M |

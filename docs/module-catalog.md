@@ -31,6 +31,7 @@ nothing holds this page.
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |
 | [`beacon`](modules/beacon.md) | A few lines of script that report each page view to an analytics server; no cookie |  |  |  | static-site safe |
 | [`i18n`](modules/i18n.md) | Translations checked at build time; a locale per request from the query, a cookie or `Accept-Language` |  |  |  | static-site safe; every exported page is in the `default` locale |
+| [`i18n-routing`](modules/i18n-routing.md) | A locale segment in the path (/fr/about), a redirect from a path without one | Renderer |  | part of `i18n`, off until you tick it | with `meta`: hreflang alternates and a canonical URL with the segment |
 | [`gtag`](modules/gtag.md) | Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts |  |  |  | static-site safe |
 | [`logging`](modules/logging.md) | A line per request; the core assumes no log layer |  |  |  |  |
 | [`middleware`](modules/middleware.md) | Proxy headers, method override, canonical host, content types, CORS |  | yes |  |  |
@@ -50,7 +51,9 @@ nothing holds this page.
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`errors`](modules/errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Middleware |  |  | a client that does not read HTML keeps the plain answer |
 | [`jt`](modules/jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Routes |  |  | static-site safe |
+| [`meta`](modules/meta.md) | A title, a description, a canonical URL and Open Graph tags for each page | Enhancer |  |  | static-site safe; no canonical URL until `base_url` is set |
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |
 | [`rsx-htmx`](modules/rsx-htmx.md) | A click swaps what changed; the server renders from the shared layout down |  |  | part of `rsx`, ticked with its parent | static-site safe |
 | [`sanitize`](modules/sanitize.md) | An allow-list HTML sanitizer and a SafeHtml type; links html5ever |  |  |  | static-site safe |
