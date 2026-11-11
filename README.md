@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 44 crates under `crates/` and two examples under
+A Cargo workspace of 53 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -172,6 +172,7 @@ puts the crate in a new project.
 | [`brocanth-command`](crates/brocanth-command/README.md) | Project commands: define one with `#[cmd]` and the CLI finds it | `commands` |
 | [`brocanth-command-macros`](crates/brocanth-command-macros/README.md) | The `#[cmd]` attribute, re-exported by `brocanth-command` | with `commands` |
 | [`brocanth-i18n`](crates/brocanth-i18n/README.md) | Message catalogs checked at build time, locale negotiation, CLDR plurals | |
+| [`brocanth-db`](crates/brocanth-db/README.md) | One Postgres pool, the session each connection starts with, sea-query statements over sqlx | `db` |
 | [`brocanth-model`](crates/brocanth-model/README.md) | The model layer over SeaORM: validations, eager loading, N+1 detection, dirty tracking | `model` |
 | [`brocanth-migrate`](crates/brocanth-migrate/README.md) | Stable field ids, a schema snapshot and a rename-aware migration diff | the `migrate` tool, with `model` |
 | [`brocanth-events`](crates/brocanth-events/README.md) | `Change` and `ChangeSink`: the seam between writes and subscribers | with `model` |

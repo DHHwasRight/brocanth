@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 47 modules. Each name links to its own page
+what to build next. There are 71 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,7 +23,7 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (18)
+### Middleware (23)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -51,7 +51,7 @@ nothing holds this page.
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
 | [`webhooks-in`](modules/webhooks-in.md) | `POST /webhooks/{source}`: signature, replay window, idempotency key, then a typed handler; before the CSRF check |  |  | part of `webhooks`, ticked with its parent | with `db`: the idempotency keys are rows |
 
-### Renderer (6)
+### Renderer (8)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -64,7 +64,7 @@ nothing holds this page.
 | [`pagination`](modules/pagination.md) | Offset and keyset pages, with links that keep the query; the admin and `resource` page with it too |  |  |  | static-site safe |
 | [`filters`](modules/filters.md) | Typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE |  |  | needs `policy`: a filter is a `Pred` over a policy entity's columns | static-site safe |
 
-### Routes (11)
+### Routes (13)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -82,7 +82,7 @@ nothing holds this page.
 | [`robots`](modules/robots.md) | A robots.txt from your settings, served at /robots.txt; closed outside production |  |  |  | static-site safe |
 | [`sitemap`](modules/sitemap.md) | A sitemap.xml of every page with no parameter, served at /sitemap.xml; `robots` names it |  |  |  | static-site safe |
 
-### Enhancer (12)
+### Enhancer (21)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|

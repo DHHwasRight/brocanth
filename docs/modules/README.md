@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 47. For all
+One page per module that `brocanth create` offers. There are 71. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
