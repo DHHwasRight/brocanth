@@ -44,6 +44,7 @@ members = [
     "crates/brocanth-static",
     "crates/brocanth-storage",
     "crates/brocanth-webhooks",
+    "crates/brocanth-oauth-client",
     "crates/brocanth-test",
     "crates/brocanth-pages",
     "crates/brocanth-queue",
@@ -104,6 +105,7 @@ brocanth-queue-postgres = { path = "crates/brocanth-queue-postgres", version = "
 brocanth-queue-conformance = { path = "crates/brocanth-queue-conformance", version = "0.1.0" }
 brocanth-storage = { path = "crates/brocanth-storage", version = "0.1.0" }
 brocanth-webhooks = { path = "crates/brocanth-webhooks", version = "0.1.0" }
+brocanth-oauth-client = { path = "crates/brocanth-oauth-client", version = "0.1.0" }
 brocanth-resource = { path = "crates/brocanth-resource", version = "0.1.0", default-features = false }
 brocanth-realtime = { path = "crates/brocanth-realtime", version = "0.1.0" }
 brocanth-assets = { path = "crates/brocanth-assets", version = "0.1.0" }
