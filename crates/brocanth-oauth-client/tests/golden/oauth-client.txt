@@ -1514,7 +1514,7 @@ macro_rules! register {
         // the only thing to decide is which paths are exempt -- a webhook,
         // or anything else whose caller is not a browser:
         //
-        //     exempt = ["/webhooks"]    under [csrf] in config/<env>.toml
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
         //
         // The token for the request is `ctx.hooked::<CsrfToken>()`;
         // `token.hidden_field()` is the input a form carries.
@@ -2406,7 +2406,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ec4e1d52852fa04c
+// brocanth-digest: aa19e0f1230bf16a
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3394,14 +3394,16 @@ mod tests {
 
     use crate::pages::Ctx;
 
-    /// The admin is in the table, and it answers 403 until somebody opens it.
+    /// The admin is in the table, where src/modules/admin.rs mounts it, and
+    /// it answers 403 until somebody opens it.
     #[tokio::test]
     async fn the_admin_is_mounted_and_ships_locked() {
+        let at = crate::modules::admin::MODULE.mount_at;
         let router = crate::pages::router().expect("the table builds");
-        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, "/admin") else {
-            panic!("/admin is not in the table");
+        let Dispatch::Found { handler, matched } = router.dispatch(Verb::Get, at) else {
+            panic!("{at} is not in the table");
         };
-        let mut ctx = Ctx::new(Verb::Get, "/admin", matched.params());
+        let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
     }
@@ -3415,9 +3417,9 @@ mod tests {
 //! the address exists, because the expensive hash runs on both paths.
 //!
 //! `brocanth-auth` is in `Cargo.toml` because this file is here, and through
-//! no other route. Delete the registration in `src/app.rs` and delete this
-//! file, and the application has no accounts and links nothing to hash a
-//! password with.
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application has no accounts and links nothing
+//! to hash a password with.
 //!
 //! # Signing somebody in
 //!

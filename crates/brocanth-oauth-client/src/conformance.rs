@@ -23,7 +23,7 @@ fn row(account: &str, provider: &str, tag: u8) -> StoredToken {
         account: account.to_string(),
         provider: provider.to_string(),
         access: vec![1, tag, 0, 255],
-        refresh: (tag % 2 == 0).then(|| vec![2, tag]),
+        refresh: tag.is_multiple_of(2).then(|| vec![2, tag]),
         token_type: "Bearer".to_string(),
         scopes: vec!["read".to_string(), format!("s{tag}")],
         expires_at: Some(1_000 + i64::from(tag)),
