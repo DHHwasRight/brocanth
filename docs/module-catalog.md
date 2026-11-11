@@ -159,8 +159,10 @@ shutdown_grace_secs` has a flag and a variable in every project
    `docs/realtime.md` §10: RFC 8441 over HTTP/2, `permessage-deflate`,
    subprotocols.
 2. ~~**`pagination`.**~~ Done: one public paginator
-   (offset and keyset) that the admin and `resource` use. Open: a keyset
-   page has no previous link; the admin's `per_page` has no ceiling yet.
+   (offset and keyset) that the admin and `resource` use. The admin's
+   `per_page` stops at a ceiling (`ModelAdmin::max_per_page`, default 100).
+   A keyset cursor of the wrong type is a 400 (`brocanth_policy::Sortable`).
+   Open: a keyset page has no previous link.
 
 ### 3. Module system
 

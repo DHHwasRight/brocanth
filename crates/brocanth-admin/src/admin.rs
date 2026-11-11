@@ -20,7 +20,7 @@ use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
 use crate::journal::{AdminWrite, FieldChange, Journal, RecordLinkFn, RecordRef, Written};
 use crate::model::{ColumnDescriptor, ModelDescriptor, PrimaryKey, Row, Value};
-use crate::paging::{Page, Pager};
+use crate::paging::Pager;
 use crate::panel::{Panel, PanelPage, PanelRequest};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
@@ -347,11 +347,9 @@ impl Admin {
             columns: &search_columns,
         };
         let total = self.data.count(descriptor, search, scope).await?;
-        let page = Page::new(
-            query.page,
-            query.per_page.unwrap_or(admin.page_size() as u64),
-            total as u64,
-        );
+        let page = admin
+            .page_limits()
+            .page(query.page, query.per_page, total as u64);
         let rows = self
             .data
             .list(ListRequest {
