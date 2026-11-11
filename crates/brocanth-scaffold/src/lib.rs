@@ -1848,6 +1848,15 @@ impl Default for Settings {
     }
 
     #[test]
+    fn settings_of_secrets_only_build_the_test_without_a_default() {
+        let text = "#[derive(Debug)]\npub struct Settings {\n    pub url: String,\n}\n\nimpl Default for Settings {\n    fn default() -> Self {\n        Self { url: String::new() }\n    }\n}\n";
+        let settings = [Setting::text("url", "", "The URL.").secret()];
+        let out = snippet::redact_secrets(text, &settings);
+        assert!(out.starts_with("pub struct Settings {"), "{out}");
+        assert!(!out.contains("..super::Settings::default()"), "{out}");
+    }
+
+    #[test]
     fn settings_without_a_secret_are_left_alone() {
         let settings = [Setting::text("host", "", "The relay.")];
         assert_eq!(snippet::redact_secrets(SETTINGS_RS, &settings), SETTINGS_RS);
@@ -2669,12 +2678,19 @@ pub mod snippet {
              \x20   }}\n\
              }}\n"
         );
+        // A struct of secrets only takes no `..Default`: clippy refuses an
+        // update that sets nothing.
+        let rest = if fields.len() == secrets.len() {
+            ""
+        } else {
+            "            ..super::Settings::default()\n"
+        };
         let test = format!(
             "    #[test]\n\
              \x20   fn a_printed_settings_never_shows_a_secret() {{\n\
              \x20       let settings = super::Settings {{\n\
              {canaries}\
-             \x20           ..super::Settings::default()\n\
+             {rest}\
              \x20       }};\n\
              \x20       let printed = format!(\"{{settings:?}}\");\n\
              \x20       assert!(!printed.contains(\"not-for-the-log\"), \"{{printed}}\");\n\

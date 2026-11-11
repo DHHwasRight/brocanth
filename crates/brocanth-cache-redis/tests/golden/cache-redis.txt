@@ -2881,7 +2881,6 @@ mod tests {
     fn a_printed_settings_never_shows_a_secret() {
         let settings = super::Settings {
             url: "not-for-the-log".to_string(),
-            ..super::Settings::default()
         };
         let printed = format!("{settings:?}");
         assert!(!printed.contains("not-for-the-log"), "{printed}");
