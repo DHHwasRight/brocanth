@@ -220,6 +220,28 @@ pub struct ListRequest<'a> {
     pub scope: Scope<'a>,
 }
 
+/// What a guarded write did: the rows it changed, and the row as the write
+/// read it, under its lock.
+///
+/// The admin journals `before` as the values before the write. A source
+/// that reads no row returns `None`, and the admin then journals the row it
+/// read before the write, which another write may have changed meanwhile.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Locked {
+    /// Rows changed. Zero means what it means for [`AdminData::update`].
+    pub rows: u64,
+    /// The row as the write found it, when the source read one.
+    pub before: Option<Row>,
+}
+
+impl Locked {
+    /// `rows` changed, and the row the write found.
+    pub fn new(rows: u64, before: Option<Row>) -> Locked {
+        Locked { rows, before }
+    }
+}
+
 /// Everything the admin needs from the layer that stores rows.
 #[async_trait]
 pub trait AdminData: Send + Sync + 'static {
@@ -311,6 +333,33 @@ pub trait AdminData: Send + Sync + 'static {
         scope: Scope<'_>,
     ) -> Result<u64, DataError>;
 
+    /// [`AdminData::update`], and the row as the write read it under its
+    /// lock: the journal's "before". The admin calls this one. The default
+    /// calls `update` and reads no row.
+    async fn update_locked(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(
+            self.update(model, key, values, scope).await?,
+            None,
+        ))
+    }
+
+    /// [`AdminData::delete`], and the row as the write read it under its
+    /// lock. The default calls `delete` and reads no row.
+    async fn delete_locked(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(self.delete(model, key, scope).await?, None))
+    }
+
     /// Opens a unit of work: writes that are kept all together or not at
     /// all.
     ///
@@ -355,6 +404,32 @@ pub trait AdminTransaction: Send {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<u64, DataError>;
+
+    /// [`AdminTransaction::update`], and the row it read under its lock.
+    /// See [`AdminData::update_locked`].
+    async fn update_locked(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(
+            self.update(model, key, values, scope).await?,
+            None,
+        ))
+    }
+
+    /// [`AdminTransaction::delete`], and the row it read under its lock.
+    /// See [`AdminData::delete_locked`].
+    async fn delete_locked(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(self.delete(model, key, scope).await?, None))
+    }
 
     /// Keeps every write. An error means that none is kept.
     async fn commit(self: Box<Self>) -> Result<(), DataError>;

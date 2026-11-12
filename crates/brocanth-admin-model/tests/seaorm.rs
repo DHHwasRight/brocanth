@@ -709,3 +709,37 @@ async fn fetch_many_reads_a_batch_and_skips_a_key_the_column_cannot_hold() {
     names.sort();
     assert_eq!(names, ["Ada Lovelace", "Alan Turing"]);
 }
+
+#[tokio::test]
+async fn a_guarded_write_returns_the_row_it_locked() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    three_users(&models).await;
+    let key = PrimaryKey::single("id", 1);
+    let done = models
+        .update_locked(
+            &user_model(),
+            &key,
+            &[("name".into(), Value::Text("Ada King".into()))],
+            Scope::Unscoped,
+        )
+        .await
+        .expect("update");
+    assert_eq!(done.rows, 1);
+    let before = done.before.expect("the locked row");
+    assert_eq!(
+        before.get("name").map(|v| v.as_input()).as_deref(),
+        Some("Ada Lovelace")
+    );
+    let gone = models
+        .delete_locked(&user_model(), &key, Scope::Unscoped)
+        .await
+        .expect("delete");
+    assert_eq!(gone.rows, 1);
+    assert_eq!(
+        gone.before
+            .and_then(|r| r.get("name").map(|v| v.as_input())),
+        Some("Ada King".to_string())
+    );
+}

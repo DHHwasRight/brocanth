@@ -75,8 +75,9 @@ mod source;
 
 pub use async_trait::async_trait;
 pub use source::{
-    columns_of, count_of, delete_of, entry_of, equals_of, insert_of, json_of, like_escaped,
-    order_of, row_of, rows_by, rows_of, scope_of, search_of, single_key, update_of, value_of,
+    columns_of, count_of, delete_locked_of, delete_of, entry_of, equals_of, insert_of, json_of,
+    like_escaped, order_of, row_of, rows_by, rows_of, scope_of, search_of, single_key,
+    update_locked_of, update_of, value_of,
 };
 
 /// A module path the source was not given an entity for.
@@ -233,13 +234,13 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
 /// cache, a set of flags -- never needs one. That admin shows "nothing to
 /// administer" and its tabs, which is accurate rather than broken.
 ///
-/// # Why the match is written ten times
+/// # Why the match is written fourteen times
 ///
-/// Once per method, by the macro: seven on the source, three on its
+/// Once per method, by the macro: nine on the source, five on its
 /// transaction. A helper macro holding it once cannot be written: a
 /// `macro_rules!` nested inside another cannot capture the outer one's
 /// variables, and every arm names a different entity, so no function can
-/// hold them either. Ten expansions of a two-line match is the cost of the
+/// hold them either. Fourteen expansions of a two-line match is the cost of the
 /// ORM being static and the admin being dynamic.
 ///
 /// # One save, one transaction
@@ -335,6 +336,45 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::delete_of::<$entity, _>(&self.txn, model, key, scope).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn update_locked(
+                &mut self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::update_locked_of::<$entity, _>(
+                            &self.txn, model, key, values, scope,
+                        )
+                        .await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn delete_locked(
+                &mut self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::delete_locked_of::<$entity, _>(&self.txn, model, key, scope)
+                            .await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }
@@ -472,6 +512,42 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::delete_of::<$entity, _>(&self.db, model, key, scope).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn update_locked(
+                &self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::update_locked_of::<$entity, _>(&self.db, model, key, values, scope)
+                            .await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn delete_locked(
+                &self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::delete_locked_of::<$entity, _>(&self.db, model, key, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }

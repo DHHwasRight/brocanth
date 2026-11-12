@@ -16,7 +16,8 @@ use thiserror::Error;
 use crate::actions::{ActionCx, BulkAction, Run, Selected, MAX_SELECTED};
 use crate::config::{AdminConfig, ModelAdmin};
 use crate::data::{
-    AdminData, AdminTransaction, DataError, Equals, FieldErrors, ListRequest, Search, SharedData,
+    AdminData, AdminTransaction, DataError, Equals, FieldErrors, ListRequest, Locked, Search,
+    SharedData,
 };
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
@@ -176,10 +177,10 @@ impl Writer<'_> {
         key: &PrimaryKey,
         values: &[(String, Value)],
         scope: crate::data::Scope<'_>,
-    ) -> Result<u64, DataError> {
+    ) -> Result<Locked, DataError> {
         match self {
-            Writer::Direct(data) => data.update(model, key, values, scope).await,
-            Writer::Transaction(tx) => tx.update(model, key, values, scope).await,
+            Writer::Direct(data) => data.update_locked(model, key, values, scope).await,
+            Writer::Transaction(tx) => tx.update_locked(model, key, values, scope).await,
         }
     }
 
@@ -188,10 +189,10 @@ impl Writer<'_> {
         model: &ModelDescriptor,
         key: &PrimaryKey,
         scope: crate::data::Scope<'_>,
-    ) -> Result<u64, DataError> {
+    ) -> Result<Locked, DataError> {
         match self {
-            Writer::Direct(data) => data.delete(model, key, scope).await,
-            Writer::Transaction(tx) => tx.delete(model, key, scope).await,
+            Writer::Direct(data) => data.delete_locked(model, key, scope).await,
+            Writer::Transaction(tx) => tx.delete_locked(model, key, scope).await,
         }
     }
 
@@ -989,9 +990,9 @@ impl Admin {
         let written = writer
             .update(&entry.descriptor, &record, &values, guard.scope())
             .await;
-        match written.map(|rows| guard.applied(rows)) {
-            Ok(Ok(_)) => {}
-            Ok(Err(_lost)) => {
+        let locked = match written.map(|done| (guard.applied(done.rows), done.before)) {
+            Ok((Ok(_), before)) => before,
+            Ok((Err(_lost), _)) => {
                 writer.rollback().await?;
                 return self.conflict(principal);
             }
@@ -1001,13 +1002,16 @@ impl Admin {
                 return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
             }
             Err(other) => return Err(abandon(writer, other).await),
-        }
+        };
+        // The row the write locked, when the source says: the earlier
+        // read may be older.
+        let before = locked.as_ref().unwrap_or(&row);
         let mut told = vec![Told {
             entry,
             key: record.clone(),
-            label: entry.admin.label_for(&entry.descriptor, &row),
+            label: entry.admin.label_for(&entry.descriptor, before),
             kind: Written::Updated,
-            fields: crate::journal::changes(Some(&row), &values),
+            fields: crate::journal::changes(Some(before), &values),
         }];
         let mut after = row.clone();
         for (name, value) in &values {
@@ -1103,12 +1107,12 @@ impl Admin {
         };
         let removed = self
             .data
-            .delete(&entry.descriptor, &record, guard.scope())
+            .delete_locked(&entry.descriptor, &record, guard.scope())
             .await?;
-        if guard.applied(removed).is_err() {
+        if guard.applied(removed.rows).is_err() {
             return self.conflict(principal);
         }
-        if let Some(row) = &found {
+        if let Some(row) = removed.before.as_ref().or(found.as_ref()) {
             let label = entry.admin.label_for(&entry.descriptor, row);
             let fields = crate::journal::removed(row);
             self.tell(principal, entry, &record, &label, Written::Deleted, &fields);
@@ -2184,10 +2188,11 @@ impl Admin {
                         let removed = writer
                             .delete(&child.descriptor, &key, guard.scope())
                             .await?;
-                        if guard.applied(removed).is_err() {
+                        if guard.applied(removed.rows).is_err() {
                             built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
                             return Ok(false);
                         }
+                        let before = removed.before.unwrap_or(before);
                         told.push(Told {
                             entry: child,
                             label: child.admin.label_for(&child.descriptor, &before),
@@ -2206,15 +2211,18 @@ impl Admin {
                         let written = writer
                             .update(&child.descriptor, &key, &values, guard.scope())
                             .await;
-                        match written.map(|rows| guard.applied(rows)) {
-                            Ok(Ok(_)) => told.push(Told {
-                                entry: child,
-                                label: child.admin.label_for(&child.descriptor, &before),
-                                fields: crate::journal::changes(Some(&before), &values),
-                                kind: Written::Updated,
-                                key,
-                            }),
-                            Ok(Err(_lost)) => {
+                        match written.map(|done| (guard.applied(done.rows), done.before)) {
+                            Ok((Ok(_), locked)) => {
+                                let before = locked.unwrap_or(before);
+                                told.push(Told {
+                                    entry: child,
+                                    label: child.admin.label_for(&child.descriptor, &before),
+                                    fields: crate::journal::changes(Some(&before), &values),
+                                    kind: Written::Updated,
+                                    key,
+                                })
+                            }
+                            Ok((Err(_lost), _)) => {
                                 built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
                                 return Ok(false);
                             }
@@ -3019,18 +3027,19 @@ impl Admin {
         let Ok(guard) = pending.resolve(1) else {
             return Ok(false);
         };
-        let rows = match self
+        let done = match self
             .data
-            .update(&entry.descriptor, key, values, guard.scope())
+            .update_locked(&entry.descriptor, key, values, guard.scope())
             .await
         {
-            Ok(rows) => rows,
+            Ok(done) => done,
             Err(DataError::Invalid(_)) => return Ok(false),
             Err(other) => return Err(other.into()),
         };
-        if guard.applied(rows).is_err() {
+        if guard.applied(done.rows).is_err() {
             return Ok(false);
         }
+        let row = done.before.unwrap_or(row);
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::changes(Some(&row), values);
         self.tell(principal, entry, key, &label, Written::Updated, &fields);
@@ -3072,11 +3081,12 @@ impl Admin {
         };
         let removed = self
             .data
-            .delete(&entry.descriptor, key, guard.scope())
+            .delete_locked(&entry.descriptor, key, guard.scope())
             .await?;
-        if guard.applied(removed).is_err() {
+        if guard.applied(removed.rows).is_err() {
             return Ok(false);
         }
+        let row = removed.before.unwrap_or(row);
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::removed(&row);
         self.tell(principal, entry, key, &label, Written::Deleted, &fields);

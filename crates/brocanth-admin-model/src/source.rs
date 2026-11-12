@@ -3,7 +3,7 @@
 //! Every function here is generic over one entity, so the macro's arms are
 //! one line each and the logic is written once rather than per model.
 
-use brocanth_admin::data::{DataError, Scope, Search};
+use brocanth_admin::data::{DataError, Locked, Scope, Search};
 use brocanth_admin::model::Row;
 use brocanth_admin::query::{Direction, Sort};
 use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
@@ -432,6 +432,30 @@ where
         + Sync
         + brocanth_model::sea_orm::TryIntoModel<E::Model>,
 {
+    Ok(update_locked_of::<E, C>(db, model, key, values, scope)
+        .await?
+        .rows)
+}
+
+/// [`update_of`], and the row as it read it under the lock: what the
+/// admin journals as the values before the write.
+pub async fn update_locked_of<E, C>(
+    db: &C,
+    model: &brocanth_admin::model::ModelDescriptor,
+    key: &brocanth_admin::model::PrimaryKey,
+    values: &[(String, brocanth_admin::model::Value)],
+    scope: Scope<'_>,
+) -> Result<Locked, DataError>
+where
+    E: EntityTrait,
+    C: ConnectionTrait + TransactionTrait,
+    E::Model: Send + Sync + IntoActiveModel<E::ActiveModel> + serde::Serialize,
+    for<'de> E::Model: serde::Deserialize<'de>,
+    E::ActiveModel: ActiveModelTrait<Entity = E>
+        + Send
+        + Sync
+        + brocanth_model::sea_orm::TryIntoModel<E::Model>,
+{
     let guard = scope_of(scope, db.get_database_backend())?;
     let txn = db.begin().await.map_err(backend)?;
     let found = E::find()
@@ -444,10 +468,11 @@ where
     let Some(found) = found else {
         // Gone, or no longer matching. Zero rows, which the admin answers
         // as a lost race; the transaction rolls back when it drops.
-        return Ok(0);
+        return Ok(Locked::new(0, None));
     };
     // The row as it stands, with the submitted fields written over it.
     let mut merged = serde_json::to_value(&found).map_err(|e| DataError::backend(e.to_string()))?;
+    let before = crate::row_from_json(&merged);
     let submitted = crate::json_from_values(model, values);
     if let (Some(into), Some(from)) = (merged.as_object_mut(), submitted.as_object()) {
         for (name, value) in from {
@@ -459,7 +484,7 @@ where
     active.set_from_json(merged).map_err(unreadable)?;
     active.update(&txn).await.map_err(invalid)?;
     txn.commit().await.map_err(backend)?;
-    Ok(1)
+    Ok(Locked::new(1, Some(before)))
 }
 
 /// Removes a row, guarded by the scope, and reports the rows it removed.
@@ -476,7 +501,26 @@ pub async fn delete_of<E, C>(
 where
     E: EntityTrait,
     C: ConnectionTrait + TransactionTrait,
-    E::Model: Send + Sync + ModelTrait<Entity = E> + IntoActiveModel<E::ActiveModel>,
+    E::Model:
+        Send + Sync + ModelTrait<Entity = E> + IntoActiveModel<E::ActiveModel> + serde::Serialize,
+    E::ActiveModel:
+        ActiveModelTrait<Entity = E> + brocanth_model::sea_orm::ActiveModelBehavior + Send,
+{
+    Ok(delete_locked_of::<E, C>(db, model, key, scope).await?.rows)
+}
+
+/// [`delete_of`], and the row as it read it under the lock.
+pub async fn delete_locked_of<E, C>(
+    db: &C,
+    model: &brocanth_admin::model::ModelDescriptor,
+    key: &brocanth_admin::model::PrimaryKey,
+    scope: Scope<'_>,
+) -> Result<Locked, DataError>
+where
+    E: EntityTrait,
+    C: ConnectionTrait + TransactionTrait,
+    E::Model:
+        Send + Sync + ModelTrait<Entity = E> + IntoActiveModel<E::ActiveModel> + serde::Serialize,
     E::ActiveModel:
         ActiveModelTrait<Entity = E> + brocanth_model::sea_orm::ActiveModelBehavior + Send,
 {
@@ -491,11 +535,14 @@ where
         .map_err(backend)?;
     let Some(found) = found else {
         // Gone, or no longer matching: zero rows, never success.
-        return Ok(0);
+        return Ok(Locked::new(0, None));
     };
+    let before = serde_json::to_value(&found)
+        .map(|json| crate::row_from_json(&json))
+        .map_err(|e| DataError::backend(e.to_string()))?;
     let removed = found.delete(&txn).await.map_err(backend)?;
     txn.commit().await.map_err(backend)?;
-    Ok(removed.rows_affected)
+    Ok(Locked::new(removed.rows_affected, Some(before)))
 }
 
 fn backend(error: brocanth_model::sea_orm::DbErr) -> DataError {
