@@ -415,6 +415,13 @@ fn development() -> bool {
     }
 }
 
+/// Whether `secret` may sign tokens here. In development anything goes;
+/// elsewhere not the scaffold's secret, which this repository shows to
+/// anybody, and not one shorter than 32 characters.
+fn usable_secret(secret: &str, development: bool) -> bool {
+    development || (secret != DEVELOPMENT_SECRET && secret.len() >= 32)
+}
+
 /// What this plugin puts on the context.
 ///
 /// A wrapper and not the two values loose, because `ContextItem` is
@@ -465,11 +472,7 @@ impl Plugin for Files {
                  help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
-        if !development()
-            && (self.settings.secret == DEVELOPMENT_SECRET || self.settings.secret.len() < 32)
-        {
-            // The scaffold's secret is in this repository, so anybody who
-            // read it can mint a token for any object.
+        if !usable_secret(&self.settings.secret, development()) {
             return Err(PluginError::new(
                 "[storage] secret is the scaffold's development value or shorter than 32 characters\n\
                  help: set the variable for `storage.secret` to 32 random bytes, such as the output of `head -c 32 /dev/urandom | base64`",
@@ -501,6 +504,19 @@ impl Plugin for Files {
                 tokens: tokens.clone(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{usable_secret, DEVELOPMENT_SECRET};
+
+    #[test]
+    fn the_development_secret_is_refused_outside_development() {
+        assert!(usable_secret(DEVELOPMENT_SECRET, true));
+        assert!(!usable_secret(DEVELOPMENT_SECRET, false));
+        assert!(!usable_secret("short", false));
+        assert!(usable_secret(&"x".repeat(32), false));
     }
 }
 "##;
