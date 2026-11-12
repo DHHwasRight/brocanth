@@ -273,11 +273,12 @@ async fn a_replica_that_finds_the_sweep_locked_deletes_nothing() {
         .unwrap();
     // Another replica sweeps: it holds the lock in its own transaction.
     let mut other = sandbox.db.pool().begin().await.unwrap();
-    let (locked,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(0x6272_6f63_616e_7468_i64)
-        .fetch_one(&mut *other)
-        .await
-        .unwrap();
+    let (locked,): (bool,) =
+        sqlx::query_as("SELECT pg_try_advisory_xact_lock($1, hashtext(current_schema()))")
+            .bind(0x6272_6f63_i32)
+            .fetch_one(&mut *other)
+            .await
+            .unwrap();
     assert!(locked);
     sandbox
         .store

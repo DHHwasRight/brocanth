@@ -89,11 +89,12 @@ INSERT INTO brocanth_analytics_sites (site)
     async fn try_sweep_lock(
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
     ) -> Result<bool, StoreError> {
-        let (locked,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(SWEEP_LOCK)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(failed)?;
+        let (locked,): (bool,) =
+            sqlx::query_as("SELECT pg_try_advisory_xact_lock($1, hashtext(current_schema()))")
+                .bind(SWEEP_LOCK)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(failed)?;
         Ok(locked)
     }
 }
@@ -106,9 +107,11 @@ fn failed(e: sqlx::Error) -> StoreError {
     ))
 }
 
-/// The key of the advisory lock the retention sweep takes, so one replica
-/// sweeps and the others skip. `brocanth` as eight ASCII bytes.
-const SWEEP_LOCK: i64 = 0x6272_6f63_616e_7468;
+/// The first key of the advisory lock the retention sweep takes, so one
+/// replica sweeps and the others skip: `broc` as four ASCII bytes. The
+/// second key is the schema's hash, so two applications in two schemas of
+/// one database do not wait on each other.
+const SWEEP_LOCK: i32 = 0x6272_6f63;
 
 /// `day` is stored as a `date` and travels as days since 1970, so this
 /// crate needs no date library: `DATE '1970-01-01' + n` and
