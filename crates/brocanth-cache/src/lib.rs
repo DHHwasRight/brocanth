@@ -233,7 +233,7 @@ pub use key::{Key, Namespace, MAX_KEY_BYTES, MAX_NAMESPACE_BYTES};
 #[cfg(feature = "runtime")]
 pub use memory::MemoryCache;
 #[cfg(feature = "runtime")]
-pub use plugin::{CacheConfig, CacheHandle, CachePlugin};
+pub use plugin::{CacheConfig, CacheHandle, CachePlugin, CacheReadiness};
 #[cfg(feature = "runtime")]
 pub use sweep::{sweep, Sweeper, DEFAULT_SWEEP_EVERY};
 #[cfg(feature = "runtime")]

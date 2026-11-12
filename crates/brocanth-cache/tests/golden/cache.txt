@@ -2173,7 +2173,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
 use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_cache::{CacheHandle, PgCache, Sweeper};
+use brocanth_cache::{CacheHandle, CacheReadiness, PgCache, Sweeper};
 
 /// What this plugin is built from.
 ///
@@ -2262,38 +2262,20 @@ impl Plugin for Cache {
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
-        // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers. With
-        // `migrate`, the first check creates the table, as the jobs module
-        // does, so a new project starts; a project with reviewers turns it
-        // off and keeps `PgCache::schema_sql` in a migration. `serve` awaits
-        // this once before it listens, so an unreachable store stops the
-        // start there.
-        let probe = Arc::clone(&cache);
-        let migrate = self.settings.migrate;
-        let migrated = Arc::new(tokio::sync::OnceCell::new());
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if migrate {
-                    migrated
-                        .get_or_try_init(|| probe.migrate())
-                        .await
-                        .map_err(|e| format!("creating the cache table: {e}"))?;
-                }
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!(
-                        "{e}\nhelp: check `[cache] url`; with `migrate = false`, the \
-                         `brocanth_cache` table must exist: `PgCache::schema_sql()` has the \
-                         statements for a migration"
-                    )
-                })
-            }
-        });
+        // Ready when one read of the table answers: `CacheReadiness` is the
+        // check `CachePlugin` registers. With `migrate`, the first check
+        // creates the table, so a new project starts; a project with
+        // reviewers turns it off and keeps `PgCache::schema_sql` in a
+        // migration. `serve` awaits this once before it listens, so an
+        // unreachable store stops the start there.
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .migrating(self.settings.migrate)
+                .help(
+                    "check `[cache] url`; with `migrate = false`, the `brocanth_cache` table \
+                     must exist: `PgCache::schema_sql()` has the statements for a migration",
+                ),
+        );
         let handle = CacheHandle::new(cache);
         // The first cache this process opens is the one the admin's cache
         // tab reads: the admin is built before any plugin starts.

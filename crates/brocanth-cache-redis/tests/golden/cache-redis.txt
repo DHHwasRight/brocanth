@@ -2766,7 +2766,7 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
-use brocanth_cache::CacheHandle;
+use brocanth_cache::{CacheHandle, CacheReadiness};
 use brocanth_cache_redis::RedisCache;
 
 /// What this plugin is built from.
@@ -2844,21 +2844,13 @@ impl Plugin for Cache {
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
-        // Ready when one read answers. A miss is a pass: the question is
-        // whether the server answers. `serve` awaits this once before it
+        // Ready when one read answers: `CacheReadiness` is the check
+        // `CachePlugin` registers. `serve` awaits this once before it
         // listens, so an unreachable server stops the start there.
-        let probe = Arc::clone(&cache);
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            async move {
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!("{e}\nhelp: check `[cache] url`, and that the Redis server runs")
-                })
-            }
-        });
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .help("check `[cache] url`, and that the Redis server runs"),
+        );
         let handle = CacheHandle::new(cache);
         // The first cache this process opens is the one the admin's cache
         // tab reads: the admin is built before any plugin starts.

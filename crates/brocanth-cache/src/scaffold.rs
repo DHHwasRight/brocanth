@@ -181,7 +181,7 @@ pub struct Backend {
     /// `let cache: Arc<dyn brocanth_cache::Cache> = ...;`.
     pub open: &'static str,
     /// The readiness check, 8 spaces in, over `cache`, or empty.
-    pub ready: &'static str,
+    pub ready: String,
     /// Whether the plugin runs the sweep, from a `sweep_every` setting.
     pub sweep: bool,
 }
@@ -214,7 +214,7 @@ pub fn write_plugin(s: &mut Scaffold, project: &Project, backend: Backend) {
         .replace("@CONFIGURE@", backend.configure)
         .replace("@LC@", if uses_lc { "lc" } else { "_lc" })
         .replace("@OPEN@", backend.open)
-        .replace("@READY@", backend.ready)
+        .replace("@READY@", &backend.ready)
         .replace("@SWEEP@", pick(SWEEP));
     s.file(
         "src/plugins/cache/mod.rs",
@@ -301,7 +301,7 @@ fn sweep_setting() -> Setting {
 fn postgres() -> Backend {
     Backend {
         doc: PG_DOC,
-        cache_items: &["PgCache"],
+        cache_items: &["CacheReadiness", "PgCache"],
         uses: "",
         settings: vec![
             url_setting(
@@ -326,7 +326,7 @@ fn postgres() -> Backend {
         ),
         configure: CONFIGURE_URL,
         open: PG_OPEN,
-        ready: PG_READY,
+        ready: PG_READY.replace("@HELP@", "[cache] url"),
         sweep: true,
     }
 }
@@ -335,7 +335,7 @@ fn postgres() -> Backend {
 fn postgres_on_db() -> Backend {
     Backend {
         doc: PG_DB_DOC,
-        cache_items: &["PgCache"],
+        cache_items: &["CacheReadiness", "PgCache"],
         uses: "",
         settings: vec![migrate_setting(), sweep_setting()],
         fields: concat!(
@@ -350,7 +350,7 @@ fn postgres_on_db() -> Backend {
         ),
         configure: "",
         open: PG_DB_OPEN,
-        ready: PG_DB_READY,
+        ready: PG_READY.replace("@HELP@", "[db] url"),
         sweep: true,
     }
 }
@@ -369,7 +369,7 @@ fn memory() -> Backend {
         defaults: "            sweep_every: 300,\n",
         configure: "",
         open: MEMORY_OPEN,
-        ready: "",
+        ready: String::new(),
         sweep: true,
     }
 }
@@ -437,75 +437,22 @@ const PG_DB_OPEN: &str = r#"        // The pool the `db` plugin opened in its ow
 const MEMORY_OPEN: &str = r#"        let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(MemoryCache::new());
 "#;
 
-/// The Postgres readiness check, with the help line for `[cache] url`.
-const PG_READY: &str = r#"        // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers. With
-        // `migrate`, the first check creates the table, as the jobs module
-        // does, so a new project starts; a project with reviewers turns it
-        // off and keeps `PgCache::schema_sql` in a migration. `serve` awaits
-        // this once before it listens, so an unreachable store stops the
-        // start there.
-        let probe = Arc::clone(&cache);
-        let migrate = self.settings.migrate;
-        let migrated = Arc::new(tokio::sync::OnceCell::new());
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if migrate {
-                    migrated
-                        .get_or_try_init(|| probe.migrate())
-                        .await
-                        .map_err(|e| format!("creating the cache table: {e}"))?;
-                }
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!(
-                        "{e}\nhelp: check `[cache] url`; with `migrate = false`, the \
-                         `brocanth_cache` table must exist: `PgCache::schema_sql()` has the \
-                         statements for a migration"
-                    )
-                })
-            }
-        });
-"#;
-
-/// The Postgres readiness check on the `db` pool, with the help line for
-/// `[db] url`.
-const PG_DB_READY: &str = r#"        // Ready when one read of the table answers, as `CachePlugin` does. A
-        // miss is a pass: the question is whether the store answers. With
-        // `migrate`, the first check creates the table, as the jobs module
-        // does, so a new project starts; a project with reviewers turns it
-        // off and keeps `PgCache::schema_sql` in a migration. `serve` awaits
-        // this once before it listens, so an unreachable store stops the
-        // start there.
-        let probe = Arc::clone(&cache);
-        let migrate = self.settings.migrate;
-        let migrated = Arc::new(tokio::sync::OnceCell::new());
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if migrate {
-                    migrated
-                        .get_or_try_init(|| probe.migrate())
-                        .await
-                        .map_err(|e| format!("creating the cache table: {e}"))?;
-                }
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!(
-                        "{e}\nhelp: check `[db] url`; with `migrate = false`, the \
-                         `brocanth_cache` table must exist: `PgCache::schema_sql()` has the \
-                         statements for a migration"
-                    )
-                })
-            }
-        });
+/// The Postgres readiness check, with `@HELP@` for the setting that names
+/// the database: `[cache] url`, or `[db] url` on the `db` pool.
+const PG_READY: &str = r#"        // Ready when one read of the table answers: `CacheReadiness` is the
+        // check `CachePlugin` registers. With `migrate`, the first check
+        // creates the table, so a new project starts; a project with
+        // reviewers turns it off and keeps `PgCache::schema_sql` in a
+        // migration. `serve` awaits this once before it listens, so an
+        // unreachable store stops the start there.
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .migrating(self.settings.migrate)
+                .help(
+                    "check `@HELP@`; with `migrate = false`, the `brocanth_cache` table \
+                     must exist: `PgCache::schema_sql()` has the statements for a migration",
+                ),
+        );
 "#;
 
 const SHUTDOWN_USE: &str = "use brocanth::plugin_shutdown::ShutdownCx;\n";

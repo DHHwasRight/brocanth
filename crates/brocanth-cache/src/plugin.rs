@@ -7,12 +7,14 @@
 //! An application that does not write [`CachePlugin`] in its `main` links no
 //! `sqlx` and no cache.
 //!
-//! **A plugin arrives already configured.** [`CacheConfig`] holds a live
-//! cache, because a cache is a connection pool and a connection pool is made
-//! asynchronously, which a sync `Plugin::new` cannot do. So the application
-//! opens it in its own `main`, where the runtime is, and hands it over. There
-//! is no `plugin_from_config` path for the same reason `brocanth-jobs` has
-//! none: nothing in a TOML file can become a pool.
+//! **A plugin arrives already configured.** [`CacheConfig`] holds an open
+//! cache: the application opens it in its own `main` and hands it over. To
+//! open one from a URL in a synchronous place, use
+//! [`PgCache::connect_lazy`](crate::PgCache::connect_lazy), which connects
+//! on first use. The plugin `brocanth create` writes does that from
+//! `[cache] url`, or reuses the `db` pool, at `before_start`. It registers
+//! the same readiness check as this plugin, [`CacheReadiness`], and the same
+//! [`Sweeper`].
 //!
 //! **Plugins do not autowire.** This one offers no middleware and mounts
 //! nothing. It runs one background task, the sweep ([`Sweeper`]), from
@@ -52,6 +54,8 @@ use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth::plugin_health::ReadinessCheck;
+use brocanth::plugin_routes::BoxFuture;
 use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::cache::Cache;
@@ -120,10 +124,83 @@ impl std::fmt::Debug for CacheHandle {
 
 impl ContextItem for CacheHandle {}
 
+/// The cache's readiness check: ready when one read answers.
+///
+/// A miss is a pass: the question is whether the store answers, not what it
+/// holds. With [`CacheReadiness::migrating`], the check creates the table
+/// first, until that worked once. The server awaits every check before it
+/// listens, so the table is there before the first request. No stage waits
+/// for it, because a stage that waits hangs a current-thread runtime.
+///
+/// [`CachePlugin`] registers one. A plugin that opens its own cache
+/// registers one too: `lc.ready_when(CacheReadiness::new(cache))`.
+pub struct CacheReadiness {
+    cache: Arc<dyn Cache>,
+    migrated: AtomicBool,
+    help: Option<String>,
+}
+
+impl CacheReadiness {
+    /// A check that reads `cache` and creates nothing.
+    pub fn new(cache: Arc<dyn Cache>) -> Self {
+        Self {
+            cache,
+            migrated: AtomicBool::new(true),
+            help: None,
+        }
+    }
+
+    /// Creates the table first when `migrate` is true. See
+    /// [`CacheConfig::migrating`] for when to turn it on.
+    #[must_use]
+    pub fn migrating(self, migrate: bool) -> Self {
+        self.migrated.store(!migrate, Ordering::Release);
+        self
+    }
+
+    /// The `help:` line a failed check ends with: what to check, in the
+    /// application's own terms (`check [cache] url`).
+    #[must_use]
+    pub fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    fn fail(&self, what: String) -> String {
+        match &self.help {
+            Some(help) => format!("{what}\nhelp: {help}"),
+            None => what,
+        }
+    }
+}
+
+impl ReadinessCheck for CacheReadiness {
+    fn check(&self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            if !self.migrated.load(Ordering::Acquire) {
+                self.cache
+                    .migrate()
+                    .await
+                    .map_err(|e| self.fail(format!("creating the cache table: {e}")))?;
+                self.migrated.store(true, Ordering::Release);
+            }
+            let key = crate::key::Namespace::new("brocanth.readyz")
+                .and_then(|ns| crate::key::Key::new(ns, "probe"))
+                .map_err(|e| e.to_string())?;
+            self.cache
+                .get(&key)
+                .await
+                .map(drop)
+                .map_err(|e| self.fail(e.to_string()))
+        })
+    }
+}
+
 /// What [`CachePlugin`] is built from.
 pub struct CacheConfig {
     cache: Arc<dyn Cache>,
     migrate: bool,
+    ready_help: Option<String>,
     sweep_every: Duration,
     on_sweep_error: SweepErrorFn,
 }
@@ -135,6 +212,7 @@ impl CacheConfig {
         Self {
             cache,
             migrate: false,
+            ready_help: None,
             sweep_every: DEFAULT_SWEEP_EVERY,
             on_sweep_error: Arc::new(|_| {}),
         }
@@ -180,12 +258,21 @@ impl CacheConfig {
         self.migrate = true;
         self
     }
+
+    /// The `help:` line a failed readiness check ends with, such as
+    /// "check `[cache] url`". See [`CacheReadiness::help`].
+    #[must_use]
+    pub fn ready_help(mut self, help: impl Into<String>) -> Self {
+        self.ready_help = Some(help.into());
+        self
+    }
 }
 
 /// The cache, as a plugin.
 pub struct CachePlugin {
     cache: Arc<dyn Cache>,
     migrate: bool,
+    ready_help: Option<String>,
     sweep_every: Duration,
     on_sweep_error: SweepErrorFn,
     sweeper: Option<Sweeper>,
@@ -217,6 +304,7 @@ impl Plugin for CachePlugin {
         Self {
             cache: config.cache,
             migrate: config.migrate,
+            ready_help: config.ready_help,
             sweep_every: config.sweep_every,
             on_sweep_error: config.on_sweep_error,
             sweeper: None,
@@ -227,31 +315,11 @@ impl Plugin for CachePlugin {
         let handle = CacheHandle::new(self.cache.clone());
         handle.install();
         lc.services_mut().insert(handle);
-        // Ready when one read of the table succeeds. A miss is a success: the
-        // question is whether the store answers, not what it holds. With
-        // `migrating`, the check creates the table first, until that worked
-        // once: the server awaits every check before it listens, so the
-        // table is there before the first request. No stage waits for it,
-        // because a stage that waits hangs a current-thread runtime.
-        let cache = self.cache.clone();
-        let migrated = Arc::new(AtomicBool::new(!self.migrate));
-        lc.ready_when(move || {
-            let cache = cache.clone();
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if !migrated.load(Ordering::Acquire) {
-                    cache
-                        .migrate()
-                        .await
-                        .map_err(|e| format!("creating the cache table: {e}"))?;
-                    migrated.store(true, Ordering::Release);
-                }
-                let key = crate::key::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| crate::key::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                cache.get(&key).await.map(drop).map_err(|e| e.to_string())
-            }
-        });
+        let mut ready = CacheReadiness::new(self.cache.clone()).migrating(self.migrate);
+        if let Some(help) = &self.ready_help {
+            ready = ready.help(help.clone());
+        }
+        lc.ready_when(ready);
         Ok(())
     }
 
