@@ -20,7 +20,7 @@ http = { version = "1", optional = true }
 # `i18n`: the banner reads its strings from the application's catalogs, in
 # the request's locale. No default features: the hook needs only
 # `brocanth_i18n::Current`, which links no CLDR data and no parser.
-brocanth-i18n = { path = "../brocanth-i18n", version = "0.1.0", default-features = false, optional = true }
+brocanth-i18n = { workspace = true, optional = true }
 
 # `config`: the configuration types deserialise, so an `[gtag]` section
 # of a brocanth-config file builds one. Off, so an application that builds
@@ -39,7 +39,7 @@ brocanth-middleware.workspace = true
 # the configuration test rather than compiling it out.
 brocanth-gtag = { path = ".", features = ["config", "i18n", "scaffold"] }
 # `tests/i18n.rs` negotiates a locale with the real hook.
-brocanth-i18n = { path = "../brocanth-i18n", features = ["plugin"] }
+brocanth-i18n = { workspace = true, features = ["runtime", "plugin"] }
 brocanth-config.workspace = true
 # `tests/scaffold.rs`: the module, generated into a project by the CLI's
 # own generator. A cycle through dev-dependencies, which cargo allows.
