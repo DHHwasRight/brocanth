@@ -25,7 +25,12 @@ impl Reqwest {
         reqwest::blocking::Client::builder()
             .build()
             .map(|client| Reqwest { client })
-            .map_err(|e| format!("the HTTP client would not start: {e}"))
+            .map_err(|e| {
+                format!(
+                    "the HTTP client would not start: {e}\n\
+                     help: check the TLS setup of this machine, or implement `Wire` with another client"
+                )
+            })
     }
 }
 
@@ -48,18 +53,26 @@ impl Wire for Reqwest {
             request = request.body(body.clone());
         }
 
-        let answered = request
-            .send()
-            .map_err(|e| format!("{} {}: {e}", call.verb.as_str(), call.url))?;
+        let answered = request.send().map_err(|e| {
+            format!(
+                "{} {}: {e}\n\
+                     help: start the server, or pass `--base <URL>` to reach it at another address",
+                call.verb.as_str(),
+                call.url
+            )
+        })?;
         let status = answered.status().as_u16();
         let content_type = answered
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = answered
-            .text()
-            .map_err(|e| format!("reading the answer: {e}"))?;
+        let body = answered.text().map_err(|e| {
+            format!(
+                "reading the answer: {e}\n\
+                     help: the server closed the connection early; read its log, then try again"
+            )
+        })?;
 
         Ok(Answer {
             status,

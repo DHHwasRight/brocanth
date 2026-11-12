@@ -42,11 +42,17 @@ brocanth add client
 
 `client` needs `input` (the route table) and `commands` (a place for a
 subcommand). It writes `src/commands/api.rs`: an `api` command that calls
-`brocanth_client::run` with `crate::pages::described()` and `Reqwest`. It
+`brocanth_client::run_at` with `crate::pages::described()`, `Reqwest` and
+the address `serve` listens on (`<APP>_ADDR`, or `127.0.0.1:3000`). It
 prints the body, and exits with 1 when the status is 400 or more. The
 module declares no settings. The `api` command has its own global flags:
-`--base URL` (default `http://127.0.0.1:3000`), `-H/--header NAME:VALUE`
-and `-q/--query NAME=VALUE`.
+`--base URL` (default: the address `serve` listens on),
+`-H/--header NAME:VALUE` and `-q/--query NAME=VALUE`.
+
+A required field is required only when `--body` is absent, and `--body`
+does not mix with the field flags. A field named like a path parameter or
+like one of the global flags gets no flag of its own: send it in `--body`.
+Path parameter values are percent-encoded, so one value stays one segment.
 
 ## Examples
 
