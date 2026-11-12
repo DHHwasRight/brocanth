@@ -50,7 +50,10 @@ after_dispatch    request hooks, reverse declared order   read-only
   - `rate_limit.count` runs after `proxy-headers.read`, if present, so
     `ClientInfo` is there to read. `RateLimitConfig::after("auth.session")`
     adds a constraint, for a `user` key that another hook puts on the
-    request state.
+    request state. A `session` key counts only once that hook put a
+    `rate_limit::VerifiedSession` on the state.
+  - `flash.write` runs before `conditional_get` and `compression` on the
+    way out, so the message is in the body that is tagged and compressed.
   - The other hooks declare nothing and keep their registration order.
 - **A request hook may answer.** `CanonicalHost` (a redirect),
   `ContentTypes` (415), `Cors` (a preflight), `Csrf` (403) and the rate
