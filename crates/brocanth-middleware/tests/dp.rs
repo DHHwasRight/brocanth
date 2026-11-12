@@ -143,14 +143,24 @@ fn token(client: &TestClient<Base, impl HookFamilies, Handler<Base>>) -> String 
         .and_then(|pair| pair.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("name=value");
-    // The page carries the same value for the script to read.
-    assert!(
-        first.text().contains(&format!(
-            r#"<meta name="csrf-token" content="{value}" data-header="x-csrf-token">"#
-        )),
-        "{}",
-        first.text()
+    // The page carries the token for the script to read, masked so a
+    // compressed page does not hold a fixed secret.
+    let text = first.text();
+    let masked = text
+        .split_once(r#"<meta name="csrf-token" content=""#)
+        .and_then(|(_, rest)| rest.split_once(r#"" data-header="x-csrf-token">"#))
+        .map(|(content, _)| content.to_string())
+        .unwrap_or_else(|| panic!("no csrf meta tag: {text}"));
+    assert_ne!(masked, value, "the meta tag holds the token unmasked");
+    // What the script sends back passes, as the cookie's own value does.
+    let raw = client.send(dp_post("/items", Some(&value), &[("name", "a")]));
+    assert_ne!(raw.status(), 403, "{}", raw.text());
+    let unmasked = client.send(
+        dp_post("/items", None, &[("name", "a")])
+            .header("cookie", &format!("csrf_token={value}"))
+            .header("x-csrf-token", &masked),
     );
+    assert_ne!(unmasked.status(), 403, "{}", unmasked.text());
     value
 }
 

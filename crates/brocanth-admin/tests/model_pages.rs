@@ -366,7 +366,7 @@ fn a_page_post_without_the_csrf_token_is_refused_before_the_page() {
         data.clone(),
         AdminConfig::new().discovering(Discovery::new().under("blog::models")),
     );
-    let cookie = format!("csrf_token={TOKEN}");
+    let cookie = format!("__Host-csrf_token={TOKEN}");
 
     let refused = client.send(
         TestRequest::post("/admin/post/2/publish")

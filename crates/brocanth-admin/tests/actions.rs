@@ -624,7 +624,7 @@ fn a_bulk_delete_without_the_csrf_token_is_refused_before_the_admin() {
         ("pk", "1"),
         ("pk", "2"),
     ];
-    let cookie = format!("csrf_token={TOKEN}");
+    let cookie = format!("__Host-csrf_token={TOKEN}");
 
     // No field and no cookie; a cookie and no field; the wrong field.
     let no_token = client.send(TestRequest::post("/admin/post/actions").form(&form));

@@ -184,7 +184,8 @@ table.route("/items", Verb::Get, form()).expect("a route");
 table.route("/items", Verb::Post, saved()).expect("a route");
 let client = TestClient::serving(app, table.build().expect("a table"));
 
-// A first visit gets the cookie, and the page carries the same value.
+// A first visit gets the cookie, and the page carries the token masked,
+// so a compressed page holds no fixed secret.
 let page = client.get("/items");
 let cookie = page.header("set-cookie").expect("a cookie");
 let token = cookie
@@ -193,7 +194,8 @@ let token = cookie
     .and_then(|pair| pair.split_once('='))
     .map(|(_, value)| value.to_string())
     .expect("name=value");
-assert!(page.text().contains(&token));
+assert!(page.text().contains(r#"name="_csrf_token""#));
+assert!(!page.text().contains(&token));
 
 // No token: refused before the handler runs.
 client
