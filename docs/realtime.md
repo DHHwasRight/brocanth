@@ -132,7 +132,10 @@ Authentication is the page's, before the switch: the session reads as on
 any `GET`. The generated page reads what `authorise` needs into a `Viewer`
 once, because the socket outlives the request and later `subscribe`
 commands have no request to read. Each topic, in the URL or in a command,
-passes the same `authorise`. A refusal before the switch is a status the
+passes the same `authorise` (`src/plugins/realtime/authorise.rs`, shared
+with the event stream). The socket keeps its `Viewer` for its life, so the
+loop closes it after `MAX_AGE` (15 minutes) with code 1001, and the browser
+reconnects and is read again. A refusal before the switch is a status the
 browser can read (403, 426, 503 with `retry-after`); a refusal after it is
 a `refused` record.
 

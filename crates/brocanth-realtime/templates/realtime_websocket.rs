@@ -37,7 +37,9 @@
 //! stops taking from the mailbox, and `[realtime] overflow` decides what is
 //! lost: `drop-oldest` and `drop-newest` drop frames and the browser reads
 //! `lagged`; `disconnect` closes the mailbox, and this loop closes the
-//! socket with code 1013.
+//! socket with code 1013. A send that is not written within one `HEARTBEAT`
+//! ends the loop: a peer that stopped reading must not hold its client, and
+//! the pings cannot run while a send waits.
 //!
 //! # Ending
 //!
@@ -47,18 +49,29 @@
 //! * The server stops. The loop sends the frames already queued, then a
 //!   close frame with code 1001, and ends, so a deploy does not wait for a
 //!   subscriber. The browser reconnects with `?last=<id>`.
+//! * The socket reaches `MAX_AGE`. The loop closes it with code 1001 and the
+//!   browser reconnects. The viewer `authorise` decides on is read once,
+//!   when the socket opens, so this is the longest a socket keeps the rights
+//!   of a session that logged out or lost a role.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 use brocanth_realtime::{Client, Event, Subscription, SubscriptionId, Topic};
-use brocanth_server::websocket::{self, Incoming, WebSocket};
+use brocanth_server::websocket::{self, Gone, Incoming, WebSocket};
 use tokio::time::{Instant, MissedTickBehavior};
 
 /// How often the socket pings the browser. A browser that has not answered
 /// by the next ping is gone, so this is also the longest a dead subscriber
-/// holds its mailbox.
+/// holds its mailbox, and the longest one send may wait.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// How long one socket lives before the server closes it and the browser
+/// reconnects. The viewer is read again on the reconnect, so a logout or a
+/// role change reaches an open socket within this time. Shorten it when that
+/// matters more than a reconnect; or close the user's sockets at logout.
+pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
 
 /// Who may follow what: the page's `authorise`, with what it read from the
 /// request already captured.
@@ -74,62 +87,90 @@ pub type Filed = HashMap<String, SubscriptionId>;
 /// since the last one it read; the broker keeps no history, so the socket
 /// says `lagged` instead.
 pub async fn run(
+    socket: WebSocket,
+    client: Client,
+    authorise: Authorise,
+    filed: Filed,
+    missed: bool,
+) {
+    serve(socket, client, authorise, filed, missed, MAX_AGE).await;
+}
+
+/// [`run`], with the socket's age limit as an argument, so a test can wait
+/// for it.
+async fn serve(
     mut socket: WebSocket,
     client: Client,
     authorise: Authorise,
     mut filed: Filed,
     missed: bool,
+    max_age: Duration,
 ) {
-    if missed && socket.send_text(lagged(None)).await.is_err() {
+    if missed && !written(socket.send_text(lagged(None))).await {
         return;
     }
     let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let expiry = tokio::time::sleep(max_age);
+    tokio::pin!(expiry);
     loop {
         tokio::select! {
             event = client.mailbox().recv() => match event {
                 Some(event) => {
-                    if socket.send_text(encoded(event)).await.is_err() {
+                    if !written(socket.send_text(encoded(event))).await {
                         return;
                     }
                 }
                 // This loop holds the client, so only the overflow policy
                 // closes its mailbox: `disconnect` fired.
                 None => {
-                    return socket
-                        .close(websocket::TRY_AGAIN_LATER, "too far behind; reconnect")
-                        .await;
+                    return bye(socket, websocket::TRY_AGAIN_LATER, "too far behind; reconnect").await;
                 }
             },
             incoming = socket.recv() => match incoming {
                 Incoming::Text(command) => {
                     let answer = obey(&client, &authorise, &mut filed, &command);
-                    if socket.send_text(answer).await.is_err() {
+                    if !written(socket.send_text(answer)).await {
                         return;
                     }
                 }
                 Incoming::Binary(_) => {
-                    return socket.close(websocket::POLICY, "send text commands").await;
+                    return bye(socket, websocket::POLICY, "send text commands").await;
                 }
                 Incoming::Stopping => {
                     for event in client.mailbox().drain() {
-                        if socket.send_text(encoded(event)).await.is_err() {
+                        if !written(socket.send_text(encoded(event))).await {
                             return;
                         }
                     }
-                    return socket
-                        .close(websocket::GOING_AWAY, "the server is stopping")
-                        .await;
+                    return bye(socket, websocket::GOING_AWAY, "the server is stopping").await;
                 }
                 Incoming::Closed(_) => return,
             },
             _ = ticker.tick() => {
-                if socket.keepalive().await.is_err() {
+                if !written(socket.keepalive()).await {
                     return;
                 }
             }
+            () = &mut expiry => {
+                return bye(socket, websocket::GOING_AWAY, "reconnect to check the session again").await;
+            }
         }
     }
+}
+
+/// Whether a send was written within one `HEARTBEAT`.
+///
+/// A peer that stops reading leaves a write pending, and while it waits
+/// nothing else in the loop runs: no ping, no stop signal. So a send that
+/// takes longer than a heartbeat ends the connection.
+async fn written(send: impl Future<Output = Result<(), Gone>>) -> bool {
+    matches!(tokio::time::timeout(HEARTBEAT, send).await, Ok(Ok(())))
+}
+
+/// Sends a close frame, but waits no longer than one `HEARTBEAT` to write it.
+async fn bye(socket: WebSocket, code: u16, reason: &str) {
+    let _ = tokio::time::timeout(HEARTBEAT, socket.close(code, reason)).await;
 }
 
 /// One command from the browser, obeyed, and the record that answers it.
@@ -209,6 +250,11 @@ mod tests {
 
     /// A server whose one route is this loop, with every topic public.
     async fn open(broker: &Arc<Broker>) -> (WebSocket, Stopper) {
+        open_for(broker, MAX_AGE).await
+    }
+
+    /// [`open`], with sockets that live `max_age`.
+    async fn open_for(broker: &Arc<Broker>, max_age: Duration) -> (WebSocket, Stopper) {
         let server = Server::bind("127.0.0.1:0").await.expect("a port");
         let addr = server.local_addr().expect("an address");
         let stopper = server.stopper();
@@ -221,7 +267,9 @@ mod tests {
                 let client = broker.connect().expect("room");
                 let everyone: Authorise =
                     Box::new(|topic| Ok(Subscription::new(topic, Gate::everyone())));
-                handshake.response(move |socket| run(socket, client, everyone, Filed::new(), false))
+                handshake.response(move |socket| {
+                    serve(socket, client, everyone, Filed::new(), false, max_age)
+                })
             }
         }));
         let socket = websocket::connect(addr, "/", None).await.expect("open");
@@ -278,6 +326,17 @@ mod tests {
         assert_eq!(
             next(&mut socket).await,
             Incoming::Text("event:unsubscribed\ndata:posts/*\n\n".into())
+        );
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_socket_past_its_age_is_closed_so_the_browser_reconnects() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open_for(&broker, Duration::from_millis(200)).await;
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Closed(Some(websocket::GOING_AWAY))
         );
         stopper.stop();
     }

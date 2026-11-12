@@ -48,6 +48,14 @@ impl Module for Realtime {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to(
+            "realtime-sse",
+            "it writes the one `authorise` both transports share",
+        )
+        .adapts_to(
+            "realtime-websocket",
+            "it writes the one `authorise` both transports share",
+        )
         .asked_in("behaviour", "A broadcast broker")
         .krate(Dep::brocanth("brocanth-realtime"))
         // Only for the order of the `[realtime]` section and the builder
@@ -61,7 +69,16 @@ impl Module for Realtime {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        s.file("src/plugins/realtime/mod.rs", plugin_rs(project));
+        let transport = project.has("realtime-sse") || project.has("realtime-websocket");
+        s.file("src/plugins/realtime/mod.rs", plugin_rs(project, transport));
+        if transport {
+            // One `authorise` and one topic parser for every transport, so a
+            // rule written for the stream also holds for the socket.
+            s.file(
+                "src/plugins/realtime/authorise.rs",
+                AUTHORISE_RS.to_string(),
+            );
+        }
         s.at(Slot::PluginsMod).line("pub mod realtime;");
         configurable(s, project, "realtime", "Realtime", settings());
         // Also what makes the broker a thing the project reads rather than
@@ -89,8 +106,9 @@ impl Module for Realtime {
 ///
 /// In the generated project, as two files the application owns:
 /// `src/plugins/realtime_sse/mod.rs` (a `BodyStream` over one client's
-/// mailbox) and `src/pages/realtime/events.rs` (the route, and the one
-/// function that authorises a topic).
+/// mailbox) and `src/pages/realtime/events.rs` (the route). The one
+/// function that authorises a topic is `src/plugins/realtime/authorise.rs`,
+/// which [`Realtime`] writes once for every transport.
 ///
 /// Not in this crate, because a transport is a response body and this crate
 /// does not depend on `brocanth`: nothing in it touches a request, a
@@ -370,59 +388,34 @@ const EVENTS_RS: &str = r#"//! `GET /realtime/events?topics=posts/*,posts/42` --
 //! no headers of its own; the cookie goes with it, so a session reads as on
 //! any other page. Every topic passes `authorise` before it is filed, and
 //! one refusal refuses the request: a stream that quietly follows fewer
-//! topics than it asked for is a bug nobody sees.
+//! topics than it asked for is a bug nobody sees. `authorise` is in
+//! `src/plugins/realtime/authorise.rs`, shared with every transport.
 //!
 //! The transport is `crate::plugins::realtime_sse`.
 
-use brocanth_realtime::{Gate, Subscription, Topic};
-
 use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::authorise::{authorise, topics, value, viewer};
 use crate::plugins::realtime::Broadcast;
 use crate::plugins::realtime_sse::Frames;
 
-/// Collections any visitor may follow: every row, every change.
-///
-/// Empty, so nothing is public until somebody says so here.
-const PUBLIC: &[&str] = &[];
-
-/// Whether this request may follow `topic`, and gated by what.
-///
-/// The one place a topic is authorised, and the place to edit. A public
-/// collection takes `Gate::everyone()`. Rows that a policy decides take the
-/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
-/// with the view rule, and the broker inverts the rule into an index key, so
-/// a write is a map lookup and not a check per subscriber.
-///
-/// ```ignore
-/// let subject = /* who is asking: the session's user id */;
-/// return Ok(Subscription::from_policy(topic, &PostPolicy, &subject));
-/// ```
-fn authorise(_ctx: &Ctx, topic: Topic) -> Result<Subscription, Error> {
-    if PUBLIC.contains(&topic.collection_name()) {
-        return Ok(Subscription::new(topic, Gate::everyone()));
-    }
-    Err(Error::new(
-        403,
-        format!("no rule lets this request follow {topic}; add one to `authorise` in src/pages/realtime/events.rs"),
-    ))
-}
-
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let viewer = viewer(ctx);
+    let asked = topics(&ctx.query).map_err(|why| Error::new(400, why))?;
+    if asked.is_empty() {
+        return Err(Error::new(
+            400,
+            "this request names no topic to follow\n\
+             help: add ?topics=posts/* for a collection, or posts/42 for a row",
+        ));
+    }
     let mut subscriptions = Vec::new();
-    for topic in topics(&ctx.query)? {
-        subscriptions.push(authorise(ctx, topic)?);
+    for topic in asked {
+        subscriptions.push(authorise(&viewer, topic).map_err(|why| Error::new(403, why))?);
     }
     let broker = &ctx
         .provided::<Broadcast, _>()
         .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
         .broker;
-
-    // A browser that reconnects sends the id of the last frame it read. The
-    // broker keeps no history to replay, so the honest answer to "did I miss
-    // anything" is yes whenever a frame was published since.
-    let missed = ctx
-        .header("last-event-id")
-        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
 
     // At the cap the broker refuses rather than evicting somebody. The
     // browser retries on its own; `retry-after` says when.
@@ -434,53 +427,20 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
             .subscribe(subscription)
             .map_err(|e| Error::new(400, e.to_string()))?;
     }
+
+    // A browser that reconnects sends the id of the last frame it read: the
+    // `Last-Event-ID` header, or `?last=` from a page that reconnects by
+    // hand. The broker keeps no history to replay, so the honest answer to
+    // "did I miss anything" is yes whenever a frame was published since.
+    // Read after the subscriptions exist: a frame published before this read
+    // reached no mailbox, and this read then counts it as missed. An id this
+    // broker cannot compare (another process, or not a number) is missed too.
+    let missed = ctx
+        .header("last-event-id")
+        .map(str::to_string)
+        .or_else(|| value(&ctx.query, "last"))
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
     Ok(Response::events(Frames::new(client, missed)))
-}
-
-/// Every `topics=` in the query, split at commas and parsed.
-fn topics(query: &str) -> Result<Vec<Topic>, Error> {
-    let mut out = Vec::new();
-    for pair in query.split('&') {
-        let Some(("topics", value)) = pair.split_once('=') else {
-            continue;
-        };
-        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
-            let topic =
-                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
-            out.push(topic);
-        }
-    }
-    if out.is_empty() {
-        return Err(Error::new(
-            400,
-            "name what to follow: ?topics=posts/* for a collection, posts/42 for a row",
-        ));
-    }
-    Ok(out)
-}
-
-/// A query value with its `%XX` and `+` undone.
-fn decoded(value: &str) -> Result<String, Error> {
-    let bad = || {
-        Error::new(
-            400,
-            format!("the query value {value:?} is not percent-encoded UTF-8"),
-        )
-    };
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(byte) = rest.next() {
-        bytes.push(match byte {
-            b'+' => b' ',
-            b'%' => {
-                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
-                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
-                u8::from_str_radix(hex, 16).map_err(|_| bad())?
-            }
-            other => other,
-        });
-    }
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 #[cfg(test)]
@@ -497,18 +457,6 @@ mod tests {
         let mut request = Request::new(Verb::Get, path).with_header("accept", "text/event-stream");
         request.query = query.to_string();
         crate::app::handle(&app, request).await.status
-    }
-
-    #[test]
-    fn topics_are_read_from_the_query_encoded_or_not() {
-        let read = topics("topics=posts/*,posts%2F42&x=1&topics=users%2F*").expect("three");
-        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
-        assert_eq!(names, ["posts/*", "posts/42", "users/*"]);
-        assert!(
-            topics("").is_err(),
-            "no topic is a 400, not a silent stream"
-        );
-        assert!(topics("topics=posts").is_err(), "a topic has a slash");
     }
 
     #[tokio::test]
@@ -531,9 +479,12 @@ const AGENTS: &str = r#"
 to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
 `src/pages/realtime/events.rs` is the route.
 
-- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+- Authorise every topic in `authorise` in `src/plugins/realtime/authorise.rs`.
   Nothing is public until it is listed in `PUBLIC` or gated there by a
   policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Frames reach only the browsers connected to this process. Two instances
+  behind a load balancer do not share a broker; a browser that reconnects
+  to another one is told `lagged`.
 - Publish from a page after the write, with the row you already hold:
 
   ```rust
@@ -558,8 +509,9 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
 ///
 /// Where [`Sse`] puts it, for the same reasons: in the generated project,
 /// as `src/plugins/realtime_websocket/mod.rs` (the loop over one socket)
-/// and `src/pages/realtime/socket.rs` (the route, the Origin list and the
-/// one function that authorises a topic).
+/// and `src/pages/realtime/socket.rs` (the route and the Origin list). Topics
+/// pass the same `authorise` as [`Sse`]'s, in
+/// `src/plugins/realtime/authorise.rs`.
 ///
 /// What this module needs that [`Sse`] does not is in `brocanth-server`:
 /// the upgrade out of the request/response shape (`upgrade`), and the
@@ -598,6 +550,11 @@ impl Module for WebSocket {
     }
 }
 
+/// `src/plugins/realtime/authorise.rs`: who may follow what, for every
+/// transport. Not compiled here: it names the generated project's
+/// `crate::pages`.
+const AUTHORISE_RS: &str = include_str!("../templates/realtime_authorise.rs");
+
 /// `src/plugins/realtime_websocket/mod.rs`: one socket's loop.
 ///
 /// A file of its own and not a string here, so that `tests/websocket.rs`
@@ -620,16 +577,20 @@ const SOCKET_AGENTS: &str = r#"
 the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
 `src/pages/realtime/socket.rs` is the route.
 
-- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+- Authorise every topic in `authorise` in `src/plugins/realtime/authorise.rs`.
   It runs for the topics in the URL and for each `subscribe <topic>` the
   browser sends later, so read what it needs (the user id) into `Viewer`
   when the socket opens. Never filter frames after delivery.
+- A socket keeps the `Viewer` it opened with. The loop closes it after
+  `MAX_AGE` and the browser reconnects with a fresh one; a logout must
+  close the user's open sockets when that is too late.
+- Frames reach only the sockets open on this process.
 - A page on another site is refused by its `Origin`. List a second site of
   your own in `ALLOWED_ORIGINS`; never turn the check off.
 - Each message is one record in the server-sent-events format: `id:`,
   `event:` (the topic) and `data:` lines. `lagged` means the view may be
   stale: fetch it again. A close with code 1001 means the server is
-  stopping: reconnect with `?last=<id>`.
+  stopping or the socket reached its age: reconnect with `?last=<id>`.
 
   ```js
   const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
@@ -678,8 +639,13 @@ fn settings() -> Vec<Setting> {
     ]
 }
 
-fn plugin_rs(project: &Project) -> String {
+fn plugin_rs(project: &Project, transport: bool) -> String {
     let (derive, note) = settings_derive(project, "realtime");
+    let authorise = if transport {
+        "\n/// Who may follow which topic, for every transport.\npub mod authorise;\n"
+    } else {
+        ""
+    };
     format!(
         r##"//! The realtime broker, as this application registers it.
 //!
@@ -728,19 +694,31 @@ fn plugin_rs(project: &Project) -> String {
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
 //!    transport at all.
-//! 3. **Long polling.** Keep the `Client` in the session; each request calls
+//! 3. **Long polling.** Keep each session's `Client` on the server, in a map
+//!    from session id to `Client` with an idle timeout (a `Client` holds the
+//!    broker, so it cannot go into a cookie); each request calls
 //!    `Mailbox::recv_timeout` for a few seconds, then `Mailbox::drain`, and
 //!    returns the frames as one finished body. Every hook runs exactly as
 //!    specified. It costs a request per interval and a little latency.
 //! 4. **Nothing.** The index costs what it holds, and an application that
 //!    publishes without subscribers pays for a map lookup that finds no one.
+//!
+//! # One process
+//!
+//! The broker lives in this process, and so do its subscribers. Two
+//! instances behind a load balancer do not see each other's writes: a
+//! browser connected to one hears nothing of a write handled by the other.
+//! `brocanth-realtime`'s `listen-notify` feature has the codec and the sink
+//! for Postgres `LISTEN/NOTIFY`; this file does not wire it. The frame ids
+//! start at the clock, so a browser that reconnects to a new process is told
+//! `lagged` rather than trusted to have missed nothing.
 
 use std::sync::Arc;
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
 use brocanth_realtime::{{Broker, Config, Overflow}};
-
+{authorise}
 /// What this plugin is built from.
 ///
 /// {note}
@@ -840,6 +818,9 @@ impl Plugin for Realtime {{
                     queue: self.settings.queue,
                     overflow,
                 }})
+                // An id from an earlier process never equals one from this
+                // process, so a reconnect across a restart reads `lagged`.
+                .frame_ids_from_clock()
                 .build(),
         );
         Ok(())

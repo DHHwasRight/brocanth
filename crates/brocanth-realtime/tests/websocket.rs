@@ -9,5 +9,8 @@
 //! `brocanth-server`'s `tests/websocket.rs`, and again in the generated
 //! page's tests.
 
+// `run` is what the generated page calls; the tests here call the loop
+// under it, with a short age limit.
+#[allow(dead_code)]
 #[path = "../templates/realtime_websocket.rs"]
 mod realtime_websocket;
