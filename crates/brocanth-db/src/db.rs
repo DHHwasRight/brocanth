@@ -221,9 +221,14 @@ impl<'c> Tx<'c> {
     /// them. On a savepoint, a rollback of the savepoint reverts them.
     ///
     /// A second call replaces the first; it does not merge with it. A key
-    /// an earlier call set and this one does not is set to `''`, which a
-    /// policy reads as `NULL`. With no role, the transaction returns to the
-    /// login role (`SET LOCAL ROLE NONE`). Savepoints share this record.
+    /// an earlier call set and this one does not is set to `''`. With no
+    /// role, the transaction returns to the login role
+    /// (`SET LOCAL ROLE NONE`). Savepoints share this record.
+    ///
+    /// `current_setting('brocanth.<key>', true)` returns that `''`, not
+    /// `NULL`. A policy written by hand must read the key as
+    /// `nullif(current_setting('brocanth.<key>', true), '')`, as the
+    /// expressions of `brocanth-rls` do.
     ///
     /// Each value is a bind parameter. The role is a quoted identifier,
     /// because `SET` takes no parameter.

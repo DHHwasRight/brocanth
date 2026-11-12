@@ -154,8 +154,13 @@ impl DbIdentity {
     }
 
     /// The statements that replace `before` with this identity: a key
-    /// `before` set and this identity does not is set to `''` (read as
-    /// `NULL`), and a role `before` took is left with `SET LOCAL ROLE NONE`.
+    /// `before` set and this identity does not is set to `''`, and a role
+    /// `before` took is left with `SET LOCAL ROLE NONE`.
+    ///
+    /// `current_setting('brocanth.<key>', true)` returns that `''`, not
+    /// `NULL`. A policy written by hand must read the key as
+    /// `nullif(current_setting('brocanth.<key>', true), '')`, as the
+    /// expressions of `brocanth-rls` do.
     pub(crate) fn statements_after(&self, before: &Assumed) -> Result<Statements, DbError> {
         if let Some((message, help)) = &self.problem {
             return Err(DbError::config(message.clone(), help.clone()));
