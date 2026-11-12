@@ -180,9 +180,24 @@ impl Module for Htmx {
         // Vendored into the brocanth binary, written out here. A project
         // that has to fetch a script to finish is a project that fails on
         // a train.
-        s.file("public/dpswap.min.js", DPSWAP_JS);
+        s.file("public/dpswap.min.js", dpswap_js());
     }
 }
+
+/// The script as the project serves it: dp-swap, then one line that sets
+/// header mode.
+///
+/// dp-swap's default asks for `<url>/_fragment.html`, a prerendered file a
+/// static site has and this server does not: every boosted click got a 404
+/// and fell back to a full load. In header mode dp-swap asks for the page's
+/// own URL with `DP-Partial`, which `Ctx::partial_depth` reads. The admin
+/// sets the same mode for the same reason.
+fn dpswap_js() -> String {
+    format!("{DPSWAP_JS}{DPSWAP_HEADER_MODE}")
+}
+
+/// The line that turns on header mode.
+const DPSWAP_HEADER_MODE: &str = "dpswap.configure({fragmentMode:\"header\"});\n";
 
 /// The static files, embedded: a proc macro that puts the files themselves
 /// in the binary. Either child that has files to serve asks for it.
@@ -213,6 +228,15 @@ const PARTIAL_DEPTH_HEADER: &str = r#"impl Ctx {
         }
     }
 }
+
+/// A rendered page, marked as varying on `DP-Partial`.
+///
+/// One URL answers with the whole document or with a fragment, chosen by
+/// that header, so a cache that ignored it could hand a fragment to a first
+/// load. `Vary` tells every cache to key on it.
+fn page_response(body: String) -> Response {
+    Response::ok(body).with_header("vary", "DP-Partial")
+}
 "#;
 
 /// `partial_depth` without partial navigation: always the whole document.
@@ -224,6 +248,12 @@ const PARTIAL_DEPTH_NONE: &str = r#"impl Ctx {
     pub fn partial_depth(&self) -> u32 {
         0
     }
+}
+
+/// A rendered page. Every load is the whole document, so it varies on
+/// nothing.
+fn page_response(body: String) -> Response {
+    Response::ok(body)
 }
 "#;
 
@@ -507,7 +537,7 @@ pub fn render_with(
 ) -> Result<Response, Error> {
     let mut body = out_of_band.concat();
     body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
+    Ok(page_response(body))
 }
 
 /// One skipped layout's replacement chrome, rendered on its own.
@@ -546,7 +576,7 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    Ok(Response::ok(content.render_to_string()?))
+    Ok(page_response(content.render_to_string()?))
 }
 "##;
 
@@ -1002,6 +1032,27 @@ mod tests {
                 "a page names its own shell:\n{template}"
             );
         }
+    }
+
+    #[test]
+    fn a_boosted_click_asks_the_page_itself_with_dp_partial() {
+        // dp-swap sends `DP-Partial` only in header mode; in its default
+        // suffix mode it asks for `<url>/_fragment.html`, which no route
+        // answers.
+        assert!(
+            DPSWAP_JS.contains(r#"fragmentMode==="header"&&(n[l.partialHeader]"#),
+            "the vendored script changed how it sends the header"
+        );
+        let served = dpswap_js();
+        assert!(served.starts_with(DPSWAP_JS));
+        assert!(
+            served.ends_with("\ndpswap.configure({fragmentMode:\"header\"});\n"),
+            "header mode, on its own line after the script"
+        );
+        // And the server reads it, and says the answer varies on it.
+        assert!(PARTIAL_DEPTH_HEADER.contains(r#"self.header("dp-partial")"#));
+        assert!(PARTIAL_DEPTH_HEADER.contains(r#""vary", "DP-Partial""#));
+        assert!(!PARTIAL_DEPTH_NONE.contains("vary"));
     }
 
     #[test]
