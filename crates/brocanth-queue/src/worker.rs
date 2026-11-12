@@ -115,8 +115,8 @@ impl Budget {
 /// idle".
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "the {which} pool has {have} connections and needs {need} for concurrency: {why}. \
-     Raise the pool or lower the concurrency."
+    "the {which} pool has {have} connections and needs {need} for concurrency: {why}\n\
+     help: raise the {which} pool's size or lower the concurrency"
 )]
 pub struct PoolTooSmall {
     /// Which pool.
@@ -180,7 +180,21 @@ impl Default for WorkerConfig {
 
 impl WorkerConfig {
     /// Reject a configuration that cannot keep a lease alive.
+    ///
+    /// A zero `lease`, `heartbeat` or `sweep_every` is refused here, at
+    /// build time. Each one becomes a `tokio::time::interval` or a lease
+    /// length, and a zero interval panics inside a spawned task, long after
+    /// the call that could have reported it.
     pub fn check(&self) -> Result<(), ConfigError> {
+        for (field, value) in [
+            ("lease", self.lease),
+            ("heartbeat", self.heartbeat),
+            ("sweep_every", self.sweep_every),
+        ] {
+            if value.is_zero() {
+                return Err(ConfigError::Zero { field });
+            }
+        }
         if self.heartbeat * 3 > self.lease {
             return Err(ConfigError::HeartbeatTooSlow {
                 heartbeat: self.heartbeat,
@@ -200,7 +214,8 @@ pub enum ConfigError {
     /// The heartbeat cannot outrun the lease.
     #[error(
         "the heartbeat is {heartbeat:?} and the lease is {lease:?}; \
-         one missed beat loses the job. Use a lease at least three beats long."
+         one missed beat loses the job\n\
+         help: use a lease at least three heartbeats long"
     )]
     HeartbeatTooSlow {
         /// The configured heartbeat.
@@ -209,8 +224,20 @@ pub enum ConfigError {
         lease: Duration,
     },
     /// Concurrency of zero.
-    #[error("concurrency is 0, so the worker would claim nothing")]
+    #[error(
+        "concurrency is 0, so the worker would claim nothing\n\
+         help: set concurrency to 1 or more"
+    )]
     NoConcurrency,
+    /// A duration that must be positive is zero.
+    #[error(
+        "`{field}` is zero, and the worker needs a positive duration there\n\
+         help: set `{field}` to a duration above zero"
+    )]
+    Zero {
+        /// The field.
+        field: &'static str,
+    },
 }
 
 fn default_worker_name() -> String {
@@ -419,7 +446,7 @@ impl Worker {
             // using, and the lease is what another worker is waiting on.
             if permits.available_permits() == 0 {
                 tokio::select! {
-                    _ = stop.changed() => continue,
+                    () = changed_or_pending(&mut stop) => continue,
                     _ = tokio::time::sleep(Duration::from_millis(10)) => continue,
                 }
             }
@@ -450,6 +477,14 @@ impl Worker {
                 // process has ever seen. They would be unreleasable, and
                 // invisible until the lease expired. Finishing the claim
                 // costs one round trip of shutdown latency and loses nothing.
+                //
+                // The lease end is counted from the local clock as read
+                // before the claim was sent, and never from the expiry the
+                // backend reports: that one is on the backend's clock, and
+                // comparing it with this process's clock is wrong by the
+                // skew between them. Reading the clock first makes the local
+                // deadline early by the round trip, never late.
+                let sent = tokio::time::Instant::now();
                 let claimed = match self.backend.claim(&req).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -473,6 +508,7 @@ impl Worker {
                         Arc::clone(&self.unknown_seen),
                         self.config.clone(),
                         job,
+                        sent + self.config.lease,
                         stop.clone(),
                         permit,
                     ));
@@ -494,7 +530,7 @@ impl Worker {
                             None => std::future::pending::<()>().await,
                         }
                     } => {}
-                    _ = stop.changed() => {}
+                    () = changed_or_pending(&mut stop) => {}
                 }
             }
         }
@@ -584,7 +620,11 @@ pub enum StartError {
     #[error(transparent)]
     Pool(#[from] PoolTooSmall),
     /// A registered job needs something the backend cannot do.
-    #[error("the backend cannot serve every registered job: {}", fmt_unmet(.0))]
+    #[error(
+        "the backend cannot serve every registered job: {}\n\
+         help: change those jobs' requirements, or run them on a backend that has the capability",
+        fmt_unmet(.0)
+    )]
     Unmet(Vec<Unmet>),
 }
 
@@ -643,6 +683,7 @@ async fn run_one(
     unknown_seen: Arc<AtomicU64>,
     config: WorkerConfig,
     claimed: Claimed,
+    lease_end: tokio::time::Instant,
     stopping: watch::Receiver<Option<Duration>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) -> RunEnd {
@@ -698,11 +739,15 @@ async fn run_one(
     };
     let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = grace_of(&stopping);
 
-    // What the worker believes the lease runs out at. A successful heartbeat
-    // pushes it; a failed one does not. The backend reports the first expiry
-    // on the claim, so this starts from the backend's clock and moves only by
-    // durations.
-    let mut expires_at = claimed.lease.expires_at;
+    // What the worker believes the lease runs out at, on this process's
+    // monotonic clock. A successful heartbeat pushes it; a failed one does
+    // not. Each deadline is counted from the instant read *before* the call
+    // that set the lease went out, because the backend counts from when it
+    // received the call: reading the clock after the reply would make the
+    // local deadline late by the round trip, and another worker could claim
+    // the job in that gap. The backend's own `expires_at` is never used: it
+    // is on another clock.
+    let mut expires_at = lease_end;
 
     let outcome: Settle = loop {
         tokio::select! {
@@ -731,7 +776,7 @@ async fn run_one(
             // a lease it is told it lost. Logging the failed heartbeat and
             // carrying on would leave two workers running the same job with
             // neither of them aware of it.
-            _ = tokio::time::sleep(remaining(expires_at)) => {
+            () = tokio::time::sleep_until(expires_at) => {
                 observer.on_lease_lost(&claimed.kind);
                 handle.abort();
                 let _ = handle.await;
@@ -739,8 +784,9 @@ async fn run_one(
                 return RunEnd::Other;
             }
             _ = beat.tick() => {
+                let sent = tokio::time::Instant::now();
                 match backend.heartbeat(&claimed.lease, config.lease).await {
-                    Ok(LeaseState::Held) => expires_at = SystemTime::now() + config.lease,
+                    Ok(LeaseState::Held) => expires_at = sent + config.lease,
                     Ok(LeaseState::Lost) => {
                         // Another worker owns this job. Stop at once and
                         // settle nothing: a settle now would delete their
@@ -754,7 +800,7 @@ async fn run_one(
                     Err(e) => observer.on_backend_error("heartbeat", &e),
                 }
             }
-            _ = stopping.changed(), if deadline.is_none() => {
+            () = changed_or_pending(&mut stopping), if deadline.is_none() => {
                 deadline = grace_of(&stopping);
             }
             _ = async {
@@ -812,10 +858,17 @@ fn decide(
     Settle::Retry { at, failure }
 }
 
-/// How long until an instant, from this process's clock. Zero if it passed.
-fn remaining(t: SystemTime) -> Duration {
-    t.duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO)
+/// Wait for the next change on a stop channel.
+///
+/// Once every sender is gone, no stop can come, so this waits for ever.
+/// A bare `changed()` returns an error at once on a closed channel, and a
+/// `select!` that polls it in a loop then spins: the claim loop issues
+/// claims with no pause, and every running job wakes in a busy loop. That
+/// is what happens when a caller drops the handle that held the sender.
+pub(crate) async fn changed_or_pending<T>(rx: &mut watch::Receiver<T>) {
+    if rx.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// A reproducible jitter source, so the crate takes no random number
@@ -915,6 +968,29 @@ mod tests {
             Err(ConfigError::HeartbeatTooSlow { .. })
         ));
         assert!(WorkerConfig::default().check().is_ok());
+    }
+
+    #[test]
+    fn a_zero_interval_is_refused_before_it_can_panic() {
+        for c in [
+            WorkerConfig {
+                heartbeat: Duration::ZERO,
+                ..WorkerConfig::default()
+            },
+            WorkerConfig {
+                lease: Duration::ZERO,
+                heartbeat: Duration::ZERO,
+                ..WorkerConfig::default()
+            },
+            WorkerConfig {
+                sweep_every: Duration::ZERO,
+                ..WorkerConfig::default()
+            },
+        ] {
+            let e = c.check().unwrap_err();
+            assert!(matches!(e, ConfigError::Zero { .. }), "{e}");
+            assert!(e.to_string().contains("help:"));
+        }
     }
 
     #[test]

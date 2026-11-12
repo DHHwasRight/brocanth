@@ -24,18 +24,30 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub enum BackendError {
     /// The store could not be reached. The worker backs off and retries the
     /// same call; nothing is lost.
-    #[error("backend unavailable: {0}")]
+    #[error(
+        "backend unavailable: {0}\n\
+         help: check that the queue's store is reachable; the worker retries this call"
+    )]
     Unavailable(String),
     /// The call is correct but the backend does not implement it. Always the
     /// answer for a method whose capability is off. Never a panic.
-    #[error("backend does not support {0}")]
+    #[error(
+        "backend does not support {0}\n\
+         help: check `Backend::capabilities` before the call, or use a backend that has it"
+    )]
     Unsupported(&'static str),
     /// The request breaks a declared limit, for example a payload over
     /// `max_payload_bytes`. Retrying the same call cannot help.
-    #[error("rejected: {0}")]
+    #[error(
+        "rejected: {0}\n\
+         help: change the request to fit the backend's declared limits; a retry cannot help"
+    )]
     Rejected(String),
     /// The backend is reachable and the call is valid, but it failed.
-    #[error("backend error: {0}")]
+    #[error(
+        "backend error: {0}\n\
+         help: read the store's error above; check that the schema is migrated"
+    )]
     Other(String),
 }
 

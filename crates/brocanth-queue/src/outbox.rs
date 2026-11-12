@@ -60,10 +60,16 @@ use crate::inspect::{DeadId, DeadRow, Page};
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
     /// The store could not be reached.
-    #[error("outbox unavailable: {0}")]
+    #[error(
+        "outbox unavailable: {0}\n\
+         help: check that the outbox's database is reachable; the relay retries"
+    )]
     Unavailable(String),
     /// Anything else.
-    #[error("outbox error: {0}")]
+    #[error(
+        "outbox error: {0}\n\
+         help: read the store's error above; check that the schema is migrated"
+    )]
     Other(String),
 }
 
