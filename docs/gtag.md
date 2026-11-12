@@ -4,9 +4,11 @@ Status: draft for review. The module works and is tested; the choices
 below are open to change.
 
 `brocanth-gtag` and the `gtag` module put Google Analytics 4 on
-a site in the way EU rules ask for: nothing reaches Google before the
-visitor accepts, a refusal is as easy as an acceptance, and what is sent is
-stripped of what usually identifies a person.
+a site in the way EU rules ask for: in `basic` mode, the default, nothing
+reaches Google before the visitor accepts; a refusal is as easy as an
+acceptance; and what is sent is stripped of what usually identifies a
+person. `advanced` mode sends cookieless pings before a choice (see "Basic
+mode by default").
 
 ## `gtag` or `analytics`
 
@@ -133,18 +135,30 @@ browser demonstrates nothing to an authority.
 Set `consent_log` to a file, such as `log/consent.jsonl`. Then:
 
 1. After each Accept or Refuse, the script sends
-   `GET /__consent?c=<choice>&id=<id>&v=<version>`. The id is 16 random
-   bytes the browser keeps in `localStorage`. The version is a short hash
-   of the banner text.
-2. The plugin appends one JSON line and answers `204`:
+   `GET /__consent?c=<choice>&id=<id>&v=<version>&l=<lang>`. The id is 16
+   random bytes the browser keeps in `localStorage`. The version is a short
+   hash of the banner text. `l` is the banner's language, when the page
+   has one.
+2. The plugin queues one JSON line and answers `204`; a thread appends it
+   to the file, so the request never waits on the disk:
    `{"at":<unix seconds>,"choice":"granted","id":"…","seen":"…","banner":"…"}`.
    `seen` is the version the browser showed, `banner` the version the
-   server shows now; a record whose two differ answered older text.
+   server shows now in the language `l` names; a record whose two differ
+   answered older text.
 3. The record holds no IP address and no user agent. The id links a
    record to a browser only when that browser's owner shows it.
 
 It is a GET so that a CSRF check, which leaves reads alone, does not
-refuse it. Anything but a well-formed choice answers `400`.
+refuse it. Anything but a well-formed choice answers `400`. A request a
+browser sent from another site (`Sec-Fetch-Site` other than
+`same-origin`, or an `Origin` that is not this host) answers `403`. The
+path is open to anyone who can send a request, so give `/__consent` a
+rule in the rate limiter. Past 16 MiB the file is rotated to `<file>.1`,
+which replaces an older one, so a flood cannot fill the disk.
+
+The file is per instance. Each server writes its own, and a container
+loses it when it stops, unless the path is on a volume that outlives it.
+With `i18n-routing`, `/__consent` keeps no locale segment.
 
 It is off by default, and it cannot work on a static site: a static host
 runs no code, so no one receives the report. A static site keeps the
@@ -152,7 +166,7 @@ choice in the browser only, and the doc says so rather than pretend.
 
 The log is evidence that a browser sent a choice after it saw a given
 banner text. Whether that suffices for an authority is the controller's
-assessment, not the module's. Rotate and keep the file like any other
+assessment, not the module's. Collect and keep the files like any other
 record the controller holds.
 
 ### Basic mode by default
@@ -164,7 +178,8 @@ Google's Consent Mode has two implementations:
   cookieless pings that Google uses to model the visitors who refused.
 
 Basic is the default because only basic sends nothing to Google without
-consent. Advanced is a setting (`consent_mode = "advanced"`). Under GPC or
+consent. In advanced mode, the first page loads Google's script before
+any choice and sends a page view with no identifier. Advanced is a setting (`consent_mode = "advanced"`). Under GPC or
 DNT, advanced mode still loads nothing.
 
 ### The security headers
