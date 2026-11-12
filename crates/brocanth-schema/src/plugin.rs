@@ -55,7 +55,7 @@
 
 use std::ops::Deref;
 
-use brocanth::plugin_api::{MiddlewareCatalog, Plugin, PluginError};
+use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 
 use crate::issue::Issues;
@@ -75,7 +75,9 @@ pub enum ReportStyle {
 /// What [`ValidationPlugin`] is built from.
 ///
 /// A plain value with no parsing in it, as the core requires: the application
-/// writes it in `main`, or `brocanth-config` reads it out of a TOML section.
+/// writes it in `main`. It does not deserialise, so a config file cannot fill
+/// it directly: the generated `validation` plugin reads a `Settings` of its
+/// own and builds one from it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ValidationConfig {
     /// The default rendering for a rejected body.
@@ -162,8 +164,9 @@ impl<T> Deref for Valid<T> {
 
 /// The plugin an application names in `main`.
 ///
-/// It provides [`Validation`] and offers one middleware. It does not mount it:
-/// mounting takes a pattern and the pattern is the application's decision.
+/// It provides [`Validation`] and offers no middleware. A layer that renders
+/// an unhandled report as a 422 needs the application's `Response`, so the
+/// application writes it and offers it.
 #[derive(Clone, Copy, Debug)]
 pub struct ValidationPlugin {
     settings: Validation,
@@ -183,13 +186,10 @@ impl Plugin for ValidationPlugin {
         }
     }
 
-    fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
-        catalog.offer(
-            "validation.report",
-            "Turns an unhandled validation report into a 422 rendered the configured way.",
-        );
-        Ok(())
-    }
+    // No `configure_router`: the plugin offers no middleware. A layer that
+    // turns an unhandled report into a 422 must know the application's
+    // `Response`, so this crate cannot ship one, and an offer with no layer
+    // behind it stops at startup the application that mounts it.
 
     fn provide(&self, cx: &mut ContextBuilder) {
         cx.insert(self.settings);
@@ -253,10 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn the_middleware_is_offered_and_not_mounted() {
+    fn no_middleware_is_offered_with_no_layer_behind_it() {
         let app = app();
         let plan = app.router_plan();
-        assert!(plan.offer_named("validation.report").is_some());
+        assert!(plan.offer_named("validation.report").is_none());
         assert!(plan.mounts().is_empty());
     }
 }
