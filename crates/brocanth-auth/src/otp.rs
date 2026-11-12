@@ -26,6 +26,19 @@
 //! attack is twenty million emails to the victim's inbox, which is not a
 //! quiet attack.
 //!
+//! **The attempts also count per account**, across challenges: a wrong code
+//! counts in the same window as a wrong TOTP code
+//! ([`SECOND_FACTOR_MAX_FAILURES`] in [`SECOND_FACTOR_WINDOW`]), and past the
+//! cap every code for that account is refused, right or wrong. Without it
+//! each new challenge is five fresh guesses, and the total has no bound.
+//!
+//! **A rate limit on the route that calls [`Otp::request`] is mandatory.**
+//! Each request costs an argon2id hash and sends a mail; nothing here stops
+//! a stranger from asking a thousand times a minute.
+//!
+//! [`SECOND_FACTOR_MAX_FAILURES`]: crate::mfa::SECOND_FACTOR_MAX_FAILURES
+//! [`SECOND_FACTOR_WINDOW`]: crate::mfa::SECOND_FACTOR_WINDOW
+//!
 //! **This is why the code is eight digits and not six.** Six digits is 10^6, so
 //! five attempts is one chance in 200,000, and the expected attack is 200,000
 //! mails. That is a weekend for somebody with a botnet, and it is the number
@@ -86,10 +99,12 @@ use serde::{Deserialize, Serialize};
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{AccountId, EmailAddress};
-use crate::mfa::{FactorKind, FactorSet, Verified};
+use crate::mfa::{
+    FactorKind, FactorSet, Verified, SECOND_FACTOR_MAX_FAILURES, SECOND_FACTOR_WINDOW,
+};
 use crate::password::Passwords;
 use crate::random::{random_bytes, random_secret};
-use crate::storage::{OtpChallengeRecord, OtpStore};
+use crate::storage::{MfaStore, OtpChallengeRecord, OtpStore};
 
 /// Digits in a code, unless an application insists otherwise.
 pub const DEFAULT_DIGITS: u32 = 8;
@@ -191,7 +206,7 @@ pub struct OtpRequested {
 }
 
 /// Issues and spends one-time codes.
-pub struct Otp<S: OtpStore, C: Clock> {
+pub struct Otp<S: OtpStore + MfaStore, C: Clock> {
     store: Arc<S>,
     clock: Arc<C>,
     passwords: Arc<Passwords>,
@@ -203,7 +218,7 @@ pub struct Otp<S: OtpStore, C: Clock> {
     max_attempts: u32,
 }
 
-impl<S: OtpStore, C: Clock> Otp<S, C> {
+impl<S: OtpStore + MfaStore, C: Clock> Otp<S, C> {
     /// Builds the service at the defaults the module documentation computes:
     /// eight digits, five attempts, ten minutes.
     ///
@@ -393,9 +408,28 @@ impl<S: OtpStore, C: Clock> Otp<S, C> {
         let Some(record) = record else {
             return Err(AuthError::InvalidCredentials);
         };
+        // The per-account cap, across challenges. Past it a right code is
+        // refused too, so a guessing run cannot tell when it has won.
+        let window_start = now - SECOND_FACTOR_WINDOW;
+        if self
+            .store
+            .second_factor_failures(&record.account, window_start)
+            .await?
+            >= SECOND_FACTOR_MAX_FAILURES
+        {
+            return Err(AuthError::InvalidCredentials);
+        }
+        if !correct {
+            self.store
+                .record_second_factor_failure(&record.account, now, window_start)
+                .await?;
+        }
         if now >= record.expires_at || !correct || record.account == self.sentinel {
             return Err(AuthError::InvalidCredentials);
         }
+        self.store
+            .clear_second_factor_failures(&record.account)
+            .await?;
         // Single use. The row survived the attempt claim because attempts were
         // left; a correct code spends the whole challenge.
         self.store.delete_otp_challenge(challenge).await?;
