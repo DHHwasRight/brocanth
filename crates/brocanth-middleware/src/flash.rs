@@ -27,9 +27,10 @@
 //! * **The cookie is signed.** Each message is shown on a page of this
 //!   site. Unsigned, a cookie set from a sibling subdomain could show a
 //!   visitor "your account is locked, call this number" in the site's own
-//!   words. The key is `$<key_env>`; without it each process draws a random
-//!   key, and the only cost is a message lost when a fleet sends the next
-//!   request to another instance.
+//!   words. The key is `$<key_env>`, at least 32 bytes; a shorter key is a
+//!   startup error. Without it each process draws a random key and writes
+//!   one warning to stderr, and the cost is a message lost when a fleet
+//!   sends the next request to another instance.
 //! * **A message stays until a page shows it.** A redirect has no body, a
 //!   JSON answer has no layout, and a partial swap leaves the layout out.
 //!   Each of those keeps the messages for the next page that has the
@@ -212,7 +213,8 @@ pub struct FlashConfig {
     /// The cookie this hook owns.
     pub cookie: String,
     /// The name of the environment variable that holds the signing key, not
-    /// the key. Unset or empty: a random key per process.
+    /// the key. The key is at least [`MIN_KEY_BYTES`] bytes. Unset or empty:
+    /// a random key per process, and a warning on stderr.
     pub key_env: String,
     /// `Secure`, so the cookie never leaves over plain HTTP. False in
     /// development and nowhere else.
@@ -319,8 +321,13 @@ impl HookSource for FlashPlugin {
             ))
         })?;
         let key = match std::env::var(&self.config.key_env) {
-            Ok(key) if !key.is_empty() => key.into_bytes(),
+            Ok(key) if !key.is_empty() => {
+                let key = key.into_bytes();
+                check_key(&self.config.key_env, &key).map_err(PluginError::new)?;
+                key
+            }
             _ => {
+                eprintln!("{}", missing_key(&self.config.key_env));
                 let mut bytes = vec![0u8; 32];
                 getrandom::fill(&mut bytes).map_err(|e| {
                     PluginError::new(format!(
@@ -348,6 +355,33 @@ impl HookSource for FlashPlugin {
             .response("write", write, hook);
         Ok(())
     }
+}
+
+/// The shortest signing key accepted: 256 bits, as every other secret in
+/// this workspace.
+pub const MIN_KEY_BYTES: usize = 32;
+
+/// Why `key` cannot sign, if it cannot.
+fn check_key(key_env: &str, key: &[u8]) -> Result<(), String> {
+    if key.len() < MIN_KEY_BYTES {
+        return Err(format!(
+            "flash: ${key_env} is {} bytes, and a signing key is at least {MIN_KEY_BYTES}\n\
+             help: set {key_env} to 32 random bytes, such as the output of \
+             `head -c 32 /dev/urandom | base64`",
+            key.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The warning for a process that draws its own key.
+fn missing_key(key_env: &str) -> String {
+    format!(
+        "flash: ${key_env} is not set, so this process signs with a random key. A message \
+         written by one instance is lost when the next request reaches another, and on \
+         every restart.\n\
+         help: set {key_env} to the same 32 random bytes on every instance"
+    )
 }
 
 #[derive(Clone)]
@@ -553,6 +587,14 @@ fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_short_key_is_refused_and_a_missing_one_is_warned_about() {
+        let why = check_key("FLASH_KEY", b"x").expect_err("a one-byte key");
+        assert!(why.contains("\nhelp: "), "{why}");
+        assert!(check_key("FLASH_KEY", &[7u8; MIN_KEY_BYTES]).is_ok());
+        assert!(missing_key("FLASH_KEY").contains("\nhelp: "));
+    }
+
     use super::*;
 
     fn hook() -> Hook {

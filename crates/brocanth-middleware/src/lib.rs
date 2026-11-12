@@ -130,6 +130,7 @@ pub use dp::{Directive, DpRequest, DpSwap, Oob};
 #[cfg(feature = "runtime")]
 pub use flash::{
     default_render, Flash, FlashConfig, FlashMessage, FlashPlugin, Level, Render, FLASH_MARKER,
+    MIN_KEY_BYTES as MIN_FLASH_KEY_BYTES,
 };
 #[cfg(feature = "runtime")]
 pub use method_override::{MethodOverride, MethodOverrideConfig};

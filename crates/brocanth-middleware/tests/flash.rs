@@ -118,7 +118,10 @@ fn a_cookie_name_that_cannot_go_in_a_header_stops_the_build() {
 #[test]
 fn two_instances_with_the_key_in_key_env_read_each_others_messages() {
     // A name no other test reads, so setting it races with nothing.
-    std::env::set_var("A046_FLASH_SHARED_KEY", "a key both instances read");
+    std::env::set_var(
+        "A046_FLASH_SHARED_KEY",
+        "a key both instances read, 32 bytes or more",
+    );
     let config = || FlashConfig {
         key_env: "A046_FLASH_SHARED_KEY".into(),
         ..FlashConfig::default().insecure()
@@ -149,6 +152,22 @@ fn without_a_key_another_instance_ignores_the_cookie() {
         "Saved.",
         "its own instance reads it"
     );
+}
+
+/// A key shorter than 32 bytes stops the build, with what to do.
+#[test]
+fn a_short_key_stops_the_build() {
+    std::env::set_var("A046_FLASH_SHORT_KEY", "x");
+    let built = AppBuilder::new()
+        .plugin_hooking(FlashPlugin::new(FlashConfig {
+            key_env: "A046_FLASH_SHORT_KEY".into(),
+            ..FlashConfig::default()
+        }))
+        .build();
+    let Err(why) = built else {
+        panic!("a one-byte key was accepted");
+    };
+    assert!(why.to_string().contains("help:"), "{why}");
 }
 
 /// The default sends the cookie over HTTPS only.
