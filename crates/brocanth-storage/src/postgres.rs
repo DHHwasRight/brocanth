@@ -40,7 +40,7 @@
 //! # The ceiling this backend imposes, and why it is not a gigabyte
 //!
 //! [`DEFAULT_MAX_OBJECT_BYTES`] is thirty-two mebibytes, and
-//! [`Postgres::with_max_object_bytes`] refuses anything above
+//! [`PgStorage::with_max_object_bytes`] refuses anything above
 //! [`OBJECT_SIZE_CEILING`], which is two hundred and fifty-six.
 //!
 //! The hard limit is a gigabyte, and a gigabyte is unreachable in practice. A
@@ -78,10 +78,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use brocanth_storage::{HashKey, ObjectInfo, Postgres, Storage};
+//! use brocanth_storage::{HashKey, ObjectInfo, PgStorage, Storage};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let store = Postgres::connect("postgres://localhost/brocanth")
+//! let store = PgStorage::connect("postgres://localhost/brocanth")
 //!     .await?
 //!     .with_hash_key(HashKey::from_secret(b"deployment secret"));
 //! store.migrate().await?;
@@ -103,12 +103,12 @@ use crate::meta::{ContentType, Filename, ObjectInfo, ObjectMeta};
 use crate::spec::VariantSpec;
 use crate::storage::Storage;
 
-/// The largest object a new [`Postgres`] stores: thirty-two mebibytes.
+/// The largest object a new [`PgStorage`] stores: thirty-two mebibytes.
 ///
 /// See the module documentation for why this is not a gigabyte.
 pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The largest value [`Postgres::with_max_object_bytes`] accepts: two hundred
+/// The largest value [`PgStorage::with_max_object_bytes`] accepts: two hundred
 /// and fifty-six mebibytes.
 ///
 /// Postgres would take four times this in one `bytea`. This backend will not,
@@ -121,7 +121,7 @@ pub const OBJECT_SIZE_CEILING: u64 = 256 * 1024 * 1024;
 /// not there.
 const FOREIGN_KEY_VIOLATION: &str = "23503";
 
-/// The advisory lock [`Postgres::migrate`] holds while it applies the schema.
+/// The advisory lock [`PgStorage::migrate`] holds while it applies the schema.
 ///
 /// `CREATE TABLE IF NOT EXISTS` is **not** safe to run concurrently in
 /// Postgres: `IF NOT EXISTS` checks the catalogue and then creates, and two
@@ -142,20 +142,20 @@ const MIGRATION_LOCK: i64 = 0x6272_6f63_7374_6f72;
 /// itself a handle — but the expected way to hold one is `Arc<dyn Storage>`,
 /// exactly as for [`LocalDisk`](crate::local::LocalDisk).
 #[derive(Clone, Debug)]
-pub struct Postgres {
+pub struct PgStorage {
     pool: PgPool,
     hash_key: Option<HashKey>,
     max_object_bytes: u64,
 }
 
-impl Postgres {
+impl PgStorage {
     /// Opens a pool on `url` and wraps it.
     ///
-    /// Does **not** create the tables; call [`Postgres::migrate`] for that, in
+    /// Does **not** create the tables; call [`PgStorage::migrate`] for that, in
     /// the one place an application decides to run its migrations.
     ///
     /// Addresses are plain SHA-256 content addresses. For user uploads prefer
-    /// [`Postgres::with_hash_key`], which closes the existence oracle
+    /// [`PgStorage::with_hash_key`], which closes the existence oracle
     /// described in [`crate::key`].
     ///
     /// # Errors
@@ -164,7 +164,25 @@ impl Postgres {
         let pool = PgPool::connect(url)
             .await
             .map_err(|e| StorageError::backend(format!("connect to Postgres: {e}")))?;
-        Ok(Self::with_pool(pool))
+        Ok(Self::from_pool(pool))
+    }
+
+    /// Opens a pool on `url` that connects on first use, and wraps it.
+    ///
+    /// Synchronous, for a plugin hook that cannot await. It needs a Tokio
+    /// runtime entered, because the pool spawns its upkeep task. The same
+    /// name and shape as `PgCache::connect_lazy` in `brocanth-cache`.
+    ///
+    /// # Errors
+    /// [`StorageError::Backend`] when `url` does not parse as a Postgres URL.
+    pub fn connect_lazy(url: &str) -> Result<Self, StorageError> {
+        let pool = PgPool::connect_lazy(url).map_err(|e| {
+            StorageError::backend(format!(
+                "open a Postgres pool: {e}\n\
+                 help: give a `postgres://` URL"
+            ))
+        })?;
+        Ok(Self::from_pool(pool))
     }
 
     /// Wraps a pool the application already has.
@@ -173,7 +191,7 @@ impl Postgres {
     /// `brocanth-jobs` and a model layer already holds one pool, and a second
     /// one for blobs is a second set of connections against the same
     /// `max_connections`.
-    pub fn with_pool(pool: PgPool) -> Self {
+    pub fn from_pool(pool: PgPool) -> Self {
         Self {
             pool,
             hash_key: None,
@@ -286,7 +304,7 @@ impl Postgres {
 }
 
 #[async_trait]
-impl Storage for Postgres {
+impl Storage for PgStorage {
     async fn put(&self, content: &[u8], about: &ObjectInfo) -> Result<ObjectKey, StorageError> {
         let key = self.address_of(content);
         self.put_at(&key, content, about).await?;

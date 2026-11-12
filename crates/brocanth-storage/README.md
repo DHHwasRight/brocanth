@@ -23,7 +23,7 @@ brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth", branch = "
 |---|---|---|
 | `variants` | off | `derive_variant` and `render`, with the png, jpeg, gif and webp decoders (`image`) |
 | `routes` | off | `routes::FileRoutes`: `POST /files` and `GET /files/{address}?token=` as request hooks (`brocanth`, `brocanth-input`) |
-| `postgres` | off | `Postgres`, objects in `bytea` columns (`sqlx`, `tokio`) |
+| `postgres` | off | `PgStorage`, objects in `bytea` columns (`sqlx`, `tokio`) |
 | `scaffold` | off | the `storage` and `storage-routes` modules for `brocanth create`; only the CLI turns it on |
 
 With no feature, the build has no SQL driver, no async runtime and no image

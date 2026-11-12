@@ -6,7 +6,7 @@
 //! # Shape
 //!
 //! [`Storage`] is the whole public contract. [`LocalDisk`] implements it, and
-//! so does [`Postgres`] behind the `postgres` feature — objects in `bytea`
+//! so does [`PgStorage`] behind the `postgres` feature — objects in `bytea`
 //! columns, for a deployment that already runs Postgres for its queues and
 //! would rather not also run a shared filesystem. An S3 backend is a later,
 //! separate crate that implements the same trait — PLAN §4 cuts object stores
@@ -14,7 +14,7 @@
 //! no AWS SDK in the lock file. Nothing above the trait changes when that
 //! crate arrives.
 //!
-//! [`Postgres`]: postgres::Postgres
+//! [`PgStorage`]: postgres::PgStorage
 //!
 //! Without the `routes` feature this crate does not depend on `brocanth`. It
 //! has no routes, parses no multipart body and knows nothing about HTTP. The
@@ -103,6 +103,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod deferred;
 pub mod error;
 pub mod key;
 pub mod local;
@@ -132,6 +133,7 @@ mod rt;
 #[cfg(test)]
 mod tests;
 
+pub use deferred::Deferred;
 pub use error::StorageError;
 pub use key::{HashKey, ObjectKey, KEY_BYTES, KEY_HEX_LEN};
 pub use local::LocalDisk;
@@ -139,7 +141,7 @@ pub use meta::{ContentType, Filename, ObjectInfo, ObjectMeta, MAX_FILENAME_LEN};
 pub use spec::{CropAnchor, VariantMode, VariantSpec, MAX_VARIANT_DIM};
 
 #[cfg(feature = "postgres")]
-pub use postgres::{Postgres, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
+pub use postgres::{PgStorage, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
 pub use storage::Storage;
 pub use token::{FileToken, FileTokenKey, FileTokens, UnixTime, DEFAULT_TTL};
 

@@ -79,7 +79,7 @@ const OPEN: &str = r#"        // The connection opens on the first command, so n
         })?;
         let cache = {
             let _entered = runtime.enter();
-            RedisCache::open(&self.settings.url)
+            RedisCache::connect_lazy(&self.settings.url)
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);

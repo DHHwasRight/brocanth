@@ -1432,7 +1432,7 @@ mod images {
 #[cfg(feature = "postgres")]
 mod pg {
     use super::*;
-    use crate::postgres::{Postgres, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
+    use crate::postgres::{PgStorage, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
 
     /// Says, once and where it cannot be swallowed, that the suite did not
     /// run.
@@ -1469,7 +1469,7 @@ mod pg {
     /// nothing.
     fn with_store<F>(body: F)
     where
-        F: AsyncFnOnce(Postgres),
+        F: AsyncFnOnce(PgStorage),
     {
         let Some(url) = std::env::var("BROCANTH_TEST_DATABASE_URL")
             .ok()
@@ -1479,7 +1479,7 @@ mod pg {
             return;
         };
         reactor().block_on(async move {
-            let store = Postgres::connect(&url).await.expect("connecting");
+            let store = PgStorage::connect(&url).await.expect("connecting");
             store.migrate().await.expect("creating the tables");
             body(store).await;
         });
@@ -1630,7 +1630,7 @@ mod pg {
         with_store(async |store| {
             let body = unique("keyed addressing");
             let plain = store.address_of(&body);
-            let keyed = Postgres::with_pool(store.pool().clone())
+            let keyed = PgStorage::from_pool(store.pool().clone())
                 .with_hash_key(HashKey::from_secret(b"deployment secret"));
             let key = keyed.put(&body, &ObjectInfo::new()).await.expect("put");
             assert_ne!(key, plain, "the key must change the address");
@@ -1704,7 +1704,7 @@ mod pg {
     #[test]
     fn an_object_past_the_limit_is_refused_before_it_is_sent() {
         with_store(async |store| {
-            let small = Postgres::with_pool(store.pool().clone())
+            let small = PgStorage::from_pool(store.pool().clone())
                 .with_max_object_bytes(64)
                 .expect("a limit");
             let body = vec![b'x'; 65];
@@ -1764,7 +1764,7 @@ mod pg {
             let configure = |bytes| {
                 let pool = sqlx::postgres::PgPool::connect_lazy("postgres://localhost/unused")
                     .expect("a lazy pool");
-                Postgres::with_pool(pool).with_max_object_bytes(bytes)
+                PgStorage::from_pool(pool).with_max_object_bytes(bytes)
             };
             assert!(configure(0).is_err(), "a limit of zero stores nothing");
             assert!(configure(OBJECT_SIZE_CEILING + 1).is_err());

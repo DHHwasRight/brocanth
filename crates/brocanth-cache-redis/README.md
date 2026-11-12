@@ -29,7 +29,7 @@ use brocanth_cache::{Cache, CacheExt, Namespace};
 use brocanth_cache_redis::RedisCache;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-// One PING before it answers. `RedisCache::open` connects on the first
+// One PING before it answers. `RedisCache::connect_lazy` connects on the first
 // command instead, for a startup stage that must not wait.
 let cache = RedisCache::connect("redis://localhost:6379").await?;
 let cache: Arc<dyn Cache> = Arc::new(cache.with_prefix("my-app:cache"));

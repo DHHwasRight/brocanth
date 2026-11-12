@@ -203,7 +203,7 @@ impl RedisCache {
     ///
     /// # Errors
     /// [`CacheError::Backend`] when `url` is not a Redis URL.
-    pub fn open(url: &str) -> Result<Self> {
+    pub fn connect_lazy(url: &str) -> Result<Self> {
         let client = Client::open(url).map_err(|e| {
             CacheError::Backend(
                 format!(
@@ -245,7 +245,7 @@ impl RedisCache {
     /// [`CacheError::Backend`] when `url` is not a Redis URL, or the server
     /// did not answer.
     pub async fn connect(url: &str) -> Result<Self> {
-        let cache = Self::open(url)?;
+        let cache = Self::connect_lazy(url)?;
         cache.ping().await?;
         Ok(cache)
     }

@@ -68,7 +68,7 @@ pub enum StorageError {
     /// nothing a client sent reaches a log through here.
     #[error(
         "the object is {size} bytes, past this backend's limit of {limit}\n\
-         help: store a smaller file, or raise the limit (`Postgres::with_max_object_bytes`, \
+         help: store a smaller file, or raise the limit (`PgStorage::with_max_object_bytes`, \
          `max_bytes` for the upload route)"
     )]
     TooLarge {
