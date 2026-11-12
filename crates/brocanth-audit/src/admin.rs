@@ -10,12 +10,20 @@
 //! Locked like every tab: reading is `Action::ViewPanel` on `history`,
 //! which the admin's shipped `DenyAll` refuses until the application says
 //! who may.
+//!
+//! The tab lists changes to every table, so `history` alone does not grant
+//! a read of them. Each entry's values and label show only when the admin
+//! says this person may read that record (`PanelRequest::may_read`: the
+//! `ViewDetail` policy and the model's view rule). Any other entry shows
+//! when, who, the table, the key and the column names, with its values
+//! hidden.
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::journal::{AdminWrite, Journal, Written};
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
-use brocanth_admin::{parts, AdminConfig};
+use brocanth_admin::parts::{self, encode, escape};
+use brocanth_admin::AdminConfig;
 
 use crate::entry::{format_time, Entry, Field, Kind};
 use crate::plugin::AuditPlugin;
@@ -221,6 +229,21 @@ impl Panel for AuditPanel {
                 escape(&e)
             ));
         }
+        let dropped = trail.dropped();
+        if dropped > 0 {
+            html.push_str(&format!(
+                "<p role=\"alert\" class=\"{}\">{dropped} changes were not recorded: the \
+                 queue was full while the history could not be written.</p>",
+                parts::muted(),
+            ));
+        }
+        if !trail.is_durable() {
+            html.push_str(&format!(
+                "<p class=\"{}\">The history is kept in memory and is lost at restart: the \
+                 application has no database.</p>",
+                parts::muted(),
+            ));
+        }
         if entries.is_empty() {
             html.push_str(&format!(
                 "<div class=\"{}\"><div class=\"{}\">No changes recorded.</div></div>",
@@ -229,7 +252,22 @@ impl Panel for AuditPanel {
             ));
             return Ok(Some(PanelPage::body(heading, html)));
         }
-        let rows: String = entries.iter().map(|e| line(&r, e)).collect();
+        // Asked once per record, not per entry: a page often holds several
+        // changes to one row.
+        let mut readable: Vec<((&str, &str), bool)> = Vec::new();
+        let mut rows = String::new();
+        for e in &entries {
+            let at = (e.table.as_str(), e.row.as_str());
+            let may = match readable.iter().find(|(k, _)| *k == at) {
+                Some((_, may)) => *may,
+                None => {
+                    let may = r.may_read(&e.table, &e.row).await;
+                    readable.push((at, may));
+                    may
+                }
+            };
+            rows.push_str(&line(&r, e, may));
+        }
         html.push_str(&format!(
             "<div class=\"{card}\"><table class=\"{table}\"><thead><tr>\
              <th class=\"{th}\">When</th><th class=\"{th}\">Who</th>\
@@ -259,13 +297,14 @@ impl Panel for AuditPanel {
     }
 }
 
-/// One entry as a table row.
-fn line(r: &PanelRequest<'_>, e: &Entry) -> String {
+/// One entry as a table row. With `readable` false, the label and the
+/// values are left out: the column names stay.
+fn line(r: &PanelRequest<'_>, e: &Entry, readable: bool) -> String {
     let who = match &e.actor {
         Some(a) => escape(a),
         None => format!("<span class=\"{}\">nobody signed in</span>", parts::muted()),
     };
-    let record = if e.label.is_empty() {
+    let record = if e.label.is_empty() || !readable {
         format!("{} {}", e.table, e.row)
     } else {
         format!("{} {} ({})", e.table, e.row, e.label)
@@ -280,9 +319,27 @@ fn line(r: &PanelRequest<'_>, e: &Entry) -> String {
     if !e.fields.is_empty() {
         change.push_str("<ul>");
         for f in &e.fields {
-            change.push_str(&format!("<li>{}</li>", field(e.kind, f)));
+            let f = match readable {
+                true => f.clone(),
+                false => Field {
+                    name: f.name.clone(),
+                    before: None,
+                    after: None,
+                },
+            };
+            change.push_str(&format!("<li>{}</li>", field(e.kind, &f)));
         }
         change.push_str("</ul>");
+    }
+    if !readable
+        && e.fields
+            .iter()
+            .any(|f| f.before.is_some() || f.after.is_some())
+    {
+        change.push_str(&format!(
+            " <span class=\"{}\">(values hidden)</span>",
+            parts::muted()
+        ));
     }
     format!(
         "<tr><td class=\"{td}\">{when}</td><td class=\"{td}\">{who}</td>\
@@ -312,33 +369,4 @@ fn field(kind: Kind, f: &Field) -> String {
             format!("{name}: {} \u{2192} {}", show(&f.before), show(&f.after))
         }
     }
-}
-
-/// Percent-encodes a query value.
-fn encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
 }

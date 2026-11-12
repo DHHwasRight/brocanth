@@ -24,7 +24,7 @@ use crate::inline::Inline;
 use crate::journal::{AdminWrite, FieldChange, Journal, RecordLinkFn, RecordRef, Written};
 use crate::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::paging::Pager;
-use crate::panel::{PageCx, Panel, PanelPage, PanelRequest};
+use crate::panel::{PageCx, Panel, PanelPage, PanelRequest, RecordAccess};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::rows::{Gate, Guard, RowAction, RowRules, Rules, Write};
@@ -1196,6 +1196,10 @@ impl Admin {
             return self.refuse(principal, Action::ActOnPanel);
         }
         let mount = self.panel_url(key);
+        let reader = Reader {
+            admin: self,
+            principal,
+        };
         let request = PanelRequest {
             path: rest,
             query,
@@ -1203,6 +1207,7 @@ impl Admin {
             can_act,
             submission,
             mount: &mount,
+            access: Some(&reader),
         };
         match panel.render(request).await? {
             // The panel's own 404, rendered as the admin's, so a panel does
@@ -1336,6 +1341,10 @@ impl Admin {
         if route.post && !can_act {
             return self.refuse(principal, Action::Update);
         }
+        let reader = Reader {
+            admin: self,
+            principal,
+        };
         let cx = PageCx {
             admin: self,
             model,
@@ -1347,6 +1356,7 @@ impl Admin {
                 can_act,
                 submission,
                 mount: &mount,
+                access: Some(&reader),
             },
             key: record.as_ref().map(|(key, _)| key),
             record: record.as_ref().map(|(_, row)| row),
@@ -3279,6 +3289,47 @@ fn resolve_inline(
                 )),
             }
         }
+    }
+}
+
+/// The admin's answer to [`RecordAccess`] for one principal.
+struct Reader<'a> {
+    admin: &'a Admin,
+    principal: Principal<'a>,
+}
+
+#[async_trait::async_trait]
+impl RecordAccess for Reader<'_> {
+    async fn may_read(&self, table: &str, key: &str) -> bool {
+        let admin = self.admin;
+        let Some(entry) = admin.entries.iter().find(|e| e.descriptor.table == table) else {
+            return false;
+        };
+        let columns = entry.descriptor.key_columns();
+        let parts: Vec<&str> = match columns.len() {
+            1 => vec![key],
+            _ => key.split(',').collect(),
+        };
+        if columns.is_empty() || parts.len() != columns.len() {
+            return false;
+        }
+        let record = PrimaryKey::from_parts(
+            columns
+                .iter()
+                .zip(parts)
+                .map(|(c, v)| (c.name.clone(), v.to_string())),
+        );
+        let model = &entry.descriptor.key;
+        if !admin.allows(
+            self.principal,
+            Request::on(Action::ViewDetail, model, &record),
+        ) {
+            return false;
+        }
+        admin
+            .admits(self.principal, entry, RowAction::View, &record)
+            .await
+            .unwrap_or(false)
     }
 }
 

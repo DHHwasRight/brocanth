@@ -158,9 +158,32 @@ pub const MUTATE_SCRIPT: &str = brocanth_middleware::dp::SCRIPT;
 /// Public so an ejected screen compiles in the application with the same
 /// vocabulary. **Stable:** the function names. **Not stable:** the class
 /// strings they return, which follow the stylesheet.
+///
+/// Also the two helpers a panel writing its own markup needs: [`parts::escape`]
+/// for text, and [`parts::encode`] for a query value.
 #[cfg(feature = "runtime")]
 pub mod parts {
     pub use crate::templates::parts::*;
+
+    /// Percent-encodes a query value: everything outside the unreserved set
+    /// of RFC 3986.
+    pub use brocanth_pagination::query::encode;
+
+    /// Escapes text for HTML: element content or a quoted attribute value.
+    pub fn escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&#39;"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
 }
 #[cfg(feature = "runtime")]
 pub use config::{AdminConfig, ModelAdmin};
