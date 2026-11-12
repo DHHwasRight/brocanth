@@ -2134,6 +2134,7 @@ macro_rules! register {
                     .keep_unprefixed(crate::modules::storage_routes::MODULE.path)
                     .keep_unprefixed(crate::modules::auth_oauth::MODULE.mount_at)
                     .keep_unprefixed(crate::modules::oauth_client::MODULE.mount_at)
+                    .keep_unprefixed(brocanth_gtag::CONSENT_PATH)
             })
             .map_err(|e| e.to_string())?;
         let builder = builder.hooks_off_from(
@@ -2193,8 +2194,8 @@ macro_rules! register {
         //
         // A request hook, after dispatch: a GET answered with HTML is one
         // page view. It stores no address, no user agent and no cookie; the
-        // visitor is a hash whose salt is deleted when the day ends. The
-        // views go in two tables of the `[db]` database, written every
+        // visitor is a hash whose salt is deleted the day after. The
+        // views go in tables of the `[db]` database, written every
         // `flush_interval` seconds, never during a request.
         //
         // The admin is never counted, wherever src/modules/admin.rs
@@ -3315,7 +3316,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "sitemap.base_url",
-        help: "The site's address: scheme, host, and base path if any.",
+        help: "The site's address: scheme, host, and base path if any. Empty means none.",
         flag: true,
         file: "src/modules/sitemap.rs",
         flags: crate::modules::sitemap::MODULE.flags,
@@ -5079,7 +5080,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: e2549c90ddcddacc
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -8613,8 +8614,8 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/modules/gtag.rs =====
-//! `gtag`: Google Analytics 4 behind a consent banner; nothing leaves before
-//! the visitor accepts.
+//! `gtag`: Google Analytics 4 behind a consent banner; in `basic` mode nothing
+//! leaves before the visitor accepts.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -9424,6 +9425,8 @@ exclude = []
 # cookie_domain = ""
 # A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.
 # A server only: a static export has no one to report a choice to.
+# The file is per instance, and a container loses it when it stops
+# unless the path is on a volume that outlives it.
 # consent_log = ""
 
 [gtag.banner]
@@ -9634,6 +9637,8 @@ overflow = "drop-oldest"
 # false on staging, or a search engine lists staging beside production.
 index = false
 # Paths no crawler may read, each from the root: "/admin".
+# Each path is also written under each locale segment: "/drafts" keeps
+# crawlers out of /fr/drafts too.
 disallow = []
 # Paths a crawler may read under a disallowed one: "/admin/help".
 allow = []
@@ -9649,11 +9654,12 @@ allow = []
 # disallow = ["/"]
 
 [sitemap]
-# The site's address: scheme, host, and base path if any.
+# The site's address: scheme, host, and base path if any. Empty means none.
 # This file is the development one. Set the production address in
-# production's file or with the environment, or every <loc> names
-# localhost.
-base_url = "http://localhost:3000"
+# production's file or with the environment: unset, a release build
+# refuses to start.
+# Keep it equal to `base_url` under [meta].
+# base_url = "http://localhost:3000"
 # More paths to list, such as the pages of a route with a parameter: "/users/7".
 extra = []
 # Path prefixes kept out of the sitemap: "/drafts".
@@ -12759,8 +12765,9 @@ mod tests {
         let body = response.body.bytes().expect("a whole body");
         let xml = std::str::from_utf8(body).expect("utf-8");
         assert!(xml.starts_with("<?xml"), "{xml}");
-        // The index page, at the base URL of the development file.
-        assert!(xml.contains("/</loc>"), "{xml}");
+        // The index page, once per locale, at the base URL of the
+        // development file.
+        assert!(xml.contains("/en</loc>"), "{xml}");
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{'), "{xml}");
         assert!(!xml.contains("sitemap.xml"), "{xml}");
@@ -17958,7 +17965,9 @@ pub fn schema() -> Schema {
 //! ignore that line, and the page it was meant to hide would be indexed.
 //!
 //! `index = false` answers `User-agent: *` / `Disallow: /` and nothing
-//! else. That is the answer for development and staging.
+//! else. That is the answer for development and staging. The rules are
+//! still checked then, so a bad one stops the development server, not the
+//! first production one.
 //!
 //! Only the root `/robots.txt` of a host is read. Under a base path, as on
 //! a GitHub Pages project site, crawlers never ask for this file.
@@ -18027,12 +18036,21 @@ pub struct Robots {
     settings: Settings,
 }
 
-impl Robots {
-    /// The builder these settings describe.
-    fn text(&self) -> Result<Text, PluginError> {
-        if !self.settings.index {
-            return Ok(Text::closed());
+/// A rule path, then each other URL `localized` gives for it.
+fn rule_paths(path: &str, localized: &dyn Fn(&str) -> Vec<String>) -> Vec<String> {
+    let mut out = vec![path.to_string()];
+    for other in localized(path) {
+        if !out.contains(&other) {
+            out.push(other);
         }
+    }
+    out
+}
+
+impl Robots {
+    /// The builder these settings describe, as if `index` were true.
+    /// `localized` gives the other URLs a rule path covers.
+    fn open(&self, localized: &dyn Fn(&str) -> Vec<String>) -> Result<Text, PluginError> {
         let mut text = Text::new();
         // The admin, where src/modules/admin.rs mounts it. Turn it off with
         // `integrate.admin` in src/modules/robots.rs.
@@ -18040,10 +18058,14 @@ impl Robots {
             text = text.disallow(crate::modules::admin::MODULE.mount_at);
         }
         for path in &self.settings.disallow {
-            text = text.disallow(path.as_str());
+            for path in rule_paths(path, localized) {
+                text = text.disallow(path);
+            }
         }
         for path in &self.settings.allow {
-            text = text.allow(path.as_str());
+            for path in rule_paths(path, localized) {
+                text = text.allow(path);
+            }
         }
         for named in &self.settings.groups {
             let Some((first, rest)) = named.agents.split_first() else {
@@ -18057,10 +18079,14 @@ impl Robots {
                 group = group.agent(agent.as_str());
             }
             for path in &named.disallow {
-                group = group.disallow(path.as_str());
+                for path in rule_paths(path, localized) {
+                    group = group.disallow(path);
+                }
             }
             for path in &named.allow {
-                group = group.allow(path.as_str());
+                for path in rule_paths(path, localized) {
+                    group = group.allow(path);
+                }
             }
             text = text.group(group);
         }
@@ -18073,11 +18099,16 @@ impl Robots {
         Ok(text)
     }
 
-    /// The text these settings describe, or why it cannot be served.
-    fn rendered(&self) -> Result<String, PluginError> {
-        self.text()?
-            .render()
-            .map_err(|e| PluginError::new(format!("[robots] {e}")))
+    /// The text these settings describe, or why it cannot be served. The
+    /// open text is rendered even when `index` is false, so a bad rule
+    /// stops the development server too.
+    fn rendered(&self, localized: &dyn Fn(&str) -> Vec<String>) -> Result<String, PluginError> {
+        let failed = |e: brocanth_robots::RobotsError| PluginError::new(format!("[robots] {e}"));
+        let open = self.open(localized)?.render().map_err(failed)?;
+        if !self.settings.index {
+            return Text::closed().render().map_err(failed);
+        }
+        Ok(open)
     }
 }
 
@@ -18092,8 +18123,18 @@ impl Plugin for Robots {
 
     // After `configure`: the sitemap plugin sets its URL there, and every
     // plugin finishes one stage before any plugin starts the next.
-    fn after_config(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let _ = RENDERED.set(self.rendered()?);
+    fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Each rule path under each locale segment too, from the negotiator
+        // the `i18n` plugin put in the services: /drafts and /fr/drafts.
+        let i18n = lc
+            .services()
+            .get::<brocanth_i18n::Negotiator<crate::plugins::i18n::Locale>>()
+            .cloned();
+        let localized = move |path: &str| {
+            i18n.as_ref()
+                .map_or_else(|| vec![path.to_string()], |n| n.localized(path))
+        };
+        let _ = RENDERED.set(self.rendered(&localized)?);
         Ok(())
     }
 }
@@ -18101,6 +18142,10 @@ impl Plugin for Robots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rendered(robots: &Robots) -> Result<String, PluginError> {
+        robots.rendered(&|path| vec![path.to_string()])
+    }
 
     fn ai_crawlers() -> CrawlerGroup {
         CrawlerGroup {
@@ -18117,7 +18162,18 @@ mod tests {
             groups: vec![ai_crawlers()],
             ..Settings::default()
         });
-        assert_eq!(robots.rendered().unwrap(), "User-agent: *\nDisallow: /\n");
+        assert_eq!(rendered(&robots).unwrap(), "User-agent: *\nDisallow: /\n");
+    }
+
+    #[test]
+    fn a_bad_rule_stops_a_closed_site_too() {
+        let robots = Robots::new(Settings {
+            index: false,
+            disallow: vec!["private".to_string()],
+            ..Settings::default()
+        });
+        let error = rendered(&robots).unwrap_err().to_string();
+        assert!(error.contains("help:"), "{error}");
     }
 
     #[test]
@@ -18129,7 +18185,7 @@ mod tests {
             groups: vec![ai_crawlers()],
             ..Settings::default()
         });
-        let text = robots.rendered().unwrap();
+        let text = rendered(&robots).unwrap();
         assert!(text.contains("Disallow: /private\n"), "{text}");
         assert!(text.contains("Allow: /private/help\n"), "{text}");
         assert!(
@@ -18148,7 +18204,7 @@ mod tests {
             groups: vec![CrawlerGroup::default()],
             ..Settings::default()
         });
-        let error = robots.rendered().unwrap_err().to_string();
+        let error = rendered(&robots).unwrap_err().to_string();
         assert!(error.contains("help:"), "{error}");
     }
 }
@@ -18316,9 +18372,13 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! is many pages: list the ones that exist in `extra`.
 //!
 //! A base URL that is not a full `http(s)` address stops the build here: a
-//! crawler ignores every relative `<loc>`.
+//! crawler ignores every relative `<loc>`. An unset one stops a release
+//! build, and a debug build takes the development address.
 //!
 //! To give a page a `<lastmod>`, call `path_modified` in `sitemap` below.
+//!
+//! With `i18n-routing`, each page is listed once per locale, as the `i18n`
+//! negotiator says: `/fr/about`, never `/about`, which redirects.
 
 use std::sync::OnceLock;
 
@@ -18326,6 +18386,10 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Verb;
 use brocanth_robots::sitemap::{listed, under, Sitemap as Xml};
+
+/// The address `serve` listens on: the base URL of a debug build that
+/// sets none.
+const DEVELOPMENT_BASE: &str = "http://localhost:3000";
 
 /// The rendered XML, set once at `configure`.
 static RENDERED: OnceLock<String> = OnceLock::new();
@@ -18354,7 +18418,7 @@ pub fn location() -> Option<&'static str> {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// The site's address: scheme, host, and base path if any.
-    pub base_url: String,
+    pub base_url: Option<String>,
     /// More paths to list.
     pub extra: Vec<String>,
     /// Path prefixes kept out of the sitemap.
@@ -18364,7 +18428,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            base_url: "http://localhost:3000".to_string(),
+            base_url: None,
             extra: Vec::new(),
             exclude: vec!["/status".to_string(), "/realtime".to_string()],
         }
@@ -18376,21 +18440,45 @@ pub struct Sitemap {
 }
 
 impl Sitemap {
-    /// The builder these settings and these routes describe.
-    fn sitemap<'a>(&self, routes: impl IntoIterator<Item = (Verb, &'a str)>) -> Xml {
+    /// The base URL. Unset, a debug build takes the development address,
+    /// and a release build stops: a production sitemap of localhost URLs
+    /// sends every crawler nowhere.
+    fn base(&self) -> Result<&str, PluginError> {
+        match self.settings.base_url.as_deref().filter(|b| !b.is_empty()) {
+            Some(base) => Ok(base),
+            None if cfg!(debug_assertions) => Ok(DEVELOPMENT_BASE),
+            None => Err(PluginError::new(
+                "[sitemap] `base_url` is not set, so no <loc> can name this site\n\
+                 help: set `base_url` under [sitemap] to the published address, \
+                 such as \"https://example.com\"",
+            )),
+        }
+    }
+
+    /// The builder these settings and these routes describe. `localized`
+    /// gives the URLs one page answers at.
+    fn sitemap<'a>(
+        &self,
+        routes: impl IntoIterator<Item = (Verb, &'a str)>,
+        localized: &dyn Fn(&str) -> Vec<String>,
+    ) -> Result<Xml, PluginError> {
         let kept = |path: &str| !self.settings.exclude.iter().any(|p| under(path, p));
-        let mut xml = Xml::new(self.settings.base_url.as_str());
+        let mut xml = Xml::new(self.base()?);
         for (verb, pattern) in routes {
             if verb == Verb::Get && listed(pattern) && kept(pattern) {
-                xml = xml.path(pattern);
+                for path in localized(pattern) {
+                    xml = xml.path(path);
+                }
             }
         }
         for path in &self.settings.extra {
             if kept(path) {
-                xml = xml.path(path.as_str());
+                for path in localized(path) {
+                    xml = xml.path(path);
+                }
             }
         }
-        xml
+        Ok(xml)
     }
 }
 
@@ -18409,11 +18497,21 @@ impl Plugin for Sitemap {
         Self { settings: config }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let routes = crate::pages::handlers()
             .iter()
             .map(|(verb, pattern, _)| (*verb, *pattern));
-        let xml = self.sitemap(routes);
+        // One URL per locale, from the negotiator the `i18n` plugin put in
+        // the services: `/fr/about`, never `/about`, which redirects.
+        let i18n = lc
+            .services()
+            .get::<brocanth_i18n::Negotiator<crate::plugins::i18n::Locale>>()
+            .cloned();
+        let localized = move |path: &str| {
+            i18n.as_ref()
+                .map_or_else(|| vec![path.to_string()], |n| n.localized(path))
+        };
+        let xml = self.sitemap(routes, &localized)?;
         let text = xml
             .render()
             .map_err(|e| PluginError::new(format!("[sitemap] {e}")))?;
@@ -18439,7 +18537,8 @@ mod tests {
     fn rendered(settings: Settings) -> Result<String, String> {
         let plugin = Sitemap::new(settings);
         plugin
-            .sitemap(ROUTES.iter().copied())
+            .sitemap(ROUTES.iter().copied(), &|path| vec![path.to_string()])
+            .map_err(|e| e.to_string())?
             .render()
             .map_err(|e| e.to_string())
     }
@@ -18447,7 +18546,7 @@ mod tests {
     #[test]
     fn pages_with_no_parameter_are_listed_and_the_rest_are_not() {
         let xml = rendered(Settings {
-            base_url: "https://example.com".to_string(),
+            base_url: Some("https://example.com".to_string()),
             extra: vec!["/users/7".to_string()],
             exclude: vec!["/drafts".to_string()],
         })
@@ -18464,11 +18563,31 @@ mod tests {
     #[test]
     fn a_relative_base_url_stops_the_build_with_the_fix() {
         let error = rendered(Settings {
-            base_url: "example.com".to_string(),
+            base_url: Some("example.com".to_string()),
             ..Settings::default()
         })
         .unwrap_err();
         assert!(error.contains("help:"), "{error}");
+    }
+
+    #[test]
+    fn each_page_is_listed_once_per_locale_and_never_where_it_redirects() {
+        let i18n = brocanth_i18n::Negotiator::<crate::plugins::i18n::Locale>::new(
+            brocanth_i18n::NegotiatorConfig::default().with_paths(true),
+        );
+        let plugin = Sitemap::new(Settings {
+            base_url: Some("https://example.com".to_string()),
+            ..Settings::default()
+        });
+        let xml = plugin
+            .sitemap(ROUTES.iter().copied(), &|path| i18n.localized(path))
+            .unwrap()
+            .render()
+            .unwrap();
+        for present in ["/en/about</loc>", "/fr/about</loc>", "/fr</loc>"] {
+            assert!(xml.contains(present), "{present} in {xml}");
+        }
+        assert!(!xml.contains("example.com/about</loc>"), "{xml}");
     }
 }
 ===== src/plugins/static_files/mod.rs =====
@@ -19587,7 +19706,7 @@ request.
 - `middleware-conditional-get`  a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since
 - `middleware-compression`  gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream
 - `flash`  one-shot messages across a redirect, in a signed cookie, drawn into the layout
-- `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
+- `gtag`  Google Analytics 4 behind a consent banner; in `basic` mode nothing leaves before the visitor accepts
 - `openapi`  an OpenAPI 3.1 document derived from src/pages, served at /openapi.json
 - `validation`  a zod-shaped vocabulary; a handler takes Valid<T> or does not compile
 - `resource`  typed CRUD routes over one table, with the policy in the WHERE clause
@@ -19695,7 +19814,10 @@ above the five shows the type.
 
 `brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
 Its hook puts a consent banner and Google's tag into every HTML page,
-before `</body>`. Nothing reaches Google before the visitor accepts.
+before `</body>`. In `basic` mode, the default, nothing reaches Google
+before the visitor accepts. In `advanced` mode, Google's script loads
+on the first page with every consent denied, and sends cookieless
+pings before any choice.
 
 Do not add a second Google tag, and do not send a page view yourself:
 the hook scrubs the URL first. Never put an email address, a name or a
@@ -19705,7 +19827,10 @@ and the scrubber only catches what it can recognise. A link with
 
 The choice lives in the visitor's browser. To keep a record of it on
 the server, set `consent_log` to a file: each choice is one JSON line
-with no address and no user agent.
+with no address and no user agent. The file is per instance; keep it
+on a volume that outlives the container. The report path,
+`/__consent`, answers only the site's own pages: give it a rate-limit
+rule.
 
 The banner speaks the request's locale. Its words are the
 `[gtag.banner]` keys of `locales/*.toml`; change them there, in every
@@ -20451,7 +20576,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 1486ad4bc15e6022 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20935,7 +21060,7 @@ kind = ["routes"]
 files = ["src/modules/robots.rs", "src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
 crates = ["brocanth-robots"]
-adapted_to = ["config", "admin", "sitemap"]
+adapted_to = ["config", "admin", "sitemap", "i18n-routing"]
 
 [modules.sitemap]
 version = "0.1.0"
@@ -20943,7 +21068,7 @@ kind = ["routes"]
 files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
-adapted_to = ["config", "admin", "jt", "realtime-sse"]
+adapted_to = ["config", "admin", "jt", "realtime-sse", "i18n-routing", "meta"]
 
 [modules.pagination]
 version = "0.1.0"
@@ -21033,4 +21158,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: af079ea950d63b4d
