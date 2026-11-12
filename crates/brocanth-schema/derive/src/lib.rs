@@ -503,6 +503,7 @@ fn parse_string(list: &syn::MetaList) -> syn::Result<Kind> {
             Meta::Path(p) if p.is_ident("url") => builder = quote!(#builder.url()),
             Meta::Path(p) if p.is_ident("uuid") => builder = quote!(#builder.uuid()),
             Meta::Path(p) if p.is_ident("non_empty") => builder = quote!(#builder.non_empty()),
+            Meta::Path(p) if p.is_ident("sensitive") => builder = quote!(#builder.sensitive()),
             Meta::NameValue(nv) if nv.path.is_ident("min_length") => {
                 let n = lit_usize(&nv.value)?;
                 builder = quote!(#builder.min_length(#n));
@@ -536,8 +537,8 @@ fn parse_string(list: &syn::MetaList) -> syn::Result<Kind> {
                 return Err(syn::Error::new(
                     other.span(),
                     "unknown string constraint: expected `min_length`, `max_length`, `length`, \
-                     `non_empty`, `pattern`, `email`, `url`, `uuid`, `starts_with`, `ends_with` \
-                     or `contains`",
+                     `non_empty`, `pattern`, `email`, `url`, `uuid`, `starts_with`, `ends_with`, \
+                     `contains` or `sensitive`",
                 ))
             }
         }
@@ -855,10 +856,10 @@ fn option_inner(ty: &Type) -> Option<&Type> {
 // ---------------------------------------------------------------------------
 
 fn check_pattern(value: &LitStr) -> syn::Result<()> {
+    // The same wrapping `StringSchema::pattern` does, so a pattern that
+    // compiles here compiles there.
     let source = value.value();
-    let body = source.strip_prefix('^').unwrap_or(&source);
-    let body = body.strip_suffix('$').unwrap_or(body);
-    match regex::Regex::new(&format!("^(?:{body})$")) {
+    match regex::Regex::new(&format!("^(?:{source})$")) {
         Ok(_) => Ok(()),
         Err(error) => Err(syn::Error::new(
             value.span(),
