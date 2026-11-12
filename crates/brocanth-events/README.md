@@ -30,8 +30,9 @@ Inside this workspace: `brocanth-events.workspace = true`.
 | `serde` | off | `Serialize` and `Deserialize` on every type. |
 
 The crate has no `scaffold` module, and `brocanth create` does not add it
-directly. `brocanth-model`, `brocanth-resource` and `brocanth-realtime`
-depend on it, and `brocanth-cache` does with its `events` feature.
+directly. `brocanth-model`, `brocanth-resource`, `brocanth-realtime`,
+`brocanth-audit` and `brocanth-webhooks` depend on it, and `brocanth-cache`
+does with its `events` feature.
 
 ## Examples
 
