@@ -109,8 +109,8 @@ pub fn pages(input: TokenStream) -> TokenStream {
     };
     let Some(root) = string_literal(head) else {
         return error(
-            "expected a string literal with the pages root, as in \
-             `brocanth_pages::pages!(\"src/pages\")`",
+            "expected a string literal with the pages root\n\
+             help: write `brocanth_pages::pages!(\"src/pages\")`",
         );
     };
     // Words rather than booleans, because `pages!("src/pages", true, true)`
@@ -128,8 +128,9 @@ pub fn pages(input: TokenStream) -> TokenStream {
                      it takes `describe`, which emits what every route takes \
                      and gives, `mounts`, which lets the table hold routes \
                      a module contributed, and `errors`, which renders \
-                     `not-found.rsx` and `error.rsx` for a failure -- as in \
-                     `pages!(\"src/pages\", describe, mounts, errors)`"
+                     `not-found.rsx` and `error.rsx` for a failure\n\
+                     help: write `pages!(\"src/pages\", describe, mounts, errors)` \
+                     with the words you need"
                 ))
             }
         }
@@ -151,17 +152,17 @@ fn string_literal(raw: &str) -> Option<String> {
 pub fn html(input: TokenStream) -> TokenStream {
     let Some((ctx, content)) = split_once_comma(TokenStream2::from(input)) else {
         return error(
-            "`html!` takes the context and then the page, as in \
-             `html!(ctx, views::index::Index { title: TITLE })`; the context \
-             is what carries how much of the document the client already has",
+            "`html!` takes the context and then the page; the context \
+             is what carries how much of the document the client already has\n\
+             help: write `html!(ctx, views::index::Index { title: TITLE })`",
         );
     };
 
     let Some(file) = Span::call_site().local_file() else {
         return error(
             "`html!` cannot tell which file it is in, so it cannot tell which \
-             layouts cover this page; call `pages::render` and name the layout \
-             yourself",
+             layouts cover this page\n\
+             help: call `pages::render` and name the layout yourself",
         );
     };
 
@@ -274,8 +275,9 @@ fn layout_in(dir: &Path, owned: &[&str]) -> Result<Option<PathBuf>, String> {
         return Err(format!(
             "`{}` holds two layouts, {}: a directory has one, because which \
              of them wrapped a page would depend on the order the filesystem \
-             listed them. Delete one, or move the pages it wraps into a \
-             directory of their own",
+             listed them\n\
+             help: delete one, or move the pages it wraps into a directory of \
+             their own",
             dir.display(),
             names.join(" and "),
         ));
@@ -297,11 +299,18 @@ fn layouts_above(file: &Path) -> Result<Vec<Layout>, String> {
 fn layouts_above_in(root: &Path, file: &Path) -> Result<Vec<Layout>, String> {
     let mut found = Vec::new();
 
+    // The package's own `src` -- the first `src` in the path -- is the
+    // ceiling. Above it is the package, which holds `Cargo.toml` and no
+    // markup. A page directory that happens to be named `src` is below the
+    // ceiling, and its layouts still count.
+    let ceiling: Option<PathBuf> = file
+        .components()
+        .position(|c| c.as_os_str() == "src")
+        .map(|at| file.components().take(at + 1).collect());
+
     let mut dir = file.parent();
     while let Some(current) = dir {
-        // `src` is the ceiling. Above it is the package, which holds
-        // `Cargo.toml` and no markup.
-        if current.file_name().is_some_and(|name| name == "src") || current.as_os_str().is_empty() {
+        if current.as_os_str().is_empty() || ceiling.as_deref() == Some(current) {
             break;
         }
         if let Some(candidate) = layout_in(&root.join(current), LAYOUT_EXTENSIONS)? {
@@ -867,6 +876,34 @@ mod tests {
         let out = expand(&[], &quote!(ctx), &quote!(Page {})).to_string();
         assert!(!out.contains("layout"), "{out}");
         assert!(out.contains("crate :: pages :: render"), "{out}");
+    }
+
+    #[test]
+    fn a_page_directory_named_src_keeps_the_layouts_above_it() {
+        let root =
+            std::env::temp_dir().join(format!("brocanth-pages-nested-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/pages/docs/src")).expect("dirs");
+        std::fs::write(root.join("src/pages/layout.rsx"), "").expect("layout");
+        std::fs::write(root.join("src/pages/docs/src/layout.rsx"), "").expect("layout");
+
+        let found = layouts_above_in(&root, Path::new("src/pages/docs/src/index.rs"))
+            .expect("one layout per directory");
+        let modules: Vec<Vec<String>> = found.iter().map(|l| l.module.clone()).collect();
+        assert_eq!(
+            modules,
+            [
+                vec!["pages".to_string(), "views".to_string()],
+                vec![
+                    "pages".to_string(),
+                    "views".to_string(),
+                    "docs".to_string(),
+                    "src".to_string()
+                ],
+            ],
+            "the package's `src` is the ceiling, not every `src`"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

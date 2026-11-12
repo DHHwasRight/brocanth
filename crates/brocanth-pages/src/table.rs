@@ -92,7 +92,9 @@ pub fn expand(root: &Path, manifest: &Path, words: Words) -> TokenStream2 {
     if pages.is_empty() {
         return error(&format!(
             "no pages found under `{}`: a route is a file, so an empty \
-             directory is a server that answers nothing",
+             directory is a server that answers nothing\n\
+             help: add `{}/index.rs` with `pub fn handle(ctx: &mut Ctx)`",
+            root.display(),
             root.display()
         ));
     }
@@ -103,11 +105,28 @@ pub fn expand(root: &Path, manifest: &Path, words: Words) -> TokenStream2 {
     for page in &pages {
         if page.handlers.is_empty() {
             return error(&format!(
-                "`{}` declares no handler, so nothing would route to it; \
-                 write `pub fn handle(ctx: &mut Ctx) -> Result<impl \
+                "`{}` declares no handler, so nothing would route to it\n\
+                 help: write `pub fn handle(ctx: &mut Ctx) -> Result<impl \
                  IntoResponse, Error>` (or `pub async fn handle` to await \
                  inside it), or delete the file",
                 page.route_file
+            ));
+        }
+    }
+
+    // `users.rs` beside `users/` would be one module that is a file and a
+    // directory at once: the file wins, and the pages inside the directory
+    // are never declared.
+    for page in &pages {
+        if let Some(inner) = pages.iter().find(|other| {
+            other.module.len() > page.module.len() && other.module.starts_with(&page.module)
+        }) {
+            let index = page.route_file.trim_end_matches(".rs");
+            return error(&format!(
+                "`{}` sits beside the directory that holds `{}`, so the pages \
+                 in that directory would not be declared\n\
+                 help: move `{}` to `{index}/index.rs`",
+                page.route_file, inner.route_file, page.route_file
             ));
         }
     }
@@ -446,8 +465,13 @@ impl Node {
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<Page>) -> Result<(), String> {
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "cannot read `{}`: {e}\n\
+             help: check that the directory exists and that this user may read it",
+            dir.display()
+        )
+    })?;
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .collect();
@@ -495,7 +519,12 @@ fn page(root: &Path, path: &Path) -> Result<Page, String> {
     // name the table is. One reader, so the two cannot disagree.
     let template = brocanth::routing::route_for_file(&route_file, "")
         .map(|route| route.pattern().to_string())
-        .map_err(|e| format!("`{route_file}` is not a route: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "`{route_file}` is not a route: {e}\n\
+                 help: name the file after its path: `users/[id].rs` for `/users/{{id}}`"
+            )
+        })?;
 
     Ok(Page {
         handlers: handlers(path, &route_file)?,
@@ -512,10 +541,16 @@ fn page(root: &Path, path: &Path) -> Result<Page, String> {
 /// comment in the file the scaffold writes, and a route table that depends on
 /// where a comment is would be a route table nobody could trust.
 fn handlers(path: &Path, route_file: &str) -> Result<Vec<Found>, String> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    let file = syn::parse_file(&source)
-        .map_err(|e| format!("`{route_file}` is not valid Rust: {e}; fix it and build again"))?;
+    let source = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "cannot read `{}`: {e}\n\
+                 help: check that the file exists and that this user may read it",
+            path.display()
+        )
+    })?;
+    let file = syn::parse_file(&source).map_err(|e| {
+        format!("`{route_file}` is not valid Rust: {e}\nhelp: fix the syntax, then build again")
+    })?;
 
     let mut found = Vec::new();
     for item in &file.items {
@@ -539,8 +574,8 @@ fn handlers(path: &Path, route_file: &str) -> Result<Vec<Found>, String> {
             return Err(format!(
                 "`{route_file}` has `pub fn {name}`, which is not a verb: \
                  the framework reads the verb off the name, and the names \
-                 it reads are {known}. Rename it, or make it private if it \
-                 is not a handler"
+                 it reads are {known}\n\
+                 help: rename it, or make it private if it is not a handler"
             ));
         };
         found.push(Found {
@@ -572,12 +607,14 @@ fn body_of(
             syn::FnArg::Typed(arg) => Ok(Some((*arg.ty).clone())),
             syn::FnArg::Receiver(_) => Err(format!(
                 "`{route_file}`: `{name}` takes `self`, and a page is a \
-                 function rather than a method"
+                 function rather than a method\n\
+                 help: write `pub fn {name}(ctx: &mut Ctx)` as a free function"
             )),
         },
         many => Err(format!(
-            "`{route_file}`: `{name}` takes {many} parameters. A handler \
-             takes the context, and may take one more -- the body, which \
+            "`{route_file}`: `{name}` takes {many} parameters, and a handler \
+             takes at most two\n\
+             help: take the context, and at most one more -- the body, which \
              the framework reads and checks before calling it"
         )),
     }
@@ -630,16 +667,28 @@ fn helpers(root: &Path, pages: &[Page]) -> Result<TokenStream2, String> {
     let mut routes = Vec::with_capacity(pages.len());
     for page in pages {
         let file = format!("{base}/{}", page.route_file);
-        let helper = RouteHelper::for_file(&file, &base)
-            .map_err(|e| format!("`{}` is not a route: {e}", page.route_file))?;
+        let helper = RouteHelper::for_file(&file, &base).map_err(|e| {
+            format!(
+                "`{}` is not a route: {e}\n\
+                     help: name the file after its path: `users/[id].rs` for `/users/{{id}}`",
+                page.route_file
+            )
+        })?;
         let verbs: Vec<Verb> = page.handlers.iter().map(|found| found.verb).collect();
         routes.push(helper.with_verbs(verbs));
     }
 
-    let source = generate_helpers(&routes).map_err(|e| e.to_string())?;
-    let body: TokenStream2 = source
-        .parse()
-        .map_err(|e| format!("the generated route helpers do not parse: {e}"))?;
+    let source = generate_helpers(&routes).map_err(|e| {
+        format!(
+            "the route helpers cannot be generated: {e}\nhelp: rename the page the message names"
+        )
+    })?;
+    let body: TokenStream2 = source.parse().map_err(|e| {
+        format!(
+            "the generated route helpers do not parse: {e}\n\
+             help: this is a bug in brocanth-pages; report it with the pages tree"
+        )
+    })?;
 
     Ok(quote! {
         /// One function per route: `routes::users::id::path(7)`.
@@ -760,6 +809,7 @@ mod tests {
         assert!(out.contains("compile_error !"), "{out}");
         assert!(out.contains("is not a verb"), "{out}");
         assert!(out.contains("handle_post"), "the message lists them: {out}");
+        assert!(out.contains("\\nhelp: rename it"), "{out}");
     }
 
     #[test]
@@ -825,6 +875,16 @@ mod tests {
     fn a_page_with_no_handler_at_all_is_an_error() {
         let out = table(&[("index.rs", GET), ("draft.rs", "// later")]);
         assert!(out.contains("declares no handler"), "{out}");
+        assert!(out.contains("\\nhelp: "), "{out}");
+    }
+
+    #[test]
+    fn a_file_beside_a_directory_of_the_same_name_is_refused() {
+        // `users.rs` would be declared as `mod users` with a `#[path]`, and
+        // the `users::_id_` its sibling rows call would not exist.
+        let out = table(&[("users.rs", GET), ("users/[id].rs", GET)]);
+        assert!(out.contains("compile_error !"), "{out}");
+        assert!(out.contains("move `users.rs` to `users/index.rs`"), "{out}");
     }
 
     #[test]

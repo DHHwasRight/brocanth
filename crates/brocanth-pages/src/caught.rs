@@ -67,8 +67,13 @@ fn walk(dir: &Path, parts: &mut Vec<String>, out: &mut Vec<Dir>) -> Result<(), S
             failed,
         });
     }
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "cannot read `{}`: {e}\n\
+             help: check that the directory exists and that this user may read it",
+            dir.display()
+        )
+    })?;
     let mut children: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.is_dir())
@@ -131,14 +136,22 @@ impl Caught {
         });
 
         // Deepest first, so `/users/7/x` finds `users/[id]/not-found.rsx`
-        // before `users/not-found.rsx`. The pages root is the last answer
-        // and needs no test.
+        // before `users/not-found.rsx`. At one depth a literal segment comes
+        // before a parameter, so `/users/new/x` finds `users/new/` before
+        // `users/[id]/`, as the router would. The pages root is the last
+        // answer and needs no test.
         let mut deeper: Vec<&Dir> = self.dirs.iter().filter(|d| !d.parts.is_empty()).collect();
+        let key = |dir: &Dir| -> Vec<(bool, String)> {
+            dir.parts
+                .iter()
+                .map(|part| (is_param(part), part.clone()))
+                .collect()
+        };
         deeper.sort_by(|a, b| {
             b.parts
                 .len()
                 .cmp(&a.parts.len())
-                .then(a.parts.cmp(&b.parts))
+                .then_with(|| key(a).cmp(&key(b)))
         });
         let (root_nf, root_er) = self.nearest(&[]);
         let choice = if deeper.is_empty() {
@@ -146,7 +159,7 @@ impl Caught {
         } else {
             let arms = deeper.iter().map(|dir| {
                 let pattern = dir.parts.iter().map(|part| {
-                    if part.starts_with('[') && part.ends_with(']') {
+                    if is_param(part) {
                         quote!(None)
                     } else {
                         quote!(Some(#part))
@@ -248,6 +261,11 @@ impl Caught {
             }
         }
     }
+}
+
+/// A directory named after a parameter: `[id]`, which any segment fills.
+fn is_param(part: &str) -> bool {
+    part.starts_with('[') && part.ends_with(']')
 }
 
 #[cfg(test)]
@@ -352,6 +370,25 @@ mod tests {
             ),
             "{arm}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_literal_directory_comes_before_a_parameter_sibling() {
+        let root = tree(&[
+            "not-found.rsx",
+            "users/[id]/not-found.rsx",
+            "users/new/not-found.rsx",
+        ]);
+        let caught = read(Path::new("src/pages"), &root).expect("read");
+        let out = caught.items().to_string();
+        let literal = out
+            .find("& [Some (\"users\") , Some (\"new\")]")
+            .expect("the literal directory");
+        let param = out
+            .find("& [Some (\"users\") , None]")
+            .expect("the parameter directory");
+        assert!(literal < param, "`new` before `[id]`: {out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
