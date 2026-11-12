@@ -394,3 +394,8 @@ masks.
   first if the role must stay.
 - Policies on views, and `security_invoker` views.
 - Functions in other languages than SQL.
+- A per-request identity for `brocanth-admin-model`'s data source. Its
+  `AdminData` methods take no request, so it queries the `Orm` as the
+  login role: on a `FORCE` table it sees no row. Give the admin a policy
+  for the login (or a staff role), or keep its tables out of RLS.
+- `rls check` does not compare a function's `EXECUTE` grants.
