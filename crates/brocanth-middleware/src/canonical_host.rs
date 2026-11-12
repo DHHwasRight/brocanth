@@ -143,35 +143,34 @@ fn host_of(request: &Request) -> Option<String> {
         return Some(authority.host().to_ascii_lowercase());
     }
     let raw = text(request.headers(), http::header::HOST)?;
-    // `example.com:8443` is the same host as `example.com`. The port is
-    // not compared, because a canonical host that redirected on a port
-    // would loop behind any proxy that terminates TLS.
-    let host = raw.rsplit_once(':').map_or(raw, |(host, port)| {
-        if port.chars().all(|c| c.is_ascii_digit()) {
+    Some(without_port(raw).trim().to_ascii_lowercase())
+}
+
+/// `example.com:8443` is the same host as `example.com`. The port is not
+/// compared, because a canonical host that redirected on a port would loop
+/// behind any proxy that terminates TLS. Both sides drop it: the request's
+/// host and the configured one.
+fn without_port(raw: &str) -> &str {
+    raw.rsplit_once(':').map_or(raw, |(host, port)| {
+        // `[2001:db8::1]` has colons of its own and no port after them.
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
             host
         } else {
             raw
         }
-    });
-    Some(host.trim().to_ascii_lowercase())
+    })
 }
 
-/// Splits `https://example.com` into its scheme and its host.
+/// Splits `https://example.com` into its scheme and its host. The host
+/// has no port, as [`host_of`] gives none: `https://example.com:8443`
+/// compares as `example.com`.
 fn split(base: &str) -> (String, String) {
-    match base.split_once("://") {
-        Some((scheme, rest)) => (
-            scheme.to_ascii_lowercase(),
-            rest.trim_end_matches('/')
-                .split('/')
-                .next()
-                .unwrap_or(rest)
-                .to_ascii_lowercase(),
-        ),
-        None => (
-            String::new(),
-            base.trim_end_matches('/').to_ascii_lowercase(),
-        ),
-    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    (
+        scheme.to_ascii_lowercase(),
+        without_port(authority).to_ascii_lowercase(),
+    )
 }
 
 #[cfg(test)]
@@ -247,6 +246,36 @@ mod tests {
     }
 
     #[test]
+    fn a_canonical_target_with_a_port_does_not_redirect_to_itself() {
+        let config = CanonicalHostConfig::to("https://example.com:8443");
+        let (_scheme, host) = split(&config.to);
+        let hook = Hook {
+            base: config.to.clone(),
+            host,
+            status: config.status,
+        };
+        for sent in ["example.com:8443", "example.com"] {
+            let flow = hook
+                .before_dispatch(&mut get("/x", Some(sent)), &mut RequestState::new())
+                .expect("ok");
+            assert!(matches!(flow, Flow::Continue), "{sent} was redirected");
+        }
+        let flow = hook
+            .before_dispatch(
+                &mut get("/x", Some("www.example.com")),
+                &mut RequestState::new(),
+            )
+            .expect("ok");
+        let Flow::Respond(response) = flow else {
+            panic!("the wrong host was let through");
+        };
+        assert_eq!(
+            response.headers()[http::header::LOCATION],
+            "https://example.com:8443/x"
+        );
+    }
+
+    #[test]
     fn no_host_is_no_redirect() {
         assert!(redirect(&mut get("/x", None)).is_none());
     }
@@ -284,6 +313,14 @@ mod tests {
         assert_eq!(
             split("example.com"),
             (String::new(), "example.com".to_string())
+        );
+        assert_eq!(
+            split("https://example.com:8443/"),
+            ("https".to_string(), "example.com".to_string())
+        );
+        assert_eq!(
+            split("http://[2001:db8::1]:8080"),
+            ("http".to_string(), "[2001:db8::1]".to_string())
         );
     }
 }
