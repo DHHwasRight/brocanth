@@ -72,14 +72,21 @@ The `[jobs]` section holds these settings:
 `url` has no flag because a URL can carry a password, and every user on the
 host can read a process's arguments. `migrate` is for development. In
 production, put the statements from `Queue::schema_sql` in a migration
-somebody reviewed. With the `config` module, the binary refuses a flag
+somebody reviewed. Those statements do not move the rows of the first
+queue's tables (`brocanth_jobs`, `brocanth_dead_jobs`): a project that ran
+it calls `Queue::migrate_legacy` once the tables exist, and again after the
+last old worker stopped. With the `config` module, the binary refuses a flag
 unless `flags_with_config: true` in `src/modules/brocanth.rs`. See `docs/module-flags.md`.
 
 ## Examples
 
 The examples use the memory store, so they run with no server. On
-Postgres, pass a `postgres://` URL to `Queue::connect`, or a pool you
-already have to `Queue::from_pool`.
+Postgres, pass a `postgres://` URL to `Queue::connect`. If the job bodies
+use a pool you already have, pass it to `Queue::beside`, which opens a
+small control pool for the queue on the same database: a running job must
+never hold the connection its heartbeat needs. `Queue::from_pool` makes
+the pool you give it the queue's control pool, and a worker refuses one
+smaller than the queue's own calls need.
 
 ### Define a job and enqueue it
 
@@ -240,6 +247,11 @@ tx.commit().await?;
 # Ok(())
 # }
 ```
+
+`in_tx` takes the connection the transaction runs on, `&mut PgConnection`.
+A `sqlx::Transaction` coerces to it, as above. A `brocanth_db::Tx`, with
+the role and settings `transact_as` set, hands it out:
+`.in_tx(tx.connection())`.
 
 ### Register the plugin and the admin tab
 
