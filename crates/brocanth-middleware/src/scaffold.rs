@@ -475,6 +475,10 @@ impl Module for RateLimit {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to(
+            "auth-screens",
+            "the example rule covers the sign-in, second-factor and password-check posts",
+        )
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
@@ -498,11 +502,19 @@ impl Module for RateLimit {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         // The rules are records, so they live in the file when there is
         // one. Without it they are code: a list of records has no flag.
+        // With the account screens, the example guards their posts; a
+        // `/login` that does not exist guards nothing.
+        let paths = if project.has("auth-screens") {
+            SCREEN_PATHS
+        } else {
+            LOGIN_PATHS
+        };
         let (prelude, adjust) = if project.has("config") {
             (RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_FILE), None)
         } else {
             (
-                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE) + LOGIN_RULE,
+                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
+                    + &LOGIN_RULE.replace("@PATHS@", paths),
                 Some(".rule(login)".to_string()),
             )
         };
@@ -541,7 +553,8 @@ impl Module for RateLimit {
             ],
         );
         if project.has("config") {
-            s.at(Slot::ConfigSections).block(RULES_TOML.to_string());
+            s.at(Slot::ConfigSections)
+                .block(RULES_TOML.replace("@PATHS@", paths));
         }
         s.at(Slot::AgentsSections)
             .block(RATE_LIMIT_AGENTS.to_string());
@@ -571,9 +584,16 @@ const RULES_IN_FILE: &str = "The rules are `[[rate_limit.rules]]` in config/<env
 /// Where the rules are, without one.
 const RULES_IN_CODE: &str = "The rule is below: `brocanth add config` moves rules to a file.";
 
+/// The example rule's paths: a login form.
+const LOGIN_PATHS: &str = r#""/login""#;
+
+/// The example rule's paths with `auth-screens`: the posts that check a
+/// password or a code.
+const SCREEN_PATHS: &str = r#""/account/signin", "/account/code", "/account/elevate""#;
+
 /// The example rule, as code.
 const LOGIN_RULE: &str = r#"        let login = brocanth_middleware::Rule::new("login", 5, 60)
-            .paths(["/login"])
+            .paths([@PATHS@])
             .methods(["POST"]);
 "#;
 
@@ -586,7 +606,7 @@ const RULES_TOML: &str = r#"
 # `key` is a list of "ip", "session" and "user", first found wins.
 [[rate_limit.rules]]
 name = "login"
-paths = ["/login"]
+paths = [@PATHS@]
 methods = ["POST"]
 limit = 5
 window_secs = 60
