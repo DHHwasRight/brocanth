@@ -51,7 +51,7 @@ type Build = Arc<dyn Fn(RunEnv) -> Entry + Send + Sync>;
 /// The job types a worker can run.
 #[derive(Clone, Default)]
 pub struct JobRegistry {
-    entries: HashMap<&'static str, Build>,
+    entries: HashMap<&'static str, (std::any::TypeId, Build)>,
 }
 
 impl JobRegistry {
@@ -62,9 +62,36 @@ impl JobRegistry {
 
     /// Registers a job type under its [`Job::NAME`].
     ///
-    /// Registering a second type under the same name replaces the first, so
-    /// the last registration wins, as it did before.
+    /// Registering the same type twice is harmless. Registering a
+    /// *different* type under a name that is taken panics, as the engine's
+    /// registry does: one of the two would decode the other's payloads, fail
+    /// and send them to the dead letter. Use [`JobRegistry::try_register`]
+    /// to get the refusal as a value.
+    ///
+    /// # Panics
+    ///
+    /// When another type is registered under `J::NAME`.
     pub fn register<J: Job>(&mut self) -> &mut Self {
+        if let Err(e) = self.try_register::<J>() {
+            panic!("{e}");
+        }
+        self
+    }
+
+    /// [`JobRegistry::register`], with a name another type holds reported
+    /// as an error instead of a panic.
+    pub fn try_register<J: Job>(&mut self) -> crate::Result<&mut Self> {
+        let id = std::any::TypeId::of::<J>();
+        if let Some((held, _)) = self.entries.get(J::NAME) {
+            if *held != id {
+                return Err(crate::Error::Backend(format!(
+                    "two job types are both registered as `{}`; a job's NAME must be unique\n\
+                     help: give one of the two types another `NAME`",
+                    J::NAME
+                )));
+            }
+            return Ok(self);
+        }
         let build: Build = Arc::new(|env: RunEnv| {
             Entry::custom(
                 J::NAME,
@@ -79,8 +106,8 @@ impl JobRegistry {
                 move |payload: Vec<u8>, cx: brocanth_queue::JobContext| run::<J>(env, payload, cx),
             )
         });
-        self.entries.insert(J::NAME, build);
-        self
+        self.entries.insert(J::NAME, (id, build));
+        Ok(self)
     }
 
     /// Whether a job of this name is registered.
@@ -108,7 +135,7 @@ impl JobRegistry {
     /// The engine's registry, with every runner built for `env`.
     pub(crate) fn build(&self, env: RunEnv) -> brocanth_queue::Registry {
         let mut registry = brocanth_queue::Registry::new();
-        for build in self.entries.values() {
+        for (_, build) in self.entries.values() {
             // The map's keys are unique, so a duplicate kind cannot happen.
             let _ = registry.try_add(build(env));
         }
@@ -258,6 +285,31 @@ mod tests {
         async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
             Ok(())
         }
+    }
+
+    /// Another type that claims `noop`.
+    #[derive(Serialize, Deserialize)]
+    struct NoopImpostor;
+
+    impl Job for NoopImpostor {
+        const NAME: &'static str = "noop";
+        type Error = std::convert::Infallible;
+        async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_second_type_under_a_taken_name_is_refused() {
+        let mut registry = JobRegistry::new();
+        registry.register::<Noop>();
+        // The same type again is harmless.
+        registry.register::<Noop>();
+        let e = registry
+            .try_register::<NoopImpostor>()
+            .expect_err("refused");
+        assert!(e.to_string().contains("help:"), "{e}");
+        assert_eq!(registry.len(), 1);
     }
 
     #[derive(Serialize, Deserialize)]
