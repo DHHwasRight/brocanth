@@ -37,6 +37,35 @@ fn a_project_with_a_queue_delivers_later_from_a_worker() {
     shape("mail-jobs", &["config", "jobs", "mail"]);
 }
 
+fn mail_file(files: &[(String, String)]) -> &str {
+    files
+        .iter()
+        .find(|(path, _)| path == "src/plugins/mail/mod.rs")
+        .map(|(_, text)| text.as_str())
+        .expect("src/plugins/mail/mod.rs")
+}
+
+/// With a queue in memory the application opens no database, so the test
+/// that starts it stays; with a queue in Postgres it goes.
+#[test]
+fn the_start_test_stays_unless_the_application_opens_postgres() {
+    let test = "fn the_application_starts_with_its_settings()";
+    let memory = brocanth_cli::testing::generate(
+        "my-blog",
+        &["config", "jobs", "jobs-memory", "mail"],
+        &[&Mail],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(mail_file(&memory).contains(test), "jobs-memory keeps it");
+    let postgres =
+        brocanth_cli::testing::generate("my-blog", &["config", "jobs", "mail"], &[&Mail])
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        !mail_file(&postgres).contains(test),
+        "a Postgres queue drops it"
+    );
+}
+
 /// No config file: the settings come from the environment and the flags,
 /// and the SMTP password has no flag.
 #[test]
