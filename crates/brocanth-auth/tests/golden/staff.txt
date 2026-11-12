@@ -1446,10 +1446,10 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
+            .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::cache::Cache>("cache")
+            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
@@ -1471,9 +1471,9 @@ pub(crate) use register;
 /// plugins all provide nothing.
 type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
 type WithDb = After<crate::plugins::db::Database, WithAdmin>;
-type WithAuth = After<crate::plugins::auth::Auth, WithDb>;
-type WithCache = After<crate::plugins::cache::Cache, WithAuth>;
-type WithSuperuser = After<crate::plugins::superuser::Superuser, WithCache>;
+type WithCache = After<crate::plugins::cache::Cache, WithDb>;
+type WithAuth = After<crate::plugins::auth::Auth, WithCache>;
+type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuth>;
 pub type Installed = WithSuperuser;
 
 /// Which hook families this binary installed, as a type.
@@ -1725,13 +1725,22 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
-        path: "auth.url",
-        help: "The Postgres database for accounts and sessions.",
-        flag: false,
-        file: "src/modules/auth.rs",
-        flags: Flags::Off,
+        path: "cache.migrate",
+        help: "Create the unlogged cache table at startup if it is absent.",
+        flag: true,
+        file: "src/modules/cache.rs",
+        flags: crate::modules::cache::MODULE.flags,
         none_as: None,
-        text: true,
+        text: false,
+    },
+    Setting {
+        path: "cache.sweep_every",
+        help: "Seconds between two sweeps of expired entries; 0 turns the sweep off.",
+        flag: true,
+        file: "src/modules/cache.rs",
+        flags: crate::modules::cache::MODULE.flags,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "auth.signing_key_env",
@@ -1775,24 +1784,6 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/auth.rs",
         flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "cache.migrate",
-        help: "Create the unlogged cache table at startup if it is absent.",
-        flag: true,
-        file: "src/modules/cache.rs",
-        flags: crate::modules::cache::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "cache.sweep_every",
-        help: "Seconds between two sweeps of expired entries; 0 turns the sweep off.",
-        flag: true,
-        file: "src/modules/cache.rs",
-        flags: crate::modules::cache::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -2057,8 +2048,8 @@ pub fn flag_args(
 fn defaults() -> Vec<(&'static str, String)> {
     let admin = crate::plugins::admin::Settings::default();
     let db = crate::plugins::db::Settings::default();
-    let auth = crate::plugins::auth::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
+    let auth = crate::plugins::auth::Settings::default();
     let superuser = crate::plugins::superuser::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
@@ -2079,7 +2070,8 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
-        ("auth.url", format!("{:?}", auth.url)),
+        ("cache.migrate", format!("{:?}", cache.migrate)),
+        ("cache.sweep_every", format!("{:?}", cache.sweep_every)),
         (
             "auth.signing_key_env",
             format!("{:?}", auth.signing_key_env),
@@ -2091,8 +2083,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.absolute_timeout",
             format!("{:?}", auth.absolute_timeout),
         ),
-        ("cache.migrate", format!("{:?}", cache.migrate)),
-        ("cache.sweep_every", format!("{:?}", cache.sweep_every)),
         ("superuser.email", format!("{:?}", superuser.email)),
         (
             "superuser.password_env",
@@ -2199,7 +2189,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 48b7ef01aaa159e5
+// brocanth-digest: c2bb7468c22b1aef
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2924,7 +2914,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -2932,14 +2923,22 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-blog"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 
+[cache]
+# Create the unlogged cache table at startup if it is absent.
+# Development only: see `PgCache::schema_sql` for the statements to put in a
+# migration instead.
+migrate = true
+# Seconds between two sweeps of expired entries; 0 turns the sweep off.
+# Each wait moves by up to a quarter, so instances do not sweep together.
+# Expired entries are never served; the sweep only frees their space.
+sweep_every = 300
+
 [auth]
-# The Postgres database for accounts and sessions.
-# The tables are created at startup, named brocanth_auth_*. A URL can
-# carry a password, so no flag sets it.
-url = "postgres://localhost/development"
 # The name of the variable that holds the session signing key.
 # Not the key. 32 bytes, base64url. `brocanth` will not invent one: a key
 # minted at startup logs every session out on each restart and differs
@@ -2960,16 +2959,6 @@ secure = false
 idle_timeout = 28800
 # Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
-
-[cache]
-# Create the unlogged cache table at startup if it is absent.
-# Development only: see `PgCache::schema_sql` for the statements to put in a
-# migration instead.
-migrate = true
-# Seconds between two sweeps of expired entries; 0 turns the sweep off.
-# Each wait moves by up to a quarter, so instances do not sweep together.
-# Expired entries are never served; the sweep only frees their space.
-sweep_every = 300
 
 [superuser]
 # The address of the superuser the server makes at start. Empty means none.
@@ -3399,7 +3388,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -3426,6 +3415,16 @@ impl Command for Migrate {
             println!("wrote {}", path.display());
             return Ok(());
         }
+        // With no directory, `up` would apply nothing and say all is
+        // applied: in a release image that forgot to copy it, a lie.
+        if matches!(self.action, Action::Up | Action::Down { .. }) && !dir.is_dir() {
+            anyhow::bail!(
+                "{} has no migrations/ directory, so there is nothing to apply or roll back\n\
+                 help: run this command from the project root, or copy migrations/ next to \
+                 the binary in the image",
+                ctx.root().display()
+            );
+        }
         let files = migrate::read_dir(dir)?;
         let config = database()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3444,6 +3443,14 @@ impl Command for Migrate {
 async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
     match action {
         Action::Up => {
+            let late = migrate::out_of_order(&migrator.status().await?);
+            if !late.is_empty() {
+                eprintln!(
+                    "warning: {} sorts before the newest applied migration, and is applied \
+                     after it. `migrate down` undoes it first.",
+                    late.join(", ")
+                );
+            }
             let applied = migrator.up().await?;
             if applied.is_empty() {
                 println!("Nothing to apply: each migration is applied.");
@@ -3859,7 +3866,7 @@ mod tests {
 //! else in the project changes type.
 //!
 //! 1. **`Store = PgStore`.** Accounts and sessions are rows in the
-//!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and
+//!    `brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and
 //!    a deploy. The pool is built in `before_start` with no connection, and
 //!    the readiness check that `serve` awaits before it listens runs
 //!    `migrate` once (it is idempotent and takes an advisory lock). To review
@@ -3934,7 +3941,7 @@ use brocanth_auth::{Clock as _, Passwords, PgStore, SystemClock};
 
 /// Where identities, sessions and single-use tokens live.
 ///
-/// Postgres, at `[auth] url`. See the file header.
+/// Postgres, on the pool the `db` plugin opened. See the file header.
 pub type Store = PgStore;
 
 /// How this application reaches a provider.
@@ -3962,11 +3969,9 @@ pub type Services = brocanth_auth::Auth<Store, Http, Clock>;
 /// It derives `Deserialize` because this application reads it from
 /// `[auth]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// The Postgres database the accounts and sessions live in.
-    pub url: String,
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
@@ -3984,25 +3989,9 @@ pub struct Settings {
     pub absolute_timeout: i64,
 }
 
-/// Every field but a secret, which prints as `<redacted>`: a log line or
-/// a panic message that prints the settings leaks no secret.
-impl std::fmt::Debug for Settings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Settings")
-            .field("url", &"<redacted>")
-            .field("signing_key_env", &self.signing_key_env)
-            .field("cookie_name", &self.cookie_name)
-            .field("secure", &self.secure)
-            .field("idle_timeout", &self.idle_timeout)
-            .field("absolute_timeout", &self.absolute_timeout)
-            .finish()
-    }
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
             signing_key_env: "MY_BLOG_SESSION_KEY".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
@@ -4035,16 +4024,6 @@ impl Plugin for Auth {
             store: None,
             sweeper: None,
         }
-    }
-
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.settings.url.is_empty() {
-            return Err(PluginError::new(
-                "[auth] url is required; accounts live in a Postgres database\n\
-                 help: set `url` under [auth] in the config file, or the variable for `auth.url`",
-            ));
-        }
-        Ok(())
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
@@ -4115,21 +4094,10 @@ impl Plugin for Auth {
             ..SessionConfig::default()
         };
 
-        // The hooks are synchronous and opening a pool is not, so the pool
-        // opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "[auth] needs a Tokio runtime at startup to open its pool ({e})\n\
-                 help: build the application inside the runtime that serves it"
-            ))
-        })?;
-        let store = {
-            let _entered = runtime.enter();
-            PgStore::connect_lazy(&self.settings.url)
-                .map_err(|e| PluginError::new(format!("[auth] {e}")))?
-        };
+        // The pool the `db` plugin opened, which registers before this one:
+        // one set of connections for the pages and the accounts.
+        let db = lc.require_service::<brocanth_db::Db>()?;
+        let store = PgStore::from_pool(db.pool().clone());
         let store = Arc::new(store);
         self.store = Some(Arc::clone(&store));
         // Ready when the database answers. The first check also creates the
@@ -4204,20 +4172,6 @@ impl Plugin for Auth {
         if let Some(services) = &self.services {
             cx.insert(services.clone());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_printed_settings_never_shows_a_secret() {
-        let settings = super::Settings {
-            url: "not-for-the-log".to_string(),
-            ..super::Settings::default()
-        };
-        let printed = format!("{settings:?}");
-        assert!(!printed.contains("not-for-the-log"), "{printed}");
-        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/cache/mod.rs =====
@@ -4422,7 +4376,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -4441,8 +4396,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -4468,12 +4424,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -4944,7 +4900,8 @@ DROP TABLE posts;
 ```
 
 `migrate up` applies each pending file in name order, each in one
-transaction. `migrate down [N]` runs the `-- down` part of the newest N.
+transaction. `migrate down [N]` runs the `-- down` part of the last N
+applied, the last applied first.
 `migrate status` lists each file. Do not edit a file that is applied: write
 a new one.
 
@@ -5051,7 +5008,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: e1c8983113925e61 -->
+<!-- brocanth-digest: 8046ab15ad245f06 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -5111,7 +5068,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "cache"]
+adapted_to = ["config", "cache", "db"]
 
 [modules.superuser]
 version = "0.1.0"
@@ -5129,4 +5086,4 @@ config = []
 crates = ["brocanth-auth"]
 adapted_to = ["admin"]
 
-# brocanth-digest: 983645e801a7c399
+# brocanth-digest: f57c6c35ebd6141f
