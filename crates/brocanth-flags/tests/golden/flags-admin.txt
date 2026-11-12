@@ -3069,12 +3069,15 @@ pub fn enabled(ctx: &Ctx, flag: Flag) -> bool {
 /// Who is asking, as the flags see it.
 ///
 /// Anonymous until this reads your user off the request, and an anonymous
-/// request sees only a flag that is on for everyone. With a user on the
-/// context, this is two lines:
+/// request sees only a flag that is on for everyone. A project created
+/// with the `auth` module gets a version that reads the signed-in account.
+/// Add a group only for a person who is in it, from your own data:
 ///
 /// ```ignore
-/// ctx.provided::<CurrentUser, _>()
-///     .map_or_else(Actor::anonymous, |user| Actor::new(user.id.to_string()).in_group("staff"))
+/// let mut actor = Actor::new(user.id.to_string());
+/// if user.is_staff {
+///     actor = actor.in_group("staff");
+/// }
 /// ```
 fn actor(_ctx: &Ctx) -> Actor {
     Actor::anonymous()
