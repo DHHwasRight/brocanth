@@ -31,6 +31,7 @@
 //! | See the recovery codes | the same: codes are returned only by the calls that take an [`AccountHolder`], and so is the list of enrolled factors ([`Mfa::enrolled`]) |
 //! | Reach [`Privilege::Elevated`] | [`Sessions::elevate`] refuses an impersonated session, and no other method takes a [`Privilege`] at all |
 //! | Impersonate somebody else | [`Sessions::impersonate`] refuses an operator session that is itself impersonated |
+//! | Connect or remove a provider sign-in | [`Linking::link`] and [`Linking::unlink`] take [`AccountHolder`] |
 //!
 //! The list is deliberately short. Everything an operator genuinely needs
 //! impersonation *for* — seeing the broken page, reproducing the failing
@@ -52,13 +53,15 @@
 //! [`Mfa::enrolled`]: crate::mfa::Mfa::enrolled
 //! [`Sessions::impersonate`]: crate::session::Sessions::impersonate
 //! [`brocanth-policy`]: https://docs.rs/brocanth-policy
+//! [`Linking::link`]: crate::linking::Linking::link
+//! [`Linking::unlink`]: crate::linking::Linking::unlink
 
 use serde::{Deserialize, Serialize};
 
 use crate::clock::UnixTime;
 use crate::error::AuthError;
 use crate::identity::AccountId;
-use crate::session::SessionId;
+use crate::session::{Privilege, SessionId};
 use crate::storage::SessionRecord;
 
 /// Who is really behind an impersonated session.
@@ -92,8 +95,27 @@ pub struct Impersonation {
 /// the only ways to get one are [`AccountHolder::of`] — which refuses an
 /// impersonated session — and [`AccountHolder::without_a_session`], whose name
 /// is the review prompt.
+///
+/// It also remembers when the session last re-proved itself, so a call that
+/// changes a credential ([`Mfa::begin_totp_enrolment`] and its siblings) can
+/// ask for a fresh elevation: a stolen cookie alone must not enrol the
+/// thief's authenticator.
+///
+/// [`Mfa::begin_totp_enrolment`]: crate::mfa::Mfa::begin_totp_enrolment
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AccountHolder(AccountId);
+pub struct AccountHolder {
+    account: AccountId,
+    proof: HolderProof,
+}
+
+/// How an [`AccountHolder`] was built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HolderProof {
+    /// From a session; `Some` with the moment it was elevated.
+    Session(Option<UnixTime>),
+    /// From [`AccountHolder::without_a_session`]: no request, no thief.
+    NoSession,
+}
 
 impl AccountHolder {
     /// Reads the holder out of a live session.
@@ -107,7 +129,11 @@ impl AccountHolder {
         if session.impersonation.is_some() {
             return Err(AuthError::Impersonated);
         }
-        Ok(Self(session.account.clone()))
+        let elevated_at = (session.privilege == Privilege::Elevated).then_some(session.created_at);
+        Ok(Self {
+            account: session.account.clone(),
+            proof: HolderProof::Session(elevated_at),
+        })
     }
 
     /// Asserts the holder with no session to check.
@@ -117,12 +143,26 @@ impl AccountHolder {
     /// defeats every guarantee this module makes**, which is why it is named
     /// the way it is rather than `new`.
     pub fn without_a_session(account: AccountId) -> Self {
-        Self(account)
+        Self {
+            account,
+            proof: HolderProof::NoSession,
+        }
     }
 
     /// Whose account it is.
     pub fn account(&self) -> &AccountId {
-        &self.0
+        &self.account
+    }
+
+    /// Whether the holder re-proved itself less than `max_age` seconds before
+    /// `now`. A holder built without a session counts as fresh: it has no
+    /// cookie to steal.
+    pub fn elevation_is_fresh(&self, now: UnixTime, max_age: UnixTime) -> bool {
+        match self.proof {
+            HolderProof::NoSession => true,
+            HolderProof::Session(Some(at)) => now - at < max_age,
+            HolderProof::Session(None) => false,
+        }
     }
 }
 
@@ -145,17 +185,23 @@ pub enum Restricted {
     Elevate,
     /// Starting a further impersonation from inside one.
     Nest,
+    /// Attaching or removing a provider sign-in.
+    ///
+    /// A link is a credential: an operator who connects their own provider
+    /// account to the subject keeps a way in after the impersonation ends.
+    LinkProvider,
 }
 
 impl Restricted {
     /// Everything on the list.
-    pub fn all() -> [Restricted; 5] {
+    pub fn all() -> [Restricted; 6] {
         [
             Restricted::ChangePassword,
             Restricted::ManageSecondFactors,
             Restricted::ReadRecoveryCodes,
             Restricted::Elevate,
             Restricted::Nest,
+            Restricted::LinkProvider,
         ]
     }
 
@@ -164,7 +210,8 @@ impl Restricted {
         match self {
             Restricted::ChangePassword
             | Restricted::ManageSecondFactors
-            | Restricted::ReadRecoveryCodes => "AccountHolder::of",
+            | Restricted::ReadRecoveryCodes
+            | Restricted::LinkProvider => "AccountHolder::of",
             Restricted::Elevate => "Sessions::elevate",
             Restricted::Nest => "Sessions::impersonate",
         }
@@ -179,6 +226,7 @@ impl std::fmt::Display for Restricted {
             Restricted::ReadRecoveryCodes => "read the recovery codes",
             Restricted::Elevate => "elevate the session",
             Restricted::Nest => "impersonate from inside an impersonation",
+            Restricted::LinkProvider => "connect or remove a provider sign-in",
         })
     }
 }

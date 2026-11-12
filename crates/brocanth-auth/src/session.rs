@@ -65,6 +65,10 @@ use crate::storage::{AuthStore, SessionRecord};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
+/// Seconds between two writes of a session's `last_seen_at`. A load within
+/// this time of the last write reads the row and writes nothing.
+const TOUCH_EVERY: UnixTime = 60;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// A session identifier: 256 random bits, base64url.
@@ -519,12 +523,11 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
             .impersonation
             .as_ref()
             .ok_or_else(|| AuthError::misconfigured("that session is not an impersonation"))?;
+        self.store.delete_session(&session.id).await?;
         let operator = self
-            .store
-            .session(&marker.operator_session)
+            .live(&marker.operator_session, self.clock.now())
             .await?
             .ok_or(AuthError::NoSession)?;
-        self.store.delete_session(&session.id).await?;
         Ok(self.cookie_for(
             &operator.id,
             operator.absolute_expires_at - self.clock.now(),
@@ -542,21 +545,47 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     /// bad cookie is entitled to none of those distinctions.
     pub async fn load(&self, cookie_value: &str) -> Result<SessionRecord, AuthError> {
         let id = self.unseal(cookie_value).ok_or(AuthError::NoSession)?;
-        let session = self.store.session(&id).await?.ok_or(AuthError::NoSession)?;
         let now = self.clock.now();
+        let session = self.live(&id, now).await?.ok_or(AuthError::NoSession)?;
+        // An impersonation lives only as long as the operator's own session:
+        // an operator signed out everywhere stops acting as anybody.
+        if let Some(marker) = &session.impersonation {
+            if self.live(&marker.operator_session, now).await?.is_none() {
+                self.store.delete_session(&session.id).await?;
+                return Err(AuthError::NoSession);
+            }
+        }
+        // One write a minute at most, not one per request: the idle timeout
+        // is hours, so a minute of precision changes nothing, and a request
+        // that loads the session three times writes no row three times.
+        if now - session.last_seen_at >= TOUCH_EVERY {
+            self.store.touch_session(&session.id, now).await?;
+            return Ok(SessionRecord {
+                last_seen_at: now,
+                ..session
+            });
+        }
+        Ok(session)
+    }
+
+    /// The session with this id, when it is alive at `now`. A dead one is
+    /// deleted on sight rather than left to a sweeper: the request that
+    /// discovered it is the cheapest place to do it.
+    async fn live(
+        &self,
+        id: &SessionId,
+        now: UnixTime,
+    ) -> Result<Option<SessionRecord>, AuthError> {
+        let Some(session) = self.store.session(id).await? else {
+            return Ok(None);
+        };
         if now >= session.absolute_expires_at
             || now - session.last_seen_at >= self.config.idle_timeout
         {
-            // A dead session is deleted on sight rather than left to a sweeper:
-            // the request that discovered it is the cheapest place to do it.
             self.store.delete_session(&session.id).await?;
-            return Err(AuthError::NoSession);
+            return Ok(None);
         }
-        self.store.touch_session(&session.id, now).await?;
-        Ok(SessionRecord {
-            last_seen_at: now,
-            ..session
-        })
+        Ok(Some(session))
     }
 
     /// Replaces a session's identifier, keeping everything else.

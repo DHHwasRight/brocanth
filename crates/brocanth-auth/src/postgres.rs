@@ -802,6 +802,51 @@ impl MfaStore for PgStore {
             .map_err(backend)?;
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
+
+    async fn record_second_factor_failure(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        let n: i32 = sqlx::query(sql::RECORD_SECOND_FACTOR_FAILURE)
+            .bind(account.as_str())
+            .bind(at)
+            .bind(window_start)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend)?
+            .try_get(0)
+            .map_err(backend)?;
+        Ok(u32::try_from(n).unwrap_or(0))
+    }
+
+    async fn second_factor_failures(
+        &self,
+        account: &AccountId,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        let row = sqlx::query(sql::SECOND_FACTOR_FAILURES)
+            .bind(account.as_str())
+            .bind(window_start)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend)?;
+        let n: i32 = match row {
+            Some(row) => row.try_get(0).map_err(backend)?,
+            None => 0,
+        };
+        Ok(u32::try_from(n).unwrap_or(0))
+    }
+
+    async fn clear_second_factor_failures(&self, account: &AccountId) -> Result<(), StoreError> {
+        sqlx::query(sql::CLEAR_SECOND_FACTOR_FAILURES)
+            .bind(account.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
 }
 
 #[async_trait]

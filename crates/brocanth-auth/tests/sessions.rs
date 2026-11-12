@@ -291,3 +291,28 @@ async fn a_password_reset_revokes_every_session_without_being_asked() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn a_load_writes_the_row_at_most_once_a_minute() {
+    let f = Fixture::new();
+    let sessions = f.sessions();
+    let account = an_account(&f).await;
+    let started = common::signed_in(&sessions, &account).await;
+    let cookie = sessions.seal(&started.session.id);
+    let stored = || async {
+        f.store
+            .session(&started.session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_seen_at
+    };
+
+    let first = stored().await;
+    f.clock.advance(30);
+    sessions.load(&cookie).await.unwrap();
+    assert_eq!(stored().await, first, "no write within the minute");
+    f.clock.advance(30);
+    sessions.load(&cookie).await.unwrap();
+    assert_eq!(stored().await, f.clock.now(), "a write after it");
+}

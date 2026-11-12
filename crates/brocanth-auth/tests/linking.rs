@@ -6,6 +6,7 @@ use brocanth_auth::error::AuthError;
 use brocanth_auth::identity::{EmailAddress, ProviderIdentity};
 use brocanth_auth::linking::{LinkRefusal, Linking, SignInOutcome};
 use brocanth_auth::storage::{AuthStore, NewAccount};
+use brocanth_auth::AccountHolder;
 use common::Fixture;
 use serde_json::json;
 
@@ -162,7 +163,10 @@ async fn an_explicit_link_from_the_account_itself_succeeds() {
     ));
 
     // Ada signs in with her password, and only then does the application link.
-    let link = linking.link(&ada.id, &waiting).await.expect("link");
+    let link = linking
+        .link(&AccountHolder::without_a_session(ada.id.clone()), &waiting)
+        .await
+        .expect("link");
     assert_eq!(link.account, ada.id);
 
     // Now the provider signs her in directly.
@@ -194,9 +198,15 @@ async fn an_identity_owned_by_another_account_cannot_be_linked() {
         .unwrap();
 
     let shared = identity("gitlab", "gl-1", Some("ada@example.com"), true);
-    linking.link(&ada.id, &shared).await.unwrap();
+    linking
+        .link(&AccountHolder::without_a_session(ada.id.clone()), &shared)
+        .await
+        .unwrap();
 
-    let err = linking.link(&grace.id, &shared).await.unwrap_err();
+    let err = linking
+        .link(&AccountHolder::without_a_session(grace.id.clone()), &shared)
+        .await
+        .unwrap_err();
     assert!(matches!(err, AuthError::AlreadyLinked), "{err:?}");
 }
 
@@ -206,8 +216,14 @@ async fn relinking_the_same_identity_to_the_same_account_is_fine() {
     let linking = Linking::new(f.store.clone(), f.clock.clone());
     let ada = f.store.create_account(NewAccount::default()).await.unwrap();
     let id = identity("discord", "d-1", Some("ada@example.com"), true);
-    linking.link(&ada.id, &id).await.unwrap();
-    linking.link(&ada.id, &id).await.expect("idempotent");
+    linking
+        .link(&AccountHolder::without_a_session(ada.id.clone()), &id)
+        .await
+        .unwrap();
+    linking
+        .link(&AccountHolder::without_a_session(ada.id.clone()), &id)
+        .await
+        .expect("idempotent");
     assert_eq!(linking.links(&ada.id).await.unwrap().len(), 1);
 }
 
@@ -225,7 +241,13 @@ async fn unlinking_the_last_way_in_is_refused() {
         other => panic!("{other:?}"),
     };
 
-    let err = linking.unlink(&account.id, "slack").await.unwrap_err();
+    let err = linking
+        .unlink(
+            &AccountHolder::without_a_session(account.id.clone()),
+            "slack",
+        )
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("only way into this account"),
         "{err}"
@@ -233,10 +255,19 @@ async fn unlinking_the_last_way_in_is_refused() {
 
     // With a second provider attached it is allowed.
     linking
-        .link(&account.id, &identity("github", "gh-1", None, false))
+        .link(
+            &AccountHolder::without_a_session(account.id.clone()),
+            &identity("github", "gh-1", None, false),
+        )
         .await
         .unwrap();
-    linking.unlink(&account.id, "slack").await.expect("unlink");
+    linking
+        .unlink(
+            &AccountHolder::without_a_session(account.id.clone()),
+            "slack",
+        )
+        .await
+        .expect("unlink");
     assert_eq!(linking.links(&account.id).await.unwrap().len(), 1);
 }
 
@@ -283,8 +314,11 @@ async fn a_provider_that_returns_no_address_still_registers() {
     }
 }
 
+/// An unverified provider address is not the account's address: a
+/// stranger could otherwise claim it before its owner signs up, and keep a
+/// way in through the link after the owner resets the password.
 #[tokio::test]
-async fn an_unverified_address_on_a_new_account_is_stored_unverified() {
+async fn an_unverified_address_does_not_become_the_account_address() {
     let f = Fixture::new();
     let linking = Linking::new(f.store.clone(), f.clock.clone());
     match linking
@@ -297,16 +331,26 @@ async fn an_unverified_address_on_a_new_account_is_stored_unverified() {
         .await
         .unwrap()
     {
-        SignInOutcome::Registered { account, .. } => {
+        SignInOutcome::Registered { account, link, .. } => {
+            assert_eq!(account.email, None, "the provider asserted nothing");
+            assert!(!account.email_verified);
+            // Kept on the link, as a contact.
             assert_eq!(
-                account.email.as_ref().map(|e| e.as_str()),
+                link.email.as_ref().map(|e| e.as_str()),
                 Some("nobody@example.com")
-            );
-            assert!(
-                !account.email_verified,
-                "the provider asserted nothing, so neither do we"
             );
         }
         other => panic!("{other:?}"),
     }
+    // The owner of the address can still make a password account with it.
+    f.accounts()
+        .register("nobody@example.com", "a long passphrase")
+        .await
+        .unwrap();
+    let owner = f
+        .store
+        .account_by_email(&EmailAddress::parse("nobody@example.com").unwrap())
+        .await
+        .unwrap();
+    assert!(owner.is_some(), "the owner's sign-up made an account");
 }

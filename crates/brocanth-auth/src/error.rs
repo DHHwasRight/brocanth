@@ -39,7 +39,7 @@ pub enum AuthError {
     FlowExpired,
 
     /// The provider answered the authorization request with an error.
-    #[error("the provider refused the authorization: {error}{}", .description.as_deref().map(|d| format!(" ({d})")).unwrap_or_default())]
+    #[error("the provider refused the authorization: {error}{}\nhelp: the person said no, or the app's registration at the provider is wrong (client id, redirect URI, scopes)", .description.as_deref().map(|d| format!(" ({d})")).unwrap_or_default())]
     ProviderRefused {
         /// The provider's `error` code.
         error: String,
@@ -48,7 +48,7 @@ pub enum AuthError {
     },
 
     /// The provider's response could not be understood.
-    #[error("the provider `{provider}` returned a response this crate cannot read: {detail}")]
+    #[error("the provider `{provider}` returned a response this crate cannot read: {detail}\nhelp: check the provider's endpoints in its catalog entry; the provider may have changed its API")]
     ProviderResponse {
         /// Provider id.
         provider: String,
@@ -61,7 +61,7 @@ pub enum AuthError {
     /// changed.
     ///
     /// [`ProfileMap`]: crate::providers::ProfileMap
-    #[error("the provider `{provider}` returned no `{field}`; its profile mapping expects one")]
+    #[error("the provider `{provider}` returned no `{field}`; its profile mapping expects one\nhelp: check the scopes the app asks for, and the provider's ProfileMap")]
     ProfileFieldMissing {
         /// Provider id.
         provider: String,
@@ -94,6 +94,11 @@ pub enum AuthError {
     #[error("that action needs a recently re-proved session")]
     ElevationRequired,
 
+    /// The account already has this factor, confirmed. Enrolling again would
+    /// replace the working one; remove it first.
+    #[error("that factor is already enrolled on this account\nhelp: remove it before you enrol a new one")]
+    AlreadyEnrolled,
+
     /// The provider identity is already linked to a different account.
     #[error("that provider account is already linked to another account")]
     AlreadyLinked,
@@ -104,21 +109,34 @@ pub enum AuthError {
 
     /// A configuration value is wrong, and it is wrong before any request is
     /// served.
-    #[error("auth is misconfigured: {0}")]
+    #[error("auth is misconfigured: {}", with_help(.0, "fix the value this message names where the application builds its auth config"))]
     Misconfigured(String),
 
     /// The storage implementation failed.
-    #[error("the auth store failed: {0}")]
+    #[error("the auth store failed: {}", with_help(.0, "check that the database is reachable and its tables exist (PgStore::migrate)"))]
     Store(String),
 
     /// The HTTP client failed.
-    #[error("the request to the provider failed: {0}")]
+    #[error("the request to the provider failed: {}", with_help(.0, "check that this host reaches the provider over HTTPS, and retry"))]
     Http(String),
 
     /// Hashing, signing or verifying failed for a reason that is not a wrong
     /// password.
-    #[error("a cryptographic operation failed: {0}")]
+    #[error("a cryptographic operation failed: {}", with_help(.0, "check the signing key (32 bytes, base64url) and the operating system's random source"))]
     Crypto(String),
+}
+
+/// `message`, with `help` as its `help:` line unless it has one already.
+///
+/// The operator-facing variants carry a `help:` line. Many messages are
+/// built where the exact next step is known and say it; the rest get the
+/// variant's general advice.
+fn with_help(message: &str, help: &str) -> String {
+    if message.contains("\nhelp:") {
+        message.to_string()
+    } else {
+        format!("{message}\nhelp: {help}")
+    }
 }
 
 impl AuthError {
@@ -130,5 +148,44 @@ impl AuthError {
     /// Builds a [`AuthError::Crypto`].
     pub fn crypto(what: impl Into<String>) -> Self {
         Self::Crypto(what.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_operator_error_says_what_to_do_next() {
+        for err in [
+            AuthError::misconfigured("the key is short"),
+            AuthError::Store("connection refused".into()),
+            AuthError::Http("timed out".into()),
+            AuthError::crypto("no entropy"),
+            AuthError::ProviderRefused {
+                error: "access_denied".into(),
+                description: None,
+            },
+            AuthError::ProviderResponse {
+                provider: "github".into(),
+                detail: "not JSON".into(),
+            },
+            AuthError::ProfileFieldMissing {
+                provider: "github".into(),
+                field: "subject",
+            },
+            AuthError::from(crate::storage::StoreError::backend("connection refused")),
+        ] {
+            let text = err.to_string();
+            assert_eq!(text.matches("\nhelp: ").count(), 1, "{text}");
+        }
+        // A message that names its own next step keeps it, and only it.
+        let own = AuthError::misconfigured("bad\nhelp: do this");
+        assert!(own.to_string().ends_with("help: do this"), "{own}");
+        // What a person reads stays plain.
+        assert_eq!(
+            AuthError::InvalidCredentials.to_string(),
+            "invalid credentials"
+        );
     }
 }

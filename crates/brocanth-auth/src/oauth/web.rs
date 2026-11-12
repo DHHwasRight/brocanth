@@ -61,6 +61,7 @@ use crate::clock::{Clock, UnixTime};
 use crate::error::AuthError;
 use crate::http_client::HttpClient;
 use crate::identity::{EmailAddress, ProviderIdentity};
+use crate::impersonation::AccountHolder;
 use crate::linking::SignInOutcome;
 use crate::mfa::{Admission, FactorPolicy, Mfa, Verified};
 use crate::oauth::{parse_pairs, AuthorizeOptions, CallbackParams, FlowState, OauthClient};
@@ -418,7 +419,15 @@ impl<H: HttpClient, C: Clock> OauthRoutes<H, C> {
                     "This sign-in took longer than ten minutes. Start again.",
                 ))
             }
-            Err(AuthError::StateMismatch | AuthError::NonceMismatch | AuthError::InvalidToken) => {
+            // The flow cookie stays: a callback with another state is not
+            // this browser's flow, and a forged link must not end it.
+            Err(AuthError::StateMismatch) => {
+                return Ok(OauthAnswer::refused(
+                    400,
+                    "This sign-in is not valid. Start again.",
+                ))
+            }
+            Err(AuthError::NonceMismatch | AuthError::InvalidToken) => {
                 return Ok(refused("This sign-in is not valid. Start again."))
             }
             Err(other) => return Err(other),
@@ -427,7 +436,19 @@ impl<H: HttpClient, C: Clock> OauthRoutes<H, C> {
         let provider = configured.provider.display_name.to_string();
 
         // Somebody is signed in: this is a link, and a link needs a POST.
-        if let Some(session) = signed_in_session(auth, request.cookies).await? {
+        let session = match signed_in_session(auth, request.cookies).await {
+            Err(AuthError::Impersonated) => {
+                return Ok(OauthAnswer::Page {
+                    status: 403,
+                    page: OauthPage::Refused {
+                        message: IMPERSONATED.to_string(),
+                    },
+                    cookies: vec![clear_flow],
+                })
+            }
+            other => other?,
+        };
+        if let Some(session) = session {
             let already = auth
                 .linking()
                 .links(&session.account)
@@ -550,7 +571,11 @@ impl<H: HttpClient, C: Clock> OauthRoutes<H, C> {
                 format!("Nothing is waiting to be connected. Sign in with {provider} again."),
             ));
         };
-        let Some(session) = signed_in_session(auth, request.cookies).await? else {
+        let session = match signed_in_session(auth, request.cookies).await {
+            Err(AuthError::Impersonated) => return Ok(OauthAnswer::refused(403, IMPERSONATED)),
+            other => other?,
+        };
+        let Some(session) = session else {
             let link = self.link_path(&identity.provider);
             return Ok(OauthAnswer::page(
                 401,
@@ -574,7 +599,8 @@ impl<H: HttpClient, C: Clock> OauthRoutes<H, C> {
                 },
             ));
         }
-        match auth.linking().link(&session.account, &identity).await {
+        let holder = AccountHolder::of(&session)?;
+        match auth.linking().link(&holder, &identity).await {
             Ok(_) => Ok(OauthAnswer::Redirect {
                 location: self.after_sign_in.clone(),
                 cookies: vec![cookies.clear(&cookies.link)],
@@ -592,13 +618,23 @@ impl<H: HttpClient, C: Clock> OauthRoutes<H, C> {
     }
 }
 
+/// What an impersonated session reads when it tries to connect a provider.
+const IMPERSONATED: &str =
+    "You are acting as another person. End the impersonation to connect a provider.";
+
 /// The session a request carries, when it is signed in. A pre-login session
 /// is not.
+///
+/// An impersonated session is an error, [`AuthError::Impersonated`]: a
+/// provider link is a credential, and an operator who attaches their own
+/// provider to the subject keeps a way in after the impersonation ends (see
+/// [`crate::impersonation::Restricted::LinkProvider`]).
 async fn signed_in_session<S: MfaStore, H: HttpClient, C: Clock>(
     auth: &Auth<S, H, C>,
     cookies: &str,
 ) -> Result<Option<SessionRecord>, AuthError> {
     match auth.sessions().from_cookie_header(cookies).await {
+        Ok(session) if session.impersonation.is_some() => Err(AuthError::Impersonated),
         Ok(session) if session.privilege != Privilege::Anonymous => Ok(Some(session)),
         Ok(_) | Err(AuthError::NoSession) => Ok(None),
         Err(other) => Err(other),

@@ -37,6 +37,8 @@ struct State {
     roles: BTreeMap<String, BTreeSet<String>>,
     assignments: BTreeSet<(AccountId, String)>,
     failed_logins: HashMap<AccountId, FailedLogins>,
+    /// Wrong second-factor codes: the count and when its window began.
+    second_factor_failures: HashMap<AccountId, (u32, UnixTime)>,
 }
 
 /// One account's row for [`LockoutStore`].
@@ -275,7 +277,12 @@ impl AuthStore for MemoryStore {
     async fn delete_sessions_for_account(&self, account: &AccountId) -> Result<u64, StoreError> {
         let mut state = self.state.lock().expect("memory store lock");
         let before = state.sessions.len();
-        state.sessions.retain(|_, s| &s.account != account);
+        state.sessions.retain(|_, s| {
+            &s.account != account
+                && s.impersonation
+                    .as_ref()
+                    .is_none_or(|marker| &marker.operator != account)
+        });
         Ok((before - state.sessions.len()) as u64)
     }
 
@@ -482,6 +489,48 @@ impl MfaStore for MemoryStore {
             .recovery
             .get(account)
             .map_or(0, |set| set.len() as u32))
+    }
+
+    async fn record_second_factor_failure(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        let mut state = self.state.lock().expect("memory store lock");
+        let row = state
+            .second_factor_failures
+            .entry(account.clone())
+            .or_insert((0, at));
+        if row.1 < window_start {
+            *row = (0, at);
+        }
+        row.0 = row.0.saturating_add(1);
+        Ok(row.0)
+    }
+
+    async fn second_factor_failures(
+        &self,
+        account: &AccountId,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .expect("memory store lock")
+            .second_factor_failures
+            .get(account)
+            .filter(|(_, since)| *since >= window_start)
+            .map_or(0, |(failures, _)| *failures))
+    }
+
+    async fn clear_second_factor_failures(&self, account: &AccountId) -> Result<(), StoreError> {
+        self.state
+            .lock()
+            .expect("memory store lock")
+            .second_factor_failures
+            .remove(account);
+        Ok(())
     }
 }
 
