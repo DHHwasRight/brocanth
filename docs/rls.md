@@ -18,7 +18,7 @@ No Rust library does this today: the crates on crates.io (`umbral-rls`,
 ```rust
 use brocanth_rls::{crud, Command, Function, Policy, Privilege, Role, Schema, Setting, SqlExpr, SqlType, Table};
 
-let member = Role::new("app_user").member("app_login");    // NOLOGIN, granted to the login
+let member = Role::new("app_user").member("app_login");      // NOLOGIN, granted to the login
 let tenant = Setting::new("tenant_id", SqlType::BigInt);     // brocanth.tenant_id
 let posts = Table::of(post::Entity);                        // ENABLE + FORCE
 
@@ -186,7 +186,21 @@ create and alter (new graph, topological order).
 
 The `-- down` part is not the inverse of each step. It is the diff from the
 new snapshot to the old one (`down`), so it follows the same rules and the
-same order, with one exception: it drops no role (see below).
+same order, with one exception: it drops no role (see below). So a removed
+membership is always revoked; when the plan drops the member role too, the
+`REVOKE` runs only if that role still exists.
+
+A table that leaves `schema()` keeps row-level security in the up part:
+its policies and grants are dropped, and `ENABLE` and `FORCE` stay. Fail
+closed: disabling it would show every row to a role with a grant made
+elsewhere. To turn row-level security off on purpose, write
+`ALTER TABLE … DISABLE ROW LEVEL SECURITY` in a SQL migration. The down
+part of the migration that added the table still disables it.
+
+Each part starts with `SET LOCAL lock_timeout = '5s'`. `ENABLE` and
+`CREATE POLICY` take an `ACCESS EXCLUSIVE` lock; behind a long read they
+wait, and every later query waits behind them. With the bound, a deploy
+fails fast and can run again.
 
 A rename is a drop and a create. drizzle-kit asks whether a pair is a
 rename. Here a policy holds no data, so a drop plus a create loses nothing,
@@ -204,6 +218,9 @@ re-created test database, meet a role that exists. So a role is made in a
 
 - Missing: `CREATE ROLE … NOLOGIN`, with only the attributes that differ
   from the `CREATE ROLE` defaults (`NOINHERIT`, `CREATEDB`, `CREATEROLE`).
+  The migrate lock covers one database, so another database can create
+  the role at the same time: the block catches `duplicate_object` and
+  checks the role as it finds it.
 - Present: the migration fails, with a `help:` line, when the role has
   `SUPERUSER` or `BYPASSRLS`: either bypasses every policy, so adopting it
   would make the policies a lie. Otherwise each attribute that differs is
