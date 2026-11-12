@@ -210,12 +210,29 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         if hits.items.is_empty() {
             body.push_str(&format!("<p>Nothing matches “{}”.</p>", escape(&term)));
         } else {
-            body.push_str(&format!("<p>{}</p><ol>", pager.summary()));
-            for hit in &hits.items {
+            body.push_str(&format!("<p>{}</p>", pager.summary()));
+            if hits.more {
                 body.push_str(&format!(
-                    "<li><a href=\"{}\">{}</a><p>{}</p></li>",
-                    escape(&hit.url),
-                    escape(&hit.title),
+                    "<p>More than {} results: try a narrower term.</p>",
+                    brocanth_search::MAX_COUNT
+                ));
+            }
+            body.push_str("<ol>");
+            for hit in &hits.items {
+                // A link only to a path or an http(s) URL: the index is
+                // written by code, and a `javascript:` URL in it would run
+                // here.
+                let title = if documents::safe_url(&hit.url) {
+                    format!(
+                        "<a href=\"{}\">{}</a>",
+                        escape(&hit.url),
+                        escape(&hit.title)
+                    )
+                } else {
+                    escape(&hit.title)
+                };
+                body.push_str(&format!(
+                    "<li>{title}<p>{}</p></li>",
                     escape(&hit.excerpt(200))
                 ));
             }
@@ -233,6 +250,7 @@ fn escape(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 "#;
 
@@ -269,6 +287,7 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         views::search::Search {
             term: &term,
             hits: &hits.items,
+            more: hits.more,
             pager: &pager,
         }
     )
@@ -276,14 +295,16 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 "#;
 
 const SEARCH_RSX: &str = r#"// The site search. Every value is escaped on the way out: the term came
-// from the request and the rows from whoever wrote the index.
+// from the request and the rows from whoever wrote the index. A hit links
+// only to a path or an http(s) URL: a `javascript:` URL would run here.
 
-use brocanth_search::documents::Hit;
+use brocanth_search::documents::{safe_url, Hit};
 use brocanth_search::pagination::Pager;
+use brocanth_search::MAX_COUNT;
 
 use crate::pages::views::parts::pager::PageNav;
 
-pub fn Search(term: &str, hits: &[Hit], pager: &Pager) -> Element {
+pub fn Search(term: &str, hits: &[Hit], more: bool, pager: &Pager) -> Element {
     <h1>Search</h1>
     <form method="get" action="/search" role="search">
         <input type="search" name="q" value={term} aria-label="Search" />
@@ -294,10 +315,17 @@ pub fn Search(term: &str, hits: &[Hit], pager: &Pager) -> Element {
             <p>Nothing matches “{term}”.</p>
         } else {
             <p>{pager.summary()}</p>
+            if more {
+                <p>More than {MAX_COUNT} results: try a narrower term.</p>
+            }
             <ol>
                 for hit in hits {
                     <li>
-                        <a href={&hit.url}>{&hit.title}</a>
+                        if safe_url(&hit.url) {
+                            <a href={&hit.url}>{&hit.title}</a>
+                        } else {
+                            <span>{&hit.title}</span>
+                        }
                         <p>{hit.excerpt(200)}</p>
                     </li>
                 }
@@ -323,9 +351,13 @@ fn agents(project: &Project) -> String {
          `/search` ranks the rows of `search_documents`, the site index.\n\
          {migration}\n\
          \n\
-         - Write a row with `brocanth_search::documents::upsert(ctx.db(), kind,\n\
-         \x20 key, title, body, url)` when a thing changes, in the same\n\
-         \x20 transaction or job, and `documents::remove` when it goes.\n\
+         - Write a row with `brocanth_search::documents::upsert(db, kind, key,\n\
+         \x20 title, body, url)` when a thing changes, and `documents::remove`\n\
+         \x20 when it goes. Pass the `&mut Tx` that writes the thing, so the row\n\
+         \x20 commits with it, or `ctx.db()` from a job. `url` is a path or an\n\
+         \x20 http(s) URL; anything else is refused.\n\
+         - The count stops at `brocanth_search::MAX_COUNT`. Put /search behind\n\
+         \x20 a rate limit on a large index: each search runs two queries.\n\
          - Every row is public. Index only what any visitor may read, or put\n\
          \x20 the rule in `src/pages/search.rs`: it goes into the `WHERE`, so a\n\
          \x20 hidden row is never ranked, counted or shown.\n\

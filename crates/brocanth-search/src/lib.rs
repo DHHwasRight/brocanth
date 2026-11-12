@@ -25,7 +25,7 @@ mod run;
 pub mod scaffold;
 
 #[cfg(feature = "runtime")]
-pub use index::{Index, Migration, SearchQuery, Statement, Weight, MAX_TERM};
+pub use index::{Index, Migration, SearchQuery, Statement, Weight, MAX_COUNT, MAX_TERM};
 #[cfg(feature = "postgres")]
 pub use run::Hits;
 
@@ -58,4 +58,13 @@ pub enum SearchError {
     #[cfg(feature = "postgres")]
     #[error("{0}")]
     Db(#[from] brocanth_db::DbError),
+    /// A URL for the site index that is not a relative path or `http(s)`.
+    #[error(
+        "the search document URL {url:?} is not a relative path or an http(s) URL\n\
+         help: write a path such as `/posts/42`; a `javascript:` or `data:` URL would run in the visitor's browser"
+    )]
+    UnsafeUrl {
+        /// What was given.
+        url: String,
+    },
 }

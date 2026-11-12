@@ -30,8 +30,15 @@ file with `model`), the page `/search`, and its rules in `AGENTS.md`. Fill
 the index when a thing changes:
 
 ```rust,ignore
-brocanth_search::documents::upsert(ctx.db(), "post", &id, &title, &body, &url).await?;
+// In the transaction that writes the post, so the row commits with it:
+brocanth_search::documents::upsert(&mut tx, "post", &id, &title, &body, &url).await?;
 ```
+
+`url` is a path or an `http(s)` URL; `upsert` refuses anything else, and
+the page links only such a URL. The count of a search stops at
+`MAX_COUNT` (1000) and `Hits::more` says when it did.
+`Index::migration` rewrites the table under a lock;
+`Index::migration_concurrently` builds the indexes without blocking writes.
 
 By hand:
 
@@ -83,7 +90,7 @@ let condition = rule.condition::<Post>(Dialect::Postgres).unwrap();
 let query = index.query(&condition, "rust async", 0, 20).unwrap();
 
 assert!(query.count.sql.starts_with(
-    r#"SELECT count(*) FROM "posts" WHERE ("posts"."published" = $1) AND ("posts"."search" @@ websearch_to_tsquery('english', $2)"#
+    r#"SELECT count(*) FROM (SELECT 1 FROM "posts" WHERE ("posts"."published" = $1) AND ("posts"."search" @@ websearch_to_tsquery('english', $2)"#
 ));
 assert!(query.select.sql.contains("ORDER BY search_rank DESC"));
 assert_eq!(query.select.binds.len(), 2, "the rule's value, then the term");

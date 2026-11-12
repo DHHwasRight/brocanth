@@ -6,7 +6,13 @@
 //! searches them all, and the search page needs no join.
 //!
 //! The row is a copy, so it can go stale. Write it in the same transaction
-//! as the thing it describes, or from a job, and delete it with the thing.
+//! as the thing it describes (pass the `Tx` to `upsert`), or from a job,
+//! and delete it with the thing.
+//!
+//! The URL is written into an `href` by the search page, so `upsert`
+//! refuses one that is not a relative path or `http(s)`: a `javascript:` URL
+//! in the index would run in every visitor's browser. [`safe_url`] is the
+//! rule, and the page checks it again on the way out.
 
 use brocanth_policy::{Column, Entity, Ident};
 
@@ -113,6 +119,29 @@ pub struct Hit {
     pub search_rank: f32,
 }
 
+/// Whether `url` may go into an `href`: a relative path (`/posts/42`,
+/// `posts/42`, `?page=2`) or an absolute `http://` or `https://` URL.
+///
+/// Everything else is refused: a scheme such as `javascript:` or `data:`, a
+/// protocol-relative `//host`, a backslash a browser reads as a slash, and
+/// any control character or leading space, which a browser strips before it
+/// reads the scheme.
+pub fn safe_url(url: &str) -> bool {
+    if url.is_empty() || url.starts_with(char::is_whitespace) || url.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return true;
+    }
+    if url.starts_with("//") || url.starts_with('\\') || url.starts_with("/\\") {
+        return false;
+    }
+    // A scheme is a `:` before the first `/`, `?` or `#`.
+    let head = url.split(['/', '?', '#']).next().unwrap_or_default();
+    !head.contains(':')
+}
+
 impl Hit {
     /// The body cut to about `chars` characters, at a word, with `…` when
     /// it was cut.
@@ -130,9 +159,10 @@ impl Hit {
 mod store {
     use brocanth_db::sqlx::postgres::PgRow;
     use brocanth_db::sqlx::{self, AssertSqlSafe, FromRow, Row};
-    use brocanth_db::{Db, DbError};
+    use brocanth_db::{DbError, Exec};
 
-    use super::Hit;
+    use super::{safe_url, Hit};
+    use crate::SearchError;
 
     impl<'r> FromRow<'r, PgRow> for Hit {
         fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
@@ -153,17 +183,27 @@ mod store {
     /// `kind` and `key` name the thing: `("post", "42")`. Call it when the
     /// thing is created or changed.
     ///
+    /// `db` is a `&Db` (its own statement) or a `&mut Tx`: pass the
+    /// transaction that writes the thing, and the row commits or rolls back
+    /// with it.
+    ///
     /// # Errors
     ///
-    /// What the database raised, as a [`DbError`] with a `help:` line.
+    /// [`SearchError::UnsafeUrl`] for a URL [`safe_url`] refuses, before
+    /// anything reaches the database; else what the database raised.
     pub async fn upsert(
-        db: &Db,
+        mut db: impl Exec,
         kind: &str,
         key: &str,
         title: &str,
         body: &str,
         url: &str,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), SearchError> {
+        if !safe_url(url) {
+            return Err(SearchError::UnsafeUrl {
+                url: url.to_string(),
+            });
+        }
         sqlx::query(AssertSqlSafe(
             "INSERT INTO \"search_documents\" (\"kind\", \"key\", \"title\", \"body\", \"url\") \
              VALUES ($1, $2, $3, $4, $5) ON CONFLICT (\"kind\", \"key\") DO UPDATE SET \
@@ -174,25 +214,26 @@ mod store {
         .bind(title)
         .bind(body)
         .bind(url)
-        .execute(db.pool())
+        .execute(db.executor())
         .await
         .map(|_| ())
-        .map_err(DbError::from)
+        .map_err(|e| SearchError::Db(DbError::from(e)))
     }
 
     /// Removes one thing from the site index. Removing a thing that is not
-    /// there is not an error.
+    /// there is not an error. `db` is a `&Db` or a `&mut Tx`, as for
+    /// [`upsert`].
     ///
     /// # Errors
     ///
     /// What the database raised.
-    pub async fn remove(db: &Db, kind: &str, key: &str) -> Result<u64, DbError> {
+    pub async fn remove(mut db: impl Exec, kind: &str, key: &str) -> Result<u64, DbError> {
         sqlx::query(AssertSqlSafe(
             "DELETE FROM \"search_documents\" WHERE \"kind\" = $1 AND \"key\" = $2",
         ))
         .bind(kind)
         .bind(key)
-        .execute(db.pool())
+        .execute(db.executor())
         .await
         .map(|done| done.rows_affected())
         .map_err(DbError::from)
@@ -201,3 +242,41 @@ mod store {
 
 #[cfg(feature = "postgres")]
 pub use store::{remove, upsert};
+
+#[cfg(test)]
+mod tests {
+    use super::safe_url;
+
+    #[test]
+    fn a_path_or_an_http_url_is_safe_in_an_href() {
+        for url in [
+            "/posts/42",
+            "posts/42",
+            "?page=2",
+            "#top",
+            "/a:b",
+            "https://example.com/x",
+            "HTTP://example.com",
+        ] {
+            assert!(safe_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_script_url_is_refused() {
+        for url in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            " javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:text/html,<script>",
+            "vbscript:x",
+            "//evil.example",
+            "\\\\evil.example",
+            "/\\evil.example",
+            "",
+        ] {
+            assert!(!safe_url(url), "{url:?}");
+        }
+    }
+}
