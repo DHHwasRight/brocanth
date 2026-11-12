@@ -300,7 +300,7 @@ impl Storage for Postgres {
         about: &ObjectInfo,
     ) -> Result<(), StorageError> {
         self.check_size(content)?;
-        let content_type = resolve_type(content, about);
+        let content_type = ContentType::resolve(content, about.declared_type.as_ref());
         // No `SELECT` first. The conflict clause is the existence check, it is
         // atomic where a check-then-insert is not, and it leaves the first
         // uploader's row alone — which is the whole of the no-rewrite
@@ -428,16 +428,6 @@ impl Storage for Postgres {
             Err(e) => Err(backend("store a variant", e)),
         }
     }
-}
-
-/// The media type to store: what the bytes are, then what the client said,
-/// then nothing. The same order [`LocalDisk`](crate::local::LocalDisk) uses,
-/// and for the same reason — see
-/// [`Storage::put`](crate::storage::Storage::put).
-fn resolve_type(content: &[u8], about: &ObjectInfo) -> ContentType {
-    ContentType::sniff(content)
-        .or_else(|| about.declared_type.clone())
-        .unwrap_or_else(ContentType::octet_stream)
 }
 
 /// Names the operation, never the address. A key in an error message is a key

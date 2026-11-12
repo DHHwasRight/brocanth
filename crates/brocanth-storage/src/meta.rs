@@ -128,6 +128,19 @@ impl ContentType {
     pub fn is_image(&self) -> bool {
         self.is_safe_to_inline()
     }
+
+    /// The media type a backend stores: what the bytes are, then what the
+    /// client said, then `application/octet-stream`.
+    ///
+    /// A declared type that would be served inline (an image type) is not
+    /// believed when the bytes are not that image: inline is for what
+    /// [`ContentType::sniff`] recognised, and HTML labelled `image/png` must
+    /// stay an attachment. See [`Storage::put`](crate::storage::Storage::put).
+    pub fn resolve(content: &[u8], declared: Option<&ContentType>) -> Self {
+        Self::sniff(content)
+            .or_else(|| declared.filter(|d| !d.is_safe_to_inline()).cloned())
+            .unwrap_or_else(Self::octet_stream)
+    }
 }
 
 fn is_token(s: &str) -> bool {
