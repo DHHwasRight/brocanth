@@ -104,11 +104,11 @@ async fn events_reach_the_client_as_they_are_sent() {
         .send(Event::new("one").with_event("tick").with_id("1"))
         .await
         .expect("open");
-    read_until(&mut client, &mut seen, "data:one").await;
+    read_until(&mut client, &mut seen, "data: one").await;
     let head = String::from_utf8_lossy(&seen).to_lowercase();
     assert!(head.contains("content-type: text/event-stream"), "{head}");
     assert!(head.contains("cache-control: no-cache"), "{head}");
-    assert!(head.contains("id:1\nevent:tick\ndata:one\n\n"), "{head}");
+    assert!(head.contains("id: 1\nevent: tick\ndata: one\n\n"), "{head}");
 
     events.comment("still here").await.expect("open");
     read_until(&mut client, &mut seen, ": still here").await;
@@ -143,7 +143,7 @@ async fn stopping_the_server_ends_the_stream_and_closes_the_sender() {
     let events = server.sender().await;
     let mut seen = Vec::new();
     events.send(Event::new("before")).await.expect("open");
-    read_until(&mut client, &mut seen, "data:before").await;
+    read_until(&mut client, &mut seen, "data: before").await;
 
     server.stopper.stop();
     tokio::time::timeout(Duration::from_secs(5), events.closed())

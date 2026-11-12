@@ -6080,7 +6080,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            "event:tick\ndata:1\n\nevent:tick\ndata:2\n\nevent:tick\ndata:3\n\n"
+            "event: tick\ndata: 1\n\nevent: tick\ndata: 2\n\nevent: tick\ndata: 3\n\n"
         );
     }
 }
