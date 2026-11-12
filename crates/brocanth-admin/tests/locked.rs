@@ -84,9 +84,12 @@ impl AdminData for Moved {
     }
 }
 
+/// One column the journal heard: its name, before and after.
+type Heard = (String, Option<String>, Option<String>);
+
 #[test]
 fn an_edit_journals_the_row_the_write_locked() {
-    let heard: Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>> = Arc::default();
+    let heard: Arc<Mutex<Vec<Heard>>> = Arc::default();
     let log = Arc::clone(&heard);
     let admin = Admin::new(
         Arc::new(Moved(Fixture::blog())),
