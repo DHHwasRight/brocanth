@@ -23,8 +23,9 @@ brocanth-server = { workspace = true, optional = true }
 
 # Probe checks run concurrently under a timeout, and the signal helper waits
 # for SIGTERM. The server already links tokio with `rt` and `time`; `signal`
-# is the one feature this adds.
-tokio = { version = "1", features = ["rt", "time", "signal", "macros"], optional = true }
+# is the one feature this adds, and `sync` lets probes and scrapes that
+# arrive together share one run.
+tokio = { version = "1", features = ["rt", "time", "signal", "macros", "sync"], optional = true }
 
 # `logs`: the request line and the application's own `tracing::info!` go
 # through one subscriber. `tracing` is in the workspace already (sqlx and

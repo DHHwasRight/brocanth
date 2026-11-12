@@ -23,6 +23,8 @@ fn config() -> ObserveConfig {
     let mut config = ObserveConfig::new("test");
     config.install_subscriber = false;
     config.check_timeout = Duration::from_millis(200);
+    // Each probe in these tests runs the checks again.
+    config.ready_cache = Duration::ZERO;
     config
 }
 
@@ -255,8 +257,47 @@ fn readyz_reports_each_plugin_check_and_fails_when_one_fails() {
         text.contains(r#""name":"database","status":"fail""#),
         "{text}"
     );
-    assert!(text.contains(r#""error":"connection refused""#), "{text}");
+    // The main listener answers anybody: the reason is not in the body.
+    assert!(!text.contains("connection refused"), "{text}");
+    let report = with_logs(&observer, observer.ready()).0;
+    assert_eq!(
+        report.checks[0].outcome,
+        Err("connection refused".to_string())
+    );
     drop(app);
+}
+
+#[test]
+fn probes_inside_the_cache_window_share_one_run_of_the_checks() {
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut config = config();
+    config.ready_cache = Duration::from_secs(60);
+    let observer = Observer::new(config).unwrap();
+    let counted = Arc::clone(&runs);
+    observer.readiness().add("counted", move || {
+        let counted = Arc::clone(&counted);
+        async move {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        }
+    });
+    let handler = observer.wrap(echo_id);
+    let (answers, _) = with_logs(&observer, async {
+        let (a, b, c) = tokio::join!(
+            handler(Request::new(Verb::Get, "/readyz")),
+            handler(Request::new(Verb::Get, "/readyz")),
+            handler(Request::new(Verb::Get, "/readyz")),
+        );
+        let d = handler(Request::new(Verb::Get, "/readyz")).await;
+        [a, b, c, d]
+    });
+    assert!(answers.iter().all(|a| a.status == 200));
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Draining wins at once, whatever the cached run said.
+    observer.readiness().drain();
+    let (draining, _) = with_logs(&observer, handler(Request::new(Verb::Get, "/readyz")));
+    assert_eq!(draining.status, 503);
 }
 
 #[test]

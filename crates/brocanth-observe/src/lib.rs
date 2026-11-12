@@ -142,6 +142,9 @@ struct Inner {
     config: ObserveConfig,
     readiness: OnceLock<Readiness>,
     own_readiness: Readiness,
+    /// The last `/readyz` run and when it finished. The lock is held while
+    /// a run is in flight, so probes that arrive together share it.
+    last_ready: tokio::sync::Mutex<Option<(Instant, ReadyReport)>>,
     #[cfg(feature = "metrics")]
     metrics: Metrics,
     #[cfg(feature = "_jobs")]
@@ -210,6 +213,7 @@ impl Observer {
                 config,
                 readiness: OnceLock::new(),
                 own_readiness: Readiness::new(),
+                last_ready: tokio::sync::Mutex::new(None),
                 #[cfg(feature = "metrics")]
                 metrics,
                 #[cfg(feature = "_jobs")]
@@ -244,9 +248,37 @@ impl Observer {
             .unwrap_or(&self.inner.own_readiness)
     }
 
-    /// Runs every readiness check now, as `/readyz` does.
+    /// Runs every readiness check now.
+    ///
+    /// `/readyz` shares a run between probes instead: see
+    /// [`ObserveConfig::ready_cache`].
     pub async fn ready(&self) -> ReadyReport {
         probes::ready(self.readiness(), self.inner.config.check_timeout).await
+    }
+
+    /// What `/readyz` answers: the last run while it is younger than
+    /// [`ObserveConfig::ready_cache`], else a new one. Draining wins at
+    /// once, whatever the last run said.
+    async fn ready_shared(&self) -> ReadyReport {
+        let timeout = self.inner.config.check_timeout;
+        if self.readiness().is_draining() {
+            return probes::ready(self.readiness(), timeout).await;
+        }
+        let mut last = self.inner.last_ready.lock().await;
+        if let Some((at, report)) = last.as_ref() {
+            if at.elapsed() < self.inner.config.ready_cache && !self.readiness().is_draining() {
+                return report.clone();
+            }
+        }
+        let report = probes::ready(self.readiness(), timeout).await;
+        #[cfg(feature = "logs")]
+        for check in &report.checks {
+            if let Err(error) = &check.outcome {
+                tracing::warn!(target: "brocanth::readyz", check = %check.name, "not ready: {error}");
+            }
+        }
+        *last = Some((Instant::now(), report.clone()));
+        report
     }
 
     /// The application's metrics registry, for a plugin's own series.
@@ -427,7 +459,8 @@ impl Observer {
         let answer = if config.live_path.as_deref() == Some(path) {
             probes::live()
         } else if config.ready_path.as_deref() == Some(path) {
-            self.ready().await.into_response()
+            // Anybody reaches the main listener: the reasons go to the log.
+            self.ready_shared().await.into_response(!main)
         } else {
             self.answer_metrics(request, main).await?
         };
