@@ -37,9 +37,11 @@ type RelayDriver =
 /// pool turns into a redelivery storm.
 ///
 /// So the queue uses a **separate, small control pool** for claim, heartbeat,
-/// settle and sweep. It is never shared with job bodies. [`Budget::check`]
-/// is called at boot and refuses to start rather than letting the process
-/// find this out under load.
+/// settle and sweep. It is never shared with job bodies. Call
+/// [`Budget::check`] at boot, so a pool that is too small refuses to start
+/// rather than letting the process find this out under load. The engine's
+/// [`Worker`] does not see the pools and cannot call it; `brocanth-jobs`
+/// calls it when its worker starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     /// Connections the application's jobs draw on.
@@ -309,6 +311,7 @@ pub struct Worker {
     unknown_seen: Arc<AtomicU64>,
     wakeup: Option<watch::Receiver<u64>>,
     relay: Option<RelayDriver>,
+    sweep: bool,
 }
 
 impl Worker {
@@ -333,7 +336,19 @@ impl Worker {
             unknown_seen: Arc::new(AtomicU64::new(0)),
             wakeup: None,
             relay: None,
+            sweep: true,
         })
+    }
+
+    /// Whether this worker calls [`Backend::sweep`](crate::Backend::sweep)
+    /// on its timer. On by default.
+    ///
+    /// Turn it off when several workers share one backend in one process
+    /// and something else sweeps for all of them: `brocanth-jobs` runs one
+    /// sweep per queue, not one per worker.
+    pub fn sweep(mut self, on: bool) -> Self {
+        self.sweep = on;
+        self
     }
 
     /// Watch the worker.
@@ -433,12 +448,14 @@ impl Worker {
         // deduplication table never shrank. The failure was invisible
         // because it needed load to appear.
         let (sweep_stop_tx, sweep_stop_rx) = watch::channel(false);
-        let sweeper = tokio::spawn(sweep_loop(
-            Arc::clone(&self.backend),
-            Arc::clone(&self.observer),
-            self.config.sweep_every,
-            sweep_stop_rx,
-        ));
+        let sweeper = self.sweep.then(|| {
+            tokio::spawn(sweep_loop(
+                Arc::clone(&self.backend),
+                Arc::clone(&self.observer),
+                self.config.sweep_every,
+                sweep_stop_rx,
+            ))
+        });
 
         while stop.borrow().is_none() {
             // Never claim more than there are permits for. A claimed job
@@ -565,8 +582,10 @@ impl Worker {
             let _ = task.await;
         }
         let _ = sweep_stop_tx.send(true);
-        sweeper.abort();
-        let _ = sweeper.await;
+        if let Some(sweeper) = sweeper {
+            sweeper.abort();
+            let _ = sweeper.await;
+        }
         report
     }
 }

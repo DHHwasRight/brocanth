@@ -14,8 +14,10 @@ use sqlx::PgPool;
 
 use crate::error::Result;
 
-/// Every waiting or running job. A running row becomes ready at once: its
-/// worker ran the old code. Its attempts stay spent, so a row that had none
+/// Every waiting or running job. A running row becomes ready one lease
+/// after the move, the old worker's default `stale_after` of sixty seconds:
+/// during a rolling deploy its old worker may still run it, and a new
+/// worker must not claim it at once. Its attempts stay spent, so a row that had none
 /// left is not claimed and the sweep buries it, as the old reclaim did. A
 /// unique key that `queue_bulk` already holds is not written twice.
 const MOVE_JOBS: &str = r#"
@@ -28,7 +30,7 @@ INSERT INTO queue_bulk
 SELECT job_name,
        queue,
        convert_to(payload, 'UTF8'),
-       CASE WHEN state = 'running' THEN now()
+       CASE WHEN state = 'running' THEN now() + interval '60 seconds'
             ELSE to_timestamp(run_at / 1000.0) END,
        attempts::integer,
        max_attempts::integer,

@@ -51,8 +51,6 @@
 //! application that never registered this plugin does not compile:
 //! `cx.get::<Queue, _>()`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
@@ -61,7 +59,7 @@ use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::queue::Queue;
 use crate::registry::JobRegistry;
-use crate::worker::{WorkerConfig, WorkerHandle};
+use crate::worker::{Finish, WorkerConfig, WorkerHandle};
 
 /// What the worker keeps of the grace period to give back the jobs that did
 /// not finish, so they are on the queue before the process exits.
@@ -71,11 +69,15 @@ const GIVE_BACK: Duration = Duration::from_secs(2);
 /// "as long as they take" without an `Instant` overflow.
 const UNBOUNDED: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The shutdown grace [`JobsConfig`] assumes: the engine worker's default.
+const DEFAULT_GRACE: Duration = Duration::from_secs(25);
+
 /// What [`JobsPlugin`] is built from.
 pub struct JobsConfig {
     queue: Queue,
     worker: Option<(JobRegistry, WorkerConfig)>,
     migrate: bool,
+    grace: Duration,
 }
 
 impl JobsConfig {
@@ -90,7 +92,18 @@ impl JobsConfig {
             queue,
             worker: None,
             migrate: false,
+            grace: DEFAULT_GRACE,
         }
+    }
+
+    /// The server's shutdown grace period, so the worker stops claiming
+    /// when the server starts to drain and gives its running jobs this
+    /// long, less the time to give back the ones that do not finish.
+    /// Twenty-five seconds by default.
+    #[must_use]
+    pub fn shutdown_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
     }
 
     /// Also run a worker in this process, for the registered job types.
@@ -134,6 +147,7 @@ pub struct JobsPlugin {
     queue: Queue,
     worker: Option<(JobRegistry, WorkerConfig)>,
     migrate: bool,
+    grace: Duration,
     handle: Option<WorkerHandle>,
 }
 
@@ -174,39 +188,21 @@ impl Plugin for JobsPlugin {
             queue: config.queue,
             worker: config.worker,
             migrate: config.migrate,
+            grace: config.grace,
             handle: None,
         }
     }
 
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         lc.services_mut().insert(self.queue.clone());
-        // Ready when the jobs table answers. A lookup by primary key, so the
-        // probe costs one index read however long the queue is; `stats` would
-        // count every row on every probe.
-        // With `migrating`, the check creates the tables first, until that
-        // worked once: the server awaits every check before it listens. No
-        // stage waits for it, because a stage that waits hangs a
-        // current-thread runtime.
-        let queue = self.queue.clone();
-        let migrated = Arc::new(AtomicBool::new(!self.migrate));
-        lc.ready_when(move || {
-            let queue = queue.clone();
-            let migrated = Arc::clone(&migrated);
-            async move {
-                if !migrated.load(Ordering::Acquire) {
-                    queue
-                        .migrate()
-                        .await
-                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
-                    migrated.store(true, Ordering::Release);
-                }
-                queue.ping().await.map_err(|e| e.to_string())
-            }
-        });
+        // Ready when the queue's tables answer: a catalogue lookup, which
+        // costs the same however long the queue is. With `migrating`, the
+        // check creates the tables first.
+        lc.ready_when(self.queue.readiness_check(self.migrate));
         Ok(())
     }
 
-    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         // In `start`, after the server's startup gate created the tables,
         // and inside the runtime the server runs on.
         if let Some((registry, config)) = self.worker.take() {
@@ -226,11 +222,17 @@ impl Plugin for JobsPlugin {
             if let Some(id) = config.id.clone() {
                 builder = builder.id(id);
             }
-            self.handle = Some(
-                builder
-                    .start()
-                    .map_err(|e| PluginError::new(format!("starting the job workers: {e}")))?,
+            let handle = builder
+                .start()
+                .map_err(|e| PluginError::new(format!("starting the job workers: {e}")))?;
+            // When the server starts to drain, stop claiming then, not after
+            // the listener drained. The running jobs have the grace period,
+            // less the time to give back the ones that do not finish.
+            handle.stop_when(
+                lc.readiness().draining(),
+                self.grace.saturating_sub(GIVE_BACK),
             );
+            self.handle = Some(handle);
         }
         Ok(())
     }
@@ -250,41 +252,13 @@ impl Plugin for JobsPlugin {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return Ok(());
-        };
-        // On a current-thread runtime this thread drives the I/O, so a wait
-        // here never ends. The worker stops by itself, by its deadline.
-        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
-            return Ok(());
-        }
-        let remaining = sd.remaining();
-        let finished = async move {
-            match remaining {
-                Some(left) => tokio::time::timeout(left, handle.finished()).await.ok(),
-                None => Some(handle.finished().await),
-            }
-        };
-        match std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(finished))
-                .join()
-                .map_err(|_| {
-                    PluginError::new(
-                        "the jobs stopping thread panicked\n\
-                         help: read the panic message above; it names the cause",
-                    )
-                })
-        })? {
-            Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => Err(PluginError::new(format!(
-                "stopping the job workers: {e}\n\
-                 help: read the panic message above; it names the cause"
-            ))),
-            None => Err(PluginError::new(
+        match handle.finish_blocking(sd.remaining()) {
+            Ok(Finish::Stopped(_) | Finish::NotWaited) => Ok(()),
+            Ok(Finish::Deadline) => Err(PluginError::new(
                 "the job workers were still giving jobs back at the deadline\n\
                  help: give the shutdown a longer grace period, so the workers have time to give them back",
             )),
+            Err(e) => Err(PluginError::new(format!("stopping the job workers: {e}"))),
         }
     }
 

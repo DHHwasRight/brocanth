@@ -244,7 +244,7 @@ pub use queue::{
 #[cfg(feature = "runtime")]
 pub use registry::JobRegistry;
 #[cfg(feature = "runtime")]
-pub use worker::{ShutdownReport, Worker, WorkerBuilder, WorkerConfig, WorkerHandle};
+pub use worker::{Finish, ShutdownReport, Worker, WorkerBuilder, WorkerConfig, WorkerHandle};
 
 /// Everything an application that enqueues and runs jobs needs, in one `use`.
 #[cfg(feature = "runtime")]

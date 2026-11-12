@@ -131,14 +131,38 @@ struct Inner {
     inspect: Arc<dyn DynInspect>,
     schedules: Schedules,
     store: Store,
+    /// Held by the one worker that runs this queue's upkeep: the schedule
+    /// ticker, the sweep and the outbox relay. See [`Queue::try_lead`].
+    lead: std::sync::Mutex<std::sync::Weak<()>>,
+    /// The one `LISTEN` connection the workers on this queue share, while
+    /// any of them runs.
+    wakeups: tokio::sync::Mutex<std::sync::Weak<tokio::sync::watch::Receiver<u64>>>,
+}
+
+impl Inner {
+    fn new(
+        backend: Arc<dyn DynBackend>,
+        inspect: Arc<dyn DynInspect>,
+        schedules: Schedules,
+        store: Store,
+    ) -> Self {
+        Inner {
+            backend,
+            inspect,
+            schedules,
+            store,
+            lead: Default::default(),
+            wakeups: Default::default(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Queue
 // ---------------------------------------------------------------------------
 
-/// The queue [`Queue::install`] recorded.
-static INSTALLED: std::sync::OnceLock<Queue> = std::sync::OnceLock::new();
+/// The queue [`Queue::install`] recorded last.
+static INSTALLED: std::sync::RwLock<Option<Queue>> = std::sync::RwLock::new(None);
 
 /// The queue.
 ///
@@ -222,31 +246,38 @@ impl Queue {
 
     /// Builds a queue on a store the application already has.
     ///
-    /// This is the path for an application that also uses `brocanth-db` or
-    /// `brocanth-model`: hand it the same `PgPool`, and the queue and the
-    /// models share one set of connections rather than opening a second pool
-    /// against the same database.
+    /// The pool becomes the queue's **control pool**: every claim,
+    /// heartbeat, settle, sweep and enqueue, the outbox relay and the
+    /// `LISTEN` connection run on it. Job bodies must not draw on the same
+    /// pool. If they do, running jobs can hold every connection, the
+    /// heartbeats cannot get one, and every lease expires at once: see
+    /// [`brocanth_queue::Budget`]. An application whose models already
+    /// have a pool uses [`Queue::beside`], which opens a small control pool
+    /// on the same database.
+    ///
+    /// A worker checks the pool's size when it starts and refuses a pool
+    /// smaller than the queue's own calls need.
     pub fn from_pool(backend: impl Into<Backend>) -> Self {
         let inner = match backend.into() {
             #[cfg(feature = "postgres")]
             Backend::Postgres(pool) => {
                 let pg = Arc::new(brocanth_queue_postgres::PgQueue::bulk(pool.clone()));
-                Inner {
-                    backend: pg.clone(),
-                    inspect: pg,
-                    schedules: Schedules::Postgres(pool.clone()),
-                    store: Store::Postgres(pool),
-                }
+                Inner::new(
+                    pg.clone(),
+                    pg,
+                    Schedules::Postgres(pool.clone()),
+                    Store::Postgres(pool),
+                )
             }
             #[cfg(feature = "memory")]
             Backend::Memory => {
                 let memory = Arc::new(brocanth_queue_memory::Memory::new());
-                Inner {
-                    backend: memory.clone(),
-                    inspect: memory,
-                    schedules: Schedules::Memory(Default::default()),
-                    store: Store::Memory,
-                }
+                Inner::new(
+                    memory.clone(),
+                    memory,
+                    Schedules::Memory(Default::default()),
+                    Store::Memory,
+                )
             }
         };
         Self {
@@ -254,6 +285,25 @@ impl Queue {
             clock: Arc::new(SystemClock),
             events: Arc::new(Silent),
         }
+    }
+
+    /// A queue on a control pool of its own, opened lazily on the database
+    /// `app` connects to, with at most `connections` connections.
+    ///
+    /// For an application whose job bodies use `app`: the queue's claim,
+    /// heartbeat, settle and relay then never wait behind a running job.
+    /// The control pool needs [`brocanth_queue::Budget::control_needed`]
+    /// connections for one worker, plus what the application's enqueues
+    /// use at once; ten is a sound start. The pool spawns its upkeep task,
+    /// so call this inside a Tokio runtime.
+    #[cfg(feature = "postgres")]
+    pub fn beside(app: &sqlx::PgPool, connections: u32) -> Self {
+        let options = (*app.connect_options()).clone();
+        Self::from_pool(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(connections.max(1))
+                .connect_lazy_with(options),
+        )
     }
 
     /// A queue in this process's memory. **For tests and development
@@ -265,8 +315,10 @@ impl Queue {
 
     /// Replaces the clock. See [`crate::clock`] for why there is one.
     ///
-    /// The clock drives the recurring schedules. A job's own delay is the
-    /// backend's business, and Postgres measures it with the server's clock.
+    /// The clock drives the recurring schedules and nothing else. A job's
+    /// own delay (`in_`, `at`), its retry and [`Queue::inspect`] read the
+    /// system clock, and Postgres turns a delay into an instant with the
+    /// server's clock.
     #[must_use]
     pub fn with_clock(mut self, clock: impl Clock) -> Self {
         self.clock = Arc::new(clock);
@@ -290,15 +342,38 @@ impl Queue {
         self.clock.now()
     }
 
-    /// One cheap read, to prove the store answers. A readiness check calls
-    /// it.
+    /// One cheap round trip, to prove the store answers and the queue's
+    /// tables exist. A readiness check calls it every few seconds, so it
+    /// reads no table: on Postgres it asks the catalogue whether the tables
+    /// are there, which costs the same however long the queue is. The
+    /// counts are [`Queue::stats`], for the admin screen.
     pub async fn ping(&self) -> Result<()> {
-        self.inner.inspect.stats().await?;
-        Ok(())
+        match &self.inner.store {
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pool) => {
+                let present: bool = sqlx::query_scalar(
+                    "SELECT to_regclass('queue_bulk') IS NOT NULL \
+                        AND to_regclass('brocanth_job_schedules') IS NOT NULL",
+                )
+                .fetch_one(pool)
+                .await?;
+                if present {
+                    Ok(())
+                } else {
+                    Err(Error::Backend(
+                        "the database answers, and the queue's tables are not in it\n\
+                         help: run `Queue::migrate`, or apply the statements `Queue::schema_sql` returns"
+                            .to_string(),
+                    ))
+                }
+            }
+            #[cfg(feature = "memory")]
+            Store::Memory => Ok(()),
+        }
     }
 
     /// Creates the tables if they are not there, and moves the rows of the
-    /// first queue's tables into the engine's.
+    /// first queue's tables into the engine's ([`Queue::migrate_legacy`]).
     ///
     /// Safe to call on every boot, from several processes at once. See
     /// [`Queue::schema_sql`] for the statements an application keeps in
@@ -317,6 +392,50 @@ impl Queue {
         }
     }
 
+    /// The readiness check a plugin registers for this queue: [`Queue::ping`],
+    /// and with `migrate`, [`Queue::migrate`] first, until it worked once.
+    ///
+    /// The server awaits every check once before it listens, so with
+    /// `migrate` the tables exist before the first job is claimed. No
+    /// lifecycle stage waits for it instead, because a stage that waits
+    /// hangs a current-thread runtime.
+    pub fn readiness_check(&self, migrate: bool) -> impl brocanth::plugin_health::ReadinessCheck {
+        let queue = self.clone();
+        let migrated = Arc::new(tokio::sync::OnceCell::<()>::new());
+        move || {
+            let queue = queue.clone();
+            let migrated = Arc::clone(&migrated);
+            async move {
+                if migrate {
+                    migrated
+                        .get_or_try_init(|| queue.migrate())
+                        .await
+                        .map_err(|e| format!("creating the jobs tables: {e}"))?;
+                }
+                queue.ping().await.map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    /// Moves the rows of the first queue's tables, `brocanth_jobs` and
+    /// `brocanth_dead_jobs`, into the engine's. Answers how many jobs and
+    /// how many dead jobs moved.
+    ///
+    /// [`Queue::migrate`] calls it. An application that keeps the schema in
+    /// `migrations/` (`schema_sql`) and turns `migrate` off calls it once,
+    /// after the engine's tables exist, and again after the last worker of
+    /// the old version stopped: until then such a worker can still write
+    /// to the old tables. Nothing happens when the old tables are absent.
+    /// The memory backend has no old tables.
+    pub async fn migrate_legacy(&self) -> Result<(u64, u64)> {
+        match &self.inner.store {
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pool) => crate::legacy::move_rows(pool).await,
+            #[cfg(feature = "memory")]
+            Store::Memory => Ok((0, 0)),
+        }
+    }
+
     /// The DDL [`Queue::migrate`] runs, as statements.
     ///
     /// For an application whose rule is that the schema lives in files a human
@@ -324,6 +443,10 @@ impl Queue {
     /// into a migration and never call [`Queue::migrate`]. The engine's
     /// archive needs a partition per day: a worker creates them as it
     /// sweeps.
+    ///
+    /// They do not move the rows of the first queue's tables, because those
+    /// tables may not exist. A project that ran the first queue calls
+    /// [`Queue::migrate_legacy`] once the tables exist.
     pub fn schema_sql(&self) -> Vec<&'static str> {
         match &self.inner.store {
             #[cfg(feature = "postgres")]
@@ -338,20 +461,24 @@ impl Queue {
         }
     }
 
-    /// Makes this queue the one [`Queue::installed`] answers. The first
-    /// call wins; a later one does nothing.
+    /// Makes this queue the one [`Queue::installed`] answers. The last
+    /// call wins.
     ///
     /// For a generated admin, which mounts its panels before any plugin has
     /// opened a queue: `JobsPanel::installed()` asks here when it renders.
-    /// A process builds one application, so "the first" is "the one". A
-    /// test that builds several hands the panel its queue instead.
+    /// The last call wins, and not the first: a test binary that builds one
+    /// application after another then reads the queue of the application
+    /// that started last, not the pool of one whose runtime has ended. Two
+    /// applications that run at the same time in one process still share
+    /// this one record; hand each panel its queue with `JobsPanel::new`.
     pub fn install(&self) {
-        let _ = INSTALLED.set(self.clone());
+        let mut slot = INSTALLED.write().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(self.clone());
     }
 
-    /// The queue [`Queue::install`] recorded, if one did.
+    /// The queue [`Queue::install`] recorded last, if one did.
     pub fn installed() -> Option<Queue> {
-        INSTALLED.get().cloned()
+        INSTALLED.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The engine's backend, for a worker or for a test that drives the
@@ -608,7 +735,24 @@ impl Queue {
         let mut fired = 0;
 
         for row in due {
-            let cron = Cron::parse(&row.cron)?;
+            // One row that does not parse must not stop the others. It is
+            // reported and parked a day ahead, so it is not re-read every
+            // tick; the row stays, because removing it would lose the
+            // operator's intent.
+            let cron = match Cron::parse(&row.cron) {
+                Ok(cron) => cron,
+                Err(error) => {
+                    self.events.handle(JobEvent::InternalError {
+                        during: "parsing a recurring schedule",
+                        error: &error,
+                    });
+                    self.inner
+                        .schedules
+                        .advance(&row.name, row.next_run_at, now_ms + 86_400_000, None, 0)
+                        .await?;
+                    continue;
+                }
+            };
             let misfire = Misfire::from_str(&row.misfire);
             let grace_ms = row.grace_ms;
 
@@ -702,6 +846,40 @@ impl Queue {
 
     pub(crate) fn event_sink(&self) -> Arc<dyn JobEvents> {
         Arc::clone(&self.events)
+    }
+
+    /// The upkeep token, if no other worker on this queue holds it.
+    ///
+    /// Every worker on a queue would otherwise run its own schedule ticker,
+    /// sweep and outbox relay, and an application with a worker per module
+    /// (the jobs plugin, the mailer, the webhooks) ran three of each. The
+    /// worker that holds the token runs them; the others claim jobs only,
+    /// and take the token over when its holder stops.
+    pub(crate) fn try_lead(&self) -> Option<Arc<()>> {
+        let mut lead = self.inner.lead.lock().unwrap_or_else(|e| e.into_inner());
+        if lead.upgrade().is_some() {
+            return None;
+        }
+        let token = Arc::new(());
+        *lead = Arc::downgrade(&token);
+        Some(token)
+    }
+
+    /// The `LISTEN` connection the workers on this queue share: the
+    /// running one, or a new one when none runs. It closes when the last
+    /// worker drops its handle, so the pool can close.
+    #[cfg(feature = "postgres")]
+    pub(crate) async fn shared_wakeups(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> std::result::Result<Arc<tokio::sync::watch::Receiver<u64>>, sqlx::Error> {
+        let mut slot = self.inner.wakeups.lock().await;
+        if let Some(rx) = slot.upgrade() {
+            return Ok(rx);
+        }
+        let rx = Arc::new(brocanth_queue_postgres::wakeups(pool).await?);
+        *slot = Arc::downgrade(&rx);
+        Ok(rx)
     }
 
     /// The Postgres pool this queue runs on, to open the transaction that
@@ -833,6 +1011,7 @@ impl<'a, J: Job> Enqueue<'a, J> {
 
     /// Kept so code written for the first queue still compiles. **It has no
     /// effect**: see [`Job::PRIORITY`].
+    #[deprecated(note = "no effect; put urgent work on a separate QUEUE")]
     pub fn priority(self, _priority: i32) -> Self {
         self
     }
@@ -950,12 +1129,26 @@ impl<'a, J: Job> Enqueue<'a, J> {
     /// # }
     /// ```
     ///
+    /// It takes the connection the transaction runs on, so any transaction
+    /// type works. A `sqlx::Transaction` coerces, as above. A
+    /// `brocanth_db::Tx`, including one under `transact_as` and its row
+    /// security, hands out its connection:
+    ///
+    /// ```ignore
+    /// db.transact(async |tx| {
+    ///     orders::insert(tx, &order).await?;
+    ///     queue.enqueue(ChargeCard { order: order.id }).in_tx(tx.connection()).await?;
+    ///     Ok(())
+    /// })
+    /// .await?;
+    /// ```
+    ///
     /// The outbox refuses a write once it holds 100,000 undelivered rows,
     /// so an outage of the relay fails the request that would grow it
     /// rather than filling the disk. A queue on the memory backend has no
     /// transaction to join, and refuses.
     #[cfg(feature = "postgres")]
-    pub async fn in_tx(self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+    pub async fn in_tx(self, tx: &mut sqlx::PgConnection) -> Result<()> {
         use brocanth_queue::TxEnqueue;
         #[cfg(feature = "memory")]
         if let Store::Memory = self.queue.inner.store {
@@ -1026,6 +1219,7 @@ impl<J: Job> Recurring<'_, J> {
 
     /// Kept so code written for the first queue still compiles. Stored, and
     /// **without effect**: see [`Job::PRIORITY`].
+    #[deprecated(note = "no effect; put urgent work on a separate QUEUE")]
     pub fn priority(mut self, priority: i32) -> Self {
         self.override_priority = Some(priority);
         self
@@ -1052,12 +1246,36 @@ impl<J: Job> Recurring<'_, J> {
                 job_name: J::NAME.to_string(),
                 queue: self.override_queue.unwrap_or_else(|| J::QUEUE.to_string()),
                 payload,
-                priority: i64::from(self.override_priority.unwrap_or(J::PRIORITY)),
+                priority: i64::from({
+                    #[allow(deprecated)]
+                    let default = J::PRIORITY;
+                    self.override_priority.unwrap_or(default)
+                }),
                 max_attempts: i64::from(J::MAX_ATTEMPTS),
                 next_run_at: to_millis(next),
                 misfire: self.misfire.as_str().to_string(),
                 grace_ms: self.grace.as_millis() as i64,
             })
             .await
+    }
+}
+
+#[cfg(all(test, feature = "memory"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_worker_at_a_time_holds_the_upkeep() {
+        let queue = Queue::memory();
+        let first = queue.try_lead().expect("the first worker leads");
+        assert!(
+            queue.clone().try_lead().is_none(),
+            "a second worker on the same queue runs no second upkeep"
+        );
+        drop(first);
+        assert!(
+            queue.try_lead().is_some(),
+            "the upkeep moves on when its holder stops"
+        );
     }
 }

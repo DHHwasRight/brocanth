@@ -559,7 +559,7 @@ impl<O: Outbox> Relay<O> {
             }
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
-                _ = stop.changed() => {}
+                () = crate::worker::changed_or_pending(&mut stop) => {}
             }
         }
     }

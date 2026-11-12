@@ -151,8 +151,11 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
     let queue = Queue::from_pool(pool.clone());
     queue.migrate().await.expect("migrate");
 
+    // The waiting job is ready. The running one waits out one old lease:
+    // during a rolling deploy its old worker may still be running it.
     let stats = queue.stats().await.expect("stats");
-    assert_eq!(stats.ready, 2, "both jobs are waiting again: {stats:?}");
+    assert_eq!(stats.ready, 1, "the waiting job is ready again: {stats:?}");
+    assert_eq!(stats.retrying, 1, "the running job waits a lease: {stats:?}");
     assert_eq!(stats.dead, 1);
     let dead = queue.dead_jobs(10, 0).await.expect("dead");
     assert_eq!(dead[0].kind, "echo");
@@ -165,19 +168,30 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
 
     // The old tables are left, empty, and a second migrate moves nothing twice.
     queue.migrate().await.expect("migrate again");
-    assert_eq!(queue.stats().await.expect("stats").ready, 2);
+    let again = queue.stats().await.expect("stats");
+    assert_eq!(again.ready + again.retrying, 2);
     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM brocanth_jobs")
         .fetch_one(&pool)
         .await
         .expect("count");
     assert_eq!(left, 0);
 
-    // And the moved jobs run.
+    // And the moved jobs run: the held one once its old lease is over,
+    // which this test brings forward rather than waiting a minute.
     let worker = Worker::builder(&queue)
         .poll_interval(Duration::from_millis(10))
         .register::<Echo>()
         .start()
         .expect("start");
+    wait_for("the waiting job to run", Duration::from_secs(10), || async {
+        log(&t).len() == 1
+    })
+    .await;
+    sqlx::query("UPDATE queue_bulk SET available_at = now() \
+         WHERE attempts > 0 AND lease_token IS NULL")
+        .execute(&pool)
+        .await
+        .expect("end the old lease");
     wait_for(
         "both moved jobs to run",
         Duration::from_secs(10),
@@ -590,4 +604,67 @@ async fn a_worker_told_not_to_listen_still_finds_the_work() {
         .shutdown(Duration::from_secs(5))
         .await
         .expect("the worker stopped");
+}
+
+// ---------------------------------------------------------------------------
+// The pool
+// ---------------------------------------------------------------------------
+
+/// A pool too small for the queue's own calls is refused when the worker
+/// starts, with the size it needs, and not found out under load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_refuses_a_pool_its_own_calls_cannot_fit_in() {
+    pool_or_skip!(pool);
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("a small pool");
+    let queue = Queue::from_pool(small);
+    queue.migrate().await.expect("migrate");
+    let refused = Worker::builder(&queue)
+        .register::<Echo>()
+        .start()
+        .err()
+        .expect("a two-connection pool is refused");
+    let text = refused.to_string();
+    assert!(text.contains("too small"), "{text}");
+    assert!(text.contains("help:"), "{text}");
+}
+
+/// The readiness probe reads no table, and it still fails while the
+/// queue's tables are missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_probe_fails_until_the_tables_exist() {
+    pool_or_skip!(pool);
+    let queue = Queue::from_pool(pool);
+    let missing = queue.ping().await.expect_err("no tables yet");
+    assert!(missing.to_string().contains("help:"), "{missing}");
+    queue.migrate().await.expect("migrate");
+    queue.ping().await.expect("the tables are there");
+}
+
+/// `in_tx` takes the connection a transaction runs on, so a raw `sqlx`
+/// transaction and the connection of any other transaction type both work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_tx_takes_any_transaction_s_connection() {
+    queue_or_skip!(queue);
+    let pool = queue.pg_pool().expect("a Postgres queue").clone();
+    let t = token("in-tx-conn");
+    let mut tx = pool.begin().await.expect("begin");
+    let conn: &mut sqlx::PgConnection = &mut tx;
+    queue
+        .enqueue(Echo {
+            token: t.clone(),
+            n: 1,
+        })
+        .in_tx(conn)
+        .await
+        .expect("enqueue in the transaction");
+    tx.commit().await.expect("commit");
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM queue_outbox")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(pending, 1);
 }
