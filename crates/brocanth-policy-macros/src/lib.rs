@@ -636,8 +636,18 @@ fn parse_and(input: ParseStream) -> syn::Result<PredExpr> {
 
 fn parse_unary(input: ParseStream) -> syn::Result<PredExpr> {
     if input.peek(Token![!]) {
-        input.parse::<Token![!]>()?;
-        return Ok(PredExpr::Not(Box::new(parse_unary(input)?)));
+        let bang = input.parse::<Token![!]>()?;
+        let inner = parse_unary(input)?;
+        if let Some(absent) = decided_absence(&inner) {
+            return Err(syn::Error::new(
+                bang.span,
+                format!(
+                    "`!` over a comparison with `else {absent}` turns the decision for an absent value around\n\
+                     help: write the inverse operator instead of `!`, for example `author_id != who.user_id else {absent}`"
+                ),
+            ));
+        }
+        return Ok(PredExpr::Not(Box::new(inner)));
     }
     if input.peek(syn::token::Paren) {
         let content;
@@ -667,6 +677,26 @@ fn parse_unary(input: ParseStream) -> syn::Result<PredExpr> {
             word.span(),
             format!("expected a comparison after column `{word}`\nhelp: use `==`, `!=`, `<`, `<=`, `>`, `>=`, `is`, `is not`, `in` or `not in`"),
         )),
+    }
+}
+
+/// The `else deny` or `else allow` inside a predicate, when it has one.
+///
+/// `else deny` compiles to `never` for an absent value, and `!never` is
+/// `always`: negated, the word grants access to the visitor it was written
+/// to refuse. `else null` stays unknown under `!`, so it is not reported.
+/// A `{ … }` block is Rust code, and the macro does not look inside it.
+fn decided_absence(pred: &PredExpr) -> Option<String> {
+    match pred {
+        PredExpr::Cmp {
+            value: ValueExpr {
+                absent: Some(word), ..
+            },
+            ..
+        } if word != "null" => Some(word.to_string()),
+        PredExpr::All(parts) | PredExpr::Any(parts) => parts.iter().find_map(decided_absence),
+        PredExpr::Not(inner) => decided_absence(inner),
+        _ => None,
     }
 }
 

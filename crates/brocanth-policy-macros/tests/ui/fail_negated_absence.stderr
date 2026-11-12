@@ -1,0 +1,6 @@
+error: `!` over a comparison with `else deny` turns the decision for an absent value around
+       help: write the inverse operator instead of `!`, for example `author_id != who.user_id else deny`
+  --> tests/ui/fail_negated_absence.rs:15:15
+   |
+15 |         list: !(author_id == who.user_id else deny),
+   |               ^

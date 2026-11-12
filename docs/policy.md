@@ -159,6 +159,12 @@ rule does not say what absence means. Write one of:
 This is PLAN.md §9's vulnerability class: in PocketBase, a typo in a negated
 rule becomes `NULL`, and `NULL` becomes access.
 
+`!` over a comparison with `else deny` or `else allow` does not compile.
+`else deny` makes the comparison `never` for an absent value, and `!never` is
+`always`: the negation grants access to the visitor that the word refuses.
+Write the inverse operator: `author_id != who.user_id else deny`, not
+`!(author_id == who.user_id else deny)`.
+
 ### Field masks
 
 `all`, `none`, `only [col, …]`, `except [col, …]`, or a `{ … }` block that
