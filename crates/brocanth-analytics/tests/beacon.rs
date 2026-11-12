@@ -11,8 +11,13 @@ use brocanth_analytics::{Beacon, BeaconConfig};
 use brocanth_test::{TestClient, TestRequest};
 
 fn answer(content_type: &'static str, body: &'static [u8]) -> Handler<Base> {
+    answer_with(200, content_type, body)
+}
+
+fn answer_with(status: u16, content_type: &'static str, body: &'static [u8]) -> Handler<Base> {
     Box::new(move |_cx: &mut RouteCx<'_, Base>| {
         Ok(http::Response::builder()
+            .status(status)
             .header("content-type", content_type)
             .body(Body::from(body.to_vec()))
             .expect("a response"))
@@ -37,6 +42,16 @@ fn table() -> Router<Handler<Base>> {
             Verb::Get,
             answer("text/html", b"<main>part</main>"),
         )
+        .unwrap();
+    table
+        .route(
+            "/missing",
+            Verb::Get,
+            answer_with(404, "text/html", b"<html><body>Not found</body></html>"),
+        )
+        .unwrap();
+    table
+        .route("/empty", Verb::Get, answer("text/html", b""))
         .unwrap();
     table
         .route(
@@ -97,6 +112,14 @@ fn a_partial_and_json_are_left_alone() {
         client.send(TestRequest::get("/data.json")).text(),
         "{\"a\":\"</body>\"}"
     );
+}
+
+#[test]
+fn an_error_page_and_an_empty_body_are_left_alone() {
+    let client = client(collecting(false));
+    let missing = client.send(TestRequest::get("/missing"));
+    assert_eq!(missing.text(), "<html><body>Not found</body></html>");
+    assert_eq!(client.send(TestRequest::get("/empty")).text(), "");
 }
 
 #[test]
