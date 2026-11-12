@@ -7,10 +7,11 @@ use brocanth_admin::data::{DataError, Scope, Search};
 use brocanth_admin::model::Row;
 use brocanth_admin::query::{Direction, Sort};
 use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
-use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition};
+use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition, LikeExpr};
 use brocanth_model::sea_orm::{
-    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, Order, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Select, TransactionSession, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, Iterable, Order,
+    PaginatorTrait, PrimaryKeyToColumn, QueryFilter, QueryOrder, QuerySelect, Select,
+    TransactionSession, TransactionTrait,
 };
 use std::str::FromStr;
 
@@ -36,8 +37,8 @@ pub fn scope_of(scope: Scope<'_>, backend: DbBackend) -> Result<Condition, DataE
     );
     if !matches {
         return Err(DataError::backend(format!(
-            "the row policy was compiled for {:?}, but this database is {backend:?}; set \
-             `AdminResource::DIALECT` to match",
+            "the row policy was compiled for {:?}, but this database is {backend:?}\n\
+             help: set `AdminResource::DIALECT` to the dialect of this database",
             condition.dialect()
         )));
     }
@@ -82,22 +83,37 @@ pub fn columns_of<E: EntityTrait>(name: &str) -> Result<E::Column, DataError> {
 ///
 /// The cast is because a searchable column need not be text. `LOWER` of an
 /// integer is an error on Postgres, and the admin lets you search an id.
+///
+/// The term is matched as written: a `%` or an `_` in it is escaped, so it
+/// matches itself and not any text.
 pub fn search_of<E: EntityTrait>(search: Search<'_>) -> Result<Condition, DataError> {
     if search.is_empty() {
         return Ok(Condition::all());
     }
-    let pattern = format!("%{}%", search.term.to_lowercase());
+    let pattern = format!("%{}%", like_escaped(&search.term.to_lowercase()));
     let mut any = Condition::any();
     for name in search.columns {
         let column = columns_of::<E>(name)?;
         let text = Func::cast_as(Expr::col(column), Alias::new("TEXT"));
         any = any.add(
             Expr::expr(Func::lower(text))
-                .like(pattern.clone())
+                .like(LikeExpr::new(pattern.clone()).escape('\\'))
                 .into_condition(),
         );
     }
     Ok(any)
+}
+
+/// `term` with `\`, `%` and `_` escaped by `\`, for a `LIKE … ESCAPE '\'`.
+pub fn like_escaped(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for c in term.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// `WHERE column = ?` for the admin's exact-match filter: the children of
@@ -128,20 +144,29 @@ pub fn value_of(value: &brocanth_admin::model::Value) -> brocanth_model::sea_orm
     }
 }
 
-/// `ORDER BY`, applied to a select.
+/// `ORDER BY`, applied to a select: the sort asked for, then the primary
+/// key.
+///
+/// The key is always the last term, also with no sort, so `LIMIT` and
+/// `OFFSET` cut one stable order. Without it Postgres may return the rows of
+/// two pages in any order, and a row shows on two pages or on none.
 pub fn order_of<E: EntityTrait>(
     select: Select<E>,
     sort: Option<&Sort>,
 ) -> Result<Select<E>, DataError> {
-    let Some(sort) = sort else {
-        return Ok(select);
-    };
-    let column = columns_of::<E>(&sort.column)?;
-    let order = match sort.direction {
-        Direction::Ascending => Order::Asc,
-        Direction::Descending => Order::Desc,
-    };
-    Ok(select.order_by(column, order))
+    let mut select = select;
+    if let Some(sort) = sort {
+        let column = columns_of::<E>(&sort.column)?;
+        let order = match sort.direction {
+            Direction::Ascending => Order::Asc,
+            Direction::Descending => Order::Desc,
+        };
+        select = select.order_by(column, order);
+    }
+    for key in E::PrimaryKey::iter() {
+        select = select.order_by(key.into_column(), Order::Asc);
+    }
+    Ok(select)
 }
 
 /// One page, as the admin's rows.
@@ -182,6 +207,33 @@ pub async fn row_of<E: EntityTrait>(
     Ok(found.as_ref().map(crate::row_from_json))
 }
 
+/// The rows whose `column` holds one of `keys`, guarded by the scope:
+/// `WHERE column IN (…) AND <condition>`. One query for a batch of foreign
+/// key labels. A key the column type cannot hold matches nothing.
+pub async fn rows_by<E: EntityTrait>(
+    db: &brocanth_model::sea_orm::DatabaseConnection,
+    column: &str,
+    keys: &[String],
+    scope: Scope<'_>,
+) -> Result<Vec<Row>, DataError> {
+    let column = columns_of::<E>(column)?;
+    let values: Vec<Expr> = keys
+        .iter()
+        .filter_map(|text| key_value(&column, text))
+        .collect();
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found = E::find()
+        .filter(Expr::col(column.as_column_ref()).is_in(values))
+        .filter(scope_of(scope, db.get_database_backend())?)
+        .into_json()
+        .all(db)
+        .await
+        .map_err(|e| DataError::backend(e.to_string()))?;
+    Ok(found.iter().map(crate::row_from_json).collect())
+}
+
 /// How many rows match the search and the scope. The scope is the one the
 /// page gets, so the total and the pages describe one set.
 pub async fn count_of<E: EntityTrait>(
@@ -206,37 +258,64 @@ where
 /// The value is bound and never interpolated, and the column went through
 /// `FromStr`, so neither half of this reaches SQL as text.
 ///
-/// The key arrives as text, from a URL. It binds as an integer when the
-/// column is one: PostgreSQL has no `integer = text` operator, so a text
-/// bind fails.
+/// The key arrives as text, from a URL, and binds as its column's type:
+/// PostgreSQL has no `integer = text` or `uuid = text` operator. A key the
+/// column cannot hold, such as `abc` for an integer, matches no row, so the
+/// admin answers 404 and not a database error.
 pub fn single_key<E: EntityTrait>(
     key: &brocanth_admin::model::PrimaryKey,
     table: &str,
 ) -> Result<Condition, DataError> {
-    use brocanth_model::sea_orm::sea_query::ColumnType;
     let (name, text) = crate::one_key(key, table)?;
     let column = columns_of::<E>(&name)?;
-    let integer = matches!(
-        column.def().get_column_type(),
-        ColumnType::TinyInteger
-            | ColumnType::SmallInteger
-            | ColumnType::Integer
-            | ColumnType::BigInteger
-            | ColumnType::TinyUnsigned
-            | ColumnType::SmallUnsigned
-            | ColumnType::Unsigned
-            | ColumnType::BigUnsigned
-    );
-    let value: brocanth_model::sea_orm::Value = match (integer, text.parse::<i64>()) {
-        (true, Ok(n)) => n.into(),
-        _ => text.into(),
+    let condition = match key_value(&column, &text) {
+        Some(value) => Expr::col(column.as_column_ref()).eq(value),
+        None => Expr::val(false),
     };
-    Ok(Condition::all().add(column.eq(value)))
+    Ok(Condition::all().add(condition))
+}
+
+/// One key, as text, bound as `column`'s type, or `None` when the column
+/// cannot hold it.
+///
+/// An integer binds as an integer. A UUID binds as text cast to `uuid`, so
+/// the crate needs no UUID library; its shape is checked first, so a bad
+/// one is no row rather than a cast error.
+fn key_value<C: ColumnTrait>(column: &C, text: &str) -> Option<Expr> {
+    use brocanth_model::sea_orm::sea_query::ColumnType;
+    match column.def().get_column_type() {
+        ColumnType::TinyInteger
+        | ColumnType::SmallInteger
+        | ColumnType::Integer
+        | ColumnType::BigInteger
+        | ColumnType::TinyUnsigned
+        | ColumnType::SmallUnsigned
+        | ColumnType::Unsigned
+        | ColumnType::BigUnsigned => text.parse::<i64>().ok().map(Expr::val),
+        ColumnType::Uuid => {
+            is_uuid(text).then(|| Expr::val(text.to_owned()).cast_as(Alias::new("uuid")))
+        }
+        _ => Some(Expr::val(text.to_owned())),
+    }
+}
+
+/// Whether `text` is a UUID as PostgreSQL reads one: 32 hex digits, with or
+/// without hyphens, with or without braces.
+fn is_uuid(text: &str) -> bool {
+    let inner = text
+        .strip_prefix('{')
+        .and_then(|t| t.strip_suffix('}'))
+        .unwrap_or(text);
+    let digits: Vec<char> = inner.chars().filter(|c| *c != '-').collect();
+    digits.len() == 32 && digits.iter().all(char::is_ascii_hexdigit)
 }
 
 /// The JSON `set_from_json` takes.
-pub fn json_of(values: &[(String, brocanth_admin::model::Value)]) -> serde_json::Value {
-    crate::json_from_values(values)
+pub fn json_of(
+    model: &brocanth_admin::model::ModelDescriptor,
+    values: &[(String, brocanth_admin::model::Value)],
+) -> serde_json::Value {
+    crate::json_from_values(model, values)
 }
 
 /// One entity's registry entry, columns and all.
@@ -306,8 +385,8 @@ where
     // scope and only one of them makes every column `NotSet`.
     let mut active = <E::ActiveModel as ActiveModelTrait>::default();
     active
-        .set_from_json(crate::json_from_values(values))
-        .map_err(invalid)?;
+        .set_from_json(crate::json_from_values(model, values))
+        .map_err(unreadable)?;
     let written = active.insert(db).await.map_err(invalid)?;
     key_of::<E>(model, &written)
 }
@@ -369,7 +448,7 @@ where
     };
     // The row as it stands, with the submitted fields written over it.
     let mut merged = serde_json::to_value(&found).map_err(|e| DataError::backend(e.to_string()))?;
-    let submitted = crate::json_from_values(values);
+    let submitted = crate::json_from_values(model, values);
     if let (Some(into), Some(from)) = (merged.as_object_mut(), submitted.as_object()) {
         for (name, value) in from {
             into.insert(name.clone(), value.clone());
@@ -377,7 +456,7 @@ where
     }
 
     let mut active = found.into_active_model();
-    active.set_from_json(merged).map_err(invalid)?;
+    active.set_from_json(merged).map_err(unreadable)?;
     active.update(&txn).await.map_err(invalid)?;
     txn.commit().await.map_err(backend)?;
     Ok(1)
@@ -435,7 +514,9 @@ where
     let row = crate::row_from_json(&json);
     brocanth_admin::model::PrimaryKey::from_row(model, &row).ok_or_else(|| {
         DataError::backend(format!(
-            "`{}` was written but its key could not be read back",
+            "`{}` was written but its key could not be read back\n\
+             help: check that the entity's primary key columns serialise under \
+             their column names",
             model.key
         ))
     })
@@ -443,11 +524,22 @@ where
 
 /// A database error on a write, as the admin spells it.
 ///
-/// Everything is a backend error here on purpose, and it is a known gap:
-/// `brocanth_model::Error::errors()` carries per-field entries, and copying
-/// them into `FieldErrors` is what puts a message beside its own input
-/// rather than in a banner at the top. That needs the model layer's error
-/// type to survive `DbErr`, which it does not yet.
+/// A validation hook of `brocanth-model` fails with a `DbErr` that carries
+/// its per-field errors ([`brocanth_model::Errors::from_db_err`]). Those
+/// become [`DataError::Invalid`], so each message lands beside its own
+/// input. Every other error is a backend error.
 fn invalid(error: brocanth_model::sea_orm::DbErr) -> DataError {
-    DataError::backend(error.to_string())
+    crate::db_error(error)
+}
+
+/// The submitted values did not fit the entity: a text that is not a
+/// number for an integer column, for example. The person can fix it, so it
+/// is a form error and not a backend error.
+fn unreadable(error: brocanth_model::sea_orm::DbErr) -> DataError {
+    if let Some(errors) = brocanth_model::Errors::from_db_err(&error) {
+        return DataError::Invalid(crate::field_errors(&errors));
+    }
+    let mut errors = brocanth_admin::data::FieldErrors::new();
+    errors.add_base(format!("The values could not be saved: {error}"));
+    DataError::Invalid(errors)
 }

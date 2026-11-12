@@ -25,6 +25,7 @@
 //! | [`AdminData::count`] | `SELECT count(*) … WHERE <search> AND <scope>` |
 //! | [`AdminData::list`] | `SELECT … WHERE <search> AND <filter> AND <scope> ORDER BY … LIMIT … OFFSET …` |
 //! | [`AdminData::fetch`] | `SELECT … WHERE <pk> = ? AND <scope>` |
+//! | [`AdminData::fetch_many`] | `SELECT … WHERE <column> IN (…) AND <scope>` |
 //! | [`AdminData::update`] | the write, guarded by `<pk> = ? AND <scope>`; report rows changed |
 //! | [`AdminData::delete`] | the same, for a delete |
 //!
@@ -249,6 +250,30 @@ pub trait AdminData: Send + Sync + 'static {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<Option<Row>, DataError>;
+
+    /// The rows whose `column` holds one of `keys`, under the scope:
+    /// `SELECT … WHERE <column> IN (…) AND <scope>`.
+    ///
+    /// The admin reads the labels of a page's foreign keys with it, one call
+    /// per column. A key that matches nothing, or that the scope refuses, is
+    /// left out. The default calls [`AdminData::fetch`] once per key; a SQL
+    /// source overrides it with one query.
+    async fn fetch_many(
+        &self,
+        model: &ModelDescriptor,
+        column: &str,
+        keys: &[String],
+        scope: Scope<'_>,
+    ) -> Result<Vec<Row>, DataError> {
+        let mut out = Vec::new();
+        for key in keys {
+            let key = PrimaryKey::single(column, key);
+            if let Some(row) = self.fetch(model, &key, scope).await? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
 
     /// Writes a new row and returns its key.
     ///

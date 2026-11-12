@@ -57,15 +57,15 @@
 //! are an enum on the entity and not in the column schema. See the admin's
 //! `adapter` module, which measured that.
 //!
-//! **No composite-key writes.** Reads of a composite key work; `update` and
-//! `delete` need `find_by_id` with a tuple, which has no dynamic spelling.
-//! A composite key is refused by name rather than half-supported.
+//! **No composite keys.** A row is addressed by one key column, for a read
+//! and for a write alike. A composite key is refused by name, with a
+//! `help:` line, rather than half-supported.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use brocanth_admin::data::DataError;
-use brocanth_admin::model::{PrimaryKey, Row, Value};
+use brocanth_admin::data::{DataError, FieldErrors};
+use brocanth_admin::model::{ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 
 pub use brocanth_admin;
 pub use brocanth_model;
@@ -75,8 +75,8 @@ mod source;
 
 pub use async_trait::async_trait;
 pub use source::{
-    columns_of, count_of, delete_of, entry_of, equals_of, insert_of, json_of, order_of, row_of,
-    rows_of, scope_of, search_of, single_key, update_of, value_of,
+    columns_of, count_of, delete_of, entry_of, equals_of, insert_of, json_of, like_escaped,
+    order_of, row_of, rows_by, rows_of, scope_of, search_of, single_key, update_of, value_of,
 };
 
 /// A module path the source was not given an entity for.
@@ -85,15 +85,33 @@ pub fn unknown_model(module_path: &str) -> DataError {
 }
 
 /// A database error, as the admin spells a backend failure.
+///
+/// A validation failure of the model layer is not a database error: it
+/// becomes [`DataError::Invalid`], so the form shows each message beside
+/// its own field.
 pub fn db_error(error: brocanth_model::sea_orm::DbErr) -> DataError {
-    DataError::backend(error.to_string())
+    match brocanth_model::Errors::from_db_err(&error) {
+        Some(errors) => DataError::Invalid(field_errors(&errors)),
+        None => DataError::backend(error.to_string()),
+    }
+}
+
+/// The model layer's validation errors, as the admin's form takes them.
+pub fn field_errors(errors: &brocanth_model::Errors) -> FieldErrors {
+    let mut out = FieldErrors::new();
+    for entry in errors {
+        out.add(entry.field.clone(), entry.message.clone());
+    }
+    out
 }
 
 /// What a name that is not a column gets, rather than a query.
 pub fn unknown_column(name: &str) -> DataError {
     DataError::backend(format!(
         "`{name}` is not a column on this entity; the admin was asked to \
-         sort or search on a name the schema does not have"
+         sort, search or filter on a name the schema does not have\n\
+         help: check the column names given to the `ModelAdmin` against the \
+         entity, and list the entity in the `admin_source!` of `models.rs`"
     ))
 }
 
@@ -129,19 +147,24 @@ pub fn value_from_json(value: &serde_json::Value) -> Value {
 
 /// The admin's values as the JSON object `set_from_json` takes.
 ///
-/// A text value that parses as JSON is passed through as JSON, which is how
-/// a `jsonb` column survives a round trip through a textarea. Everything
-/// else is a string, and SeaORM casts it to the column's type — or refuses,
-/// which is a validation message rather than a panic.
-pub fn json_from_values(values: &[(String, Value)]) -> serde_json::Value {
+/// The column's kind decides. A text value for a JSON column that parses as
+/// an object or an array is passed through as JSON, which is how a `jsonb`
+/// column survives a round trip through a textarea. Every other text value
+/// is a string, so a text column that holds `[1]` or `{}` stays text.
+/// SeaORM casts a string to the column's type, or refuses, which is a
+/// validation message rather than a panic.
+pub fn json_from_values(model: &ModelDescriptor, values: &[(String, Value)]) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     for (name, value) in values {
-        object.insert(name.clone(), json_from_value(value));
+        let json = model
+            .column(name)
+            .is_some_and(|c| c.kind == ColumnKind::Json);
+        object.insert(name.clone(), json_from_value(value, json));
     }
     serde_json::Value::Object(object)
 }
 
-fn json_from_value(value: &Value) -> serde_json::Value {
+fn json_from_value(value: &Value, json: bool) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
@@ -149,13 +172,13 @@ fn json_from_value(value: &Value) -> serde_json::Value {
         Value::Float(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
-        Value::Text(s) => match serde_json::from_str::<serde_json::Value>(s) {
+        Value::Text(s) if json => match serde_json::from_str::<serde_json::Value>(s) {
             // Only a composite: `"7"` parses as a number and must stay the
-            // string the form sent, or every text column holding digits
-            // changes type on its way to the database.
+            // string the form sent.
             Ok(parsed) if parsed.is_object() || parsed.is_array() => parsed,
             _ => serde_json::Value::String(s.clone()),
         },
+        Value::Text(s) => serde_json::Value::String(s.clone()),
     }
 }
 
@@ -165,12 +188,15 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
     match parts {
         [(column, value)] => Ok((column.clone(), value.clone())),
         [] => Err(DataError::backend(format!(
-            "`{table}` has no primary key, so the admin cannot address a row of it"
+            "`{table}` has no primary key, so the admin cannot address a row of it\n\
+             help: give the entity a primary key, or hide the model with \
+             `Discovery::without`"
         ))),
         _ => Err(DataError::backend(format!(
-            "`{table}` has a composite primary key, which this data source \
-             reads but cannot write: `find_by_id` needs a tuple and there is \
-             no dynamic spelling of one"
+            "`{table}` has a composite primary key; this data source addresses a \
+             row by one key column, so it can neither read nor write a row of it\n\
+             help: give the table a single-column key, or hide the model with \
+             `Discovery::without`"
         ))),
     }
 }
@@ -207,13 +233,13 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
 /// cache, a set of flags -- never needs one. That admin shows "nothing to
 /// administer" and its tabs, which is accurate rather than broken.
 ///
-/// # Why the match is written nine times
+/// # Why the match is written ten times
 ///
-/// Once per method, by the macro: six on the source, three on its
+/// Once per method, by the macro: seven on the source, three on its
 /// transaction. A helper macro holding it once cannot be written: a
 /// `macro_rules!` nested inside another cannot capture the outer one's
 /// variables, and every arm names a different entity, so no function can
-/// hold them either. Nine expansions of a two-line match is the cost of the
+/// hold them either. Ten expansions of a two-line match is the cost of the
 /// ORM being static and the admin being dynamic.
 ///
 /// # One save, one transaction
@@ -383,6 +409,24 @@ macro_rules! admin_source {
                 match model.module_path.as_str() {
                     $($module => {
                         $crate::row_of::<$entity>(&self.db, key, &model.table, scope).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn fetch_many(
+                &self,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                column: &str,
+                keys: &[::std::string::String],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::brocanth_admin::model::Row>,
+                $crate::brocanth_admin::data::DataError,
+            > {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::rows_by::<$entity>(&self.db, column, keys, scope).await
                     })*
                     other => ::std::result::Result::Err($crate::unknown_model(other)),
                 }

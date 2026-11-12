@@ -2264,6 +2264,9 @@ impl Admin {
             let Some(scope) = gate.scope() else {
                 continue;
             };
+            // One read per column, not per row: every distinct value the
+            // page holds that no earlier column resolved.
+            let mut keys: Vec<String> = Vec::new();
             for row in rows {
                 let Some(value) = row.get(&column.name) else {
                     continue;
@@ -2272,14 +2275,26 @@ impl Admin {
                     continue;
                 }
                 let text = value.as_input();
-                let slot = (relation.target.clone(), text.clone());
-                if out.contains_key(&slot) {
+                if out.contains_key(&(relation.target.clone(), text.clone()))
+                    || keys.contains(&text)
+                {
                     continue;
                 }
-                let key = PrimaryKey::single(&relation.target_column, &text);
-                if let Some(found) = self.data.fetch(&target.descriptor, &key, scope).await? {
-                    out.insert(slot, target.admin.label_for(&target.descriptor, &found));
-                }
+                keys.push(text);
+            }
+            if keys.is_empty() {
+                continue;
+            }
+            let found = self
+                .data
+                .fetch_many(&target.descriptor, &relation.target_column, &keys, scope)
+                .await?;
+            for row in found {
+                let Some(value) = row.get(&relation.target_column) else {
+                    continue;
+                };
+                let slot = (relation.target.clone(), value.as_input());
+                out.insert(slot, target.admin.label_for(&target.descriptor, &row));
             }
         }
         Ok(out)

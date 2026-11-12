@@ -38,8 +38,13 @@ brocanth-model.workspace = true
 # `with-json` to what `brocanth-model` already asked for and decides
 # nothing it had decided. `macros` is for the test, where another crate's
 # fixture spells `sea_orm::model` directly.
+#
+# `with-uuid`, because `into_json` reads a `uuid` column only with it: a
+# model keyed by a UUID would show no key and could not be opened. The
+# `uuid` crate is already in the lock through `brocanth-db`.
 sea-orm = { version = "=2.0.4", default-features = false, features = [
     "with-json",
+    "with-uuid",
     "macros",
 ] }
 
