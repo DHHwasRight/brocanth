@@ -48,6 +48,8 @@ default-run = "my-blog"
 #   brocanth-webhooks     no webhooks; a payment provider or a partner has no verified way in or out
 #   webhooks-in           no incoming webhooks; a sender's POST meets the CSRF check and is refused
 #   webhooks-out          no outgoing webhooks; a partner polls for what changed
+#   oauth                 no OAuth client; a call to a third-party API carries a token you manage by hand
+#   oauth-client          no connected accounts; nothing calls a provider's API for a person
 #   brocanth-realtime     no broker; a write tells nobody, and a client finds out by asking again
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
@@ -2798,7 +2800,7 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// It derives `Deserialize` because this application reads it from
 /// `[db]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// `postgres://user:password@host:5432/database`.
@@ -2823,6 +2825,25 @@ pub struct Settings {
     /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
     /// roots.
     pub ca_file: Option<String>,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("url", &"<redacted>")
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("acquire_timeout", &self.acquire_timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("search_path", &self.search_path)
+            .field("read_only", &self.read_only)
+            .field("application_name", &self.application_name)
+            .field("ca_file", &self.ca_file)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -2896,7 +2917,8 @@ impl Plugin for Database {
         // pool spawns its upkeep task, so it needs the runtime entered.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             PluginError::new(format!(
-                "[db] needs a Tokio runtime at startup to open its pool ({e})"
+                "[db] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
             ))
         })?;
         let db = {
@@ -2958,10 +2980,20 @@ impl Plugin for Database {
             scope
                 .spawn(|| runtime.block_on(close))
                 .join()
-                .map_err(|_| PluginError::new("[db] the closing thread panicked"))
+                .map_err(|_| {
+                    PluginError::new(
+                        "[db] the closing thread panicked\n\
+                         help: read the panic message above; it names the cause",
+                    )
+                })
         })?
         .then_some(())
-        .ok_or_else(|| PluginError::new("[db] connections were still in use at the deadline"))
+        .ok_or_else(|| {
+            PluginError::new(
+                "[db] connections were still in use at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], or end the work that holds a connection",
+            )
+        })
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
@@ -2970,6 +3002,20 @@ impl Plugin for Database {
         if let Some(db) = &self.db {
             cx.insert(db.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            url: "not-for-the-log".to_string(),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/rls/mod.rs =====
@@ -3039,7 +3085,7 @@ request.
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rls`  Postgres row-level security declared in Rust; `rls make` writes the migration
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3200,7 +3246,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 12a2a67413230d44 -->
+<!-- brocanth-digest: b3e38a9b444791fb -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

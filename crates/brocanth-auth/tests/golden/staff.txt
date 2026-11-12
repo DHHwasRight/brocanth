@@ -24,6 +24,7 @@ default-run = "my-blog"
 #   auth-screens          no account pages; the auth services are there and nothing calls them
 #   auth-lockout          no lockout; only a rate limit slows a guessing run
 #   brocanth-policy       no rule algebra; authorisation is whatever each handler remembered to check
+#   brocanth-rls          no row-level security; a query that forgets its WHERE shows every tenant's rows
 #   brocanth-storage      no file storage; an upload has nowhere to go and no address to be read back from
 #   storage-routes        no upload or download route; a handler stores and serves each file itself
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
@@ -4881,7 +4882,7 @@ request.
 - `superuser`  operator accounts that pass every admin check, and a createsuperuser command
 - `roles`  roles that grant permissions, stored with the accounts, for staff and the admin
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth-oauth`, `auth-screens`, `auth-lockout`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth-oauth`, `auth-screens`, `auth-lockout`, `policy`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -5050,7 +5051,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: c6c455a20cb542e0 -->
+<!-- brocanth-digest: e1c8983113925e61 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

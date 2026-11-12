@@ -27,6 +27,7 @@ brocanth-audit = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-mail = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["smtp", "serde"] }  # the `Outbox` in src/plugins/mail, and SMTP with rustls
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["reqwest-client", "policy", "postgres", "admin"] }  # the provider requests: a token exchange and a profile read
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git" }  # roles, grants and policies in Rust, diffed into migrations
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants"] }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
@@ -1991,6 +1992,7 @@ pub mod realtime;
 pub mod realtime_sse;
 pub mod realtime_websocket;
 pub mod resource;
+pub mod rls;
 pub mod robots;
 pub mod roles;
 pub mod sessions;
@@ -5077,7 +5079,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b5b8c54a7c5b58f2
+// brocanth-digest: c95289cdf2f958dd
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6050,6 +6052,17 @@ pub mod policy {
             flags: Flags::Project,
             rename: &[],
         };
+    }
+}
+
+/// The shape of src/modules/rls.rs.
+pub mod rls {
+    /// What src/modules/rls.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -7427,7 +7440,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 80126a642ee99669
+// brocanth-digest: b11a6128b6681c98
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -7500,6 +7513,7 @@ pub mod realtime;
 pub mod realtime_sse;
 pub mod realtime_websocket;
 pub mod resource;
+pub mod rls;
 pub mod robots;
 pub mod roles;
 pub mod rsx;
@@ -7544,6 +7558,7 @@ pub const ALL: &[&str] = &[
     "superuser",
     "roles",
     "policy",
+    "rls",
     "storage",
     "storage-routes",
     "input",
@@ -7592,7 +7607,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: fd3bec428228a28e
+// brocanth-digest: cf079e075a31e670
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -8249,6 +8264,20 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/rls.rs =====
+//! `rls`: Postgres row-level security declared in Rust; `rls make` writes the
+//! migration.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::rls::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/storage.rs =====
 //! `storage`: uploads on a local disk, addressed by content hash; no object
 //! store and no S3.
@@ -9961,11 +9990,12 @@ pub mod createsuperuser;
 pub mod css;
 pub mod dbshell;
 pub mod migrate;
+pub mod rls;
 pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: 17b67403988f0268
+// brocanth-digest: e19130295a5ab4cb
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/serve.rs =====
 //! `serve` -- the one command the scaffold wrote.
@@ -11089,6 +11119,102 @@ fn unlisted() -> anyhow::Result<()> {
 /// The pool's configuration: `[db]`, through the loader the server uses, so
 /// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
 /// sees.
+fn database() -> anyhow::Result<DbConfig> {
+    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
+    Ok(config
+        .section::<crate::plugins::db::Settings>("db")?
+        .config())
+}
+===== src/commands/rls.rs =====
+//! `rls` -- the row-level security of `src/plugins/rls/mod.rs`, as
+//! migrations.
+//!
+//! `rls make <name>` compares `schema()` with `migrations/rls.json` and
+//! writes the difference as a migration, with its `-- down` part. It
+//! applies nothing: `migrate up` does. `rls sql` prints the whole schema as
+//! SQL. `rls check` compares the database in `[db] url` with the snapshot.
+
+use std::path::Path;
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_db::{Db, DbConfig};
+use brocanth_rls::migration::{self, Format};
+
+/// The migration file `rls make` writes: a SeaORM migration, because the project has `model`.
+const FORMAT: Format = Format::SeaOrm;
+
+/// What to run after `rls make`.
+const NEXT: &str = "List it with `migrate sync`, then apply it with `migrate up`.";
+
+/// Write, print or check the row-level security migrations
+#[cmd]
+#[derive(clap::Args)]
+pub struct Rls {
+    #[command(subcommand)]
+    action: Action,
+}
+
+#[derive(clap::Subcommand)]
+enum Action {
+    /// Write migrations/<UTC time>_<NAME> with what changed since migrations/rls.json
+    Make {
+        /// The name of the migration, in snake case: add_post_policies
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Print the SQL that creates the whole schema
+    Sql,
+    /// Compare the database in `[db] url` with migrations/rls.json
+    Check,
+}
+
+impl Command for Rls {
+    fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
+        std::env::set_current_dir(ctx.root())?;
+        let dir = Path::new("migrations");
+        let schema = crate::plugins::rls::schema();
+        match self.action {
+            Action::Make { name } => match migration::make(&schema, dir, &name, FORMAT)? {
+                None => println!("Nothing to write: migrations/rls.json matches schema()."),
+                Some(made) => {
+                    println!("wrote {}", made.path.display());
+                    for step in made.steps {
+                        println!("  {step}");
+                    }
+                    println!("{NEXT}");
+                }
+            },
+            Action::Sql => print!("{}", schema.create_sql()?),
+            Action::Check => {
+                let snapshot = migration::read_snapshot(dir)?;
+                let config = database()?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let drift = runtime.block_on(async {
+                    let db = Db::connect(&config).await?;
+                    let drift = brocanth_rls::catalog::drift(&db, &snapshot).await;
+                    db.close().await;
+                    anyhow::Ok(drift?)
+                })?;
+                if drift.is_empty() {
+                    println!("The database matches migrations/rls.json.");
+                } else {
+                    for line in &drift {
+                        println!("{line}");
+                    }
+                    anyhow::bail!(
+                        "the database differs from migrations/rls.json\n\
+                         help: run `migrate up`, or `rls make <name>` after a change to schema()"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The pool's configuration: `[db]`, through the loader the server uses.
 fn database() -> anyhow::Result<DbConfig> {
     let config = brocanth_config::Loader::new(crate::app::APP).load()?;
     Ok(config
@@ -17788,6 +17914,42 @@ impl PageError for Error {
         Error::new(status, message)
     }
 }
+===== src/plugins/rls/mod.rs =====
+//! Row-level security: the roles, tables and policies of this database.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! Declare the rules here, then run `brocanth rls make <name>`. It compares
+//! `schema()` with `migrations/rls.json` and writes a migration with the
+//! difference. `brocanth migrate up` applies it. See `docs/rls.md` in
+//! brocanth for the design.
+//!
+//! ```ignore
+//! use brocanth_rls::{Policy, Privilege, Role, Setting, SqlExpr, SqlType, Table};
+//!
+//! let member = Role::new("app_member").member("app_login");
+//! let tenant = Setting::new("tenant_id", SqlType::BigInt);
+//! let posts = Table::new("posts").force().grant(&member, Privilege::CRUD);
+//! let mine = SqlExpr::col("tenant_id").eq(tenant.get());
+//! Schema::new()
+//!     .role(member.clone())
+//!     .table(posts.clone())
+//!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
+//! ```
+//!
+//! A request then runs as its principal, inside one transaction:
+//!
+//! ```ignore
+//! let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+//! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
+//! ```
+
+use brocanth_rls::Schema;
+
+/// Every role, table, function and policy row-level security needs.
+pub fn schema() -> Schema {
+    Schema::new()
+}
 ===== src/plugins/robots/mod.rs =====
 //! The robots.txt, as this application answers it.
 //!
@@ -19414,6 +19576,7 @@ request.
 - `superuser`  operator accounts that pass every admin check, and a createsuperuser command
 - `roles`  roles that grant permissions, stored with the accounts, for staff and the admin
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
+- `rls`  Postgres row-level security declared in Rust; `rls make` writes the migration
 - `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
 - `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails
 - `input`  a form or a JSON body, read into a struct, with every fault at once
@@ -20083,6 +20246,26 @@ A role answers which people; it does not answer which rows. Put a row
 rule in a `brocanth_policy::Policy`, and combine it with a permission
 through `Staff::gate`. Never filter rows after a paginated load.
 
+## Row-level security
+
+`src/plugins/rls/mod.rs` declares the roles, tables and policies in Rust.
+Do not write `CREATE POLICY` in a migration by hand. Change `schema()`,
+then run `brocanth rls make <name>` and read the file it writes. Commit it
+with `migrations/rls.json`.
+
+A request that reads or writes a table with a policy runs in one
+transaction, as its principal:
+
+```rust
+let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
+```
+
+The role and the values end with the transaction, so they never reach the
+next request on the same connection. A statement on `ctx.db()` outside
+`transact_as` runs as the login role, and the policies see no value.
+Never connect as a superuser: a superuser bypasses every policy.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -20251,7 +20434,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: a96ea59eae73f11a -->
+<!-- brocanth-digest: eb842f7f29d29ad1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20263,7 +20446,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "storage", "storage-routes", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -20456,6 +20639,14 @@ files = ["src/modules/policy.rs", "src/plugins/policy/"]
 config = ["policy"]
 crates = ["brocanth-policy"]
 adapted_to = ["config", "model", "realtime"]
+
+[modules.rls]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/rls.rs", "src/commands/rls.rs", "src/plugins/rls/"]
+config = []
+crates = ["brocanth-rls"]
+adapted_to = ["model", "config"]
 
 [modules.storage]
 version = "0.1.0"
@@ -20825,4 +21016,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: a07a842a926dced2
+# brocanth-digest: 3763369eef6dc4b3
