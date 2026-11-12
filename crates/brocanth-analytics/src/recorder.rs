@@ -431,8 +431,7 @@ mod tests {
             country: String::new(),
         });
         let flush = recorder.flush();
-        let timed_out =
-            tokio::time::timeout(std::time::Duration::from_millis(20), flush).await;
+        let timed_out = tokio::time::timeout(std::time::Duration::from_millis(20), flush).await;
         assert!(timed_out.is_err(), "the write never ends");
         assert_eq!(recorder.pending(), 1, "the batch is back on the buffer");
         assert_eq!(recorder.drop_pending(), 1);

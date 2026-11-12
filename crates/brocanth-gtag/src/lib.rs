@@ -318,9 +318,11 @@ impl GtagConfig {
             ));
         }
         if self.consent_days == 0 {
-            return Err("[gtag] `consent_days` is 0, so the banner asks on every page\n\
+            return Err(
+                "[gtag] `consent_days` is 0, so the banner asks on every page\n\
                         help: use 182, the six months the CNIL recommends"
-                .into());
+                    .into(),
+            );
         }
         if let Some(domain) = &self.cookie_domain {
             let bare = domain.trim_start_matches('.');
@@ -659,7 +661,10 @@ mod tests {
         link.banner.policy_url = Some("javascript:alert(1)".into());
         assert!(link.check().is_err());
         link.banner.policy_url = Some("//other.example/privacy".into());
-        assert!(link.check().is_err(), "a protocol-relative URL leaves the site");
+        assert!(
+            link.check().is_err(),
+            "a protocol-relative URL leaves the site"
+        );
         link.banner.policy_url = Some("/privacy".into());
         assert!(link.check().is_ok());
         for domain in [".", "..", ""] {

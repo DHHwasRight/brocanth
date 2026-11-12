@@ -132,7 +132,10 @@ fn cross_site(request: &Request) -> bool {
     if let Some(origin) = header("origin") {
         let host = header("host").or_else(|| request.uri().authority().map(|a| a.as_str()));
         let from = origin.split_once("://").map(|(_, host)| host);
-        return from.is_none() || !from.zip(host).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+        let same = from
+            .zip(host)
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+        return !same;
     }
     false
 }
@@ -426,6 +429,9 @@ mod tests {
             ("host", "shop.example"),
             ("origin", "https://evil.example")
         ])));
-        assert!(cross_site(&request(&[("host", "shop.example"), ("origin", "null")])));
+        assert!(cross_site(&request(&[
+            ("host", "shop.example"),
+            ("origin", "null")
+        ])));
     }
 }
