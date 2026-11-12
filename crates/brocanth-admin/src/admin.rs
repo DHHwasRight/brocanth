@@ -690,7 +690,7 @@ impl Admin {
             .then(|| self.delete_url(model, &record)),
             rows,
             links: {
-                let key = record.to_segment();
+                let key = record.to_text();
                 // The pages under this record first, then the links other
                 // crates add, such as its history.
                 let pages =
@@ -2634,7 +2634,7 @@ impl Admin {
             return;
         };
         let who = self.user_label.as_ref().and_then(|name| name(&principal));
-        let key = key.to_segment();
+        let key = key.to_text();
         // An excluded column is kept out of every screen, so its values are
         // kept out of the journal too: a delete reads the whole row.
         let fields: Vec<FieldChange> = fields

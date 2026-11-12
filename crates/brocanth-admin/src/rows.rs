@@ -156,7 +156,11 @@ pub trait AdminResource: Send + Sync + 'static {
     /// It goes into the witness the admission produces. The default reads a
     /// single-column key as an integer when it is one, and as text otherwise.
     fn key_value(&self, key: &PrimaryKey) -> PolicyValue {
-        let text = key.to_segment();
+        // The stored value, not the URL form, which is percent-encoded.
+        let text = match key.parts() {
+            [(_, value)] => value.clone(),
+            _ => key.to_segment(),
+        };
         match text.parse::<i64>() {
             Ok(n) => PolicyValue::Int(n),
             Err(_) => PolicyValue::Text(text),

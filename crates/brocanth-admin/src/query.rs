@@ -220,12 +220,22 @@ pub(crate) fn param(query: &str, name: &str) -> Option<String> {
 }
 
 fn percent_decode(s: &str) -> String {
+    decode(s, true)
+}
+
+/// Decodes the `%XX` escapes of one path segment. A `+` stays a `+`: only a
+/// query string spells a space that way.
+pub(crate) fn decode_segment(s: &str) -> String {
+    decode(s, false)
+}
+
+fn decode(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => {
+            b'+' if plus_is_space => {
                 out.push(b' ');
                 i += 1;
             }
