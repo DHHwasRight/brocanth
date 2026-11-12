@@ -38,6 +38,8 @@
 //!
 //! With the `db` feature, `Orm` is SeaORM over the pool a `brocanth_db::Db`
 //! opened, so the ORM and sea-query statements share one pool (`orm`).
+//! With the `policy` feature, `policy::condition` turns a `brocanth-policy`
+//! condition into a SeaORM `WHERE`, so a list filters before it paginates.
 //!
 //! Nothing here is global. A probe, a registry and a harness are values an
 //! application holds, so two applications in one process cannot collide.
@@ -106,6 +108,8 @@ pub mod migrating;
 pub mod orm;
 #[cfg(feature = "plugin")]
 pub mod plugin;
+#[cfg(feature = "policy")]
+pub mod policy;
 pub mod prelude;
 pub mod probe;
 pub mod registry;

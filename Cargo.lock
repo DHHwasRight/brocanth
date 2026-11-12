@@ -1211,6 +1211,7 @@ dependencies = [
  "brocanth-events",
  "brocanth-model",
  "brocanth-model-derive",
+ "brocanth-policy",
  "brocanth-realtime",
  "inventory",
  "regex",

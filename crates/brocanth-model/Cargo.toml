@@ -28,6 +28,12 @@ brocanth = { workspace = true, optional = true }
 # the lock file, so the pool type is the same type on both sides.
 brocanth-db = { workspace = true, optional = true }
 
+# Only for `src/policy.rs`: a `brocanth-policy` condition as a SeaORM
+# `WHERE`. `brocanth-policy` knows no ORM, so the adapter lives on this side
+# of the arrow. Optional, and off: a model layer with no row policy links no
+# policy crate.
+brocanth-policy = { workspace = true, optional = true }
+
 # Pinned exactly. SeaORM 2.0 is three months old; a patch bump is a decision,
 # not a side effect.
 #
@@ -64,6 +70,10 @@ plugin = ["dep:brocanth"]
 # pool `brocanth-db` opens.
 db = ["dep:brocanth-db", "postgres"]
 
+# `brocanth_model::policy`: a `brocanth-policy` condition as a SeaORM
+# condition, for `Entity::find().filter(..)`.
+policy = ["dep:brocanth-policy"]
+
 # Postgres is the base. brocanth stores queues, cache and blobs in the same
 # database as the models, and every one of those is better on Postgres: a real
 # `BOOLEAN`, `JSONB`, arrays, partial and expression indexes, transactional
@@ -90,6 +100,7 @@ brocanth-model = { path = ".", default-features = false, features = [
     "postgres",
     "plugin",
     "db",
+    "policy",
 ] }
 
 # The subscriber half, for `tests/changes.rs` only: the proof that a row
