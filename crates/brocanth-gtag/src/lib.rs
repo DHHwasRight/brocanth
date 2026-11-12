@@ -64,8 +64,14 @@ pub const CSP: &[(&str, &[&str])] = &[
 
 /// The path the consent script reports a choice to when
 /// [`GtagConfig::consent_log`] is set. A GET, so a CSRF check, which
-/// leaves reads alone, does not refuse it.
+/// leaves reads alone, does not refuse it. It answers only a same-origin
+/// request; give it a rate-limit rule as well.
 pub const CONSENT_PATH: &str = "/__consent";
+
+/// The size past which the consent log is rotated: the file becomes
+/// `<file>.1`, replacing an older one, and a new file starts. So a flood of
+/// reports cannot fill the disk.
+pub const CONSENT_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// How the tag waits for consent.
 pub const CONSENT_MODES: &[&str] = &["basic", "advanced"];
@@ -168,9 +174,10 @@ pub struct GtagConfig {
     /// The GA4 measurement id, `G-` and letters and digits.
     pub measurement_id: String,
     /// `basic`: no Google script before the visitor accepts. `advanced`:
-    /// the script loads with every consent denied and sends cookieless
-    /// pings. Basic is the default because it sends nothing to Google
-    /// without consent.
+    /// Google's script loads on the first page, before any choice, with
+    /// every consent denied, and sends cookieless pings (a page view with
+    /// no identifier). Basic is the default because it sends nothing to
+    /// Google without consent.
     pub consent_mode: String,
     /// Treat Global Privacy Control and Do Not Track as a refusal: no
     /// banner, no tag.
@@ -202,6 +209,11 @@ pub struct GtagConfig {
     ///
     /// It needs a server. A static export has no one to report to, so a
     /// static site keeps the choice in the browser only.
+    ///
+    /// The file is per instance: each server writes its own, and a
+    /// container loses it when it stops, unless the path is on a volume
+    /// that outlives it. A thread writes it, never the request. Past
+    /// [`CONSENT_LOG_MAX_BYTES`], it is rotated to `<file>.1`.
     pub consent_log: Option<String>,
     /// What the banner says.
     pub banner: Banner,
@@ -292,47 +304,51 @@ impl GtagConfig {
                     .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
             if !well_formed {
                 return Err(format!(
-                    "`measurement_id` is {id:?}, and a GA4 id is `G-` then capitals and \
-                     digits. help: copy it from Admin > Data streams in Google Analytics"
+                    "[gtag] `measurement_id` is {id:?}, and a GA4 id is `G-` then capitals \
+                     and digits\n\
+                     help: copy it from Admin > Data streams in Google Analytics"
                 ));
             }
         }
         if !CONSENT_MODES.contains(&self.consent_mode.as_str()) {
             return Err(format!(
-                "`consent_mode` is {:?}. help: use `basic` or `advanced`",
+                "[gtag] `consent_mode` is {:?}\n\
+                 help: use `basic` or `advanced`",
                 self.consent_mode
             ));
         }
         if self.consent_days == 0 {
-            return Err("`consent_days` is 0, so the banner asks on every page. \
+            return Err("[gtag] `consent_days` is 0, so the banner asks on every page\n\
                         help: use 182, the six months the CNIL recommends"
                 .into());
         }
         if let Some(domain) = &self.cookie_domain {
-            let valid = !domain.is_empty()
-                && domain
-                    .trim_start_matches('.')
+            let bare = domain.trim_start_matches('.');
+            let valid = !bare.is_empty()
+                && bare
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
             if !valid {
                 return Err(format!(
-                    "`cookie_domain` is {domain:?}. help: use a bare domain such as \
-                     `example.co.uk`, with no scheme and no path"
+                    "[gtag] `cookie_domain` is {domain:?}\n\
+                     help: use a bare domain such as `example.co.uk`, with no scheme and no path"
                 ));
             }
         }
         if self.consent_log.as_deref() == Some("") {
-            return Err("`consent_log` is empty. help: name a file such as \
-                        `log/consent.jsonl`, or leave it out to record nothing"
+            return Err("[gtag] `consent_log` is empty\n\
+                        help: name a file such as `log/consent.jsonl`, or leave it out to \
+                        record nothing"
                 .into());
         }
         if let Some(url) = &self.banner.policy_url {
-            let safe =
-                url.starts_with('/') || url.starts_with("https://") || url.starts_with("http://");
+            // `//host/…` starts with `/` but leaves the site.
+            let path = url.starts_with('/') && !url.starts_with("//");
+            let safe = path || url.starts_with("https://") || url.starts_with("http://");
             if !safe {
                 return Err(format!(
-                    "`banner.policy_url` is {url:?}. help: use a path such as \
-                     `/privacy` or an `https://` URL"
+                    "[gtag] `banner.policy_url` is {url:?}\n\
+                     help: use a path such as `/privacy` or an `https://` URL"
                 ));
             }
         }
@@ -478,15 +494,21 @@ pub struct Choice {
     pub id: String,
     /// The banner version the browser saw.
     pub version: String,
+    /// The language of the banner the browser saw (its `lang`), when the
+    /// page had one. The server computes its own version in that locale,
+    /// not in the one the report request negotiates.
+    pub locale: Option<String>,
 }
 
-/// Read `c=granted&id=…&v=…`. `None` for anything else: an unknown
-/// choice, an id that is not 8 to 64 letters, digits and hyphens, a
-/// version that is not 1 to 16 hexadecimal digits.
+/// Read `c=granted&id=…&v=…`, and an optional `l=fr`. `None` for anything
+/// else: an unknown choice, an id that is not 8 to 64 letters, digits and
+/// hyphens, a version that is not 1 to 16 hexadecimal digits, a language
+/// that is not 2 to 35 letters, digits and hyphens.
 pub fn parse_choice(query: &str) -> Option<Choice> {
     let mut choice = None;
     let mut id = None;
     let mut version = None;
+    let mut locale = None;
     for pair in query.split('&') {
         let (name, value) = pair.split_once('=')?;
         match name {
@@ -509,6 +531,13 @@ pub fn parse_choice(query: &str) -> Option<Choice> {
             {
                 version = Some(value.to_string());
             }
+            "l" if (2..=35).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-') =>
+            {
+                locale = Some(value.to_string());
+            }
             _ => return None,
         }
     }
@@ -516,6 +545,7 @@ pub fn parse_choice(query: &str) -> Option<Choice> {
         choice: choice?,
         id: id?,
         version: version?,
+        locale,
     })
 }
 
@@ -628,6 +658,20 @@ mod tests {
         let mut link = GtagConfig::default();
         link.banner.policy_url = Some("javascript:alert(1)".into());
         assert!(link.check().is_err());
+        link.banner.policy_url = Some("//other.example/privacy".into());
+        assert!(link.check().is_err(), "a protocol-relative URL leaves the site");
+        link.banner.policy_url = Some("/privacy".into());
+        assert!(link.check().is_ok());
+        for domain in [".", "..", ""] {
+            let dots = GtagConfig {
+                cookie_domain: Some(domain.into()),
+                ..GtagConfig::default()
+            };
+            assert!(dots.check().is_err(), "{domain:?}");
+        }
+        let error = mode.check().unwrap_err();
+        assert!(error.starts_with("[gtag] "), "{error}");
+        assert!(error.contains("\nhelp: "), "help on its own line: {error}");
     }
 
     #[test]

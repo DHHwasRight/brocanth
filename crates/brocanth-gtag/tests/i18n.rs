@@ -128,3 +128,52 @@ fn without_the_i18n_hook_the_banner_keeps_its_settings() {
     assert!(text.contains(">Accept</button>"), "{text}");
     assert!(!text.contains(" lang="), "{text}");
 }
+
+#[test]
+fn a_report_records_the_version_of_the_locale_the_page_showed() {
+    let dir = std::env::temp_dir().join(format!("brocanth-gtag-i18n-{}", std::process::id()));
+    let file = dir.join("consent.jsonl");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut config = GtagConfig::default().measuring("G-ABC123");
+    config.consent_log = Some(file.display().to_string());
+    // With paths on, as `i18n-routing` sets them, and the report's path
+    // kept unprefixed, as the generated project keeps it.
+    let negotiator = NegotiatorConfig::default()
+        .with_paths(true)
+        .keep_unprefixed(brocanth_gtag::CONSENT_PATH);
+    let app = AppBuilder::new()
+        .plugin_hooking(I18nHook::<Locale>::new(negotiator))
+        .plugin_hooking(Gtag::new(config))
+        .build()
+        .expect("an application");
+    let mut table = Router::builder();
+    table.route("/", Verb::Get, page()).expect("a route");
+    let client = TestClient::serving(app, table.build().expect("a table"));
+
+    let fr = client.get("/fr/");
+    let fr = fr.text();
+    let at = fr.find(r#""version":""#).expect("a version") + 11;
+    let shown = fr[at..at + 8].to_string();
+    // The report sends no cookie, and this browser asks for English.
+    let answer = client.send(
+        TestRequest::get(format!(
+            "/__consent?c=granted&id=0123456789abcdef&v={shown}&l=fr"
+        ))
+        .header("accept-language", "en"),
+    );
+    assert_eq!(answer.status(), 204, "not redirected to a locale");
+    let mut log = String::new();
+    for _ in 0..200 {
+        log = std::fs::read_to_string(&file).unwrap_or_default();
+        if !log.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(log.contains(&format!(r#""seen":"{shown}""#)), "{log}");
+    assert!(
+        log.contains(&format!(r#""banner":"{shown}""#)),
+        "the French text, not the English one: {log}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

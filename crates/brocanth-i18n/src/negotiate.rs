@@ -232,6 +232,7 @@ pub struct Current {
     tag: &'static str,
     source: Source,
     message: fn(&'static str, &str) -> Option<String>,
+    resolve: fn(&str) -> Option<&'static str>,
 }
 
 impl Current {
@@ -241,7 +242,20 @@ impl Current {
             tag: negotiated.locale.tag(),
             source: negotiated.source,
             message: message_of::<L>,
+            resolve: resolve_of::<L>,
         }
+    }
+
+    /// The same catalog in another offered locale, named by its exact tag
+    /// (ignoring case, `_` for `-`). `None` when no offered locale has
+    /// that tag. For a hook that must read the text of the locale a page
+    /// showed, which a later request names, such as the `gtag` consent
+    /// report.
+    pub fn with_tag(&self, tag: &str) -> Option<Current> {
+        Some(Current {
+            tag: (self.resolve)(tag)?,
+            ..*self
+        })
     }
 
     /// The BCP 47 tag: `en`, `fr-CA`.
@@ -272,6 +286,10 @@ impl fmt::Debug for Current {
 
 fn message_of<L: Locales>(tag: &'static str, key: &str) -> Option<String> {
     L::from_tag(tag)?.message(key)
+}
+
+fn resolve_of<L: Locales>(tag: &str) -> Option<&'static str> {
+    L::from_tag(tag).map(L::tag)
 }
 
 /// Picks a locale for a request. Cheap to clone: the configuration is
@@ -890,5 +908,16 @@ mod tests {
         assert_eq!(current.source(), Source::Cookie);
         // This test type has no catalog, so the trait's default answers.
         assert_eq!(current.text("title"), None);
+    }
+
+    #[test]
+    fn current_moves_to_another_offered_locale_by_its_tag() {
+        let current = Current::of(Negotiated {
+            locale: L::En,
+            source: Source::AcceptLanguage,
+        });
+        assert_eq!(current.with_tag("FR").map(|c| c.tag()), Some("fr"));
+        assert_eq!(current.with_tag("fr_ca").map(|c| c.tag()), Some("fr-CA"));
+        assert!(current.with_tag("de").is_none());
     }
 }
