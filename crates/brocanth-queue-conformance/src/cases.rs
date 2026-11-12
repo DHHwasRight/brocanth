@@ -86,6 +86,16 @@ pub(crate) fn all() -> Vec<Case> {
             needs_uniqueness,
             unique_key
         ),
+        case!(
+            "a delayed copy of a unique job is refused too",
+            needs_uniqueness,
+            unique_key_delayed
+        ),
+        case!(
+            "a job whose worker dies every time stops at its budget",
+            always,
+            exhausted_is_not_claimed
+        ),
         case!("purge empties a queue", always, purge_empties),
         case!(
             "cancel removes a job that has not started",
@@ -602,6 +612,66 @@ async fn unique_key(cx: &Ctx) -> Result<(), String> {
     }
     let got = claim_until(cx, &req(&q, 5, Duration::from_secs(30)), 1).await?;
     finish(cx, got).await
+}
+
+async fn unique_key_delayed(cx: &Ctx) -> Result<(), String> {
+    let q = cx.queue("unique-delayed");
+    let kind = match cx.caps.uniqueness {
+        UniquenessSupport::Unbounded => Uniqueness::UntilSuccess,
+        UniquenessSupport::Window(w) => Uniqueness::Window(w.min(Duration::from_secs(60))),
+        UniquenessSupport::None => return Ok(()),
+    };
+    // Far enough out that a backend with a separate table for delayed work
+    // puts it there, and inside any ceiling the backend declares.
+    let delay = match cx.caps.max_delay {
+        Some(max) => (max / 2).min(Duration::from_secs(600)),
+        None => Duration::from_secs(600),
+    };
+    let make = || {
+        let mut j = job(&q, "k.one");
+        j.unique_key = Some(format!("{}-delayed-key", cx.prefix));
+        j.uniqueness = kind.into();
+        j.run_at = Some(SystemTime::now() + delay);
+        j
+    };
+    let first = push(cx, vec![make()]).await?;
+    if !matches!(first[0], Pushed::Enqueued(_)) {
+        return Err("the first delayed copy was refused".into());
+    }
+    let second = push(cx, vec![make()]).await?;
+    if second[0] != Pushed::Duplicate {
+        return Err(
+            "a second delayed copy with a live unique key was enqueued. A key \
+             is held while its job waits, as it is while the job is ready"
+                .into(),
+        );
+    }
+    cx.backend.purge(&q).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn exhausted_is_not_claimed(cx: &Ctx) -> Result<(), String> {
+    let q = cx.queue("exhausted");
+    let mut j = job(&q, "k.one");
+    j.max_attempts = 2;
+    push(cx, vec![j]).await?;
+    let r = req(&q, 1, Duration::from_millis(100));
+    // The worker dies twice: each claim's lease runs out with no settle.
+    for _ in 0..2 {
+        claim_until(cx, &r, 1).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    claim_none_for(cx, &r, Duration::from_millis(200))
+        .await
+        .map_err(|_| {
+            "a job was claimed after it spent every attempt. A job whose worker \
+         dies every time then runs for ever"
+                .to_string()
+        })?;
+    cx.backend.sweep().await.map_err(|e| e.to_string())?;
+    claim_none_for(cx, &r, Duration::from_millis(100)).await?;
+    cx.backend.purge(&q).await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn purge_empties(cx: &Ctx) -> Result<(), String> {

@@ -50,8 +50,20 @@ struct Row {
 }
 
 impl Row {
+    /// `attempts < max_attempts` is here for the reason it is in the
+    /// Postgres claim: a job whose worker dies every time spends an attempt
+    /// on each claim and never settles, and this is what stops it looping
+    /// for ever.
     fn claimable(&self, now: SystemTime) -> bool {
-        self.run_at <= now && (self.token.is_none() || self.lease_until <= now)
+        self.run_at <= now
+            && (self.token.is_none() || self.lease_until <= now)
+            && self.attempts < self.max_attempts
+    }
+
+    /// Spent every attempt and holds no live lease: nothing will claim or
+    /// settle it, so the sweep moves it to the dead letter.
+    fn exhausted(&self, now: SystemTime) -> bool {
+        self.attempts >= self.max_attempts && !self.leased(now)
     }
 
     fn leased(&self, now: SystemTime) -> bool {
@@ -416,6 +428,34 @@ impl Backend for Memory {
         let now = SystemTime::now();
         let mut state = self.state.lock().unwrap();
         state.windows.retain(|_, until| *until > now);
+        let spent: Vec<u64> = state
+            .rows
+            .values()
+            .filter(|r| r.exhausted(now))
+            .map(|r| r.id)
+            .collect();
+        for id in spent {
+            let row = state.rows.remove(&id).expect("just selected");
+            state.dead_seq += 1;
+            let dead_id = state.dead_seq;
+            let failure = JobFailure::returned(
+                row.last_error
+                    .unwrap_or_else(|| "the worker died on every attempt".into()),
+            );
+            state.dead.push(Dead {
+                id: dead_id,
+                job_id: row.id,
+                kind: row.kind,
+                queue: row.queue,
+                payload: row.payload,
+                attempts: row.attempts,
+                max_attempts: row.max_attempts,
+                unique_key: row.unique_key,
+                failure,
+                enqueued_at: row.enqueued_at,
+                died_at: now,
+            });
+        }
         Ok(())
     }
 }
