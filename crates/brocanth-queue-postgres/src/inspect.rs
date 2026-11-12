@@ -26,6 +26,10 @@
 //! both and tags the ids: a row from `queue_scheduled` has an `s` in front
 //! of its id, and [`Inspect::run_now`] and [`Inspect::discard`] send it to
 //! the right table. Nothing outside this file sees the difference.
+//!
+//! An `s` id keeps working after the promoter moves its row: the live row
+//! records the id it had in `scheduled_id`, and every call here that takes
+//! an `s` id looks there when the delayed table no longer has the row.
 
 use std::time::{Duration, SystemTime};
 
@@ -144,6 +148,75 @@ impl PgQueue {
         self.config.table == Table::Bulk
     }
 
+    /// The live id of the row the promoter moved out of `queue_scheduled`
+    /// row `n`, if it has moved.
+    async fn promoted(&self, n: i64) -> Result<Option<i64>, BackendError> {
+        if !self.owns_scheduled() {
+            return Ok(None);
+        }
+        sqlx::query_scalar("SELECT id FROM queue_bulk WHERE scheduled_id = $1")
+            .bind(n)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(err)
+    }
+
+    async fn live_job(&self, n: i64) -> Result<Option<JobRow>, BackendError> {
+        let table = self.config.table.name();
+        let sql = format!(
+            "SELECT id, kind, queue, payload, attempts, max_attempts, enqueued_at, \
+                    available_at, claimed_by, claimed_at, last_error \
+               FROM {table} WHERE id = $1"
+        );
+        Ok(sqlx::query(AssertSqlSafe(sql))
+            .bind(n)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(err)?
+            .as_ref()
+            .map(live_row))
+    }
+
+    // `lease_token IS NULL OR available_at <= now()` is the whole safety
+    // condition. A held lease is refused, because clearing one is how two
+    // workers come to run the same job. An *expired* lease still carries the
+    // dead worker's token — nothing clears it, since expiry is
+    // `available_at` passing and not an event anyone runs — so the second
+    // half of the condition is what lets an orphaned job be pushed along.
+    async fn run_now_live(&self, n: i64) -> Result<bool, BackendError> {
+        let table = self.config.table.name();
+        let sql = format!(
+            "UPDATE {table} \
+                SET available_at = now(), lease_token = NULL, \
+                    claimed_by = NULL, claimed_at = NULL \
+              WHERE id = $1 \
+                AND (lease_token IS NULL OR available_at <= now())"
+        );
+        Ok(sqlx::query(AssertSqlSafe(sql))
+            .bind(n)
+            .execute(&self.pool)
+            .await
+            .map_err(err)?
+            .rows_affected()
+            > 0)
+    }
+
+    async fn discard_live(&self, n: i64) -> Result<bool, BackendError> {
+        let table = self.config.table.name();
+        let sql = format!(
+            "DELETE FROM {table} \
+              WHERE id = $1 \
+                AND (lease_token IS NULL OR available_at <= now())"
+        );
+        Ok(sqlx::query(AssertSqlSafe(sql))
+            .bind(n)
+            .execute(&self.pool)
+            .await
+            .map_err(err)?
+            .rows_affected()
+            > 0)
+    }
+
     async fn count(&self, sql: &str) -> Result<u64, BackendError> {
         let row = sqlx::query(AssertSqlSafe(sql.to_string()))
             .fetch_one(&self.pool)
@@ -191,11 +264,17 @@ impl Inspect for PgQueue {
         } else {
             0
         };
-        // The dead letter is one table for both lanes, because a dead job
-        // is read by a person and the lane it came from is not what they
-        // are looking for. A deployment that wants them apart splits on the
-        // `queue` name, which is in every row.
-        let dead = self.count("SELECT count(*) FROM queue_dead").await?;
+        // The dead letter is one table for both lanes, and each row records
+        // its lane. A reader counts and lists its own lane's rows only: the
+        // two lanes number their jobs from two sequences, and a requeue must
+        // put a row back into the table it came from.
+        let dead: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM queue_dead WHERE coalesce(lane, 'bulk') = $1")
+                .bind(self.config.table.lane())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(err)?;
+        let dead = dead.max(0) as u64;
 
         Ok(Stats {
             ready: r.get::<i64, _>("ready").max(0) as u64,
@@ -311,7 +390,14 @@ impl Inspect for PgQueue {
         if view == View::Scheduled && self.owns_scheduled() {
             let want = limit - rows.len() as i64;
             if want > 0 {
-                let skip = (page.offset as i64 - rows.len() as i64).max(0);
+                // The delayed rows come after every live one, so the offset
+                // into them is the page offset less the number of live
+                // rows, not less the live rows on this page: a page past
+                // the live rows has none of them on it.
+                let live_total = self
+                    .count(&format!("SELECT count(*) FROM {table} WHERE {p}"))
+                    .await? as i64;
+                let skip = (page.offset as i64 - live_total).max(0);
                 let delayed = sqlx::query(
                     "SELECT id, kind, queue, payload, max_attempts, enqueued_at, run_at \
                        FROM queue_scheduled \
@@ -342,44 +428,37 @@ impl Inspect for PgQueue {
     }
 
     async fn job(&self, id: &JobId) -> Result<Option<JobRow>, BackendError> {
-        let table = self.config.table.name();
         match parse_ref(id) {
             None => Ok(None),
-            Some(Ref::Live(n)) => {
-                let sql = format!(
-                    "SELECT id, kind, queue, payload, attempts, max_attempts, enqueued_at, \
-                            available_at, claimed_by, claimed_at, last_error \
-                       FROM {table} WHERE id = $1"
-                );
-                Ok(sqlx::query(AssertSqlSafe(sql))
-                    .bind(n)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(err)?
-                    .as_ref()
-                    .map(live_row))
+            Some(Ref::Live(n)) => self.live_job(n).await,
+            Some(Ref::Scheduled(n)) => {
+                let row = sqlx::query(
+                    "SELECT id, kind, queue, payload, max_attempts, enqueued_at, run_at \
+                       FROM queue_scheduled WHERE id = $1",
+                )
+                .bind(n)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(err)?;
+                if row.is_none() {
+                    if let Some(live) = self.promoted(n).await? {
+                        return self.live_job(live).await;
+                    }
+                }
+                Ok(row.map(|r| JobRow {
+                    id: scheduled_id(r.get("id")),
+                    kind: r.get("kind"),
+                    queue: r.get("queue"),
+                    payload: r.get("payload"),
+                    attempt: 0,
+                    max_attempts: r.get::<i32, _>("max_attempts") as u32,
+                    enqueued_at: when(r.get("enqueued_at")),
+                    available_at: when(r.get("run_at")),
+                    claimed_by: None,
+                    claimed_at: None,
+                    last_error: None,
+                }))
             }
-            Some(Ref::Scheduled(n)) => Ok(sqlx::query(
-                "SELECT id, kind, queue, payload, max_attempts, enqueued_at, run_at \
-                   FROM queue_scheduled WHERE id = $1",
-            )
-            .bind(n)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(err)?
-            .map(|r| JobRow {
-                id: scheduled_id(r.get("id")),
-                kind: r.get("kind"),
-                queue: r.get("queue"),
-                payload: r.get("payload"),
-                attempt: 0,
-                max_attempts: r.get::<i32, _>("max_attempts") as u32,
-                enqueued_at: when(r.get("enqueued_at")),
-                available_at: when(r.get("run_at")),
-                claimed_by: None,
-                claimed_at: None,
-                last_error: None,
-            })),
         }
     }
 
@@ -389,11 +468,13 @@ impl Inspect for PgQueue {
             "SELECT id, job_id, kind, queue, payload, attempts, max_attempts, unique_key, \
                     failure, enqueued_at, died_at \
                FROM queue_dead \
+              WHERE coalesce(lane, 'bulk') = $3 \
               ORDER BY died_at DESC \
               LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(page.offset as i64)
+        .bind(self.config.table.lane())
         .fetch_all(&self.pool)
         .await
         .map_err(err)?
@@ -409,9 +490,10 @@ impl Inspect for PgQueue {
         Ok(sqlx::query(
             "SELECT id, job_id, kind, queue, payload, attempts, max_attempts, unique_key, \
                     failure, enqueued_at, died_at \
-               FROM queue_dead WHERE id = $1",
+               FROM queue_dead WHERE id = $1 AND coalesce(lane, 'bulk') = $2",
         )
         .bind(n)
+        .bind(self.config.table.lane())
         .fetch_optional(&self.pool)
         .await
         .map_err(err)?
@@ -423,85 +505,77 @@ impl Inspect for PgQueue {
         let table = self.config.table.name();
         match parse_ref(id) {
             None => Ok(false),
-            // `lease_token IS NULL OR available_at <= now()` is the whole
-            // safety condition. A held lease is refused, because clearing
-            // one is how two workers come to run the same job. An *expired*
-            // lease still carries the dead worker's token — nothing clears
-            // it, since expiry is `available_at` passing and not an event
-            // anyone runs — so the second half of the condition is what
-            // lets an orphaned job be pushed along.
-            Some(Ref::Live(n)) => {
-                let sql = format!(
-                    "UPDATE {table} \
-                        SET available_at = now(), lease_token = NULL, \
-                            claimed_by = NULL, claimed_at = NULL \
-                      WHERE id = $1 \
-                        AND (lease_token IS NULL OR available_at <= now())"
-                );
-                Ok(sqlx::query(AssertSqlSafe(sql))
-                    .bind(n)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(err)?
-                    .rows_affected()
-                    > 0)
-            }
+            // `run_now_live` holds the safety condition.
+            Some(Ref::Live(n)) => self.run_now_live(n).await,
             // A delayed row is promoted rather than edited in place: its
-            // table has no `available_at` and no worker reads it. This is
-            // the promoter's statement for one row.
+            // table has no `available_at` and no worker reads it.
+            //
+            // Two statements in one transaction, as in `requeue`: the
+            // delete must not happen when the insert does not. A unique key
+            // the live table already holds makes the insert do nothing, and
+            // a delete that ran anyway would lose the job.
             Some(Ref::Scheduled(n)) => {
+                if !self.owns_scheduled() {
+                    return Ok(false);
+                }
+                let mut tx = self.pool.begin().await.map_err(err)?;
                 let sql = format!(
-                    "WITH due AS ( \
-                         DELETE FROM queue_scheduled WHERE id = $1 \
-                         RETURNING kind, queue, payload, max_attempts, \
-                                   unique_key, uniqueness, enqueued_at \
-                     ) \
-                     INSERT INTO {table} \
+                    "INSERT INTO {table} \
                          (kind, queue, payload, available_at, max_attempts, \
-                          unique_key, uniqueness, enqueued_at) \
+                          unique_key, uniqueness, enqueued_at, scheduled_id) \
                      SELECT kind, queue, payload, now(), max_attempts, \
                             CASE WHEN uniqueness = 'until_success' \
                                  THEN unique_key ELSE NULL END, \
-                            uniqueness, enqueued_at \
-                       FROM due \
-                     ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING"
+                            uniqueness, enqueued_at, id \
+                       FROM queue_scheduled WHERE id = $1 \
+                        FOR UPDATE \
+                     ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
+                     RETURNING id"
                 );
-                Ok(sqlx::query(AssertSqlSafe(sql))
+                let moved: Option<i64> = sqlx::query_scalar(AssertSqlSafe(sql))
                     .bind(n)
-                    .execute(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await
-                    .map_err(err)?
-                    .rows_affected()
-                    > 0)
+                    .map_err(err)?;
+                if moved.is_none() {
+                    tx.rollback().await.map_err(err)?;
+                    // The promoter may have moved it already.
+                    return match self.promoted(n).await? {
+                        Some(live) => self.run_now_live(live).await,
+                        None => Ok(false),
+                    };
+                }
+                sqlx::query("DELETE FROM queue_scheduled WHERE id = $1")
+                    .bind(n)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(err)?;
+                tx.commit().await.map_err(err)?;
+                Ok(true)
             }
         }
     }
 
     async fn discard(&self, id: &JobId) -> Result<bool, BackendError> {
-        let table = self.config.table.name();
         match parse_ref(id) {
             None => Ok(false),
-            Some(Ref::Live(n)) => {
-                let sql = format!(
-                    "DELETE FROM {table} \
-                      WHERE id = $1 \
-                        AND (lease_token IS NULL OR available_at <= now())"
-                );
-                Ok(sqlx::query(AssertSqlSafe(sql))
+            Some(Ref::Live(n)) => self.discard_live(n).await,
+            Some(Ref::Scheduled(n)) => {
+                let gone = sqlx::query("DELETE FROM queue_scheduled WHERE id = $1")
                     .bind(n)
                     .execute(&self.pool)
                     .await
                     .map_err(err)?
                     .rows_affected()
-                    > 0)
+                    > 0;
+                if gone {
+                    return Ok(true);
+                }
+                match self.promoted(n).await? {
+                    Some(live) => self.discard_live(live).await,
+                    None => Ok(false),
+                }
             }
-            Some(Ref::Scheduled(n)) => Ok(sqlx::query("DELETE FROM queue_scheduled WHERE id = $1")
-                .bind(n)
-                .execute(&self.pool)
-                .await
-                .map_err(err)?
-                .rows_affected()
-                > 0),
         }
     }
 
@@ -525,13 +599,14 @@ impl Inspect for PgQueue {
                     coalesce(max_attempts, $2), unique_key, \
                     CASE WHEN unique_key IS NULL THEN 'none' ELSE 'until_success' END, \
                     now() \
-               FROM queue_dead WHERE id = $1 \
+               FROM queue_dead WHERE id = $1 AND coalesce(lane, 'bulk') = $3 \
              ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
              RETURNING id"
         );
         let new_id: Option<i64> = sqlx::query_scalar(AssertSqlSafe(sql))
             .bind(n)
             .bind(REQUEUE_DEFAULT_ATTEMPTS)
+            .bind(self.config.table.lane())
             .fetch_optional(&mut *tx)
             .await
             .map_err(err)?;
@@ -552,13 +627,16 @@ impl Inspect for PgQueue {
         let Ok(n) = id.as_str().parse::<i64>() else {
             return Ok(false);
         };
-        Ok(sqlx::query("DELETE FROM queue_dead WHERE id = $1")
-            .bind(n)
-            .execute(&self.pool)
-            .await
-            .map_err(err)?
-            .rows_affected()
-            > 0)
+        Ok(
+            sqlx::query("DELETE FROM queue_dead WHERE id = $1 AND coalesce(lane, 'bulk') = $2")
+                .bind(n)
+                .bind(self.config.table.lane())
+                .execute(&self.pool)
+                .await
+                .map_err(err)?
+                .rows_affected()
+                > 0,
+        )
     }
 
     async fn finished(

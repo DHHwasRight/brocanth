@@ -312,3 +312,34 @@ ALTER TABLE queue_tx   ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
 ALTER TABLE queue_dead ADD COLUMN IF NOT EXISTS job_id bigint;
 ALTER TABLE queue_dead ADD COLUMN IF NOT EXISTS max_attempts integer;
 ALTER TABLE queue_dead ADD COLUMN IF NOT EXISTS unique_key text;
+
+-- `scheduled_id` is the `queue_scheduled` id a promoted row came from. The
+-- promoter writes it, and it is what lets the promoter delete exactly the
+-- rows it moved, and what keeps an `s{id}` a caller was given working after
+-- the row moves. The index is partial: a row that was never delayed adds
+-- nothing to it.
+ALTER TABLE queue_bulk ADD COLUMN IF NOT EXISTS scheduled_id bigint;
+CREATE INDEX IF NOT EXISTS queue_bulk_scheduled_id
+    ON queue_bulk (scheduled_id)
+    WHERE scheduled_id IS NOT NULL;
+
+-- A delayed `until_success` job holds its key while it waits, as it does in
+-- the live table. The push looks the key up here, so it needs an index. It
+-- is not unique: a database written before this line may hold duplicates,
+-- and a unique index would make `migrate` fail there. The push serialises
+-- on the key with an advisory lock instead.
+CREATE INDEX IF NOT EXISTS queue_scheduled_unique_key
+    ON queue_scheduled (unique_key)
+    WHERE unique_key IS NOT NULL;
+
+-- A window's length, kept on the outbox row so the relay can open the
+-- window when it pushes. Null on a row written before this column: such a
+-- row is pushed with a zero window, which is what it got before.
+ALTER TABLE queue_outbox      ADD COLUMN IF NOT EXISTS window_ms bigint;
+ALTER TABLE queue_outbox_dead ADD COLUMN IF NOT EXISTS window_ms bigint;
+
+-- Which lane a dead row came from: `bulk` or `transactional`. The two lanes
+-- number their rows from two sequences, and a requeue must put a row back
+-- where it came from. Null on a row written before this column, read as
+-- `bulk`.
+ALTER TABLE queue_dead ADD COLUMN IF NOT EXISTS lane text;

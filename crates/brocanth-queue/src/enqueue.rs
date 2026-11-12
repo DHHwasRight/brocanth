@@ -320,8 +320,15 @@ pub trait TxEnqueue: Send {
     ) -> impl Future<Output = Result<Pushed, EnqueueError>> + Send;
 }
 
-/// A job id produced by a transactional write, for a caller that wants to
+/// An id produced by a transactional write, for a caller that wants to
 /// record it beside the data it committed with.
+///
+/// It is a job id only for [`Lane::Transactional`]. A [`Lane::Bulk`] job
+/// enqueued in a transaction is an outbox row until the relay delivers it,
+/// and the backend gives it its job id then. The Postgres adapter marks such
+/// an id with an `o` (`o123`), and `cancel` and the screens refuse it: an
+/// outbox row is not a queue row, and its number may belong to an unrelated
+/// job.
 pub type TxJobId = JobId;
 
 #[cfg(test)]

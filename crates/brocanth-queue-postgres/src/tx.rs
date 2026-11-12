@@ -1,9 +1,11 @@
 //! The write side of the transaction: the one atomic enqueue.
 
-use brocanth_queue::{EnqueueError, JobId, Lane, NewJob, Pushed, TxEnqueue, DEFAULT_MAX_PENDING};
+use brocanth_queue::{
+    EnqueueError, JobId, Lane, NewJob, Pushed, TxEnqueue, UniquenessKind, DEFAULT_MAX_PENDING,
+};
 use sqlx::{Postgres, Row, Transaction};
 
-use crate::uniqueness_text;
+use crate::{claim_window, uniqueness_text};
 
 /// A delay in seconds, from the caller's own clock.
 ///
@@ -91,6 +93,25 @@ impl TxEnqueue for Tx<'_, '_> {
     async fn enqueue_in_tx(&mut self, lane: Lane, job: NewJob) -> Result<Pushed, EnqueueError> {
         match lane {
             Lane::Transactional => {
+                // The same rule as `PgQueue::push`: a window key lives in
+                // `queue_dedup`, opened in this transaction, and never in the
+                // row's unique index, where it would be held only while the
+                // row lives.
+                let row_key = match job.uniqueness {
+                    UniquenessKind::UntilSuccess => job.unique_key.as_deref(),
+                    UniquenessKind::Window(_) | UniquenessKind::None => None,
+                };
+                if let (Some(key), UniquenessKind::Window(ms)) =
+                    (job.unique_key.as_deref(), job.uniqueness)
+                {
+                    let secs = std::time::Duration::from_millis(ms).as_secs_f64();
+                    let open = claim_window(&mut **self.tx, key, secs)
+                        .await
+                        .map_err(|e| EnqueueError::Store(e.to_string()))?;
+                    if !open {
+                        return Ok(Pushed::Duplicate);
+                    }
+                }
                 let row = sqlx::query(
                     "INSERT INTO queue_tx \
                      (kind, queue, payload, available_at, max_attempts, unique_key, uniqueness) \
@@ -103,7 +124,7 @@ impl TxEnqueue for Tx<'_, '_> {
                 .bind(&job.payload)
                 .bind(delay_secs(job.run_at))
                 .bind(job.max_attempts as i32)
-                .bind(job.unique_key.as_deref())
+                .bind(row_key)
                 .bind(uniqueness_text(job.uniqueness))
                 .fetch_optional(&mut **self.tx)
                 .await
@@ -122,13 +143,21 @@ impl TxEnqueue for Tx<'_, '_> {
                         return Err(EnqueueError::OutboxFull { rows, limit });
                     }
                 }
+                // A window's length rides on the row, and the relay opens
+                // the window when it pushes. Opening it here instead would
+                // make the relay's own push find it held and drop the job.
+                let window_ms = match job.uniqueness {
+                    UniquenessKind::Window(ms) => Some(ms as i64),
+                    _ => None,
+                };
                 let row = sqlx::query(
                     "INSERT INTO queue_outbox \
-                     (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
+                     (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness, \
+                      window_ms) \
                      VALUES ($1, $2, $3, \
                              CASE WHEN $4 = 0 THEN NULL \
                                   ELSE now() + make_interval(secs => $4) END, \
-                             $5, $6, $7) RETURNING id",
+                             $5, $6, $7, $8) RETURNING id",
                 )
                 .bind(&job.kind)
                 .bind(&job.queue)
@@ -137,10 +166,18 @@ impl TxEnqueue for Tx<'_, '_> {
                 .bind(job.max_attempts as i32)
                 .bind(job.unique_key.as_deref())
                 .bind(uniqueness_text(job.uniqueness))
+                .bind(window_ms)
                 .fetch_one(&mut **self.tx)
                 .await
                 .map_err(|e| EnqueueError::Store(e.to_string()))?;
-                Ok(Pushed::Enqueued(JobId(row.get::<i64, _>("id").to_string())))
+                // The row is in the outbox, not in the queue: it has no job
+                // id yet. The `o` marks the id as an outbox row's, so
+                // `cancel` and the screens, which read numbers as queue
+                // rows, refuse it instead of acting on an unrelated job.
+                Ok(Pushed::Enqueued(JobId(format!(
+                    "o{}",
+                    row.get::<i64, _>("id")
+                ))))
             }
         }
     }

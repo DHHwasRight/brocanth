@@ -656,7 +656,13 @@ async fn a_scheduled_job_is_promoted_by_the_button_that_runs_it_now() {
     assert!(q.run_now(&row.id).await.unwrap());
 
     // It left `queue_scheduled` and is claimable from the live table now.
-    assert!(q.job(&row.id).await.unwrap().is_none());
+    // The `s` id still names it: the live row remembers where it came from.
+    let moved = q
+        .job(&row.id)
+        .await
+        .unwrap()
+        .expect("the s id still resolves");
+    assert!(!moved.id.as_str().starts_with('s'));
     let claimed = q.claim(&take_one("w1")).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].kind, "far");
@@ -763,4 +769,378 @@ async fn dropping_the_wakeups_receiver_gives_the_listener_connection_back() {
     tokio::time::timeout(std::time::Duration::from_secs(10), pool.close())
         .await
         .expect("the pool closes once the receiver is gone");
+}
+
+/// A job on its own queue, for the tests below.
+fn on(queue: &str, kind: &str) -> NewJob {
+    NewJob {
+        kind: kind.into(),
+        queue: queue.into(),
+        payload: b"{}".to_vec(),
+        run_at: None,
+        max_attempts: 3,
+        unique_key: None,
+        uniqueness: UniquenessKind::None,
+    }
+}
+
+/// Clear one queue, and the given dedup keys, out of every table.
+async fn clear_queue(pool: &PgPool, queue: &str, keys: &[&str]) {
+    for sql in [
+        "DELETE FROM queue_bulk WHERE queue = $1",
+        "DELETE FROM queue_tx WHERE queue = $1",
+        "DELETE FROM queue_scheduled WHERE queue = $1",
+        "DELETE FROM queue_dead WHERE queue = $1",
+        "DELETE FROM queue_outbox WHERE queue = $1",
+    ] {
+        sqlx::query(sql).bind(queue).execute(pool).await.unwrap();
+    }
+    sqlx::query("DELETE FROM queue_dedup WHERE key = ANY($1)")
+        .bind(keys)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn rows_in(pool: &PgPool, table: &str, queue: &str) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {table} WHERE queue = $1"
+    )))
+    .bind(queue)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_batch_inserts_nothing_and_keeps_no_window() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.atomic";
+    clear_queue(&pool, queue, &["pg.atomic.k"]).await;
+    let q = PgQueue::bulk(pool.clone());
+
+    let windowed = NewJob {
+        unique_key: Some("pg.atomic.k".into()),
+        uniqueness: UniquenessKind::Window(60_000),
+        ..on(queue, "first")
+    };
+    // Postgres refuses a NUL byte in `text`, so the second insert fails
+    // after the first one and its window went in.
+    let broken = on("bad\0queue", "second");
+    assert!(q.push(vec![windowed.clone(), broken]).await.is_err());
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 0);
+
+    // The window rolled back with the batch, so the retry goes in.
+    let again = q.push(vec![windowed]).await.unwrap();
+    assert!(matches!(again[0], Pushed::Enqueued(_)), "{again:?}");
+    clear_queue(&pool, queue, &["pg.atomic.k"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delayed_until_success_key_is_held_like_a_live_one() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.delayed-key";
+    clear_queue(&pool, queue, &[]).await;
+    let q = PgQueue::bulk(pool.clone());
+    let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+    let keyed = |kind: &str| NewJob {
+        unique_key: Some("pg.delayed-key.k".into()),
+        uniqueness: UniquenessKind::UntilSuccess,
+        run_at: Some(later),
+        ..on(queue, kind)
+    };
+
+    let first = q.push(vec![keyed("a")]).await.unwrap();
+    assert!(matches!(&first[0], Pushed::Enqueued(id) if id.as_str().starts_with('s')));
+    // A second delayed copy and an immediate copy are both refused.
+    assert!(matches!(
+        q.push(vec![keyed("b")]).await.unwrap()[0],
+        Pushed::Duplicate
+    ));
+    let now = NewJob {
+        run_at: None,
+        ..keyed("c")
+    };
+    assert!(matches!(
+        q.push(vec![now]).await.unwrap()[0],
+        Pushed::Duplicate
+    ));
+    assert_eq!(rows_in(&pool, "queue_scheduled", queue).await, 1);
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 0);
+    clear_queue(&pool, queue, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_promoter_keeps_a_row_whose_key_is_taken() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.promote-conflict";
+    clear_queue(&pool, queue, &[]).await;
+    let q = PgQueue::bulk(pool.clone());
+    // Write the race by hand: a live row and a delayed row with one key.
+    q.push(vec![NewJob {
+        unique_key: Some("pg.promote-conflict.k".into()),
+        uniqueness: UniquenessKind::UntilSuccess,
+        ..on(queue, "live")
+    }])
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO queue_scheduled \
+         (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
+         VALUES ('later', $1, '\\x7b7d', now(), 3, 'pg.promote-conflict.k', 'until_success')",
+    )
+    .bind(queue)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    q.sweep().await.unwrap();
+    assert_eq!(
+        rows_in(&pool, "queue_scheduled", queue).await,
+        1,
+        "a row the live table could not take stays where it was"
+    );
+    clear_queue(&pool, queue, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_now_keeps_a_scheduled_job_whose_key_is_taken() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.run-now-conflict";
+    clear_queue(&pool, queue, &[]).await;
+    let q = PgQueue::bulk(pool.clone());
+    q.push(vec![NewJob {
+        unique_key: Some("pg.run-now-conflict.k".into()),
+        uniqueness: UniquenessKind::UntilSuccess,
+        ..on(queue, "live")
+    }])
+    .await
+    .unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO queue_scheduled \
+         (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
+         VALUES ('later', $1, '\\x7b7d', now() + interval '1 hour', 3, \
+                 'pg.run-now-conflict.k', 'until_success') RETURNING id",
+    )
+    .bind(queue)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let sid = brocanth_queue::JobId(format!("s{id}"));
+    assert!(!q.run_now(&sid).await.unwrap());
+    assert!(
+        q.job(&sid).await.unwrap().is_some(),
+        "a refused run_now leaves the job where it was"
+    );
+    assert_eq!(rows_in(&pool, "queue_scheduled", queue).await, 1);
+    clear_queue(&pool, queue, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_windowed_jobs_through_the_outbox_deliver_one() {
+    use brocanth_queue::TxEnqueue;
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.outbox-window";
+    let key = "pg.outbox-window.k";
+    clear_queue(&pool, queue, &[key]).await;
+    let bulk: Arc<dyn DynBackend> = Arc::new(PgQueue::bulk(pool.clone()));
+    let outbox = Arc::new(PgOutbox::new(pool.clone()));
+
+    let mut tx = pool.begin().await.unwrap();
+    let mut handle = Tx::new(&mut tx);
+    let mut ids = Vec::new();
+    for kind in ["a", "b"] {
+        let job = NewJob {
+            unique_key: Some(key.into()),
+            uniqueness: UniquenessKind::Window(60_000),
+            ..on(queue, kind)
+        };
+        let Pushed::Enqueued(id) = handle.enqueue_in_tx(Lane::Bulk, job).await.unwrap() else {
+            panic!("not enqueued")
+        };
+        // An outbox row is not a queue row, and its id says so.
+        assert!(id.as_str().starts_with('o'), "{id:?}");
+        ids.push(id);
+    }
+    tx.commit().await.unwrap();
+    for id in &ids {
+        assert!(!bulk.cancel(id).await.unwrap());
+    }
+
+    let mut relay = Relay::new(Arc::clone(&outbox), bulk.clone(), RelayConfig::default());
+    relay.tick().await.unwrap();
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 1);
+    assert_eq!(rows_in(&pool, "queue_outbox", queue).await, 0);
+    clear_queue(&pool, queue, &[key]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_transactional_lane_holds_a_window_past_its_row() {
+    use brocanth_queue::TxEnqueue;
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.tx-window";
+    let key = "pg.tx-window.k";
+    clear_queue(&pool, queue, &[key]).await;
+    let job = NewJob {
+        unique_key: Some(key.into()),
+        uniqueness: UniquenessKind::Window(60_000),
+        ..on(queue, "a")
+    };
+
+    let mut tx = pool.begin().await.unwrap();
+    let first = Tx::new(&mut tx)
+        .enqueue_in_tx(Lane::Transactional, job.clone())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(first, Pushed::Enqueued(_)));
+    let key_on_row: Option<String> =
+        sqlx::query_scalar("SELECT unique_key FROM queue_tx WHERE queue = $1")
+            .bind(queue)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(key_on_row, None, "a window key is not the row's");
+    // The row goes, the window stays.
+    sqlx::query("DELETE FROM queue_tx WHERE queue = $1")
+        .bind(queue)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let second = Tx::new(&mut tx)
+        .enqueue_in_tx(Lane::Transactional, job)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(second, Pushed::Duplicate), "{second:?}");
+    clear_queue(&pool, queue, &[key]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_lane_reads_and_requeues_only_its_own_dead() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.dead-lane";
+    clear_queue(&pool, queue, &[]).await;
+    let bulk = PgQueue::bulk(pool.clone());
+    let txq = PgQueue::transactional(pool.clone());
+    txq.push(vec![on(queue, "tx")]).await.unwrap();
+    let claimed = txq
+        .claim(&ClaimRequest {
+            queue: queue.into(),
+            max: 1,
+            lease: Duration::from_secs(30),
+            kinds: None,
+            worker: "w".into(),
+        })
+        .await
+        .unwrap();
+    txq.settle(
+        &claimed[0].lease,
+        Settle::Dead {
+            failure: JobFailure::returned("no"),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mine = |rows: Vec<brocanth_queue::DeadRow>| {
+        rows.into_iter()
+            .filter(|r| r.queue == queue)
+            .collect::<Vec<_>>()
+    };
+    let tx_dead = mine(Inspect::dead(&txq, Page::default()).await.unwrap());
+    assert_eq!(tx_dead.len(), 1);
+    assert!(mine(Inspect::dead(&bulk, Page::default()).await.unwrap()).is_empty());
+    assert!(Inspect::requeue(&bulk, &tx_dead[0].id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(Inspect::requeue(&txq, &tx_dead[0].id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(rows_in(&pool, "queue_tx", queue).await, 1);
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 0);
+    clear_queue(&pool, queue, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_scheduled_screen_pages_through_every_delayed_row() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    clear(&pool).await;
+    let q = PgQueue::bulk(pool.clone());
+    let soon = std::time::SystemTime::now() + Duration::from_secs(60);
+    let far = std::time::SystemTime::now() + Duration::from_secs(3 * 3600);
+    let mut batch = Vec::new();
+    for i in 0..3 {
+        batch.push(NewJob {
+            run_at: Some(soon),
+            ..seen(&format!("live{i}"))
+        });
+    }
+    for i in 0..10 {
+        batch.push(NewJob {
+            run_at: Some(far),
+            ..seen(&format!("far{i}"))
+        });
+    }
+    q.push(batch).await.unwrap();
+
+    // Other queues' rows may share the screen, so walk every page and
+    // count this queue's rows.
+    let mut mine = std::collections::HashSet::new();
+    let mut offset = 0u64;
+    loop {
+        let rows = q
+            .list(View::Scheduled, Page { offset, limit: 10 })
+            .await
+            .unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        offset += rows.len() as u64;
+        for row in rows.into_iter().filter(|r| r.queue == SEEN) {
+            assert!(mine.insert(row.id.clone()), "{:?} twice", row.id);
+        }
+    }
+    assert_eq!(mine.len(), 13, "every row on exactly one page");
+    clear(&pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delayed_job_can_be_cancelled_by_its_id_after_promotion() {
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.cancel-promoted";
+    clear_queue(&pool, queue, &[]).await;
+    let q = PgQueue::bulk(pool.clone()).with_config(brocanth_queue_postgres::PgConfig {
+        schedule_after: Duration::from_millis(1),
+        promote_ahead: Duration::from_secs(60),
+        ..Default::default()
+    });
+    let pushed = q
+        .push(vec![NewJob {
+            run_at: Some(std::time::SystemTime::now() + Duration::from_secs(5)),
+            ..on(queue, "later")
+        }])
+        .await
+        .unwrap();
+    let Pushed::Enqueued(id) = &pushed[0] else {
+        panic!("not enqueued")
+    };
+    q.sweep().await.unwrap();
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 1);
+    assert!(q.cancel(id).await.unwrap());
+    assert_eq!(rows_in(&pool, "queue_bulk", queue).await, 0);
+    clear_queue(&pool, queue, &[]).await;
 }
