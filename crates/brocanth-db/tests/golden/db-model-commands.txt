@@ -2314,7 +2314,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -2322,7 +2323,9 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-blog"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
@@ -2540,6 +2543,7 @@ fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
@@ -2559,7 +2563,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -2608,6 +2612,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -2616,14 +2621,42 @@ enum Apply {
 
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
-    let config = database()?;
+    let mut config = database()?;
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
+    config.statement_timeout = None;
+    config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
         let orm = Orm::from_db(&pool);
-        let db = orm.connection();
-        let before = Migrator::get_migration_with_status(db).await?;
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()
@@ -2634,7 +2667,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
         match what {
             Apply::Up => {
                 let pending = named(MigrationStatus::Pending);
-                Migrator::up(db, None).await?;
                 if pending.is_empty() {
                     println!("Nothing to apply: each migration is applied.");
                 }
@@ -2644,7 +2676,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             }
             Apply::Down(n) => {
                 let applied = named(MigrationStatus::Applied);
-                Migrator::down(db, Some(n)).await?;
                 if applied.is_empty() {
                     println!("Nothing to roll back: no migration is applied.");
                 }
@@ -2885,7 +2916,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2904,8 +2936,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2931,12 +2964,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),

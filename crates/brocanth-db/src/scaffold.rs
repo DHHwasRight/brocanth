@@ -143,9 +143,10 @@ fn settings(project: &Project) -> Vec<Setting> {
         ),
         Setting::integer(
             "statement_timeout",
-            0,
+            30,
             "Seconds before the server cancels a statement. 0 is no limit.",
-        ),
+        )
+        .note("`migrate` ignores it: a migration runs with no statement limit."),
         Setting::list(
             "search_path",
             &[],
@@ -166,7 +167,11 @@ fn settings(project: &Project) -> Vec<Setting> {
             "/etc/ssl/certs/db-ca.pem",
             "A PEM bundle to trust, with verify-full.",
         )
-        .note("Unset, the pool trusts the system's roots.")
+        .note(
+            "Unset, the URL's sslmode applies. The default, prefer, verifies no\n\
+             certificate and can fall back to plain text: for a remote server, set\n\
+             this or sslmode=verify-full in the URL.",
+        )
         .optional(),
     ]
 }
@@ -243,7 +248,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -270,6 +275,16 @@ impl Command for Migrate {
             println!("wrote {}", path.display());
             return Ok(());
         }
+        // With no directory, `up` would apply nothing and say all is
+        // applied: in a release image that forgot to copy it, a lie.
+        if matches!(self.action, Action::Up | Action::Down { .. }) && !dir.is_dir() {
+            anyhow::bail!(
+                "{} has no migrations/ directory, so there is nothing to apply or roll back\n\
+                 help: run this command from the project root, or copy migrations/ next to \
+                 the binary in the image",
+                ctx.root().display()
+            );
+        }
         let files = migrate::read_dir(dir)?;
         let config = database()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -288,6 +303,14 @@ impl Command for Migrate {
 async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
     match action {
         Action::Up => {
+            let late = migrate::out_of_order(&migrator.status().await?);
+            if !late.is_empty() {
+                eprintln!(
+                    "warning: {} sorts before the newest applied migration, and is applied \
+                     after it. `migrate down` undoes it first.",
+                    late.join(", ")
+                );
+            }
             let applied = migrator.up().await?;
             if applied.is_empty() {
                 println!("Nothing to apply: each migration is applied.");
@@ -358,7 +381,8 @@ DROP TABLE posts;
 ```
 
 `migrate up` applies each pending file in name order, each in one
-transaction. `migrate down [N]` runs the `-- down` part of the newest N.
+transaction. `migrate down [N]` runs the `-- down` part of the last N
+applied, the last applied first.
 `migrate status` lists each file. Do not edit a file that is applied: write
 a new one.
 "#;
@@ -502,6 +526,23 @@ log, never to the client.
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "db");
     let name = project.name;
+    // With a config file, `config/development.toml` holds the development
+    // URL, and any other environment must name its own: an empty default
+    // makes `configure` say so. Without one, the literal is the only source,
+    // and it is for development.
+    let (url, url_doc) = if project.has("config") {
+        (
+            "",
+            "Empty by default: each\n    \
+             /// environment names its database, and `configure` refuses an empty one.",
+        )
+    } else {
+        (
+            "postgres://localhost/development",
+            "The default is a\n    \
+             /// local development database; set the variable for `db.url` everywhere else.",
+        )
+    };
     format!(
         r##"//! The database, as this application registers it.
 //!
@@ -530,7 +571,7 @@ use brocanth_db::{{Db, DbConfig, DbError}};
 /// {note}
 {derive}
 pub struct Settings {{
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. {url_doc}
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -549,20 +590,21 @@ pub struct Settings {{
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }}
 
 impl Default for Settings {{
     fn default() -> Self {{
         Self {{
-            url: "postgres://localhost/development".to_string(),
+            url: {url:?}.to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: {name:?}.to_string(),

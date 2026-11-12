@@ -2264,7 +2264,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. The default is a
+    /// local development database; set the variable for `db.url` everywhere else.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2283,8 +2284,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2315,7 +2317,7 @@ impl Default for Settings {
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),

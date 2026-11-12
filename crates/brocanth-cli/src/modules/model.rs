@@ -295,6 +295,7 @@ const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
@@ -314,7 +315,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -363,6 +364,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -371,14 +373,42 @@ enum Apply {
 
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
-    let config = database()?;
+    let mut config = database()?;
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
+    config.statement_timeout = None;
+    config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
         let orm = Orm::from_db(&pool);
-        let db = orm.connection();
-        let before = Migrator::get_migration_with_status(db).await?;
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()
@@ -389,7 +419,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
         match what {
             Apply::Up => {
                 let pending = named(MigrationStatus::Pending);
-                Migrator::up(db, None).await?;
                 if pending.is_empty() {
                     println!("Nothing to apply: each migration is applied.");
                 }
@@ -399,7 +428,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             }
             Apply::Down(n) => {
                 let applied = named(MigrationStatus::Applied);
-                Migrator::down(db, Some(n)).await?;
                 if applied.is_empty() {
                     println!("Nothing to roll back: no migration is applied.");
                 }
