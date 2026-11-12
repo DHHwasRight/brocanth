@@ -3,7 +3,7 @@
 use brocanth_queue::{
     EnqueueError, JobId, Lane, NewJob, Pushed, TxEnqueue, UniquenessKind, DEFAULT_MAX_PENDING,
 };
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgConnection, Row};
 
 use crate::{claim_window, uniqueness_text};
 
@@ -24,6 +24,12 @@ fn delay_secs(at: Option<std::time::SystemTime>) -> f64 {
 /// does not get to decide what an application's unit of work is; it only
 /// gets to add a row to it.
 ///
+/// It takes the connection the transaction runs on, `&mut PgConnection`, so
+/// any transaction type works: `&mut sqlx::Transaction` coerces to it, and
+/// `brocanth_db::Tx::connection` hands it out, with the role and settings
+/// `Tx::assume` set still in force. A connection outside a transaction
+/// works too, and then the row commits on its own.
+///
 /// ```ignore
 /// let mut tx = pool.begin().await?;
 /// orders::insert(&mut tx, &order).await?;
@@ -32,12 +38,12 @@ fn delay_secs(at: Option<std::time::SystemTime>) -> f64 {
 ///       .await?;
 /// tx.commit().await?;   // the order and the job commit together
 /// ```
-pub struct Tx<'a, 'c> {
-    tx: &'a mut Transaction<'c, Postgres>,
+pub struct Tx<'a> {
+    tx: &'a mut PgConnection,
     max_pending: Option<u64>,
 }
 
-impl<'a, 'c> Tx<'a, 'c> {
+impl<'a> Tx<'a> {
     /// Wrap a transaction.
     ///
     /// The outbox limit starts at [`DEFAULT_MAX_PENDING`] rather than at
@@ -46,7 +52,7 @@ impl<'a, 'c> Tx<'a, 'c> {
     /// writes, silently, and the outage is found when the disk fills. The
     /// limit turns that into a failure at the write that caused it. Use
     /// [`Tx::unbounded`] for an application that would rather keep serving.
-    pub fn new(tx: &'a mut Transaction<'c, Postgres>) -> Self {
+    pub fn new(tx: &'a mut PgConnection) -> Self {
         Tx {
             tx,
             max_pending: Some(DEFAULT_MAX_PENDING),
@@ -57,7 +63,7 @@ impl<'a, 'c> Tx<'a, 'c> {
     ///
     /// This is [`OnOutboxFull::Accept`](brocanth_queue::OnOutboxFull), spelled
     /// at the call site.
-    pub fn unbounded(tx: &'a mut Transaction<'c, Postgres>) -> Self {
+    pub fn unbounded(tx: &'a mut PgConnection) -> Self {
         Tx {
             tx,
             max_pending: None,
@@ -81,7 +87,7 @@ impl<'a, 'c> Tx<'a, 'c> {
             "SELECT count(*) AS n FROM (SELECT 1 FROM queue_outbox LIMIT $1) AS capped",
         )
         .bind(limit as i64)
-        .fetch_one(&mut **self.tx)
+        .fetch_one(&mut *self.tx)
         .await
         .map_err(|e| EnqueueError::Store(e.to_string()))?;
         let n = row.get::<i64, _>("n") as u64;
@@ -89,7 +95,7 @@ impl<'a, 'c> Tx<'a, 'c> {
     }
 }
 
-impl TxEnqueue for Tx<'_, '_> {
+impl TxEnqueue for Tx<'_> {
     async fn enqueue_in_tx(&mut self, lane: Lane, job: NewJob) -> Result<Pushed, EnqueueError> {
         match lane {
             Lane::Transactional => {
@@ -105,7 +111,7 @@ impl TxEnqueue for Tx<'_, '_> {
                     (job.unique_key.as_deref(), job.uniqueness)
                 {
                     let secs = std::time::Duration::from_millis(ms).as_secs_f64();
-                    let open = claim_window(&mut **self.tx, key, secs)
+                    let open = claim_window(&mut *self.tx, key, secs)
                         .await
                         .map_err(|e| EnqueueError::Store(e.to_string()))?;
                     if !open {
@@ -126,7 +132,7 @@ impl TxEnqueue for Tx<'_, '_> {
                 .bind(job.max_attempts as i32)
                 .bind(row_key)
                 .bind(uniqueness_text(job.uniqueness))
-                .fetch_optional(&mut **self.tx)
+                .fetch_optional(&mut *self.tx)
                 .await
                 .map_err(|e| EnqueueError::Store(e.to_string()))?;
                 Ok(match row {
@@ -167,7 +173,7 @@ impl TxEnqueue for Tx<'_, '_> {
                 .bind(job.unique_key.as_deref())
                 .bind(uniqueness_text(job.uniqueness))
                 .bind(window_ms)
-                .fetch_one(&mut **self.tx)
+                .fetch_one(&mut *self.tx)
                 .await
                 .map_err(|e| EnqueueError::Store(e.to_string()))?;
                 // The row is in the outbox, not in the queue: it has no job

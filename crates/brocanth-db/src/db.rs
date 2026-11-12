@@ -256,6 +256,14 @@ impl<'c> Tx<'c> {
         Ok(())
     }
 
+    /// The connection this transaction runs on, for a library that writes
+    /// into the caller's transaction through `&mut PgConnection`: a job
+    /// enqueued with `brocanth_jobs`' `in_tx`, say. The role and settings
+    /// [`Tx::assume`] set stay in force on it.
+    pub fn connection(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.inner
+    }
+
     /// Starts a nested transaction: a `SAVEPOINT` inside this one.
     ///
     /// # Errors
