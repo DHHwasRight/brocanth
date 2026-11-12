@@ -206,11 +206,8 @@ fn a_message_is_shown_through_compression_and_the_conditional_get() {
     );
     assert_eq!(shown.header("content-encoding"), Some("gzip"));
     let mut page = String::new();
-    std::io::Read::read_to_string(
-        &mut flate2::read::GzDecoder::new(shown.body()),
-        &mut page,
-    )
-    .expect("a gzip body");
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(shown.body()), &mut page)
+        .expect("a gzip body");
     assert!(page.contains("Saved."), "{page}");
     let cleared = shown.header("set-cookie").expect("the cookie is cleared");
     assert!(cleared.contains("Max-Age=0"), "{cleared}");

@@ -384,7 +384,10 @@ async fn a_client_that_never_finishes_its_headers_is_cut_off() {
         .expect("write");
     let mut rest = Vec::new();
     let closed = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
-    assert!(closed.is_ok(), "the connection was held past the header timeout");
+    assert!(
+        closed.is_ok(),
+        "the connection was held past the header timeout"
+    );
     server.stop().await;
 }
 
@@ -439,10 +442,19 @@ async fn past_the_connection_cap_a_client_waits_for_a_slot() {
 
     let second = tokio::spawn({
         let addr = server.addr.clone();
-        async move { send(&addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await }
+        async move {
+            send(
+                &addr,
+                "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+        }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!second.is_finished(), "a second connection was served past the cap");
+    assert!(
+        !second.is_finished(),
+        "a second connection was served past the cap"
+    );
 
     drop(first);
     let response = tokio::time::timeout(Duration::from_secs(5), second)

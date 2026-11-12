@@ -192,7 +192,11 @@ impl PeerAddress {
 }
 
 /// Reads the one header the edge sets.
-fn read(headers: &http::HeaderMap, header: ForwardedHeader, trust: &[IpAddr]) -> Option<ClientInfo> {
+fn read(
+    headers: &http::HeaderMap,
+    header: ForwardedHeader,
+    trust: &[IpAddr],
+) -> Option<ClientInfo> {
     let hops = match header {
         ForwardedHeader::Forwarded => parse_forwarded(text(headers, http::header::FORWARDED)?),
         ForwardedHeader::XForwardedFor => parse_legacy(headers),
@@ -291,7 +295,9 @@ fn parse_legacy(headers: &http::HeaderMap) -> Vec<Hop> {
         } else {
             values.last()
         };
-        value.filter(|value| !value.is_empty()).map(|value| value.to_string())
+        value
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
     };
     (0..length)
         .map(|at| Hop {

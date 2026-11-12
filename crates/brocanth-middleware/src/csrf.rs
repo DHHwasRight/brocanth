@@ -159,9 +159,9 @@ impl CsrfToken {
     pub fn meta_tag(&self) -> String {
         let value = self.masked();
         match &self.header {
-            Some(header) => format!(
-                r#"<meta name="csrf-token" content="{value}" data-header="{header}">"#
-            ),
+            Some(header) => {
+                format!(r#"<meta name="csrf-token" content="{value}" data-header="{header}">"#)
+            }
             None => format!(
                 r#"<meta name="csrf-token" content="{value}" data-field="{}">"#,
                 self.field
@@ -302,9 +302,7 @@ impl CsrfConfig {
         if self.secure {
             &self.cookie
         } else {
-            self.cookie
-                .strip_prefix("__Host-")
-                .unwrap_or(&self.cookie)
+            self.cookie.strip_prefix("__Host-").unwrap_or(&self.cookie)
         }
     }
 
@@ -445,8 +443,7 @@ impl Hook {
                 self.config.field
             ),
         };
-        let mut response =
-            Response::new(Body::from(format!("{why}\nhelp: {how}\n").into_bytes()));
+        let mut response = Response::new(Body::from(format!("{why}\nhelp: {how}\n").into_bytes()));
         *response.status_mut() = http::StatusCode::FORBIDDEN;
         response.headers_mut().insert(
             http::header::CONTENT_TYPE,
@@ -632,7 +629,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     text.as_bytes()

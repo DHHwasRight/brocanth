@@ -611,11 +611,13 @@ fn commented(text: &str, prefix: &str) -> String {
 }
 
 /// Above the example rule, as code, when nothing serves a sign-in form.
-const LOGIN_RULE_OFF: &str = "        // No module serves a sign-in form, so the example is off. Point\n\
+const LOGIN_RULE_OFF: &str =
+    "        // No module serves a sign-in form, so the example is off. Point\n\
     \x20       // `paths` at yours, uncomment it, and add `.rule(login)` below.\n";
 
 /// Above the example rule, in the file, when nothing serves a sign-in form.
-const LOGIN_RULE_OFF_TOML: &str = "# No module serves a sign-in form, so the example is off. Point\n\
+const LOGIN_RULE_OFF_TOML: &str =
+    "# No module serves a sign-in form, so the example is off. Point\n\
     # `paths` at yours and uncomment it.\n";
 
 /// The comment above the registration. `@RULES@` says where the rules are.

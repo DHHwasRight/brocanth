@@ -902,9 +902,8 @@ mod tests {
 
     #[test]
     fn a_missing_or_unparsable_ip_header_falls_back_to_the_socket() {
-        let l = limiter(
-            RateLimitConfig::rules([Rule::new("login", 5, 60)]).ip_header("fly-client-ip"),
-        );
+        let l =
+            limiter(RateLimitConfig::rules([Rule::new("login", 5, 60)]).ip_header("fly-client-ip"));
         for headers in [&[][..], &[("fly-client-ip", "not an address")][..]] {
             let mut req = request(http::Method::POST, "/", headers);
             req.extensions_mut()
