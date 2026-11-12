@@ -8,6 +8,25 @@
 //! do not is declared on the [`Provider`] value as a [`Quirk`], so this file
 //! contains the protocol and the catalogue contains the differences.
 //!
+//! # The protocol is two crates
+//!
+//! `oauth2` builds the authorization URL, makes the PKCE pair and sends the
+//! code exchange and the refresh. `openidconnect` verifies the id_token
+//! ([`oidc`]). Both send their requests through [`HttpClient`], so the seam
+//! an application implements does not change. This file holds what the
+//! crates leave to the caller: the signed flow state, the `state` check,
+//! the profile read, and the provider quirks.
+//!
+//! # PKCE, and there is no way to turn it off
+//!
+//! Without PKCE, an authorization code is a bearer token in a URL. Anything
+//! that can observe the redirect can replay it at the token endpoint. PKCE
+//! closes it: the client sends `SHA-256(verifier)` when it starts, and the
+//! verifier itself when it redeems. OAuth 2.1 makes it required for all
+//! clients, so [`OauthClient::begin`] makes an `S256` pair every time and
+//! [`OauthClient::complete`] sends the verifier every time, with no branch
+//! in between. `plain` is not offered.
+//!
 //! # The state is yours to carry, not ours to store
 //!
 //! [`FlowState`] holds the `state`, the `nonce` and the PKCE verifier. It is
@@ -23,16 +42,20 @@
 //! [`ProviderIdentity`]: crate::identity::ProviderIdentity
 
 pub mod oidc;
-pub mod pkce;
+mod transport;
 pub mod web;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine as _;
+use oauth2::basic::{BasicErrorResponse, BasicTokenType};
+use oauth2::{
+    AuthType, AuthUrl, AuthorizationCode, CsrfToken, EndpointNotSet, EndpointSet, ExtraTokenFields,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope,
+    StandardTokenResponse, TokenResponse as _, TokenUrl,
+};
+use openidconnect::Nonce;
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 use crate::apple::{AppleKey, FirstAuthorizationUser};
 use crate::clock::{Clock, UnixTime};
@@ -40,11 +63,14 @@ use crate::error::AuthError;
 use crate::http_client::{HttpClient, HttpRequest, HttpResponse};
 use crate::identity::ProviderIdentity;
 use crate::providers::{AuthStyle, Provider, ProviderKind, Quirk};
-use crate::random::{b64, ct_eq, ct_eq_str, random_secret, unb64};
+use crate::random::{b64, ct_eq, ct_eq_str, unb64};
 use crate::session::SigningKey;
 
 pub use oidc::Jwks;
-pub use pkce::PkcePair;
+use transport::Transport;
+
+/// The bytes of randomness in a `state`, a `nonce` and a PKCE verifier.
+const RANDOM_BYTES: u32 = 32;
 
 /// How the client authenticates itself to the token endpoint.
 #[derive(Clone)]
@@ -265,6 +291,26 @@ impl TokenResponse {
     pub fn expires_at(&self, now: UnixTime) -> Option<UnixTime> {
         self.expires_in.map(|s| now + s)
     }
+
+    fn from_crate(response: &Tokens) -> Self {
+        Self {
+            access_token: response.access_token().secret().clone(),
+            token_type: response.token_type().as_ref().to_string(),
+            expires_in: response
+                .expires_in()
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+            refresh_token: response.refresh_token().map(|t| t.secret().clone()),
+            id_token: response.0.extra_fields().id_token.clone(),
+            scope: response.scopes().map(|scopes| {
+                scopes
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }),
+            raw: serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+        }
+    }
 }
 
 /// A completed sign-in.
@@ -276,9 +322,133 @@ pub struct Authenticated {
     pub tokens: TokenResponse,
 }
 
+/// What a token endpoint sends besides the standard fields: the id_token,
+/// kept as text until [`oidc::verify_id_token`] reads it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct IdTokenField {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
+}
+
+impl ExtraTokenFields for IdTokenField {}
+
+/// A token response, read by `oauth2`, with one allowance: a provider that
+/// leaves out `token_type` gets `Bearer`, as this crate always assumed.
+/// RFC 6749 §5.1 requires the field, and some providers still omit it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(transparent)]
+struct Tokens(StandardTokenResponse<IdTokenField, BasicTokenType>);
+
+impl<'de> Deserialize<'de> for Tokens {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut body = serde_json::Value::deserialize(d)?;
+        if let Some(fields) = body.as_object_mut() {
+            fields
+                .entry("token_type")
+                .or_insert_with(|| "Bearer".into());
+        }
+        serde_json::from_value(body)
+            .map(Tokens)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl oauth2::TokenResponse for Tokens {
+    type TokenType = BasicTokenType;
+
+    fn access_token(&self) -> &oauth2::AccessToken {
+        self.0.access_token()
+    }
+    fn token_type(&self) -> &BasicTokenType {
+        self.0.token_type()
+    }
+    fn expires_in(&self) -> Option<std::time::Duration> {
+        self.0.expires_in()
+    }
+    fn refresh_token(&self) -> Option<&oauth2::RefreshToken> {
+        self.0.refresh_token()
+    }
+    fn scopes(&self) -> Option<&Vec<Scope>> {
+        self.0.scopes()
+    }
+}
+
+/// An `oauth2` client with the authorization endpoint, the token endpoint,
+/// or both set.
+type Oauth2Client<HasAuthUrl, HasTokenUrl> = oauth2::Client<
+    BasicErrorResponse,
+    Tokens,
+    oauth2::basic::BasicTokenIntrospectionResponse,
+    oauth2::StandardRevocableToken,
+    oauth2::basic::BasicRevocationErrorResponse,
+    HasAuthUrl,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    HasTokenUrl,
+>;
+
+fn redirect_url(provider: &Provider, uri: &str) -> Result<RedirectUrl, AuthError> {
+    RedirectUrl::new(uri.to_string()).map_err(|e| {
+        AuthError::misconfigured(format!(
+            "the redirect URI `{uri}` for provider `{}` does not parse: {e}",
+            provider.id
+        ))
+    })
+}
+
+/// A failed token request as an [`AuthError`].
+///
+/// Some providers refuse with `200 OK`: GitHub answers
+/// `{"error": "bad_verification_code"}`, Slack answers
+/// `{"ok": false, "error": "..."}`. `oauth2` reads neither as a token and
+/// reports a body it cannot parse. A body with an `error` is a refusal, so
+/// it is reported as one.
+fn token_error(
+    provider: &Provider,
+    e: RequestTokenError<AuthError, BasicErrorResponse>,
+) -> AuthError {
+    match e {
+        RequestTokenError::ServerResponse(r) => AuthError::ProviderRefused {
+            error: r.error().as_ref().to_string(),
+            description: r.error_description().cloned(),
+        },
+        RequestTokenError::Request(inner) => inner,
+        RequestTokenError::Parse(err, body) => {
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            match body.get("error") {
+                Some(error) => AuthError::ProviderRefused {
+                    // Some providers answer `error` as an object rather than a
+                    // string. Either way the caller gets something printable.
+                    error: error
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| error.to_string()),
+                    description: body
+                        .get("error_description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                },
+                None => AuthError::ProviderResponse {
+                    provider: provider.id.to_string(),
+                    detail: format!(
+                        "the token endpoint answered something this crate cannot read: {err}"
+                    ),
+                },
+            }
+        }
+        RequestTokenError::Other(detail) => AuthError::ProviderResponse {
+            provider: provider.id.to_string(),
+            detail,
+        },
+    }
+}
+
 /// The flow, for every provider.
 pub struct OauthClient<H: HttpClient, C: Clock> {
     http: Arc<H>,
+    transport: Transport<H>,
     clock: Arc<C>,
     jwks: Jwks<H, C>,
     flow_ttl: i64,
@@ -289,6 +459,7 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
     pub fn new(http: Arc<H>, clock: Arc<C>) -> Self {
         Self {
             jwks: Jwks::new(http.clone(), clock.clone()),
+            transport: Transport(http.clone()),
             http,
             clock,
             // Ten minutes is long enough for a password manager, a one-time
@@ -313,24 +484,24 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
     /// Starts an authorization-code flow.
     ///
     /// PKCE is generated here unconditionally. There is no option and no
-    /// branch: see [`pkce`].
+    /// branch: see the module documentation.
     ///
     /// # Errors
-    /// Fails when the OS has no randomness or the provider's authorize URL
-    /// does not parse.
+    /// Fails when the provider's authorize URL or the redirect URI does not
+    /// parse.
     pub fn begin(
         &self,
         provider: &Provider,
         client: &ClientConfig,
         options: &AuthorizeOptions,
     ) -> Result<AuthorizationRequest, AuthError> {
-        let pkce = PkcePair::generate()?;
-        let state = random_secret()?;
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256_len(RANDOM_BYTES);
+        let state = CsrfToken::new_random_len(RANDOM_BYTES).secret().clone();
         // A nonce for every OIDC provider, always. A plain OAuth 2.0 provider
         // has no id_token to bind it to, so it gets an empty one rather than a
         // value nothing checks.
         let nonce = if provider.is_oidc() {
-            random_secret()?
+            Nonce::new_random_len(RANDOM_BYTES).secret().clone()
         } else {
             String::new()
         };
@@ -347,31 +518,31 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
                     .collect()
             });
 
-        let mut url = Url::parse(&provider.authorize_url).map_err(|e| {
+        let auth_url = AuthUrl::new(provider.authorize_url.to_string()).map_err(|e| {
             AuthError::misconfigured(format!(
                 "provider `{}` has an unparseable authorize URL: {e}",
                 provider.id
             ))
         })?;
-        {
-            let mut q = url.query_pairs_mut();
-            q.append_pair("response_type", "code");
-            q.append_pair("client_id", &client.client_id);
-            q.append_pair("redirect_uri", &client.redirect_uri);
-            q.append_pair("scope", &scopes.join(" "));
-            q.append_pair("state", &state);
-            q.append_pair("code_challenge", pkce.challenge());
-            q.append_pair("code_challenge_method", pkce::METHOD);
-            if provider.is_oidc() {
-                q.append_pair("nonce", &nonce);
-            }
-            for (k, v) in provider.extra_authorize_params {
-                q.append_pair(k, v);
-            }
-            for (k, v) in &options.extra_params {
-                q.append_pair(k, v);
-            }
+        let authorizer: Oauth2Client<EndpointSet, EndpointNotSet> =
+            oauth2::Client::new(oauth2::ClientId::new(client.client_id.clone()))
+                .set_auth_uri(auth_url)
+                .set_redirect_uri(redirect_url(provider, &client.redirect_uri)?);
+        let sent = state.clone();
+        let mut request = authorizer
+            .authorize_url(move || CsrfToken::new(sent))
+            .set_pkce_challenge(challenge)
+            .add_scopes(scopes.into_iter().map(Scope::new));
+        if provider.is_oidc() {
+            request = request.add_extra_param("nonce", nonce.clone());
         }
+        for (k, v) in provider.extra_authorize_params {
+            request = request.add_extra_param(*k, *v);
+        }
+        for (k, v) in &options.extra_params {
+            request = request.add_extra_param(k.clone(), v.clone());
+        }
+        let (url, _) = request.url();
 
         Ok(AuthorizationRequest {
             url: url.to_string(),
@@ -379,7 +550,7 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
                 provider: provider.id.to_string(),
                 state,
                 nonce,
-                pkce_verifier: pkce.verifier().to_string(),
+                pkce_verifier: verifier.secret().clone(),
                 redirect_uri: client.redirect_uri.clone(),
                 started_at: self.clock.now(),
             },
@@ -433,14 +604,16 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
             });
         }
 
-        // 3. Exchange, always with the verifier.
-        let form = vec![
-            ("grant_type".to_string(), "authorization_code".to_string()),
-            ("code".to_string(), callback.code.clone()),
-            ("redirect_uri".to_string(), flow.redirect_uri.clone()),
-            ("code_verifier".to_string(), flow.pkce_verifier.clone()),
-        ];
-        let tokens = self.token_request(provider, client, form).await?;
+        // 3. Exchange, always with the verifier, and with the redirect URI
+        //    this flow started with.
+        let response = self
+            .token_client(provider, client, Some(&flow.redirect_uri))?
+            .exchange_code(AuthorizationCode::new(callback.code.clone()))
+            .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier.clone()))
+            .request_async(&self.transport)
+            .await
+            .map_err(|e| token_error(provider, e))?;
+        let tokens = TokenResponse::from_crate(&response);
 
         // 4. Identity.
         let mut identity = self.identify(provider, client, flow, &tokens).await?;
@@ -474,98 +647,66 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
         client: &ClientConfig,
         refresh_token: &str,
     ) -> Result<TokenResponse, AuthError> {
-        let form = vec![
-            ("grant_type".to_string(), "refresh_token".to_string()),
-            ("refresh_token".to_string(), refresh_token.to_string()),
-        ];
-        self.token_request(provider, client, form).await
+        let response = self
+            .token_client(provider, client, None)?
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .request_async(&self.transport)
+            .await
+            .map_err(|e| token_error(provider, e))?;
+        Ok(TokenResponse::from_crate(&response))
     }
 
-    async fn token_request(
+    /// The `oauth2` client that talks to the token endpoint, with this
+    /// registration's secret and the provider's way of sending it.
+    fn token_client(
         &self,
         provider: &Provider,
         client: &ClientConfig,
-        mut form: Vec<(String, String)>,
-    ) -> Result<TokenResponse, AuthError> {
-        form.push(("client_id".to_string(), client.client_id.clone()));
-
-        let mut request = HttpRequest::post_form(provider.token_url.as_ref(), vec![])
-            // GitHub answers a token request with `application/x-www-form-
-            // urlencoded` unless asked otherwise, and every other provider
-            // ignores this header. One line here replaces a quirk.
-            .header("Accept", "application/json");
-
-        let secret = match (&provider.auth_style, &client.secret) {
-            (AuthStyle::PrivateKeyJwt, ClientSecret::Apple(key)) => {
-                Some(key.client_secret(self.clock.as_ref())?)
-            }
-            (AuthStyle::PrivateKeyJwt, _) => {
-                return Err(AuthError::misconfigured(format!(
-                    "provider `{}` signs its client secret with a private key; \
-                     configure `ClientSecret::Apple`",
-                    provider.id
-                )))
-            }
-            (_, ClientSecret::Static(s)) => Some(s.clone()),
-            (_, ClientSecret::Apple(_)) => {
-                return Err(AuthError::misconfigured(format!(
-                    "provider `{}` takes a static client secret, not an Apple key",
-                    provider.id
-                )))
-            }
-            (_, ClientSecret::None) => None,
-        };
-
-        if let Some(secret) = secret {
-            match provider.auth_style {
-                AuthStyle::ClientSecretBasic => {
-                    let raw = format!("{}:{}", urlencode(&client.client_id), urlencode(&secret));
-                    request = request.header(
-                        "Authorization",
-                        format!("Basic {}", BASE64_STANDARD.encode(raw)),
-                    );
-                }
-                AuthStyle::ClientSecretPost | AuthStyle::PrivateKeyJwt => {
-                    form.push(("client_secret".to_string(), secret));
-                }
-            }
+        redirect_uri: Option<&str>,
+    ) -> Result<Oauth2Client<EndpointNotSet, EndpointSet>, AuthError> {
+        let token_url = TokenUrl::new(provider.token_url.to_string()).map_err(|e| {
+            AuthError::misconfigured(format!(
+                "provider `{}` has an unparseable token URL: {e}",
+                provider.id
+            ))
+        })?;
+        let mut out = oauth2::Client::new(oauth2::ClientId::new(client.client_id.clone()))
+            .set_token_uri(token_url)
+            .set_auth_type(match provider.auth_style {
+                AuthStyle::ClientSecretBasic => AuthType::BasicAuth,
+                AuthStyle::ClientSecretPost | AuthStyle::PrivateKeyJwt => AuthType::RequestBody,
+            });
+        if let Some(uri) = redirect_uri {
+            out = out.set_redirect_uri(redirect_url(provider, uri)?);
         }
+        if let Some(secret) = self.secret(provider, client)? {
+            out = out.set_client_secret(oauth2::ClientSecret::new(secret));
+        }
+        Ok(out)
+    }
 
-        request.form = Some(form);
-        let response = self.http.send(request).await?;
-        let body = self.read_json(provider, &response)?;
-
-        let access_token = body
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AuthError::ProviderResponse {
-                provider: provider.id.to_string(),
-                detail: "the token endpoint returned no `access_token`".into(),
-            })?
-            .to_string();
-
-        Ok(TokenResponse {
-            access_token,
-            token_type: body
-                .get("token_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Bearer")
-                .to_string(),
-            expires_in: body.get("expires_in").and_then(|v| v.as_i64()),
-            refresh_token: body
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            id_token: body
-                .get("id_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            scope: body
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            raw: body,
-        })
+    /// The secret to send, or none for a public client.
+    fn secret(
+        &self,
+        provider: &Provider,
+        client: &ClientConfig,
+    ) -> Result<Option<String>, AuthError> {
+        match (&provider.auth_style, &client.secret) {
+            (AuthStyle::PrivateKeyJwt, ClientSecret::Apple(key)) => {
+                Ok(Some(key.client_secret(self.clock.as_ref())?))
+            }
+            (AuthStyle::PrivateKeyJwt, _) => Err(AuthError::misconfigured(format!(
+                "provider `{}` signs its client secret with a private key; \
+                 configure `ClientSecret::Apple`",
+                provider.id
+            ))),
+            (_, ClientSecret::Static(s)) => Ok(Some(s.clone())),
+            (_, ClientSecret::Apple(_)) => Err(AuthError::misconfigured(format!(
+                "provider `{}` takes a static client secret, not an Apple key",
+                provider.id
+            ))),
+            (_, ClientSecret::None) => Ok(None),
+        }
     }
 
     /// Reads a provider's JSON body and turns every shape of failure into an
@@ -737,22 +878,6 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
         }
         Ok(())
     }
-}
-
-fn urlencode(text: &str) -> String {
-    // RFC 6749 §2.3.1 wants the client id and secret percent-encoded before
-    // they go into HTTP Basic. `url` has no standalone encoder for a form
-    // component, so this is the smallest correct one.
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 fn truncate(text: &str, max: usize) -> String {

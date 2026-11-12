@@ -8,7 +8,7 @@ use std::sync::Arc;
 use brocanth_auth::clock::TestClock;
 use brocanth_auth::error::AuthError;
 use brocanth_auth::http_client::{HttpResponse, StubHttp};
-use brocanth_auth::oauth::{pkce, AuthorizeOptions, CallbackParams, FlowState};
+use brocanth_auth::oauth::{AuthorizeOptions, CallbackParams, FlowState};
 use brocanth_auth::providers::catalog::{GITHUB, GOOGLE, SLACK};
 use brocanth_auth::session::SigningKey;
 use common::*;
@@ -59,7 +59,7 @@ async fn the_whole_code_flow_runs_and_the_pkce_halves_match() {
 
     // The verifier the flow kept is the pre-image of the challenge it sent.
     // This is the property the whole mechanism rests on.
-    assert!(pkce::verify(&request.flow.pkce_verifier, &challenge));
+    assert!(pkce_matches(&request.flow.pkce_verifier, &challenge));
 
     // 2. The provider answers with an id_token bound to this flow's nonce.
     let id_token = sign_id_token(&json!({
@@ -137,7 +137,7 @@ async fn the_whole_code_flow_runs_and_the_pkce_halves_match() {
         .map(|(_, v)| v.clone())
         .expect("code_verifier is sent");
     assert_eq!(verifier, request.flow.pkce_verifier);
-    assert!(pkce::verify(&verifier, &challenge));
+    assert!(pkce_matches(&verifier, &challenge));
     assert!(form
         .iter()
         .any(|(k, v)| k == "grant_type" && v == "authorization_code"));
@@ -216,6 +216,7 @@ async fn a_nonce_mismatch_is_rejected() {
         "email_verified": true,
         "nonce": "a-nonce-from-somebody-elses-flow",
         "exp": real_now() + 600,
+        "iat": real_now(),
     }));
     let stub = Arc::new(
         StubHttp::new()
@@ -260,6 +261,7 @@ async fn an_id_token_with_a_missing_nonce_is_also_a_nonce_mismatch() {
         "aud": "client-id-123",
         "sub": "s",
         "exp": real_now() + 600,
+        "iat": real_now(),
     }));
     let stub = Arc::new(
         StubHttp::new()
@@ -309,6 +311,7 @@ async fn an_id_token_signed_with_a_symmetric_algorithm_is_refused() {
         "email_verified": true,
         "nonce": request.flow.nonce,
         "exp": real_now() + 600,
+        "iat": real_now(),
     }));
     let stub = Arc::new(
         StubHttp::new()
@@ -337,7 +340,10 @@ async fn an_id_token_signed_with_a_symmetric_algorithm_is_refused() {
         .await
         .unwrap_err();
     let message = err.to_string();
-    assert!(message.contains("public-key algorithm"), "{message}");
+    assert!(
+        message.contains("Disallowed signature algorithm"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -354,6 +360,7 @@ async fn an_id_token_for_another_client_is_refused() {
         "sub": "s",
         "nonce": request.flow.nonce,
         "exp": real_now() + 600,
+        "iat": real_now(),
     }));
     let stub = Arc::new(
         StubHttp::new()
