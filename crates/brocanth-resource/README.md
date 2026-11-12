@@ -329,6 +329,20 @@ assert_eq!(outcome(Action::Delete, &denied).status, 403);
 # Ok::<(), Failure>(())
 ```
 
+### What an update checks
+
+A create checks the proposed row against `create`. An update checks the
+**stored** row against `update`, then writes the columns `writable` allows.
+It does not check the row as it will be after the write, as Postgres's
+`WITH CHECK` would. So a column that `update` reads must stay out of
+`writable`, or a caller who may update a row may also move it out of the
+rule: `author_id` in `writable` lets an author give a post away.
+
+`writable_on_create` defaults to `writable`. A column you allow on create
+because `create` checks it (`author_id` above) is therefore allowed on
+update too, unless you write both masks, as the example does. Write both
+whenever `create` and `update` read a column.
+
 ### The routes
 
 `flow` knows no HTTP. Two surfaces put it on a router and render through
