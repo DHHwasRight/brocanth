@@ -500,13 +500,19 @@ async fn a_rule_with_an_or_stays_whole_when_a_filter_is_anded() {
 }
 
 #[tokio::test]
-async fn an_in_list_of_only_commas_matches_nothing_and_widens_nothing() {
+async fn an_in_list_of_only_commas_is_no_filter_and_widens_nothing() {
+    // `author__in=,,` names no value, like `author__in=`: no filter. It used
+    // to be `IN ()`, which hid every row.
     let Some(db) = database().await else {
         return;
     };
     let applied = declared().parse("author__in=,,").unwrap();
-    assert_eq!(applied.pred(), &Pred::Never);
-    let (rows, total) = ids(&db, Pred::Always, "author__in=,,").await;
+    assert_eq!(applied.pred(), &Pred::Always);
+    let (all, _) = ids(&db, Pred::Always, "").await;
+    let (rows, _) = ids(&db, Pred::Always, "author__in=,,").await;
+    assert_eq!(rows, all);
+    // And it never widens the rule.
+    let (rows, total) = ids(&db, Pred::Never, "author__in=,,").await;
     assert!(rows.is_empty());
     assert_eq!(total, 0);
 }
