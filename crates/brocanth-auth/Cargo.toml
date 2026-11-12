@@ -183,6 +183,10 @@ brocanth-test.workspace = true
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 
+# `tests/catalog_parity.rs`: the sign-in catalog and the connect client hold
+# the same OAuth endpoints, and the test fails when they drift.
+brocanth-oauth-client.workspace = true
+
 [features]
 # `runtime` by default: accounts, sessions and tokens, and no HTTP client.
 # The §8 rule: the plan puts sessions, cookies and argon2id in v1 and cuts
