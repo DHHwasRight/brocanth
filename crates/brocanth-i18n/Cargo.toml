@@ -26,7 +26,9 @@ dates = ["runtime", "dep:icu_datetime", "dep:icu_calendar"]
 # The two plugins: `I18n` on the context, `I18nHook` on the request.
 plugin = ["dep:brocanth", "dep:http"]
 # The catalog compiler, for a build script.
-build = ["dep:toml", "dep:serde_spanned"]
+# `icu_locale_core` is the tag parser `Formats::new` uses, with no CLDR
+# data: a catalog name it refuses fails the build, not the first request.
+build = ["dep:toml", "dep:serde_spanned", "dep:icu_locale_core"]
 # `NegotiatorConfig` deserialises, so an `[i18n]` section of a
 # brocanth-config file builds one. Off, so an application that builds its
 # configuration in code links no serde.
