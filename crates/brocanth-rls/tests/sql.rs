@@ -77,6 +77,106 @@ fn a_change_is_the_steps_it_needs_in_both_directions() {
 }
 
 #[test]
+fn a_table_that_leaves_the_schema_stays_secured() {
+    // Fail closed: the up part drops the policies and the grants of a table
+    // that leaves `schema()`, and keeps row-level security on. Disabling it
+    // would show every row to a role with a grant made elsewhere.
+    let n = names();
+    let v1 = example(&n).snapshot().unwrap();
+    let without_notes = Schema::new()
+        .role(member(&n))
+        .role(Role::existing(&n.login))
+        .role(Role::existing(&n.owner))
+        .function(common::current_tenant(&n))
+        .table(posts(&n))
+        .policy(
+            Policy::new("posts_tenant", &posts(&n))
+                .to(&member(&n))
+                .to(&Role::existing(&n.owner))
+                .using(SqlExpr::col_named("tenant_id").eq(common::current_tenant(&n).call([])))
+                .with_check(
+                    SqlExpr::col_named("tenant_id").eq(common::current_tenant(&n).call([])),
+                ),
+        )
+        .snapshot()
+        .unwrap();
+    let up = diff(&v1, &without_notes).unwrap();
+    let down = brocanth_rls::down(&without_notes, &v1).unwrap();
+    golden("removed.sql", &migration::sql_file(&up, &down).unwrap());
+    let up = up.sql();
+    assert!(up.contains("DROP POLICY"), "{up}");
+    assert!(up.contains("REVOKE"), "{up}");
+    assert!(!up.contains("DISABLE ROW LEVEL SECURITY"), "{up}");
+    // Back to the first state: the down part enables it again, as it was.
+    let down = down.sql();
+    assert!(down.contains("ENABLE ROW LEVEL SECURITY"), "{down}");
+
+    // The down part of the migration that added the table puts it back as it
+    // was before: not secured.
+    let back = brocanth_rls::down(&v1, &without_notes).unwrap().sql();
+    assert!(back.contains("DISABLE ROW LEVEL SECURITY"), "{back}");
+}
+
+#[test]
+fn each_part_of_a_migration_bounds_its_lock_wait() {
+    // ENABLE ROW LEVEL SECURITY and CREATE POLICY take ACCESS EXCLUSIVE: a
+    // deploy behind a long read fails fast instead of queueing every query.
+    let n = names();
+    let v1 = example(&n).snapshot().unwrap();
+    let up = diff(&Snapshot::default(), &v1).unwrap();
+    let down = brocanth_rls::down(&v1, &Snapshot::default()).unwrap();
+    let file = migration::sql_file(&up, &down).unwrap();
+    let (up, down) = file.split_once("\n-- down\n").unwrap();
+    assert!(up.contains("\nSET LOCAL lock_timeout = '5s';\n"), "{up}");
+    assert!(
+        down.starts_with("SET LOCAL lock_timeout = '5s';\n"),
+        "{down}"
+    );
+    let rs = migration::seaorm_file(
+        "m1_rls",
+        &diff(&Snapshot::default(), &v1).unwrap(),
+        &Default::default(),
+    );
+    assert_eq!(rs.matches("SET LOCAL lock_timeout").count(), 2, "{rs}");
+}
+
+#[test]
+fn one_setting_type_spelled_two_ways_is_one_type() {
+    let posts = Table::named("posts");
+    let a = brocanth_rls::Setting::new("tenant_id", SqlType::BigInt);
+    let b = brocanth_rls::Setting::new("tenant_id", SqlType::Custom("bigint".into()));
+    let schema = Schema::new().table(posts.clone()).policy(
+        Policy::new("posts_tenant", &posts).using(
+            SqlExpr::col_named("tenant_id")
+                .eq(a.get())
+                .and(SqlExpr::col_named("owner_tenant").eq(b.get())),
+        ),
+    );
+    assert!(schema.snapshot().is_ok(), "{:?}", schema.snapshot().err());
+    // A real conflict is still one.
+    let c = brocanth_rls::Setting::new("tenant_id", SqlType::Text);
+    let conflict = Schema::new().table(posts.clone()).policy(
+        Policy::new("posts_tenant", &posts).using(
+            SqlExpr::col_named("tenant_id")
+                .eq(a.get())
+                .and(SqlExpr::col_named("name").eq(c.get())),
+        ),
+    );
+    assert!(conflict.snapshot().is_err());
+}
+
+#[test]
+fn a_role_that_another_database_creates_first_is_not_a_failure() {
+    // Roles are cluster-wide and the migrate lock covers one database. The
+    // CREATE ROLE catches the duplicate of a concurrent migration.
+    let sql = example(&names()).create_sql().unwrap();
+    assert!(
+        sql.contains("EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL"),
+        "{sql}"
+    );
+}
+
+#[test]
 fn a_function_with_a_new_signature_takes_its_policies_with_it() {
     let n = names();
     let old = example(&n).snapshot().unwrap();

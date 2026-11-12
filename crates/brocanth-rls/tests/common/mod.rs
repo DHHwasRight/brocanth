@@ -61,7 +61,9 @@ pub fn posts(n: &Names) -> Table {
 }
 
 pub fn notes(n: &Names) -> Table {
-    Table::named_in(&n.schema, "notes").grant(&member(n), Privilege::CRUD)
+    Table::named_in(&n.schema, "notes")
+        .no_force()
+        .grant(&member(n), Privilege::CRUD)
 }
 
 pub fn current_tenant(n: &Names) -> Function {

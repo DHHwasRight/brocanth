@@ -129,10 +129,11 @@ const SCHEMA_RS: &str = r#"//! Row-level security: the roles, tables and policie
 //! /// The tenant of the request: the policy reads it, the request sets it.
 //! pub const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
 //!
-//! let member = Role::new("app_member").member("app_login");
+//! let member = Role::new("app_user").member("app_login");
 //! // With `model`, name the table and column by the entity: a typo does
 //! // not compile. `Table::named("posts")` is the string escape hatch.
-//! let posts = Table::of(post::Entity).force().grant(&member, Privilege::CRUD);
+//! // Forced by default: the owner obeys the policies too.
+//! let posts = Table::of(post::Entity).grant(&member, Privilege::CRUD);
 //! let mine = SqlExpr::column(post::Column::TenantId).eq(TENANT.get());
 //! Schema::new()
 //!     .role(member.clone())
@@ -143,7 +144,7 @@ const SCHEMA_RS: &str = r#"//! Row-level security: the roles, tables and policie
 //! A request then runs as its identity, inside one transaction:
 //!
 //! ```ignore
-//! let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
+//! let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 //! ```
 
@@ -276,13 +277,16 @@ transaction, as its identity. Set each value through the `Setting`
 constant the policy reads, so the key cannot drift:
 
 ```rust
-let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
 ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
-`transact_as` runs as the login role, and the policies see no value.
+`transact_as` runs as the login role, and the policies see no value. A
+table is forced by default. On a table declared `.no_force()` the owner
+bypasses the policies: when the login role owns the tables, a statement
+outside `transact_as` returns every row.
 @MODEL@
 Never connect as a superuser: a superuser bypasses every policy.
 "#;

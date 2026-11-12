@@ -474,6 +474,44 @@ async fn a_member_role_is_created_before_its_membership() {
 }
 
 #[tokio::test]
+async fn the_down_part_ends_the_membership_of_a_role_it_keeps() {
+    let url = require_db!();
+    let n = Names::unique("rls_downmember");
+    let admin = connect(&url, None).await;
+    setup(&admin, &n).await;
+    let group = format!("{}_group", n.schema);
+    let v0 = brocanth_rls::Schema::new()
+        .role(brocanth_rls::Role::new(&group))
+        .snapshot()
+        .unwrap();
+    let v1 = brocanth_rls::Schema::new()
+        .role(brocanth_rls::Role::new(&group).member(&n.member))
+        .role(brocanth_rls::Role::new(&n.member))
+        .snapshot()
+        .unwrap();
+    apply(&admin, &diff(&Snapshot::default(), &v0).unwrap().sql()).await;
+    apply(&admin, &diff(&v0, &v1).unwrap().sql()).await;
+    // The down part keeps the member role (roles are cluster-wide), so it
+    // has to revoke the membership, or the role keeps the group's rights.
+    apply(&admin, &brocanth_rls::down(&v1, &v0).unwrap().sql()).await;
+    let members: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_auth_members m \
+         JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member \
+         WHERE g.rolname = $1 AND r.rolname = $2",
+    )
+    .bind(&group)
+    .bind(&n.member)
+    .fetch_one(admin.pool())
+    .await
+    .unwrap();
+    assert_eq!(members, 0, "the down part left the membership");
+    // And the up part, which drops the member role first, still applies.
+    apply(&admin, &diff(&v0, &v1).unwrap().sql()).await;
+    apply(&admin, &diff(&v1, &v0).unwrap().sql()).await;
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
 async fn an_existing_role_with_bypassrls_fails_the_migration_with_help() {
     let url = require_db!();
     let n = Names::unique("rls_bypass");

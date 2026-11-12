@@ -319,7 +319,7 @@ impl SqlExpr {
 ///
 /// const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
 ///
-/// let me = DbIdentity::new().role("app_member").setting(&TENANT, 7);
+/// let me = DbIdentity::new().role("app_user").setting(&TENANT, 7);
 /// assert_eq!(me.settings()[0].0, "tenant_id");
 /// // A value the policy cannot read as `bigint` is refused.
 /// assert!(DbIdentity::new().setting(&TENANT, "seven").statements().is_err());
@@ -375,9 +375,11 @@ impl Setting {
         if let Err(err) = self.ty.check() {
             e.uses.problems.push(err.to_string());
         }
+        // Normalized, so `Custom("bigint")` and `BigInt` are one type and
+        // not a conflict.
         e.uses
             .settings
-            .insert(self.key.to_string(), self.ty.clone());
+            .insert(self.key.to_string(), self.ty.clone().normalized());
         e
     }
 }
