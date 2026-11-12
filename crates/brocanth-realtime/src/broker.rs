@@ -29,15 +29,16 @@
 //!
 //! The registry is an `RwLock`. A publish takes it for **reading**, so
 //! publishes do not serialise against each other; subscribing and
-//! disconnecting take it for writing. Per-subscription delivery bookkeeping is
-//! an `AtomicU64`, which is why the fast path needs no write lock.
+//! disconnecting take it for writing. A publish keeps its delivery bookkeeping
+//! (which subscription already got this frame) in a set of its own, so the
+//! fast path needs no write lock and two publishes never share a mark.
 //!
 //! Two things run under the read lock and both are the caller's code: the
 //! [`RowReader`] and the [`FrameEmitter`]. Neither may block for long, and
 //! both say so. The way to avoid the reader entirely is
 //! [`Broker::publish_with_row`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -143,7 +144,10 @@ impl Default for Config {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectError {
     /// The client cap is full. Refuse the connection; do not evict anybody.
-    #[error("the broker holds {connected} of {cap} connections")]
+    #[error(
+        "the broker holds {connected} of {cap} connections\n\
+         help: try again later, or raise `max_clients` under [realtime]"
+    )]
     AtCapacity {
         /// How many are connected.
         connected: usize,
@@ -156,7 +160,11 @@ pub enum ConnectError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SubscribeError {
     /// This client already holds its maximum number of topics.
-    #[error("this client holds {held} of {cap} subscriptions")]
+    #[error(
+        "this client holds {held} of {cap} subscriptions\n\
+         help: follow the collection (`posts/*`) instead of each row, or raise \
+         `max_subscriptions_per_client` under [realtime]"
+    )]
     TooManySubscriptions {
         /// How many it holds.
         held: usize,
@@ -165,7 +173,10 @@ pub enum SubscribeError {
     },
     /// The client is gone — it disconnected, or its mailbox overflowed under
     /// [`Overflow::Disconnect`].
-    #[error("this client is no longer connected")]
+    #[error(
+        "this client is no longer connected\n\
+         help: connect again; a client that reads too slowly is disconnected under `overflow = \"disconnect\"`"
+    )]
     Disconnected,
 }
 
@@ -272,10 +283,6 @@ struct SubRec {
     placement: Placement,
     confirm: bool,
     columns: Vec<&'static str>,
-    /// The publish this subscription was last delivered a frame for. Dedup for
-    /// a union keyed on two columns that both hit, without allocating a set
-    /// per publish.
-    stamp: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -343,7 +350,6 @@ impl TopicIndex {
                 placement,
                 confirm,
                 columns,
-                stamp: AtomicU64::new(0),
             },
         );
         gating
@@ -385,6 +391,54 @@ impl TopicIndex {
     }
 }
 
+/// The key a row index is filed under.
+///
+/// A topic read from a URL carries its id as text (`posts/42`), and the model
+/// layer publishes the typed id (`I64(42)`). `brocanth_events::RowId` keeps
+/// `Text("42")` and `I64(42)` apart on purpose, so the broker files both under
+/// one key: text that is exactly an integer becomes `I64`, a larger decimal or
+/// a hyphenated UUID becomes `U128`, and any other text stays text. One
+/// collection has one key type, so the two forms never name two rows.
+fn row_key(id: &RowId<'_>) -> RowId<'static> {
+    let RowId::Text(text) = id else {
+        return id.clone().into_owned();
+    };
+    if let Ok(n) = text.parse::<i64>() {
+        if n.to_string() == *text {
+            return RowId::I64(n);
+        }
+    }
+    if let Ok(n) = text.parse::<u128>() {
+        if n.to_string() == *text {
+            return RowId::U128(n);
+        }
+    }
+    if let Some(n) = uuid(text) {
+        return RowId::U128(n);
+    }
+    RowId::Text(std::borrow::Cow::Owned(text.to_string()))
+}
+
+/// A hyphenated UUID (`8-4-4-4-12` hex digits), as its 128 bits.
+fn uuid(text: &str) -> Option<u128> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 36 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for (at, byte) in bytes.iter().enumerate() {
+        if matches!(at, 8 | 13 | 18 | 23) {
+            if *byte != b'-' {
+                return None;
+            }
+            continue;
+        }
+        let digit = char::from(*byte).to_digit(16)?;
+        n = (n << 4) | u128::from(digit);
+    }
+    Some(n)
+}
+
 #[derive(Debug, Default)]
 struct CollectionSlot {
     wildcard: Option<TopicIndex>,
@@ -417,7 +471,7 @@ impl Registry {
                 .get_or_insert_with(|| TopicIndex::new(topic.clone())),
             Topic::Row { id, .. } => slot
                 .rows
-                .entry(id.clone())
+                .entry(row_key(id))
                 .or_insert_with(|| TopicIndex::new(topic.clone())),
         }
     }
@@ -436,10 +490,11 @@ impl Registry {
                 }
             }
             Topic::Row { id: row, .. } => {
-                if let Some(index) = slot.rows.get_mut(row) {
+                let row = row_key(row);
+                if let Some(index) = slot.rows.get_mut(&row) {
                     index.remove(id);
                     if index.is_empty() {
-                        slot.rows.remove(row);
+                        slot.rows.remove(&row);
                     }
                 }
             }
@@ -494,6 +549,7 @@ pub struct BrokerBuilder {
     rows: Box<dyn RowReader>,
     groups: Box<dyn GroupIndex>,
     emitter: Box<dyn FrameEmitter>,
+    first_frame_id: u64,
 }
 
 impl Default for BrokerBuilder {
@@ -503,6 +559,7 @@ impl Default for BrokerBuilder {
             rows: Box::new(NoRows),
             groups: Box::new(UnknownGroups),
             emitter: Box::new(ChangeLine),
+            first_frame_id: 1,
         }
     }
 }
@@ -540,6 +597,37 @@ impl BrokerBuilder {
         self
     }
 
+    /// The id of the first frame. The default is 1.
+    ///
+    /// Frame ids are per broker, so a browser that reconnects to a new
+    /// process (a restart, or another instance) sends an id from the old
+    /// sequence. Two sequences that start at 1 overlap, and an equal id
+    /// would hide the frames the browser missed. See
+    /// [`BrokerBuilder::frame_ids_from_clock`]. A value of 0 is read as 1.
+    #[must_use]
+    pub fn first_frame_id(mut self, first: u64) -> BrokerBuilder {
+        self.first_frame_id = first.max(1);
+        self
+    }
+
+    /// Start the frame ids at the wall clock: milliseconds since the Unix
+    /// epoch, shifted left 20 bits.
+    ///
+    /// A broker built later starts above every id an earlier one could
+    /// reach, unless the earlier one sent more than a million frames per
+    /// millisecond of its life. So a `Last-Event-ID` from another process is
+    /// never equal to this broker's last id, and the transport says
+    /// `lagged`. The ids stay below 2^63 until the year 2248.
+    #[must_use]
+    pub fn frame_ids_from_clock(self) -> BrokerBuilder {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| {
+                u64::try_from(d.as_millis()).unwrap_or(u64::MAX >> 20)
+            });
+        self.first_frame_id(millis << 20)
+    }
+
     /// Build it.
     pub fn build(self) -> Arc<Broker> {
         Arc::new(Broker {
@@ -548,9 +636,7 @@ impl BrokerBuilder {
             rows: self.rows,
             groups: self.groups,
             emitter: self.emitter,
-            // Starts at one so that a subscription's zero stamp cannot look
-            // like "already delivered in publish zero".
-            seq: AtomicU64::new(1),
+            seq: AtomicU64::new(self.first_frame_id),
         })
     }
 }
@@ -604,13 +690,19 @@ impl Broker {
         })
     }
 
-    /// The id of the last frame this broker published, or 0 before the
-    /// first.
+    /// The id of the last frame this broker published, or one less than
+    /// the first id before the first frame (0 by default).
     ///
     /// A transport compares it with the `Last-Event-ID` a reconnecting
     /// browser sends: equal means nothing was published in between. The
     /// broker keeps no history, so a difference cannot be replayed, only
-    /// reported. The ids restart with the process.
+    /// reported. The ids restart with the process: build the broker with
+    /// [`BrokerBuilder::frame_ids_from_clock`] so an id from an earlier
+    /// process never equals one from this process.
+    ///
+    /// Read it **after** the reconnecting client subscribed. A frame
+    /// published before that read reaches no mailbox, and the read then
+    /// says it was missed.
     pub fn last_frame_id(&self) -> u64 {
         self.seq.load(Ordering::Relaxed).saturating_sub(1)
     }
@@ -710,7 +802,7 @@ impl Broker {
         let indexes: Vec<&TopicIndex> = slot
             .wildcard
             .iter()
-            .chain(slot.rows.get(&change.row))
+            .chain(slot.rows.get(&row_key(&change.row)))
             .collect();
         if indexes.is_empty() {
             return Delivery::default();
@@ -756,7 +848,7 @@ impl Broker {
         };
 
         for index in indexes {
-            walk.topic_index(&registry, index, publish);
+            walk.topic_index(&registry, index);
         }
 
         let Walk {
@@ -831,7 +923,7 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    fn topic_index(&mut self, registry: &Registry, index: &'a TopicIndex, publish: u64) {
+    fn topic_index(&mut self, registry: &Registry, index: &'a TopicIndex) {
         // One render per audience class, per §10, reused by every subscriber in
         // the class. Reset per topic, because the topic is the SSE event name
         // and therefore part of the bytes.
@@ -852,6 +944,11 @@ impl<'a> Walk<'a> {
         }
 
         if let Some(row) = self.row {
+            // A union keyed on two columns can hit twice. One frame. The set
+            // is this walk's own, so two publishes running at once under the
+            // read lock cannot clear each other's marks. It allocates only
+            // when a key hits.
+            let mut seen: HashSet<SubscriptionId> = HashSet::new();
             for (column, buckets) in &index.by_column {
                 let Some(value) = row.get(column) else {
                     continue;
@@ -866,8 +963,7 @@ impl<'a> Walk<'a> {
                     let Some(rec) = index.subs.get(id) else {
                         continue;
                     };
-                    // A union keyed on two columns can hit twice. One frame.
-                    if rec.stamp.swap(publish, Ordering::Relaxed) == publish {
+                    if !seen.insert(*id) {
                         continue;
                     }
                     self.delivery.examined += 1;

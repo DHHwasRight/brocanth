@@ -126,6 +126,55 @@ fn a_union_keyed_on_two_columns_delivers_one_frame_not_two() {
 }
 
 #[test]
+fn concurrent_publishes_each_deliver_one_frame_to_a_union() {
+    let broker = Broker::new();
+    let client = broker.connect().unwrap();
+    client
+        .subscribe(Subscription::gated_by(
+            posts(),
+            Pred::any([
+                Pred::eq(PostColumn::AuthorId, 7i64),
+                Pred::eq(PostColumn::TeamId, 3i64),
+            ]),
+        ))
+        .unwrap();
+
+    // Each publish holds only the read lock, so these walk at once. Each
+    // must still count one delivery, never two.
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let broker = Arc::clone(&broker);
+            std::thread::spawn(move || {
+                (0..2000i64)
+                    .map(|n| {
+                        broker
+                            .publish_with_row(
+                                &RowChange::created("posts", n),
+                                &row(7, 3, "published"),
+                            )
+                            .delivered
+                    })
+                    .sum::<usize>()
+            })
+        })
+        .collect();
+    let delivered: usize = threads.into_iter().map(|t| t.join().unwrap()).sum();
+    assert_eq!(delivered, 4 * 2000);
+}
+
+#[test]
+fn frame_ids_can_start_past_any_earlier_process() {
+    let broker = Broker::builder().first_frame_id(1000).build();
+    assert_eq!(broker.last_frame_id(), 999);
+    broker.publish_change(&RowChange::created("posts", 1i64));
+    assert_eq!(broker.last_frame_id(), 999, "nobody listens, no frame");
+
+    let earlier = Broker::new();
+    let later = Broker::builder().frame_ids_from_clock().build();
+    assert!(later.last_frame_id() > earlier.last_frame_id() + (1 << 40));
+}
+
+#[test]
 fn a_conjunction_keys_on_one_column_and_confirms_the_other() {
     let broker = Broker::new();
     let client = broker.connect().unwrap();
@@ -218,13 +267,67 @@ fn a_row_topic_hears_only_about_its_own_row() {
             .delivered,
         1
     );
-    // A text id and an integer id are different rows; `brocanth-events` says so.
+    // The text a URL carries names the same row as the integer: one
+    // collection has one key type.
     assert_eq!(
         broker
             .publish_change(&RowChange::deleted("posts", "42".to_owned()))
+            .delivered,
+        1
+    );
+    // Text that only looks like a number is still text.
+    assert_eq!(
+        broker
+            .publish_change(&RowChange::deleted("posts", "042".to_owned()))
             .examined,
         0
     );
+}
+
+#[test]
+fn a_parsed_row_topic_hears_the_typed_id_the_model_publishes() {
+    let broker = Broker::new();
+    let client = broker.connect().unwrap();
+    client
+        .subscribe(Subscription::new(
+            Topic::parse("posts/42").unwrap(),
+            brocanth_realtime::Gate::everyone(),
+        ))
+        .unwrap();
+    client
+        .subscribe(Subscription::new(
+            Topic::parse("users/0191a3f0-0000-7000-8000-00000000002a").unwrap(),
+            brocanth_realtime::Gate::everyone(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        broker
+            .publish_change(&RowChange::updated("posts", 42i64, &["title"][..]))
+            .delivered,
+        1
+    );
+    let uuid: u128 = 0x0191a3f0_0000_7000_8000_00000000002a;
+    assert_eq!(
+        broker
+            .publish_change(&RowChange::deleted(
+                "users",
+                brocanth_events::RowId::U128(uuid)
+            ))
+            .delivered,
+        1
+    );
+    // The model publishes a UUID key as its hyphenated text.
+    assert_eq!(
+        broker
+            .publish_change(&RowChange::deleted(
+                "users",
+                "0191A3F0-0000-7000-8000-00000000002A".to_owned()
+            ))
+            .delivered,
+        1
+    );
+    assert_eq!(frames(&client).len(), 3);
 }
 
 // ---------------------------------------------------------------------------

@@ -51,23 +51,30 @@ impl Topic {
     /// Every row of a collection: `posts/*`.
     pub fn collection(name: impl Into<String>) -> Result<Topic, BadTopic> {
         let name = name.into();
-        check(&name)?;
+        check_collection(&name)?;
         Ok(Topic::Collection(name))
     }
 
     /// One row: `posts/42`.
     ///
     /// `Err` when either part carries a control character, because the topic
-    /// is written into an SSE `event:` line.
+    /// is written into an SSE `event:` line; when the collection carries a
+    /// `/`; and when the row id is the text `*`. Both would print a topic
+    /// that reads back as another one.
     pub fn row(
         collection: impl Into<String>,
         id: impl Into<RowId<'static>>,
     ) -> Result<Topic, BadTopic> {
         let collection = collection.into();
-        check(&collection)?;
+        check_collection(&collection)?;
         let id = id.into();
         if let RowId::Text(text) = &id {
             check(text)?;
+            // `posts/*` is the wildcard's name; a row named `*` would print
+            // the same and read back as the collection.
+            if text == "*" {
+                return Err(BadTopic::StarRow);
+            }
         }
         Ok(Topic::Row { collection, id })
     }
@@ -96,10 +103,10 @@ impl Topic {
     /// Read `posts/*` or `posts/42`.
     ///
     /// A parsed row id is always [`RowId::Text`], because the text on the wire
-    /// does not say whether the database stores an integer. The caller that
-    /// knows builds the topic with [`Topic::row`] instead; a broker matches
-    /// `Text("42")` and `I64(42)` as different rows, and
-    /// [`brocanth_events::RowId`] documents that as deliberate.
+    /// does not say whether the database stores an integer. The broker files
+    /// a row topic under the id's canonical form, so `posts/42` still
+    /// receives a change the model publishes as `I64(42)`, and a hyphenated
+    /// UUID receives a change published as its `U128` or its text.
     pub fn parse(text: &str) -> Result<Topic, BadTopic> {
         let Some((collection, rest)) = text.split_once('/') else {
             return Err(BadTopic::NoSlash);
@@ -115,6 +122,16 @@ impl Topic {
             Topic::row(collection, rest.to_owned())
         }
     }
+}
+
+/// A collection name: [`check`], and no `/`, because `a/b/*` would read back
+/// as row `b/*` of `a`.
+fn check_collection(name: &str) -> Result<(), BadTopic> {
+    check(name)?;
+    if name.contains('/') {
+        return Err(BadTopic::SlashInCollection);
+    }
+    Ok(())
 }
 
 fn check(text: &str) -> Result<(), BadTopic> {
@@ -141,14 +158,35 @@ impl fmt::Display for Topic {
 pub enum BadTopic {
     /// A topic is `collection/*` or `collection/<id>`. PocketBase's bare
     /// `collection` alias is deprecated and not accepted.
-    #[error("a topic is `collection/*` or `collection/<id>`")]
+    #[error(
+        "a topic is `collection/*` or `collection/<id>`\n\
+         help: write `posts/*` for every row, or `posts/42` for one row"
+    )]
     NoSlash,
     /// An empty collection name or row id.
-    #[error("a topic has an empty collection or row id")]
+    #[error(
+        "a topic has an empty collection or row id\n\
+         help: write `posts/*` for every row, or `posts/42` for one row"
+    )]
     Empty,
     /// A control character, which would forge an SSE frame boundary.
-    #[error("a topic carries a control character, which would break the event stream")]
+    #[error(
+        "a topic carries a control character, which would break the event stream\n\
+         help: remove the newline or other control character from the topic"
+    )]
     Control,
+    /// A `/` in a collection name, which would read back as another topic.
+    #[error(
+        "a collection name carries a `/`, so the topic would read back as another one\n\
+         help: name the collection without `/`"
+    )]
+    SlashInCollection,
+    /// A text row id `*`, which prints as the collection's wildcard.
+    #[error(
+        "a row id `*` prints as the wildcard `collection/*`\n\
+         help: use `Topic::collection` to follow every row"
+    )]
+    StarRow,
 }
 
 #[cfg(test)]
@@ -181,5 +219,28 @@ mod tests {
         );
         assert_eq!(Topic::parse("posts"), Err(BadTopic::NoSlash));
         assert_eq!(Topic::parse("/x"), Err(BadTopic::Empty));
+    }
+
+    #[test]
+    fn a_topic_that_would_read_back_as_another_is_refused() {
+        assert_eq!(Topic::row("posts", "*".to_owned()), Err(BadTopic::StarRow));
+        assert_eq!(Topic::collection("a/b"), Err(BadTopic::SlashInCollection));
+        assert_eq!(Topic::row("a/b", 1i64), Err(BadTopic::SlashInCollection));
+        // A row id may carry a slash: `parse` splits at the first one.
+        let topic = Topic::row("files", "a/b".to_owned()).unwrap();
+        assert_eq!(Topic::parse(&topic.to_string()), Ok(topic));
+    }
+
+    #[test]
+    fn every_refusal_says_what_to_do() {
+        for bad in [
+            BadTopic::NoSlash,
+            BadTopic::Empty,
+            BadTopic::Control,
+            BadTopic::SlashInCollection,
+            BadTopic::StarRow,
+        ] {
+            assert!(bad.to_string().contains("\nhelp: "), "{bad}");
+        }
     }
 }
