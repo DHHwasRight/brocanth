@@ -50,5 +50,6 @@ pub use postgres::PgSeen;
 
 #[cfg(feature = "out")]
 pub use outgoing::{
-    Deliver, DeliveryRow, Endpoint, OutError, Outgoing, OutgoingConfig, OutgoingPlugin, WebhookSink,
+    DefaultGrace, Deliver, DeliveryRow, Endpoint, OutError, Outgoing, OutgoingConfig,
+    OutgoingPlugin, ShutdownGrace, WebhookSink,
 };
