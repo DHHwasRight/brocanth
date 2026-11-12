@@ -2483,6 +2483,7 @@ recommendation, and wait for the answer.
 Not chosen, and recommended by a module that is here. Ask about each:
 
 - `observability-logs`, for `config`: $<APP>_ENV picks the environment; only observability-logs writes JSON when it is production
+- `middleware-csrf`, for `admin`: the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row
 
 ## House style
 
@@ -2500,7 +2501,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 04cae0766cdbf430 -->
+<!-- brocanth-digest: fdd20abec2c4a578 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
