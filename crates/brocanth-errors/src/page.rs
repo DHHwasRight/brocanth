@@ -132,12 +132,30 @@ pub fn plain_page(caught: &Caught) -> String {
     )
 }
 
+/// Whether a header's value stays off the development page: the
+/// credentials HTTP names, and any header whose name says what it holds.
+fn is_secret(name: &str) -> bool {
+    const EXACT: [&str; 3] = ["cookie", "authorization", "proxy-authorization"];
+    const WORDS: [&str; 7] = [
+        "token",
+        "key",
+        "secret",
+        "signature",
+        "session",
+        "password",
+        "csrf",
+    ];
+    let name = name.to_ascii_lowercase();
+    EXACT.contains(&name.as_str()) || WORDS.iter().any(|word| name.contains(word))
+}
+
 /// The page a debug build shows for a 5xx: the cause, the request line and
 /// the request headers.
 ///
 /// It stands alone, outside the layouts, because the layout can be what
-/// failed. `cookie` and `authorization` show as `(hidden)`: a screenshot of
-/// this page is a thing people share.
+/// failed. `cookie`, `authorization`, and any header whose name says
+/// `token`, `key`, `secret`, `signature`, `session`, `password` or `csrf`
+/// show as `(hidden)`: a screenshot of this page is a thing people share.
 ///
 /// ```
 /// use brocanth_errors::{development_page, Caught};
@@ -156,10 +174,7 @@ pub fn development_page<'a>(
 ) -> String {
     let mut rows = String::new();
     for (name, value) in headers {
-        let secret = ["cookie", "authorization", "proxy-authorization"]
-            .iter()
-            .any(|s| name.eq_ignore_ascii_case(s));
-        let value = if secret { "(hidden)" } else { value };
+        let value = if is_secret(name) { "(hidden)" } else { value };
         let _ = writeln!(
             rows,
             "<tr><th>{}</th><td>{}</td></tr>",
@@ -255,6 +270,23 @@ mod tests {
         assert_eq!(Caught::new(418, "", "/").reason, "Error");
         assert_eq!(Caught::new(503, "", "/a/b").path, "/a/b");
         assert!(!Caught::new(500, "", "/").is_not_found());
+    }
+
+    #[test]
+    fn a_header_named_like_a_secret_is_hidden() {
+        for name in [
+            "x-csrf-token",
+            "X-API-Key",
+            "x-hub-signature-256",
+            "x-webhook-secret",
+            "x-session-id",
+            "Sec-WebSocket-Key",
+        ] {
+            assert!(is_secret(name), "{name}");
+        }
+        for name in ["accept", "user-agent", "keep-alive", "content-type"] {
+            assert!(!is_secret(name), "{name}");
+        }
     }
 
     #[test]
