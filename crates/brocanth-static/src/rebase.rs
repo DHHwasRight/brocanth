@@ -62,19 +62,48 @@ pub fn url(value: &str, base: &str) -> String {
     format!("{base}{value}")
 }
 
-/// A `srcset`: each candidate's URL, descriptors kept.
+/// A `srcset`: each candidate's URL, descriptors kept, the rest of the text
+/// unchanged.
+///
+/// Split as the HTML standard splits it, not on every comma: a URL runs to
+/// whitespace, so the comma in `data:image/png;base64,AAAA 1x` is part of
+/// the URL. Commas at the end of a URL separate it from the next one, and
+/// descriptors run to the next comma outside parentheses.
 fn srcset(value: &str, base: &str) -> String {
-    value
-        .split(',')
-        .map(|candidate| {
-            let candidate = candidate.trim();
-            match candidate.split_once(char::is_whitespace) {
-                Some((at, descriptor)) => format!("{} {}", url(at, base), descriptor.trim()),
-                None => url(candidate, base),
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len() + 32);
+    let mut i = 0;
+    while i < bytes.len() {
+        let gap = i;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        out.push_str(&value[gap..i]);
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let candidate = &value[start..i];
+        let address = candidate.trim_end_matches(',');
+        out.push_str(&url(address, base));
+        out.push_str(&candidate[address.len()..]);
+        if address.len() < candidate.len() {
+            continue;
+        }
+        let descriptors = i;
+        let mut depth = 0_usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => break,
+                _ => {}
             }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+            i += 1;
+        }
+        out.push_str(&value[descriptors..i]);
+    }
+    out
 }
 
 /// A style sheet: `url(/x)`, `url("/x")`, `url('/x')`, `@import "/x"`.
@@ -381,7 +410,23 @@ mod tests {
                 r#"<img srcset="/a.png 1x, /b.png 2x,https://c/x.png 3x">"#,
                 B
             ),
-            r#"<img srcset="/d3set/a.png 1x, /d3set/b.png 2x, https://c/x.png 3x">"#
+            r#"<img srcset="/d3set/a.png 1x, /d3set/b.png 2x,https://c/x.png 3x">"#
+        );
+    }
+
+    #[test]
+    fn a_data_uri_in_a_srcset_keeps_its_comma() {
+        assert_eq!(
+            html(
+                r#"<img srcset="data:image/png;base64,AAAA 1x, /b.png 2x">"#,
+                B
+            ),
+            r#"<img srcset="data:image/png;base64,AAAA 1x, /d3set/b.png 2x">"#
+        );
+        // A comma at the end of a URL ends the candidate.
+        assert_eq!(
+            html(r#"<img srcset="/a.png, /b.png 2x">"#, B),
+            r#"<img srcset="/d3set/a.png, /d3set/b.png 2x">"#
         );
     }
 

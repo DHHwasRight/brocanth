@@ -154,12 +154,15 @@ impl Export {
         let mut seen = HashSet::new();
         let mut paths = Vec::new();
         for path in self.paths {
-            if !path.starts_with('/') || path.contains(['?', '#']) {
+            if !path.starts_with('/') || path.contains(['?', '#']) || !stays_inside(&path) {
                 return Err(ExportError::Path(path));
             }
             if seen.insert(path.clone()) {
                 paths.push(path);
             }
+        }
+        if let Some((published, _)) = self.assets.iter().find(|(p, _)| !stays_inside(p)) {
+            return Err(ExportError::Path((*published).to_string()));
         }
         empty(&self.out)?;
 
@@ -282,7 +285,8 @@ impl fmt::Display for ExportError {
             Self::Path(path) => write!(
                 f,
                 "`{path}` is not a path\n\
-                 help: give the path alone, starting with `/`, with no query and no fragment"
+                 help: give the path alone, starting with `/`, with no query, no fragment, \
+                 no backslash and no empty, `.` or `..` segment"
             ),
             Self::Status { path, depth: None, status } => write!(
                 f,
@@ -301,8 +305,10 @@ impl fmt::Display for ExportError {
             ),
             Self::Out(out) => write!(
                 f,
-                "will not empty `{}`\n\
-                 help: export to a directory of its own, such as `dist`",
+                "will not empty `{}`: it is the working directory or holds it, or it holds \
+                 files no export wrote\n\
+                 help: export to a directory of its own, such as `dist`; an export marks it \
+                 with `{MARKER}` and empties only a marked directory",
                 out.display()
             ),
             Self::Io { at, error } => write!(
@@ -322,6 +328,23 @@ impl std::error::Error for ExportError {
             _ => None,
         }
     }
+}
+
+/// The file an export writes into a directory it made, and the sign that it
+/// may empty that directory again.
+pub const MARKER: &str = ".brocanth-export";
+
+/// Whether a path names a file under the output directory: no backslash,
+/// and no empty, `.` or `..` segment. `/` alone is the root, and one
+/// trailing `/` is allowed.
+fn stays_inside(path: &str) -> bool {
+    let inner = path.strip_prefix('/').unwrap_or(path);
+    let inner = inner.strip_suffix('/').unwrap_or(inner);
+    !path.contains('\\')
+        && (inner.is_empty()
+            || inner
+                .split('/')
+                .all(|segment| !matches!(segment, "" | "." | "..")))
 }
 
 /// Where a path's answer goes: `about/index.html`, or the name itself when
@@ -402,21 +425,42 @@ where
     }
 }
 
-/// Removes `out` and creates it again. A path with no last component
-/// (`/`, `.`, `..`) is refused: emptying it would delete what the user is
-/// working in.
+/// Removes `out` and creates it again, with [`MARKER`] in it.
+///
+/// Refused: a path with no last component (`/`, `.`, `..`), the working
+/// directory or any directory that holds it, and a directory with files in
+/// it and no marker, which no export wrote. Each of these would delete what
+/// the user is working in: `--out src` is a typo, not a request.
 fn empty(out: &Path) -> Result<(), ExportError> {
+    let refuse = || ExportError::Out(out.to_path_buf());
     if out.file_name().is_none() {
-        return Err(ExportError::Out(out.to_path_buf()));
+        return Err(refuse());
     }
     let io = |error| ExportError::Io {
         at: out.to_path_buf(),
         error,
     };
     if out.exists() {
-        std::fs::remove_dir_all(out).map_err(io)?;
+        let resolved = std::fs::canonicalize(out).map_err(io)?;
+        let here = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map_err(io)?;
+        if here.starts_with(&resolved) {
+            return Err(refuse());
+        }
+        let marked = resolved.join(MARKER).is_file();
+        let has_files = std::fs::read_dir(&resolved).map_err(io)?.next().is_some();
+        if has_files && !marked {
+            return Err(refuse());
+        }
+        std::fs::remove_dir_all(&resolved).map_err(io)?;
     }
-    std::fs::create_dir_all(out).map_err(io)
+    std::fs::create_dir_all(out).map_err(io)?;
+    std::fs::write(
+        out.join(MARKER),
+        "Written by brocanth-static. The next export empties this directory.\n",
+    )
+    .map_err(io)
 }
 
 fn write(at: &Path, body: &[u8]) -> Result<(), ExportError> {
@@ -475,11 +519,52 @@ mod tests {
 
     #[test]
     fn the_working_directory_is_never_emptied() {
-        for out in [".", "/", ".."] {
+        let here = std::env::current_dir().unwrap();
+        let above = here.parent().unwrap().to_path_buf();
+        for out in [
+            PathBuf::from("."),
+            PathBuf::from("/"),
+            PathBuf::from(".."),
+            PathBuf::from("src"),
+            here,
+            above,
+        ] {
             assert!(
-                matches!(empty(Path::new(out)), Err(ExportError::Out(_))),
-                "{out}"
+                matches!(empty(&out), Err(ExportError::Out(_))),
+                "{}",
+                out.display()
             );
+        }
+        assert!(Path::new("src/lib.rs").exists(), "nothing was deleted");
+    }
+
+    #[test]
+    fn only_a_directory_an_export_marked_is_emptied() {
+        let dir =
+            std::env::temp_dir().join(format!("brocanth-static-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+        assert!(matches!(empty(&dir), Err(ExportError::Out(_))));
+        assert!(dir.join("notes.txt").exists());
+
+        std::fs::remove_file(dir.join("notes.txt")).unwrap();
+        empty(&dir).expect("an empty directory");
+        assert!(dir.join(MARKER).is_file());
+        std::fs::write(dir.join("index.html"), "old").unwrap();
+        empty(&dir).expect("a marked directory");
+        assert!(!dir.join("index.html").exists());
+        assert!(dir.join(MARKER).is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_output_directory_is_refused() {
+        for path in ["/", "/about", "/a/b/", "/assets/app.css"] {
+            assert!(stays_inside(path), "{path}");
+        }
+        for path in ["/../x", "/a/../../x", "/a//b", "/./x", "/a\\..\\x", "/.."] {
+            assert!(!stays_inside(path), "{path}");
         }
     }
 }
