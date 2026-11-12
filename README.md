@@ -184,6 +184,7 @@ puts the crate in a new project.
 | [`brocanth-auth`](crates/brocanth-auth/README.md) | argon2id accounts, server-side sessions, OAuth 2.0 and OIDC with PKCE | `auth` |
 | [`brocanth-policy`](crates/brocanth-policy/README.md) | Typed predicates: SQL for a list, evaluation for one row | `policy` |
 | [`brocanth-policy-macros`](crates/brocanth-policy-macros/README.md) | The `policy!` macro, re-exported by `brocanth-policy` behind `macro` | |
+| [`brocanth-rls`](crates/brocanth-rls/README.md) | Postgres row-level security in Rust: roles, grants and policies, ordered by dependency and diffed into migrations | `rls` |
 | [`brocanth-pagination`](crates/brocanth-pagination/README.md) | One paginator: offset pages with a total, keyset pages with a cursor, links that keep the query | `pagination` |
 | [`brocanth-filters`](crates/brocanth-filters/README.md) | Typed list filters and a sort from the query string, compiled into a policy `Pred` | `filters` |
 | [`brocanth-search`](crates/brocanth-search/README.md) | Postgres full-text and trigram search: a site index, ranked hits inside the rule | `search` |

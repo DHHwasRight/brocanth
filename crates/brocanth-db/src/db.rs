@@ -6,6 +6,9 @@ use sqlx::{Acquire, Postgres, Transaction};
 use crate::config::DbConfig;
 use crate::error::DbError;
 use crate::exec::Exec;
+use std::sync::{Arc, Mutex};
+
+use crate::principal::{Assumed, DbIdentity};
 
 /// A Postgres pool. Clone it freely: a clone is an `Arc` bump, and every
 /// clone shares the same connections.
@@ -99,6 +102,34 @@ impl Db {
         run(self.begin().await?, f).await
     }
 
+    /// [`Db::transact`] as `identity`: the transaction assumes it first
+    /// ([`Tx::assume`]). For a request under row-level security
+    /// (`docs/rls.md`).
+    ///
+    /// ```no_run
+    /// # use brocanth_db::{Db, DbError, DbIdentity, Exec};
+    /// # use brocanth_db::sea_query::Query;
+    /// # async fn example(db: Db) -> Result<(), DbError> {
+    /// let me = DbIdentity::new().role("app_member").set("tenant_id", 7);
+    /// let q = Query::select().column("title").from("posts").to_owned();
+    /// let titles: Vec<(String,)> = db.transact_as(&me, async |tx| tx.all(&q).await).await?;
+    /// # let _ = titles; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`DbError::Config`] for a role, key or value [`DbIdentity`] refuses; the
+    /// error of `f`; a [`DbError::Query`] from `BEGIN`, `SET ROLE` or
+    /// `COMMIT`.
+    pub async fn transact_as<T, F>(&self, identity: &DbIdentity, f: F) -> Result<T, DbError>
+    where
+        F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, DbError>,
+    {
+        let mut tx = self.begin().await?;
+        tx.assume(identity).await?;
+        run(tx, f).await
+    }
+
     /// Starts a transaction and hands back its guard. Call [`Tx::commit`] to
     /// keep the writes. Dropping the guard rolls back.
     ///
@@ -109,6 +140,7 @@ impl Db {
     pub async fn begin(&self) -> Result<Tx<'static>, DbError> {
         Ok(Tx {
             inner: self.pool.begin().await.map_err(DbError::query)?,
+            assumed: Arc::default(),
         })
     }
 
@@ -159,6 +191,9 @@ impl Exec for &Db {
 #[derive(Debug)]
 pub struct Tx<'c> {
     inner: Transaction<'c, Postgres>,
+    /// What [`Tx::assume`] set in this transaction, shared with its
+    /// savepoints, so a second call replaces the first.
+    assumed: Arc<Mutex<Assumed>>,
 }
 
 impl<'c> Tx<'c> {
@@ -180,6 +215,47 @@ impl<'c> Tx<'c> {
         self.inner.rollback().await.map_err(DbError::query)
     }
 
+    /// Runs the rest of this transaction as `identity`: `SET LOCAL ROLE`
+    /// and `set_config('brocanth.<key>', $value, true)`. Both end at
+    /// `COMMIT` or `ROLLBACK`, so the next user of the connection never sees
+    /// them. On a savepoint, a rollback of the savepoint reverts them.
+    ///
+    /// A second call replaces the first; it does not merge with it. A key
+    /// an earlier call set and this one does not is set to `''`, which a
+    /// policy reads as `NULL`. With no role, the transaction returns to the
+    /// login role (`SET LOCAL ROLE NONE`). Savepoints share this record.
+    ///
+    /// Each value is a bind parameter. The role is a quoted identifier,
+    /// because `SET` takes no parameter.
+    ///
+    /// # Errors
+    /// [`DbError::Config`] for a role, key or value [`DbIdentity`] refuses;
+    /// [`DbError::Query`] when the login role is not a member of the role.
+    pub async fn assume(&mut self, identity: &DbIdentity) -> Result<(), DbError> {
+        let before = self.assumed.lock().map(|a| a.clone()).unwrap_or_default();
+        let crate::principal::Statements { role, settings } = identity.statements_after(&before)?;
+        if let Some(sql) = role {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *self.inner)
+                .await
+                .map_err(|e| role_error(e, identity))?;
+        }
+        if let Some((sql, binds)) = settings {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for bind in binds {
+                query = query.bind(bind);
+            }
+            query
+                .execute(&mut *self.inner)
+                .await
+                .map_err(DbError::query)?;
+        }
+        if let Ok(mut assumed) = self.assumed.lock() {
+            assumed.record(identity);
+        }
+        Ok(())
+    }
+
     /// Starts a nested transaction: a `SAVEPOINT` inside this one.
     ///
     /// # Errors
@@ -187,6 +263,7 @@ impl<'c> Tx<'c> {
     pub async fn begin(&mut self) -> Result<Tx<'_>, DbError> {
         Ok(Tx {
             inner: self.inner.begin().await.map_err(DbError::query)?,
+            assumed: Arc::clone(&self.assumed),
         })
     }
 
@@ -206,6 +283,24 @@ impl<'c> Tx<'c> {
 impl Exec for Tx<'_> {
     fn executor(&mut self) -> impl PgExecutor<'_> {
         &mut *self.inner
+    }
+}
+
+/// A refused `SET ROLE`, with the grant that fixes it.
+fn role_error(e: sqlx::Error, identity: &DbIdentity) -> DbError {
+    let err = DbError::query(e);
+    match (&err, identity.role_name()) {
+        (DbError::Query { code: Some(code), message, .. }, Some(role))
+            if code == "42501" || code == "22023" || code == "42704" =>
+        {
+            DbError::config(
+                format!("SET ROLE {role}: {message}"),
+                format!(
+                    "create the role and grant it to the login: `Role::new(\"{role}\").member(<login>)` in brocanth-rls, or GRANT \"{role}\" TO <login>"
+                ),
+            )
+        }
+        _ => err,
     }
 }
 

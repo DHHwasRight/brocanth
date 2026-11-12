@@ -1,0 +1,43 @@
+[package]
+name = "brocanth-rls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Postgres row-level security declared in Rust: roles, functions, grants and policies, ordered by their dependencies, diffed against a snapshot into a migration."
+readme = "README.md"
+
+[dependencies]
+# The pool, the transaction and `Principal`, and the sea-query this crate
+# builds expressions with. Through `brocanth-db`, so there is one sea-query
+# in the tree and the expression type is the one a page already uses.
+brocanth-db = { workspace = true, optional = true }
+# `migrations/rls.json`, the snapshot the diff reads.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = { version = "2", optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `rls`. Optional and off: only the CLI asks for `features = ["scaffold"]`.
+brocanth-scaffold = { workspace = true, optional = true }
+
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator. A cycle through dev-dependencies, which cargo allows.
+[dev-dependencies]
+brocanth-rls = { path = ".", features = ["scaffold"] }
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# tests/seaorm.rs compiles the SeaORM migration `rls make` writes in a
+# project with `model`. Postgres, the model layer's default.
+brocanth-model = { path = "../brocanth-model", features = ["db"] }
+async-trait = "0.1"
+
+[features]
+default = ["runtime"]
+# Everything an application runs. The CLI turns it off and takes `scaffold`
+# alone, so `brocanth create` links no driver to write a project that has one.
+runtime = ["dep:brocanth-db", "dep:serde", "dep:serde_json", "dep:thiserror"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

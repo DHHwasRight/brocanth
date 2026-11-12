@@ -39,8 +39,11 @@
 
 use std::ops::Deref;
 
-use brocanth_db::Db;
-use sea_orm::{DatabaseConnection, SqlxPostgresConnector};
+use brocanth_db::{Db, DbIdentity};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
+    SqlxPostgresConnector, Statement, TransactionTrait,
+};
 
 /// SeaORM's connection over the pool a [`Db`] holds.
 ///
@@ -64,6 +67,68 @@ impl Orm {
     /// The SeaORM connection, by value.
     pub fn into_connection(self) -> DatabaseConnection {
         self.0
+    }
+
+    /// A SeaORM transaction as `identity`, for a table under Postgres
+    /// row-level security (`docs/rls.md`). The transaction runs
+    /// `SET LOCAL ROLE` and `set_config('brocanth.<key>', $value, true)`
+    /// first, the statements [`Db::transact_as`] runs, built by
+    /// [`DbIdentity::statements`]. Both end at `COMMIT` or `ROLLBACK`, so
+    /// the next user of the connection never sees them. `f` returning
+    /// `Err` rolls back.
+    ///
+    /// ```no_run
+    /// use brocanth_db::DbIdentity;
+    /// use brocanth_model::sea_orm::{ConnectionTrait, DbErr};
+    /// use brocanth_model::Orm;
+    ///
+    /// # async fn example(orm: Orm) -> Result<(), DbErr> {
+    /// let me = DbIdentity::new().role("app_member").set("tenant_id", 7);
+    /// orm.transact_as(&me, async |txn| {
+    ///     txn.execute_unprepared("SELECT 1").await?;
+    ///     Ok(())
+    /// })
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`DbErr::Custom`] with a `help:` line for a role, key or value
+    /// [`DbIdentity`] refuses; the error of `f`; a [`DbErr`] from `BEGIN`,
+    /// `SET ROLE` or `COMMIT`.
+    pub async fn transact_as<T, F>(&self, identity: &DbIdentity, f: F) -> Result<T, DbErr>
+    where
+        F: AsyncFnOnce(&DatabaseTransaction) -> Result<T, DbErr>,
+    {
+        let statements = identity
+            .statements()
+            .map_err(|e| DbErr::Custom(e.to_string()))?;
+        let txn = self.0.begin().await?;
+        if let Some(role) = statements.role {
+            txn.execute_unprepared(&role).await?;
+        }
+        if let Some((sql, binds)) = statements.settings {
+            let values = binds.into_iter().map(sea_orm::Value::from);
+            txn.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                sql,
+                values,
+            ))
+            .await?;
+        }
+        match f(&txn).await {
+            Ok(value) => {
+                txn.commit().await?;
+                Ok(value)
+            }
+            Err(e) => {
+                // The error of `f` says why; a failed rollback closes the
+                // connection, and its transaction does not commit.
+                let _ = txn.rollback().await;
+                Err(e)
+            }
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 74. For all
+One page per module that `brocanth create` offers. There are 75. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -83,6 +83,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
 | [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
+| [`rls`](rls.md) | Postgres row-level security declared in Rust; `rls make` writes the migration | Enhancer |  |
 | [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |
 | [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails | Middleware | storage |
 | [`input`](input.md) | a form or a JSON body, read into a struct, with every fault at once | Enhancer, Renderer |  |

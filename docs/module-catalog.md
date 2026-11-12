@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 74 modules. Each name links to its own page
+what to build next. There are 75 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -96,6 +96,7 @@ nothing holds this page.
 | [`config`](modules/config.md) | Config/<env>.toml, merged; without it nothing links a TOML parser |  | yes |  | static-site safe |
 | [`db`](modules/db.md) | One Postgres pool and sea-query statements, read as `ctx.db()`; without it no SQL driver | Middleware, Renderer |  |  | with `commands` and no `model`: SQL migrations in migrations/ |
 | [`flags`](modules/flags.md) | Feature flags: on for all, a percentage, users or groups; rows in your Postgres |  |  | needs `db`: the rules are rows in the database the `db` module opens |  |
+| [`rls`](modules/rls.md) | Postgres row-level security declared in Rust; `rls make` writes the migration |  |  | needs `db` and `commands`: the policies live in the `db` database, and `rls make` runs `schema()` |  |
 | [`input`](modules/input.md) | A form or a JSON body, read into a struct, with every fault at once | Renderer |  |  |  |
 | [`jobs`](modules/jobs.md) | A queue in Postgres with retries and a dead letter; a worker in this process |  |  |  |  |
 | [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | `check --deploy` refuses it |

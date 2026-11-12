@@ -28,6 +28,7 @@ edition = "2021"
 #   auth-lockout          no lockout; only a rate limit slows a guessing run
 #   superuser             no operator account; the admin opens only for a policy you write
 #   roles                 no roles; a member of staff is a superuser, and nobody else is
+#   brocanth-rls          no row-level security; a query that forgets its WHERE shows every tenant's rows
 #   brocanth-storage      no file storage; an upload has nowhere to go and no address to be read back from
 #   storage-routes        no upload or download route; a handler stores and serves each file itself
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
@@ -2856,7 +2857,7 @@ request.
 - `pagination`  offset and keyset pages, with links that keep the query; no dependency
 - `filters`  typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3025,7 +3026,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: dbc9ee38d072ab8c -->
+<!-- brocanth-digest: ecd77a4309a8bf0d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
