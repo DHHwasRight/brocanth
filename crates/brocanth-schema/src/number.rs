@@ -132,7 +132,9 @@ impl Schema for IntSchema {
             }
         }
         if let Some(step) = self.node.multiple_of {
-            if value % step != 0 {
+            // `wrapping_rem`: `i64::MIN % -1` overflows, and its remainder
+            // is 0.
+            if value.wrapping_rem(step) != 0 {
                 issues.report(at, IssueCode::NotMultipleOf, |i| {
                     i.expected(format!("a multiple of {step}"))
                         .received(value.to_string())
@@ -328,6 +330,13 @@ impl FloatSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multiple_of_minus_one_takes_the_smallest_integer() {
+        assert!(int().multiple_of(-1).validate(&i64::MIN).is_ok());
+        assert!(int().multiple_of(-2).validate(&i64::MIN).is_ok());
+        assert!(int().multiple_of(-3).validate(&i64::MIN).is_err());
+    }
 
     #[test]
     fn every_broken_bound_is_reported_not_just_the_first() {
