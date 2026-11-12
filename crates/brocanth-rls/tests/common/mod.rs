@@ -24,6 +24,13 @@ pub struct Names {
 }
 
 impl Names {
+    /// Names with this process's id, so two `cargo test` processes on one
+    /// server do not share a role: roles are cluster-wide.
+    pub fn unique(prefix: &str) -> Names {
+        Names::new(&format!("{prefix}_{}", std::process::id()))
+    }
+
+    /// Fixed names, for the golden files.
     pub fn new(prefix: &str) -> Names {
         Names {
             schema: prefix.to_string(),
@@ -119,6 +126,16 @@ pub async fn apply(db: &Db, sql: &str) {
     tx.commit().await.expect("commit");
 }
 
+/// [`apply`], with the error as text instead of a panic.
+pub async fn try_apply(db: &Db, sql: &str) -> Result<(), String> {
+    let mut tx = db.pool().begin().await.map_err(|e| e.to_string())?;
+    sqlx::raw_sql(AssertSqlSafe(sql.to_string()))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
 /// Drops what an earlier run left, then makes the schema, the two tables
 /// and the two login roles. The tables belong to the owner.
 pub async fn setup(admin: &Db, n: &Names) {
@@ -153,7 +170,9 @@ pub async fn grant_usage(admin: &Db, n: &Names) {
 
 pub async fn teardown(admin: &Db, n: &Names) {
     let mut sql = format!("DROP SCHEMA IF EXISTS {} CASCADE;", n.schema);
-    for role in [&n.member, &n.staff, &n.login, &n.owner] {
+    let migrator = format!("{}_migrator", n.schema);
+    let group = format!("{}_group", n.schema);
+    for role in [&n.member, &n.staff, &n.login, &n.owner, &migrator, &group] {
         sql.push_str(&format!(
             "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN
                  EXECUTE 'DROP OWNED BY {role} CASCADE'; EXECUTE 'DROP ROLE {role}';
@@ -223,7 +242,7 @@ pub fn changed(n: &Names) -> Schema {
         )
         // changed: the select policy gets another USING: an alter
         .policy(
-            Policy::new("notes_app_member_select", &notes)
+            Policy::new(format!("notes_{}_select", n.member), &notes)
                 .command(Command::Select)
                 .to(&member)
                 .using(own.clone().or(SqlExpr::col("id").lt(SqlExpr::val(0)))),
@@ -236,4 +255,36 @@ pub fn changed(n: &Names) -> Schema {
                 .to(&staff)
                 .using(SqlExpr::always()),
         )
+}
+
+/// An altered policy that named a dropped role or called a
+/// dropped function ran its ALTER after the drop, and Postgres refused the
+/// drop. The policy is recreated, so its drop runs first.
+pub fn dropped_dependency(n: &Names) -> (Schema, Schema) {
+    let member = member(n);
+    let staff = Role::new(&n.staff);
+    let posts = posts(n);
+    let f = current_tenant(n);
+    let v1 = Schema::new()
+        .role(member.clone())
+        .role(staff.clone())
+        .role(Role::existing(&n.login))
+        .function(f.clone())
+        .table(posts.clone())
+        .policy(
+            Policy::new("posts_tenant", &posts)
+                .to(&member)
+                .to(&staff)
+                .using(SqlExpr::col("tenant_id").eq(f.call([]))),
+        );
+    let v2 = Schema::new()
+        .role(member.clone())
+        .role(Role::existing(&n.login))
+        .table(posts.clone())
+        .policy(
+            Policy::new("posts_tenant", &posts)
+                .to(&member)
+                .using(SqlExpr::col("tenant_id").eq(tenant().get())),
+        );
+    (v1, v2)
 }

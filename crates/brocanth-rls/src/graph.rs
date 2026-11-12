@@ -81,11 +81,21 @@ pub(crate) fn deps(key: &NodeKey, s: &Snapshot) -> Vec<NodeKey> {
             .then(|| NodeKey::Role(name.clone()))
     };
     match key {
-        NodeKey::Role(_) | NodeKey::Table(_) => Vec::new(),
+        NodeKey::Table(_) => Vec::new(),
+        // `GRANT "role" TO "member"` needs the member to exist.
+        NodeKey::Role(name) => s
+            .roles
+            .get(name)
+            .map(|r| r.members.iter().filter_map(role).collect())
+            .unwrap_or_default(),
         NodeKey::Function(k) => s
             .functions
             .get(k)
-            .map(|f| f.uses.iter().cloned().map(NodeKey::Function).collect())
+            .map(|f| {
+                let mut out: Vec<NodeKey> = f.uses.iter().cloned().map(NodeKey::Function).collect();
+                out.extend(f.execute.iter().filter_map(role));
+                out
+            })
             .unwrap_or_default(),
         NodeKey::Grant(table, grantee) => {
             let mut out = vec![NodeKey::Table(table.clone())];
@@ -107,8 +117,8 @@ pub(crate) fn deps(key: &NodeKey, s: &Snapshot) -> Vec<NodeKey> {
 /// [`NodeKey`]'s order, so the result is the same on every run.
 ///
 /// # Errors
-/// [`RlsError::Definition`] naming the nodes of a cycle (functions that
-/// call each other).
+/// [`RlsError::Definition`] naming the nodes of a cycle: functions that
+/// call each other, or roles that are members of each other.
 pub(crate) fn order(s: &Snapshot) -> Result<Vec<NodeKey>, RlsError> {
     let all = nodes(s);
     let mut waiting: BTreeMap<NodeKey, usize> = BTreeMap::new();
@@ -145,7 +155,7 @@ pub(crate) fn order(s: &Snapshot) -> Result<Vec<NodeKey>, RlsError> {
         let names: Vec<String> = waiting.keys().map(ToString::to_string).collect();
         return Err(RlsError::definition(
             format!("these definitions need each other: {}", names.join(", ")),
-            "break the cycle: a function cannot call itself through another",
+            "break the cycle: a function cannot call itself through another, and a role cannot be a member of itself through another",
         ));
     }
     Ok(out)

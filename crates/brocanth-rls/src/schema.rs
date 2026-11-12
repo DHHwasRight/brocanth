@@ -8,7 +8,7 @@ use crate::def::{Function, Grantee, Policy, Role, Table};
 use crate::error::RlsError;
 use crate::expr::{SqlExpr, Uses};
 use crate::ident::{self, SqlType};
-use crate::snapshot::{FunctionSpec, PolicySpec, RoleSpec, Snapshot, TableSpec, KEYWORDS};
+use crate::snapshot::{Command, FunctionSpec, PolicySpec, RoleSpec, Snapshot, TableSpec, KEYWORDS};
 
 /// The roles, tables, functions and policies of one database.
 ///
@@ -188,7 +188,18 @@ impl Schema {
                 definer: function.definer.clone(),
                 body: body.to_sql(),
                 uses: body.used().functions.clone(),
+                execute: function.execute.clone(),
             };
+            if let Some(role) = function
+                .execute
+                .iter()
+                .find(|r| !role_ok(r) || (KEYWORDS.contains(&r.as_str()) && *r != "public"))
+            {
+                return Err(RlsError::definition(
+                    format!("the function `{key}` grants EXECUTE to `{role}`, which is not a role of the schema"),
+                    format!("add `Role::new(\"{role}\")` or `Role::existing(\"{role}\")` to the schema"),
+                ));
+            }
             if snapshot.functions.insert(key.clone(), spec).is_some() {
                 return Err(RlsError::definition(
                     format!("the function `{key}` is added twice"),
@@ -262,6 +273,45 @@ impl Schema {
                     format!("{what} calls the function `{missing}`, which the schema does not add"),
                     "add the function with `Schema::function`",
                 ));
+            }
+            // Postgres refuses these clauses for these commands.
+            let refused = match policy.command {
+                Command::Select | Command::Delete if policy.with_check.is_some() => Some((
+                    "WITH CHECK",
+                    "a SELECT or DELETE policy filters rows with `using` only",
+                )),
+                Command::Insert if policy.using.is_some() => Some((
+                    "USING",
+                    "an INSERT policy checks the new row with `with_check` only",
+                )),
+                _ => None,
+            };
+            if let Some((clause, help)) = refused {
+                return Err(RlsError::definition(
+                    format!("{what} is FOR {} and has {clause}", policy.command),
+                    format!("remove it: {help}"),
+                ));
+            }
+            // A SECURITY DEFINER function runs with its owner's rights, so
+            // only granted roles may call it, and each role the policy
+            // applies to must be one of them.
+            for called in &uses {
+                let Some(f) = snapshot.functions.get(called) else {
+                    continue;
+                };
+                if f.definer.is_none() || f.execute.contains("public") {
+                    continue;
+                }
+                if let Some(role) = to.iter().find(|r| !f.execute.contains(*r)) {
+                    return Err(RlsError::definition(
+                        format!("{what} calls the SECURITY DEFINER function `{called}` for `{role}`, which may not execute it"),
+                        if KEYWORDS.contains(&role.as_str()) {
+                            "add `.grant_execute_public()` to the function, or name roles in the policy's `to`".to_string()
+                        } else {
+                            format!("add `.grant_execute(&Role::new(\"{role}\"))` to the function")
+                        },
+                    ));
+                }
             }
             let spec = PolicySpec {
                 kind: policy.kind,

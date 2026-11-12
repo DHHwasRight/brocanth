@@ -124,6 +124,11 @@ pub struct FunctionSpec {
     /// The functions the body calls, by key.
     #[serde(default)]
     pub uses: BTreeSet<String>,
+    /// The roles granted `EXECUTE` (or `public`). A `SECURITY DEFINER`
+    /// function has `EXECUTE` revoked from `PUBLIC` and granted to these
+    /// only.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub execute: BTreeSet<String>,
 }
 
 /// A table with row-level security on.

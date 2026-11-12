@@ -301,6 +301,7 @@ pub struct Function {
     pub(crate) returns: SqlType,
     pub(crate) volatility: Volatility,
     pub(crate) definer: Option<Vec<String>>,
+    pub(crate) execute: BTreeSet<String>,
     pub(crate) body: Option<SqlExpr>,
 }
 
@@ -314,6 +315,7 @@ impl Function {
             returns,
             volatility: Volatility::Stable,
             definer: None,
+            execute: BTreeSet::new(),
             body: None,
         }
     }
@@ -342,12 +344,31 @@ impl Function {
         self
     }
 
-    /// `SECURITY DEFINER SET search_path = <schemas>`: the body runs with
-    /// the owner's rights, so a lookup is not filtered by the policies of
-    /// the table it reads. The fixed `search_path` stops a caller from
-    /// putting its own objects first.
+    /// `SECURITY DEFINER SET search_path = <schemas>, pg_temp`: the body
+    /// runs with the owner's rights, so a lookup is not filtered by the
+    /// policies of the table it reads. The fixed `search_path` stops a
+    /// caller from putting its own objects first; `pg_temp` goes last, so
+    /// a caller's temporary table cannot stand in for one the body reads.
+    ///
+    /// `EXECUTE` is revoked from `PUBLIC`: name each role that may call it
+    /// with [`Function::grant_execute`]. A schema refuses a policy that
+    /// calls it for a role without the grant.
     pub fn security_definer(mut self, search_path: &[&str]) -> Function {
         self.definer = Some(search_path.iter().map(|s| (*s).to_string()).collect());
+        self
+    }
+
+    /// `GRANT EXECUTE ON FUNCTION … TO "role"`. For a
+    /// [`Function::security_definer`] function, the roles of the policies
+    /// that call it.
+    pub fn grant_execute(mut self, role: &Role) -> Function {
+        self.execute.insert(role.name.clone());
+        self
+    }
+
+    /// `GRANT EXECUTE ON FUNCTION … TO PUBLIC`: every role may call it.
+    pub fn grant_execute_public(mut self) -> Function {
+        self.execute.insert("public".to_string());
         self
     }
 

@@ -179,12 +179,28 @@ impl SqlExpr {
     }
 
     /// `self IS NOT DISTINCT FROM other`: equal, and `NULL` equals `NULL`.
+    ///
+    /// Refused when either side reads a [`Setting`]: with no identity the
+    /// setting is `NULL`, and `IS NOT DISTINCT FROM` would admit every row
+    /// whose column is `NULL`. Use [`SqlExpr::eq`], which admits no row.
     pub fn is(self, other: SqlExpr) -> SqlExpr {
         let e = Expr::cust_with_exprs(
             "$1 IS NOT DISTINCT FROM $2",
             [self.expr.clone(), other.expr.clone()],
         );
-        SqlExpr::with(e, &self, &other)
+        let mut out = SqlExpr::with(e, &self, &other);
+        if let Some(key) = self
+            .uses
+            .settings
+            .keys()
+            .chain(other.uses.settings.keys())
+            .next()
+        {
+            out.uses.problems.push(format!(
+                "`is` compares the setting `{key}`, so a transaction without it admits every row whose column is NULL\nhelp: use `eq`: with no `{key}` it admits no row"
+            ));
+        }
+        out
     }
 
     /// `self AND other`.

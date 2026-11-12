@@ -46,7 +46,7 @@ pub use brocanth_db::DbIdentity;
 #[cfg(feature = "runtime")]
 pub use def::{crud, Function, Grantee, Policy, Role, Table};
 #[cfg(feature = "runtime")]
-pub use diff::{diff, Plan};
+pub use diff::{diff, down, Plan};
 #[cfg(feature = "runtime")]
 pub use error::RlsError;
 #[cfg(feature = "runtime")]

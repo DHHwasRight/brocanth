@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::diff::{diff, Plan};
+use crate::diff::{diff, down, Plan};
 use crate::error::RlsError;
 use crate::schema::Schema;
 use crate::snapshot::Snapshot;
@@ -137,7 +137,7 @@ pub fn make(
     if up.is_empty() {
         return Ok(None);
     }
-    let down = diff(&new, &old)?;
+    let down = down(&new, &old)?;
     let sql = sql_file(&up, &down)?;
     // `new_file` checks the name and stamps it, as `migrate new` does.
     let path = brocanth_db::migrate::new_file(dir, name)?;

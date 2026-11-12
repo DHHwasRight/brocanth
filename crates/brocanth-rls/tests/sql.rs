@@ -5,7 +5,7 @@ mod common;
 
 use brocanth_rls::migration::{self, Format};
 use brocanth_rls::{
-    diff, Function, Policy, Privilege, Role, Schema, Snapshot, SqlExpr, SqlType, Table,
+    diff, Command, Function, Policy, Privilege, Role, Schema, Snapshot, SqlExpr, SqlType, Table,
 };
 use common::{changed, example, golden, member, notes, posts, Names};
 
@@ -119,7 +119,7 @@ fn a_seaorm_migration_runs_the_same_sql() {
     let text = migration::seaorm_file(
         "m20261111_000000_rls",
         &diff(&old, &new).unwrap(),
-        &diff(&new, &old).unwrap(),
+        &brocanth_rls::down(&new, &old).unwrap(),
     );
     golden("m20261111_000000_rls.rs", &text);
 }
@@ -221,6 +221,60 @@ fn a_schema_refuses_what_it_cannot_write_with_help() {
                 ),
             ),
         ),
+        (
+            "WITH CHECK on a SELECT policy",
+            Schema::new().table(posts.clone()).policy(
+                Policy::new("p", &posts)
+                    .command(Command::Select)
+                    .with_check(SqlExpr::always()),
+            ),
+        ),
+        (
+            "WITH CHECK on a DELETE policy",
+            Schema::new().table(posts.clone()).policy(
+                Policy::new("p", &posts)
+                    .command(Command::Delete)
+                    .with_check(SqlExpr::always()),
+            ),
+        ),
+        (
+            "USING on an INSERT policy",
+            Schema::new().table(posts.clone()).policy(
+                Policy::new("p", &posts)
+                    .command(Command::Insert)
+                    .using(SqlExpr::always()),
+            ),
+        ),
+        (
+            "is() with a setting",
+            Schema::new().table(posts.clone()).policy(
+                Policy::new("p", &posts)
+                    .using(SqlExpr::col("tenant_id").is(common::tenant().get())),
+            ),
+        ),
+        (
+            "a control character in a name",
+            Schema::new().table(Table::new("posts\n-- down")),
+        ),
+        (
+            "a SECURITY DEFINER function a policy role may not execute",
+            {
+                let member = Role::new("member");
+                let f = Function::new("lookup", SqlType::Boolean)
+                    .security_definer(&["public"])
+                    .body(SqlExpr::always());
+                Schema::new()
+                    .role(member.clone())
+                    .function(f.clone())
+                    .table(posts.clone())
+                    .policy(Policy::new("p", &posts).to(&member).using(f.call([])))
+            },
+        ),
+        ("a role cycle", {
+            Schema::new()
+                .role(Role::new("a").member("b"))
+                .role(Role::new("b").member("a"))
+        }),
         ("a function cycle", {
             let a = Function::new("a", SqlType::Boolean);
             let b = Function::new("b", SqlType::Boolean).body(a.call([]));
@@ -273,4 +327,105 @@ fn a_custom_built_in_type_survives_json_and_makes_no_step() {
     let s = Schema::new().function(f).snapshot().unwrap();
     let back = Snapshot::from_json(&s.to_json()).unwrap();
     assert!(diff(&back, &s).unwrap().is_empty());
+}
+
+#[test]
+fn a_policy_that_needs_a_dropped_node_is_dropped_before_it() {
+    let n = names();
+    let (v1, v2) = common::dropped_dependency(&n);
+    let steps = diff(&v1.snapshot().unwrap(), &v2.snapshot().unwrap())
+        .unwrap()
+        .describe();
+    let at = |s: &str| {
+        steps
+            .iter()
+            .position(|x| x == s)
+            .unwrap_or_else(|| panic!("{s}: {steps:#?}"))
+    };
+    assert!(at("drop policy posts_tenant on app.posts") < at("drop role app_staff"));
+    assert!(at("drop policy posts_tenant on app.posts") < at("drop function app.current_tenant"));
+    assert!(at("create policy posts_tenant on app.posts") > at("drop role app_staff"));
+}
+
+#[test]
+fn a_member_role_is_created_before_the_grant_that_names_it() {
+    // `a_group` sorts before `z_member`, so only the edge orders them.
+    let schema = Schema::new()
+        .role(Role::new("a_group").member("z_member"))
+        .role(Role::new("z_member"));
+    let sql = schema.create_sql().unwrap();
+    let create = sql.find(r#"CREATE ROLE "z_member""#).unwrap();
+    let grant = sql.find(r#"GRANT "a_group" TO "z_member""#).unwrap();
+    assert!(create < grant, "{sql}");
+}
+
+#[test]
+fn a_role_is_created_with_only_its_non_default_attributes_and_checked_when_it_exists() {
+    let sql = Schema::new().role(Role::new("r")).create_sql().unwrap();
+    assert!(sql.contains(r#"CREATE ROLE "r" NOLOGIN;"#), "{sql}");
+    assert!(!sql.contains(r#"ALTER ROLE "r" WITH"#), "{sql}");
+    assert!(sql.contains("rolsuper OR rolbypassrls"), "{sql}");
+    assert!(sql.contains("help:"), "{sql}");
+    let sql = Schema::new()
+        .role(Role::new("r").noinherit().createdb())
+        .create_sql()
+        .unwrap();
+    assert!(
+        sql.contains(r#"CREATE ROLE "r" NOLOGIN NOINHERIT CREATEDB;"#),
+        "{sql}"
+    );
+}
+
+#[test]
+fn the_down_part_never_drops_a_role() {
+    let n = names();
+    let v1 = example(&n).snapshot().unwrap();
+    let down = brocanth_rls::down(&v1, &Snapshot::default()).unwrap();
+    assert!(!down.describe().iter().any(|s| s.starts_with("drop role")));
+    assert!(down.describe().iter().any(|s| s.starts_with("drop policy")));
+    // The up part drops it only when nothing on the server depends on it.
+    let up = diff(&v1, &Snapshot::default()).unwrap().sql();
+    assert!(up.contains("pg_shdepend"), "{up}");
+}
+
+#[test]
+fn a_security_definer_function_is_closed_to_public_and_open_to_its_roles() {
+    let member = Role::new("member");
+    let posts = Table::new("posts");
+    let f = Function::new("lookup", SqlType::Boolean)
+        .security_definer(&["app"])
+        .grant_execute(&member)
+        .body(SqlExpr::always());
+    let sql = Schema::new()
+        .role(member.clone())
+        .function(f.clone())
+        .table(posts.clone())
+        .policy(Policy::new("p", &posts).to(&member).using(f.call([])))
+        .create_sql()
+        .unwrap();
+    assert!(sql.contains(r#"SET search_path = "app", pg_temp"#), "{sql}");
+    assert!(
+        sql.contains(r#"REVOKE EXECUTE ON FUNCTION "lookup"() FROM PUBLIC"#),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(r#"GRANT EXECUTE ON FUNCTION "lookup"() TO "member""#),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_control_character_in_a_snapshot_name_cannot_end_the_comment() {
+    let mut s = Snapshot::default();
+    s.roles.insert(
+        "a\nDROP TABLE x".to_string(),
+        brocanth_rls::snapshot::RoleSpec {
+            inherit: true,
+            createdb: false,
+            createrole: false,
+            members: Default::default(),
+        },
+    );
+    let sql = diff(&Snapshot::default(), &s).unwrap().sql();
+    assert!(sql.starts_with("-- create role a?DROP TABLE x\n"), "{sql}");
 }

@@ -11,7 +11,10 @@ use brocanth_db::sea_query::{Expr, ExprTrait, Query};
 use brocanth_db::{sqlx, Db, DbError, DbIdentity, Exec};
 use brocanth_rls::migration::{self, Format};
 use brocanth_rls::{catalog, diff, Snapshot};
-use common::{apply, changed, connect, example, grant_usage, setup, teardown, url, Names};
+use common::{
+    apply, changed, connect, dropped_dependency, example, grant_usage, setup, teardown, try_apply,
+    url, Names,
+};
 
 macro_rules! require_db {
     () => {
@@ -48,7 +51,7 @@ async fn assert_no_drift(admin: &Db, snapshot: &Snapshot) {
 #[tokio::test]
 async fn a_migration_applies_reverses_and_the_catalog_matches_each_side() {
     let url = require_db!();
-    let n = Names::new("rls_diff");
+    let n = Names::unique("rls_diff");
     let admin = connect(&url, None).await;
     setup(&admin, &n).await;
 
@@ -58,6 +61,12 @@ async fn a_migration_applies_reverses_and_the_catalog_matches_each_side() {
 
     // create, change, change back, drop: each step leaves the catalog as
     // its snapshot says.
+    // v1 to v2 alters the select policy in place: ALTER POLICY runs.
+    let alter = format!(
+        "alter policy notes_{}_select on {}.notes",
+        n.member, n.schema
+    );
+    assert!(diff(&v1, &v2).unwrap().describe().contains(&alter));
     for (from, to) in [(&empty, &v1), (&v1, &v2), (&v2, &v1), (&v1, &empty)] {
         let plan = diff(from, to).unwrap();
         assert!(!plan.is_empty());
@@ -78,7 +87,7 @@ async fn a_migration_applies_reverses_and_the_catalog_matches_each_side() {
 #[tokio::test]
 async fn drift_names_what_the_database_lacks() {
     let url = require_db!();
-    let n = Names::new("rls_drift");
+    let n = Names::unique("rls_drift");
     let admin = connect(&url, None).await;
     setup(&admin, &n).await;
     let v1 = example(&n).snapshot().unwrap();
@@ -87,32 +96,54 @@ async fn drift_names_what_the_database_lacks() {
         &admin,
         &format!(
             "DROP POLICY posts_tenant ON {s}.posts; ALTER TABLE {s}.posts NO FORCE ROW LEVEL SECURITY; \
-             CREATE POLICY stray ON {s}.notes USING (true)",
-            s = n.schema
+             CREATE POLICY stray ON {s}.notes USING (true); \
+             GRANT SELECT ON {s}.notes TO PUBLIC; GRANT {m} TO {o}; ALTER ROLE {m} BYPASSRLS",
+            s = n.schema,
+            m = n.member,
+            o = n.owner,
         ),
     )
     .await;
     let drift = catalog::drift(&admin, &v1).await.unwrap();
     let text = drift.join("\n");
     assert!(
-        text.contains("policy posts_tenant on rls_drift.posts: missing"),
+        text.contains(&format!(
+            "policy posts_tenant on {}.posts: missing",
+            n.schema
+        )),
         "{text}"
     );
     assert!(
-        text.contains("table rls_drift.posts: FORCE is off"),
+        text.contains(&format!("table {}.posts: FORCE is off", n.schema)),
         "{text}"
     );
     assert!(
-        text.contains("policy stray on rls_drift.notes: not in the schema"),
+        text.contains(&format!(
+            "policy stray on {}.notes: not in the schema",
+            n.schema
+        )),
         "{text}"
     );
+    for want in [
+        format!(
+            "table {}.notes: public has SELECT; the schema does not grant it",
+            n.schema
+        ),
+        format!(
+            "role {}: {} is a member; the schema does not grant it",
+            n.member, n.owner
+        ),
+        format!("role {}: SUPERUSER=false BYPASSRLS=true", n.member),
+    ] {
+        assert!(text.contains(&want), "{want}\n{text}");
+    }
     teardown(&admin, &n).await;
 }
 
 #[tokio::test]
 async fn brocanth_db_migrate_applies_and_rolls_back_the_file_rls_make_wrote() {
     let url = require_db!();
-    let n = Names::new("rls_make");
+    let n = Names::unique("rls_make");
     let admin = connect(&url, None).await;
     setup(&admin, &n).await;
     // `brocanth_migrations` in this test's schema, not in `public`.
@@ -141,6 +172,13 @@ async fn brocanth_db_migrate_applies_and_rolls_back_the_file_rls_make_wrote() {
     assert_no_drift(&admin, &changed(&n).snapshot().unwrap()).await;
 
     assert_eq!(migrator.down(2).await.unwrap().len(), 2);
+    // The down part leaves the roles: they are cluster-wide.
+    let (kept,): (i64,) = sqlx::query_as("SELECT count(*) FROM pg_roles WHERE rolname = $1")
+        .bind(&n.member)
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
     let drift = catalog::drift(&admin, &example(&n).snapshot().unwrap())
         .await
         .unwrap();
@@ -164,7 +202,7 @@ async fn enforced(url: &str, n: &Names) -> (Db, Db) {
 #[tokio::test]
 async fn a_member_sees_and_writes_only_its_own_rows() {
     let url = require_db!();
-    let n = Names::new("rls_enforce");
+    let n = Names::unique("rls_enforce");
     let (admin, login) = enforced(&url, &n).await;
     let posts = format!("{}.posts", n.schema);
 
@@ -266,7 +304,7 @@ fn assert_policy_refused(e: &DbError) {
 #[tokio::test]
 async fn force_makes_the_owner_obey_and_without_force_the_owner_sees_all() {
     let url = require_db!();
-    let n = Names::new("rls_force");
+    let n = Names::unique("rls_force");
     let (admin, _login) = enforced(&url, &n).await;
     let owner = connect(&url, Some(&n.owner)).await;
     let count = |table: &'static str| {
@@ -304,7 +342,7 @@ async fn force_makes_the_owner_obey_and_without_force_the_owner_sees_all() {
 #[tokio::test]
 async fn the_principal_never_reaches_the_next_transaction_on_the_connection() {
     let url = require_db!();
-    let n = Names::new("rls_leak");
+    let n = Names::unique("rls_leak");
     let (admin, login) = enforced(&url, &n).await;
     // The pool has one connection, so each transaction below reuses it.
     assert_eq!(login.pool().options().get_max_connections(), 1);
@@ -362,7 +400,7 @@ async fn the_principal_never_reaches_the_next_transaction_on_the_connection() {
 #[tokio::test]
 async fn a_role_the_login_is_not_granted_is_refused_with_help() {
     let url = require_db!();
-    let n = Names::new("rls_role");
+    let n = Names::unique("rls_role");
     let (admin, login) = enforced(&url, &n).await;
     let e = login
         .transact_as(&DbIdentity::new().role(&n.owner), async |_| Ok(()))
@@ -376,7 +414,7 @@ async fn a_role_the_login_is_not_granted_is_refused_with_help() {
 #[tokio::test]
 async fn a_second_identity_replaces_the_first_and_does_not_merge() {
     let url = require_db!();
-    let n = Names::new("rls_assume");
+    let n = Names::unique("rls_assume");
     let (admin, login) = enforced(&url, &n).await;
     let who = "SELECT current_user::text, \
                coalesce(nullif(current_setting('brocanth.user_id', true), ''), '<null>'), \
@@ -399,5 +437,98 @@ async fn a_second_identity_replaces_the_first_and_does_not_merge() {
         seen,
         (n.login.clone(), "<null>".to_string(), "2".to_string())
     );
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
+async fn a_policy_that_needed_a_dropped_role_and_function_migrates() {
+    let url = require_db!();
+    let n = Names::unique("rls_dropdep");
+    let admin = connect(&url, None).await;
+    setup(&admin, &n).await;
+    let (v1, v2) = dropped_dependency(&n);
+    let (v1, v2) = (v1.snapshot().unwrap(), v2.snapshot().unwrap());
+    apply(&admin, &diff(&Snapshot::default(), &v1).unwrap().sql()).await;
+    // Before the fix: "cannot drop function … because other objects
+    // depend on it", and "role … cannot be dropped".
+    apply(&admin, &diff(&v1, &v2).unwrap().sql()).await;
+    assert_no_drift(&admin, &v2).await;
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
+async fn a_member_role_is_created_before_its_membership() {
+    let url = require_db!();
+    let n = Names::unique("rls_members");
+    let admin = connect(&url, None).await;
+    setup(&admin, &n).await;
+    // `<schema>_group` sorts before `<schema>_member`: only the edge
+    // orders them.
+    let group = format!("{}_group", n.schema);
+    let schema = brocanth_rls::Schema::new()
+        .role(brocanth_rls::Role::new(&group).member(&n.member))
+        .role(brocanth_rls::Role::new(&n.member));
+    apply(&admin, &schema.create_sql().unwrap()).await;
+    assert_no_drift(&admin, &schema.snapshot().unwrap()).await;
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
+async fn an_existing_role_with_bypassrls_fails_the_migration_with_help() {
+    let url = require_db!();
+    let n = Names::unique("rls_bypass");
+    let admin = connect(&url, None).await;
+    setup(&admin, &n).await;
+    apply(
+        &admin,
+        &format!("CREATE ROLE {} NOLOGIN BYPASSRLS", n.member),
+    )
+    .await;
+    let e = try_apply(&admin, &example(&n).create_sql().unwrap())
+        .await
+        .unwrap_err();
+    assert!(e.contains("BYPASSRLS") && e.contains("help:"), "{e}");
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
+async fn a_migration_role_without_superuser_or_createdb_applies_the_schema() {
+    let url = require_db!();
+    let n = Names::unique("rls_nonsuper");
+    let admin = connect(&url, None).await;
+    setup(&admin, &n).await;
+    // The migration role: CREATEROLE, no CREATEDB, a member of the tables'
+    // owner so it may alter them, and ADMIN on the login it grants to.
+    let migrator = format!("{}_migrator", n.schema);
+    apply(
+        &admin,
+        &format!(
+            "CREATE ROLE {migrator} LOGIN PASSWORD 'pw' CREATEROLE; GRANT {owner} TO {migrator}; \
+             GRANT {login} TO {migrator} WITH ADMIN OPTION; GRANT USAGE, CREATE ON SCHEMA {s} TO {migrator}",
+            owner = n.owner,
+            login = n.login,
+            s = n.schema,
+        ),
+    )
+    .await;
+    let db = connect(&url, Some(&migrator)).await;
+    let v1 = example(&n).snapshot().unwrap();
+    let sql = diff(&Snapshot::default(), &v1).unwrap().sql();
+    // Before the fix: "Only roles with the CREATEDB attribute may change
+    // the CREATEDB attribute" on `ALTER ROLE … NOCREATEDB`.
+    try_apply(&db, &sql).await.unwrap();
+    // The role again: it exists and matches, so nothing is altered.
+    let roles = brocanth_rls::Schema::new()
+        .role(common::member(&n))
+        .role(brocanth_rls::Role::existing(&n.login));
+    try_apply(&db, &roles.create_sql().unwrap()).await.unwrap();
+    assert_no_drift(&admin, &v1).await;
+    // An attribute it may not set fails with the privilege it needs.
+    let createdb = brocanth_rls::Schema::new().role(brocanth_rls::Role::new(&n.staff).createdb());
+    let e = try_apply(&db, &createdb.create_sql().unwrap())
+        .await
+        .unwrap_err();
+    assert!(e.contains("help:") && e.contains("CREATEDB"), "{e}");
+    db.close().await;
     teardown(&admin, &n).await;
 }
