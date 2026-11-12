@@ -230,7 +230,7 @@ fn json_line(level: Level, message: &str, target: &str, fields: &Fields) -> Stri
         out.push(',');
         // A field named like a key of the line itself would be a second key
         // of that name, and many parsers keep only the last one.
-        if RESERVED.contains(&name.as_ref()) {
+        if RESERVED.contains(name) {
             json_string(&mut out, &format!("field.{name}"));
         } else {
             json_string(&mut out, name);

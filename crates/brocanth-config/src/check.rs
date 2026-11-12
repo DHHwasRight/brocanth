@@ -793,7 +793,7 @@ fn observability(project: &Project, config: &Config, file: &str) -> Vec<Finding>
         let ready = text("ready_path", "/readyz");
         let variable = project.variable("observability", "drain_delay_secs");
         let delay = get(config, "observability.drain_delay_secs");
-        let zero = delay.map_or(true, |v| v.as_integer() == Some(0));
+        let zero = delay.is_none_or(|v| v.as_integer() == Some(0));
         if !ready.is_empty() && zero && !project.deploy_sets(&variable) {
             let mut d = Finding::warning(
                 "deploy/drain-delay",
