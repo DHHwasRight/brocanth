@@ -233,7 +233,13 @@ impl ModelAdmin {
         self
     }
 
-    /// Columns kept out of the form and the detail screen entirely.
+    /// Columns kept out of the admin entirely: the list, the form, the
+    /// detail screen, the default search, sort and record label, and the
+    /// values a journal hears.
+    ///
+    /// An excluded column is never searched or sorted by default, so the
+    /// count of a search cannot reveal what it holds. Name it in
+    /// [`ModelAdmin::searchable`] or [`ModelAdmin::sortable`] to opt it back in.
     pub fn exclude<I, S>(mut self, columns: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -733,6 +739,7 @@ impl ModelAdmin {
         model
             .columns
             .iter()
+            .filter(|c| !self.is_excluded(&c.name))
             .filter(|c| matches!(c.kind, ColumnKind::Text | ColumnKind::LongText))
             .map(|c| c.name.clone())
             .collect()
@@ -751,6 +758,7 @@ impl ModelAdmin {
         model
             .columns
             .iter()
+            .filter(|c| !self.is_excluded(&c.name))
             .filter(|c| !matches!(c.kind, ColumnKind::Binary | ColumnKind::Json))
             .map(|c| c.name.clone())
             .collect()
@@ -772,6 +780,7 @@ impl ModelAdmin {
             .columns
             .iter()
             .filter(|c| !c.primary_key)
+            .filter(|c| !self.is_excluded(&c.name))
             .filter(|c| matches!(c.kind, ColumnKind::Text | ColumnKind::LongText))
             .find_map(|c| match row.get(&c.name) {
                 Some(value) if !value.is_null() && !value.as_input().trim().is_empty() => {

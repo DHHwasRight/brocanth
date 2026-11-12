@@ -2635,6 +2635,13 @@ impl Admin {
         };
         let who = self.user_label.as_ref().and_then(|name| name(&principal));
         let key = key.to_segment();
+        // An excluded column is kept out of every screen, so its values are
+        // kept out of the journal too: a delete reads the whole row.
+        let fields: Vec<FieldChange> = fields
+            .iter()
+            .filter(|f| !entry.admin.is_excluded(&f.name))
+            .cloned()
+            .collect();
         journal.record(&AdminWrite {
             who: who.as_deref(),
             model: &entry.descriptor.key,
@@ -2642,7 +2649,7 @@ impl Admin {
             key: &key,
             label,
             kind,
-            fields,
+            fields: &fields,
         });
     }
 
