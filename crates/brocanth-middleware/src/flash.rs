@@ -335,9 +335,17 @@ impl HookSource for FlashPlugin {
             config: self.config.clone(),
             key,
         };
+        // Declared after the conditional GET and compression, and before
+        // the route cache, so on the way out the message goes into the
+        // identity body after the cache stored the page and before the
+        // body is tagged and compressed.
+        let write = brocanth::plugin_order::Order::new()
+            .after_if_present("conditional_get")
+            .after_if_present("compression")
+            .before_if_present("route_cache");
         registrar
             .request("read", brocanth::plugin_order::Order::new(), hook.clone())
-            .response("write", brocanth::plugin_order::Order::new(), hook);
+            .response("write", write, hook);
         Ok(())
     }
 }
