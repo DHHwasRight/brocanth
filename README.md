@@ -50,8 +50,8 @@ Two rules shape the code:
 ## Getting started in five minutes
 
 You need Rust 1.97 or later (`mise.toml` pins 1.98). The `model`, `jobs`
-and `cache` modules also need a Postgres server in production; `model`
-starts on a SQLite file in development.
+and `cache` modules also need a Postgres server. Brocanth supports Postgres
+only.
 
 **1. Install the CLI** from a checkout. Nothing is on crates.io yet.
 
@@ -135,7 +135,7 @@ brocanth add jobs                 # the same generator, one more module
 brocanth migrate make add_posts   # with `model`: the project's own command diffs src/models
 brocanth migrate up               # and applies, in the project's binary
 brocanth check --deploy           # secrets, cookies, CSRF, the database
-brocanth dbshell                  # with `db`: the project's command, psql or sqlite3
+brocanth dbshell                  # with `db`: the project's command, psql
 brocanth admin eject list         # copy a shipped admin screen into the project, as yours
 brocanth admin diff               # after an upgrade: each copy against the shipped screen
 brocanth --help                   # also lists the project's own commands
@@ -301,7 +301,7 @@ else.
 
 | Piece | On Postgres today | The seam | The way out |
 |---|---|---|---|
-| Data | SeaORM, Postgres by default | `brocanth-model` | SQLite for a single machine (`features = ["sqlite"]`) |
+| Data | SeaORM, Postgres only | `brocanth-model` | none: Postgres only (2026-11-11), RLS and one database keep the framework simple |
 | Jobs | `brocanth-jobs`: typed jobs, cron and a panel over the `brocanth-queue` engine | `brocanth-queue` (below) | another queue `Backend` |
 | Queue | `PgQueue`, `PgOutbox` in `brocanth-queue-postgres` | `Backend`, `Outbox`, `Inspect` | The `Bulk` lane moves to another `Backend`. The contract is written against SQS limits. |
 | Cache | `PgCache` on unlogged tables | `Cache` (tags, `CacheExt`) | Another `Cache` impl |

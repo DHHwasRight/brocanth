@@ -705,3 +705,25 @@ The base path is rewritten in the HTML and CSS and never in data. A JSON
 payload names URLs in fields only the application understands, so the
 application prefixes them itself. `tests/d3set.rs` mirrors the gallery, so a
 change to any of this fails in brocanth before it fails there.
+
+### ADR 5 — Postgres only. SQLite is removed.
+
+**Status:** accepted (2026-11-11). **Touches:** §7, §9, the `model`,
+`policy`, `jobs` and `migrate` crates.
+
+Postgres only (2026-11-11): RLS and one database keep the framework simple.
+
+SQLite was a second, smaller target: a `sqlite` feature on `brocanth-model`,
+`Dialect::Sqlite` in `brocanth-policy`, and in-memory SQLite test databases
+in several crates. Every SQL path had to mean the same thing on both, and the
+test suites that ran unattended were the ones for the backend that was not
+the default. Row-level security, `LISTEN/NOTIFY`, `FOR UPDATE SKIP LOCKED`
+and transactional DDL exist only on Postgres, and the queue, cache and blob
+stores were Postgres already.
+
+So the feature, the dialect variant and the SQLite test databases are gone.
+A database test now runs on Postgres in a schema of its own, and skips with a
+printed line when no database is set. `Dialect` keeps one variant, so the
+public API and the generated code keep their shape. The core's
+`tests/no_hidden_dependencies.rs` still refuses `rusqlite` and
+`libsqlite3-sys`.

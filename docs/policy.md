@@ -209,7 +209,7 @@ pub policy PostPolicy(who: &Visitor) for Post {
     eval {
         subjects: [Visitor::anonymous(), Visitor::user(1), Visitor::admin()],
         database: test_db::posts,   // fn(&[MapRow<PostColumn>]) -> impl Oracle<Post>
-        dialect: Sqlite,
+        dialect: Postgres,
         cases: 64,                  // optional, default 64
     }
 }
@@ -223,7 +223,7 @@ from the values the rules compare against, so near-misses are common.
 
 `database` is the application's function: create the table, insert the rows,
 answer the query. The macro does not know your driver. See
-`crates/brocanth-policy-macros/tests/sqlite/mod.rs` for one in fifty lines.
+`crates/brocanth-policy-macros/tests/postgres/mod.rs` for one in fifty lines.
 
 ## Before and after
 

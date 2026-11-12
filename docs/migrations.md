@@ -158,7 +158,6 @@ The file marks each step that needs a check with `// Check:`. Examples: a
   `brocanth add commands` gives one.
 - A project with `db` and no `model` (sea-query, no ORM) has no models to
   diff, so no `make`. It gets plain SQL migrations instead (section 7).
-- SQLite cannot alter a column. An alter step runs on Postgres only.
 - Two fields that swap names in one step make two renames that collide. Make
   that change in two migrations.
 
@@ -166,7 +165,8 @@ The file marks each step that needs a check with `// Check:`. Examples: a
 
 - `crates/brocanth-migrate`: ids, source scan, snapshot, diff, rendering, the
   id stamper. No ORM and no driver. Its tests compile the generated golden
-  migrations and run them up and down on SQLite.
+  migrations and run them up and down on Postgres, in a schema of their own
+  (skipped when no database is set).
 - `crates/brocanth-model-derive`: `#[ids]`, and the id removal in
   `#[validates]`.
 - `crates/brocanth-migrate/src/tool.rs`: the `migrate` tool (`ids`, `make`,

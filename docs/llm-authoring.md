@@ -53,8 +53,8 @@ cargo test --workspace
 ```
 
 A full workspace check also catches a class of failure a per-crate check
-cannot: a native-library conflict. Two crates wanting different
-`libsqlite3-sys` versions breaks resolution for *every* crate, and
+cannot: a native-library conflict. Two crates that want different versions
+of one `links` library break resolution for *every* crate, and
 `cargo check -p <one>` will not show it.
 
 ## Decisions that belong to the person
@@ -358,8 +358,8 @@ chain it already knows. A handler never reads the header.
 its own repository, so `--brocanth-path` does not reach it and the generated
 manifest fetches it by git.
 
-**Postgres is the base.** SQLite is supported for smaller single-machine
-setups and is a cargo feature, not a different crate.
+**Postgres only (2026-11-11): RLS and one database keep the framework
+simple.** There is no SQLite backend, feature or test path. Do not add one.
 
 ## Conventions that are not in the code
 
