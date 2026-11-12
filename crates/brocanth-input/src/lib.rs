@@ -323,15 +323,24 @@ impl Unreadable {
 #[cfg(feature = "runtime")]
 impl fmt::Display for Unreadable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const TYPES: &str = "`application/x-www-form-urlencoded`, `multipart/form-data` \
+                             or `application/json`";
         match self {
-            Unreadable::NotText => f.write_str("the body is not UTF-8"),
-            Unreadable::BadJson(why) => write!(f, "the body is not valid JSON: {why}"),
+            Unreadable::NotText => {
+                f.write_str("the body is not UTF-8\nhelp: send the body encoded as UTF-8")
+            }
+            Unreadable::BadJson(why) => write!(
+                f,
+                "the body is not valid JSON: {why}\nhelp: send one JSON object, as `JSON.stringify` writes it"
+            ),
             Unreadable::NoReader(kind) => {
-                write!(f, "no reader for `{kind}`; send a form or JSON")
+                write!(f, "no reader for `{kind}`\nhelp: send the body as {TYPES}")
             }
-            Unreadable::Unsaid => {
-                f.write_str("a body arrived with no content-type; send a form or JSON")
-            }
+            Unreadable::Unsaid => write!(
+                f,
+                "a body arrived with no content-type\nhelp: set the `content-type` header to {TYPES}"
+            ),
+            // The fault carries its own help line.
             Unreadable::Multipart(fault) => write!(f, "the upload could not be read: {fault}"),
         }
     }
@@ -380,6 +389,21 @@ mod tests {
     }
 
     const FORM: &str = "application/x-www-form-urlencoded";
+
+    #[test]
+    fn every_unreadable_body_says_what_to_send_instead() {
+        let all = [
+            Unreadable::NotText,
+            Unreadable::BadJson("expected value".into()),
+            Unreadable::NoReader("text/csv".into()),
+            Unreadable::Unsaid,
+            Unreadable::Multipart(multipart::Fault::Truncated),
+        ];
+        for why in all {
+            let text = why.to_string();
+            assert_eq!(text.matches("\nhelp: ").count(), 1, "{text}");
+        }
+    }
 
     #[test]
     fn a_form_becomes_the_struct_the_handler_asked_for() {

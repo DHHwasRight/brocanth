@@ -79,8 +79,10 @@ impl Limits {
     /// What a caller gets when it does not say.
     ///
     /// * `total_bytes`, 16 MiB. The body is in memory in one piece, so this
-    ///   is what one request may cost the process. The server buffers 2 MiB
-    ///   today, which makes this the second line and not the first.
+    ///   is what one request may cost the process. The server's own cap,
+    ///   `brocanth_server::Server::max_body`, is 16 MiB by default too, and
+    ///   it is the first line: raise both together, or a larger limit here
+    ///   is never reached.
     /// * `file_bytes`, 8 MiB. A photo from a phone or a scanned page fits. A
     ///   video does not, and a video wants a streaming reader this crate does
     ///   not have, so the refusal is honest.
@@ -175,24 +177,62 @@ impl Fault {
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fault::NoBoundary => f.write_str("the content type names no boundary"),
-            Fault::BadBoundary => f.write_str("the boundary is not a boundary"),
-            Fault::NoFirstBoundary => f.write_str("the body does not open with the boundary"),
-            Fault::Truncated => f.write_str("the body ended before the closing boundary"),
-            Fault::NoHeaderEnd => f.write_str("a part's headers have no end"),
-            Fault::BadHeader(line) => write!(f, "a header line with no colon: `{line}`"),
-            Fault::Unnamed => f.write_str("a part with no name"),
-            Fault::NotText(name) => write!(f, "the field `{name}` is not UTF-8"),
-            Fault::BodyTooLarge { bytes, limit } => {
-                write!(f, "the body is {bytes} bytes and the limit is {limit}")
-            }
-            Fault::FileTooLarge { name, limit } => {
-                write!(f, "the file `{name}` is over the limit of {limit} bytes")
-            }
-            Fault::TooManyParts { limit } => write!(f, "more than {limit} parts"),
-            Fault::HeadersTooLarge { limit } => {
-                write!(f, "a part's headers are over the limit of {limit} bytes")
-            }
+            Fault::NoBoundary => f.write_str(
+                "the content type names no boundary\n\
+                 help: send `multipart/form-data; boundary=...`, as a form with \
+                 `enctype=\"multipart/form-data\"` does",
+            ),
+            Fault::BadBoundary => f.write_str(
+                "the boundary is not a boundary\n\
+                 help: use 1 to 70 letters, digits or `'()+_,-./:=?` as the boundary",
+            ),
+            Fault::NoFirstBoundary => f.write_str(
+                "the body does not open with the boundary\n\
+                 help: start the body with `--` and the boundary the content type names",
+            ),
+            Fault::Truncated => f.write_str(
+                "the body ended before the closing boundary\n\
+                 help: send the whole body again; it ends with `--`, the boundary and `--`",
+            ),
+            Fault::NoHeaderEnd => f.write_str(
+                "a part's headers have no end\n\
+                 help: end each part's headers with an empty line",
+            ),
+            Fault::BadHeader(line) => write!(
+                f,
+                "a header line with no colon: `{line}`\n\
+                 help: write each part header as `Name: value`"
+            ),
+            Fault::Unnamed => f.write_str(
+                "a part with no name\n\
+                 help: give each part `Content-Disposition: form-data; name=\"...\"`",
+            ),
+            Fault::NotText(name) => write!(
+                f,
+                "the field `{name}` is not UTF-8\n\
+                 help: send `{name}` as UTF-8 text, or as a file with a filename"
+            ),
+            Fault::BodyTooLarge { bytes, limit } => write!(
+                f,
+                "the body is {bytes} bytes and the limit is {limit}\n\
+                 help: send a smaller body, or raise `Limits::total_bytes` and the server's \
+                 `max_body` together"
+            ),
+            Fault::FileTooLarge { name, limit } => write!(
+                f,
+                "the file `{name}` is over the limit of {limit} bytes\n\
+                 help: send a smaller file, or raise `Limits::file_bytes`"
+            ),
+            Fault::TooManyParts { limit } => write!(
+                f,
+                "more than {limit} parts\n\
+                 help: send fewer fields, or raise `Limits::parts`"
+            ),
+            Fault::HeadersTooLarge { limit } => write!(
+                f,
+                "a part's headers are over the limit of {limit} bytes\n\
+                 help: send shorter part headers, or raise `Limits::header_bytes`"
+            ),
         }
     }
 }
