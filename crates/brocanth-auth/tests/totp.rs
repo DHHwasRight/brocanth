@@ -49,6 +49,14 @@ fn the_published_rfc_6238_vectors_all_match() {
 }
 
 #[test]
+fn ten_digits_match_the_rfc_4226_truncated_value() {
+    // RFC 4226 Appendix D: counter 1 truncates to 1094287082, and T=59 is
+    // step 1. Ten digits is the whole value; 10^10 does not fit a u32.
+    let totp = Totp::custom(10, 30, 1).unwrap();
+    assert_eq!(totp.code_at(&rfc_secret(), 59), "1094287082");
+}
+
+#[test]
 fn the_interoperable_defaults_are_the_ones_every_app_assumes() {
     let totp = Totp::interoperable();
     assert_eq!((totp.digits(), totp.step_seconds()), (6, 30));
