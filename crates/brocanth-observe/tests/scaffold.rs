@@ -57,6 +57,22 @@ fn probes_and_metrics_without_a_config_file() {
     );
 }
 
+/// With the jobs module: the queue reports each run to the `Observer`, and
+/// `/metrics` shows its depth.
+#[test]
+fn logs_and_metrics_with_jobs() {
+    shape(
+        "observability-jobs",
+        &[
+            "observability",
+            "observability-logs",
+            "observability-metrics",
+            "jobs",
+            "jobs-memory",
+        ],
+    );
+}
+
 /// The parent alone: a request id and a drain on SIGTERM, and a settings
 /// struct with no field.
 #[test]

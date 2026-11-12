@@ -1592,6 +1592,15 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "observability.trust_traceparent",
+        help: "Follow an inbound traceparent. Off at the edge: no caller forces sampling.",
+        flag: true,
+        file: "src/modules/observability.rs",
+        flags: crate::modules::observability::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -1866,6 +1875,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", observability.sample_ratio),
         ),
         (
+            "observability.trust_traceparent",
+            format!("{:?}", observability.trust_traceparent),
+        ),
+        (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
@@ -2001,7 +2014,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 5413bf28eb3c408e
+// brocanth-digest: 37f17acb7c96173c
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2112,6 +2125,7 @@ pub mod observability {
         MetricsBind,
         OtlpEndpoint,
         SampleRatio,
+        TrustTraceparent,
     }
 
     impl Key {
@@ -2127,6 +2141,7 @@ pub mod observability {
                 Key::MetricsBind => "observability.metrics_bind",
                 Key::OtlpEndpoint => "observability.otlp_endpoint",
                 Key::SampleRatio => "observability.sample_ratio",
+                Key::TrustTraceparent => "observability.trust_traceparent",
             }
         }
     }
@@ -2192,7 +2207,7 @@ pub mod observability_tracing {
     }
 }
 
-// brocanth-digest: 18d4c28bd24ab307
+// brocanth-digest: d3e36eb041ab3016
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2398,6 +2413,8 @@ metrics_path = "/metrics"
 # otlp_endpoint = "http://localhost:4318"
 # The share of new traces kept, from 0.0 to 1.0.
 sample_ratio = 1.0
+# Follow an inbound traceparent. Off at the edge: no caller forces sampling.
+trust_traceparent = false
 ===== src/plugins/observability/mod.rs =====
 //! Observability, as this application registers it: a JSON or text line per request on stdout, `/up` and `/readyz`, Prometheus text on `/metrics`, an OTLP span per request.
 //!
@@ -2449,6 +2466,9 @@ pub struct Settings {
     pub otlp_endpoint: String,
     /// The share of new traces kept, from 0.0 to 1.0.
     pub sample_ratio: f64,
+    /// Continue an inbound `traceparent`. Off at the edge: a caller could
+    /// send a sampled one and force every request it makes to be kept.
+    pub trust_traceparent: bool,
 }
 
 /// Every field but a secret, which prints as `<redacted>`: a log line or
@@ -2466,6 +2486,7 @@ impl std::fmt::Debug for Settings {
             .field("metrics_bind", &self.metrics_bind)
             .field("otlp_endpoint", &self.otlp_endpoint)
             .field("sample_ratio", &self.sample_ratio)
+            .field("trust_traceparent", &self.trust_traceparent)
             .finish()
     }
 }
@@ -2483,23 +2504,21 @@ impl Default for Settings {
             metrics_bind: String::new(),
             otlp_endpoint: String::new(),
             sample_ratio: 1.0,
+            trust_traceparent: false,
         }
     }
 }
 
-/// `MY_APP_ENV`, the variable the config plugin reads too.
-fn environment() -> String {
-    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
-    std::env::var(var).unwrap_or_else(|_| "development".to_string())
-}
-
+/// The value, trimmed; `None` when nothing is left.
 fn path(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn observer(settings: Settings) -> Result<Observer, String> {
     let mut config = ObserveConfig::new(crate::app::APP);
-    config.log_format = LogFormat::resolve(Some(&settings.format), &environment())?;
+    let env = brocanth_observe::environment(crate::app::APP);
+    config.log_format = LogFormat::resolve(Some(&settings.format), &env)?;
     config.log_level = settings.level;
     config.live_path = path(settings.live_path);
     config.ready_path = path(settings.ready_path);
@@ -2510,6 +2529,7 @@ fn observer(settings: Settings) -> Result<Observer, String> {
     config.tracing.enabled = true;
     config.tracing.endpoint = path(settings.otlp_endpoint);
     config.tracing.sample_ratio = settings.sample_ratio;
+    config.tracing.trust_traceparent = settings.trust_traceparent;
     Observer::new(config)
 }
 

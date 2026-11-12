@@ -1263,6 +1263,7 @@ version = "0.1.0"
 dependencies = [
  "brocanth",
  "brocanth-cli",
+ "brocanth-config",
  "brocanth-jobs",
  "brocanth-scaffold",
  "brocanth-server",

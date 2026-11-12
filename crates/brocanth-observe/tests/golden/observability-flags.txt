@@ -2331,8 +2331,10 @@ impl Default for Settings {
     }
 }
 
+/// The value, trimmed; `None` when nothing is left.
 fn path(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn observer(settings: Settings) -> Result<Observer, String> {

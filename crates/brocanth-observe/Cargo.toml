@@ -36,11 +36,16 @@ tokio = { version = "1", features = ["rt", "time", "signal", "macros", "sync"], 
 tracing = { version = "0.1", optional = true, default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry", "std"] }
 
+# `logs`: the log format's default depends on the environment, and the one
+# rule for `<APP>_ENV` is `brocanth-config`'s. No parser: default features
+# off.
+brocanth-config = { path = "../brocanth-config", version = "0.1.0", optional = true, default-features = false }
+
 # `metrics`: Prometheus text. `prometheus-client` over `metrics` +
 # `metrics-exporter-prometheus`: four small crates (dtoa, itoa, parking_lot,
 # a derive) against an exporter that brings its own hyper server, quanta and
 # a global recorder. A registry that belongs to one `Observer` also matches
-# ADR 1: no process-global state that two applications would share.
+# PLAN.md §3: no global registry that two applications in one process share.
 prometheus-client = { version = "0.25", optional = true }
 
 # `otel`: spans exported over OTLP/HTTP with protobuf, the protocol every
@@ -83,7 +88,7 @@ default = ["runtime", "logs", "metrics"]
 # other feature turns it on. The CLI turns every default off and takes
 # `scaffold` alone, so `brocanth create` links no server and no tokio.
 runtime = ["dep:brocanth", "dep:brocanth-server", "dep:tokio"]
-logs = ["runtime", "dep:tracing", "dep:tracing-subscriber"]
+logs = ["runtime", "dep:tracing", "dep:tracing-subscriber", "dep:brocanth-config"]
 metrics = ["runtime", "dep:prometheus-client"]
 otel = [
     "logs",

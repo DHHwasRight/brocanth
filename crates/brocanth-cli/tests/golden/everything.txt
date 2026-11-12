@@ -13,7 +13,7 @@ default-run = "my-blog"
 # field on the context, no bytes in the binary.
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel"], default-features = false }
+brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel", "jobs"], default-features = false }
 brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["check"] }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
@@ -3035,6 +3035,15 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "observability.trust_traceparent",
+        help: "Follow an inbound traceparent. Off at the edge: no caller forces sampling.",
+        flag: true,
+        file: "src/modules/observability.rs",
+        flags: crate::modules::observability::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "db.url",
         help: "The Postgres URL: postgres://user:password@host:5432/database.",
         flag: false,
@@ -4586,6 +4595,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "observability.sample_ratio",
             format!("{:?}", observability.sample_ratio),
         ),
+        (
+            "observability.trust_traceparent",
+            format!("{:?}", observability.trust_traceparent),
+        ),
         ("db.url", format!("{:?}", db.url)),
         ("db.max_connections", format!("{:?}", db.max_connections)),
         ("db.min_connections", format!("{:?}", db.min_connections)),
@@ -5079,7 +5092,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: 7f338a288de642af
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -5179,6 +5192,7 @@ pub mod observability {
         MetricsBind,
         OtlpEndpoint,
         SampleRatio,
+        TrustTraceparent,
     }
 
     impl Key {
@@ -5194,6 +5208,7 @@ pub mod observability {
                 Key::MetricsBind => "observability.metrics_bind",
                 Key::OtlpEndpoint => "observability.otlp_endpoint",
                 Key::SampleRatio => "observability.sample_ratio",
+                Key::TrustTraceparent => "observability.trust_traceparent",
             }
         }
     }
@@ -7440,7 +7455,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: b11a6128b6681c98
+// brocanth-digest: 2235f65fab4eed01
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -9507,6 +9522,8 @@ metrics_path = "/metrics"
 # otlp_endpoint = "http://localhost:4318"
 # The share of new traces kept, from 0.0 to 1.0.
 sample_ratio = 1.0
+# Follow an inbound traceparent. Off at the edge: no caller forces sampling.
+trust_traceparent = false
 
 [db]
 # The Postgres URL: postgres://user:password@host:5432/database.
@@ -14851,7 +14868,7 @@ mod tests {
 //! page with [`enabled`]:
 //!
 //! ```ignore
-//! if crate::plugins::flags::enabled(ctx, crate::plugins::flags::NEW_CHECKOUT) {
+//! if crate::plugins::flags::enabled(ctx, crate::plugins::flags::NEW_CHECKOUT).await {
 //!     // the new flow
 //! }
 //! ```
@@ -14866,9 +14883,11 @@ mod tests {
 //! everyone, for a percentage of signed-in users, or for a list of users
 //! and groups.
 
+use brocanth_auth::session::Privilege;
 use brocanth_flags::{Actor, Flag};
 
 use crate::pages::Ctx;
+use crate::plugins::auth::Services;
 
 /// The plugin, from the library. `[flags]` configures it.
 pub use brocanth_flags::FlagsPlugin as Flags;
@@ -14883,25 +14902,44 @@ pub const ALL: &[Flag] = &[NEW_CHECKOUT];
 
 /// Whether `flag` is on for whoever made this request.
 ///
+/// Async: it reads the session to know who asks. A page that reads several
+/// flags can call [`actor`] once and ask `brocanth_flags::Flags` itself.
 /// Off on a `Ctx` built by hand, which has no plugin behind it.
 #[allow(dead_code)]
-pub fn enabled(ctx: &Ctx, flag: Flag) -> bool {
-    ctx.provided::<brocanth_flags::Flags, _>()
-        .is_some_and(|flags| flags.enabled(flag, &actor(ctx)))
+pub async fn enabled(ctx: &Ctx, flag: Flag) -> bool {
+    let Some(flags) = ctx.provided::<brocanth_flags::Flags, _>().cloned() else {
+        return false;
+    };
+    flags.enabled(flag, &actor(ctx).await)
 }
 
-/// Who is asking, as the flags see it.
+/// Who is asking, as the flags see it: the signed-in account, by id.
 ///
-/// Anonymous until this reads your user off the request, and an anonymous
-/// request sees only a flag that is on for everyone. With a user on the
-/// context, this is two lines:
+/// A visitor with no session, or a session that failed to load, is
+/// anonymous and sees only a flag that is on for everyone. Groups come from
+/// your own data. Add a group only for a person who is in it:
 ///
 /// ```ignore
-/// ctx.provided::<CurrentUser, _>()
-///     .map_or_else(Actor::anonymous, |user| Actor::new(user.id.to_string()).in_group("staff"))
+/// let mut actor = Actor::new(session.account.to_string());
+/// if is_staff(&session.account).await {
+///     actor = actor.in_group("staff");
+/// }
 /// ```
-fn actor(_ctx: &Ctx) -> Actor {
-    Actor::anonymous()
+#[allow(dead_code)]
+pub async fn actor(ctx: &Ctx) -> Actor {
+    let Some(auth) = ctx.provided::<Services, _>() else {
+        return Actor::anonymous();
+    };
+    match auth
+        .sessions()
+        .from_cookie_header(ctx.header("cookie").unwrap_or(""))
+        .await
+    {
+        Ok(session) if session.privilege != Privilege::Anonymous => {
+            Actor::new(session.account.to_string())
+        }
+        _ => Actor::anonymous(),
+    }
 }
 ===== src/plugins/i18n/mod.rs =====
 //! Written by `brocanth`. The catalogs in `locales/`, compiled by
@@ -15165,6 +15203,18 @@ impl Plugin for Jobs {
         // tests only. A restart loses every job, and `brocanth check
         // --deploy` refuses it.
         let queue = Queue::memory();
+
+        // Observed: a span, a log line and a counter per job run. The
+        // observability plugin published its `Observer` in `register`.
+        let queue = match lc.services().get::<brocanth_observe::Observer>() {
+            Some(observer) => {
+                let queue = queue.with_events(observer.job_events());
+                // The queue's depth on `/metrics`, read when Prometheus scrapes.
+                observer.watch_queue(queue.clone());
+                queue
+            }
+            None => queue,
+        };
 
         // Ready while the queue answers, which in memory is always.
         let probe = queue.clone();
@@ -16393,6 +16443,9 @@ pub struct Settings {
     pub otlp_endpoint: String,
     /// The share of new traces kept, from 0.0 to 1.0.
     pub sample_ratio: f64,
+    /// Continue an inbound `traceparent`. Off at the edge: a caller could
+    /// send a sampled one and force every request it makes to be kept.
+    pub trust_traceparent: bool,
 }
 
 /// Every field but a secret, which prints as `<redacted>`: a log line or
@@ -16410,6 +16463,7 @@ impl std::fmt::Debug for Settings {
             .field("metrics_bind", &self.metrics_bind)
             .field("otlp_endpoint", &self.otlp_endpoint)
             .field("sample_ratio", &self.sample_ratio)
+            .field("trust_traceparent", &self.trust_traceparent)
             .finish()
     }
 }
@@ -16427,23 +16481,21 @@ impl Default for Settings {
             metrics_bind: String::new(),
             otlp_endpoint: String::new(),
             sample_ratio: 1.0,
+            trust_traceparent: false,
         }
     }
 }
 
-/// `MY_APP_ENV`, the variable the config plugin reads too.
-fn environment() -> String {
-    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
-    std::env::var(var).unwrap_or_else(|_| "development".to_string())
-}
-
+/// The value, trimmed; `None` when nothing is left.
 fn path(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn observer(settings: Settings) -> Result<Observer, String> {
     let mut config = ObserveConfig::new(crate::app::APP);
-    config.log_format = LogFormat::resolve(Some(&settings.format), &environment())?;
+    let env = brocanth_observe::environment(crate::app::APP);
+    config.log_format = LogFormat::resolve(Some(&settings.format), &env)?;
     config.log_level = settings.level;
     config.live_path = path(settings.live_path);
     config.ready_path = path(settings.ready_path);
@@ -16454,6 +16506,7 @@ fn observer(settings: Settings) -> Result<Observer, String> {
     config.tracing.enabled = true;
     config.tracing.endpoint = path(settings.otlp_endpoint);
     config.tracing.sample_ratio = settings.sample_ratio;
+    config.tracing.trust_traceparent = settings.trust_traceparent;
     Observer::new(config)
 }
 
@@ -20006,7 +20059,7 @@ counted.
 
 Declare every flag as a `Flag` constant in `src/plugins/flags/mod.rs`
 and add it to `ALL`. Read it with
-`crate::plugins::flags::enabled(ctx, crate::plugins::flags::NAME)`, never
+`crate::plugins::flags::enabled(ctx, crate::plugins::flags::NAME).await`, never
 with a string key: a constant cannot be misspelt.
 
 A flag with no stored rule is off. Ship the code first, then turn the
@@ -20451,7 +20504,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 79af97ccf1f3859f -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20471,7 +20524,7 @@ kind = ["middleware", "enhancer", "routes"]
 files = ["src/modules/observability.rs", "src/plugins/observability/"]
 config = ["observability"]
 crates = ["brocanth-observe"]
-adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing"]
+adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "jobs"]
 
 [modules.observability-logs]
 version = "0.1.0"
@@ -20583,7 +20636,7 @@ kind = ["enhancer"]
 files = ["src/modules/flags.rs", "src/plugins/flags/"]
 config = ["flags"]
 crates = ["brocanth-flags"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config", "auth", "admin"]
 
 [modules.audit]
 version = "0.1.0"
@@ -21033,4 +21086,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 5046ed8c135945fa

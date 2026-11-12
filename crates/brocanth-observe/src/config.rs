@@ -169,9 +169,14 @@ pub struct TracingConfig {
     /// [`None`]: the environment, then `http://localhost:4318/v1/traces`.
     pub endpoint: Option<String>,
     /// The fraction of new traces to keep, `0.0..=1.0`. A request that
-    /// arrives with a sampled `traceparent` is always kept, so one trace is
-    /// never half-exported.
+    /// continues a trusted `traceparent` follows that trace's decision, so
+    /// one trace is never half-exported.
     pub sample_ratio: f64,
+    /// Continue the trace of an inbound `traceparent`. Off at the edge: any
+    /// client can send `traceparent: 00-..-01` and so force every request
+    /// it makes to be kept, past `sample_ratio`. Turn it on behind a proxy
+    /// or for a service that only other services call.
+    pub trust_traceparent: bool,
 }
 
 #[cfg(feature = "otel")]
@@ -181,6 +186,7 @@ impl Default for TracingConfig {
             enabled: false,
             endpoint: None,
             sample_ratio: 1.0,
+            trust_traceparent: false,
         }
     }
 }
