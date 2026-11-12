@@ -94,7 +94,7 @@ fn a_function_with_a_new_signature_takes_its_policies_with_it() {
         .policy(
             Policy::new("posts_tenant", &posts)
                 .to(&member)
-                .using(SqlExpr::col("title").eq(f.call([]))),
+                .using(SqlExpr::col_named("title").eq(f.call([]))),
         )
         .snapshot()
         .unwrap();
@@ -147,7 +147,7 @@ fn make_writes_a_file_and_the_snapshot_then_nothing() {
 
 #[test]
 fn a_schema_refuses_what_it_cannot_write_with_help() {
-    let posts = Table::new("posts");
+    let posts = Table::named("posts");
     let ghost = Role::new("ghost");
     let cases: Vec<(&str, Schema)> = vec![
         (
@@ -177,7 +177,7 @@ fn a_schema_refuses_what_it_cannot_write_with_help() {
         ),
         (
             "a long name",
-            Schema::new().table(Table::new("t".repeat(64))),
+            Schema::new().table(Table::named("t".repeat(64))),
         ),
         (
             "a setting read as two types",
@@ -205,7 +205,7 @@ fn a_schema_refuses_what_it_cannot_write_with_help() {
             "a type that ends the statement",
             Schema::new().table(posts.clone()).policy(
                 Policy::new("p", &posts).using(
-                    SqlExpr::col("x")
+                    SqlExpr::col_named("x")
                         .cast(SqlType::Custom("int); DROP TABLE x; --".into()))
                         .is_null(),
                 ),
@@ -249,12 +249,12 @@ fn a_schema_refuses_what_it_cannot_write_with_help() {
             "is() with a setting",
             Schema::new().table(posts.clone()).policy(
                 Policy::new("p", &posts)
-                    .using(SqlExpr::col("tenant_id").is(common::tenant().get())),
+                    .using(SqlExpr::col_named("tenant_id").is(common::tenant().get())),
             ),
         ),
         (
             "a control character in a name",
-            Schema::new().table(Table::new("posts\n-- down")),
+            Schema::new().table(Table::named("posts\n-- down")),
         ),
         (
             "a SECURITY DEFINER function a policy role may not execute",
@@ -306,9 +306,10 @@ fn an_identity_is_checked_against_the_settings_the_policies_read() {
 
 #[test]
 fn a_value_with_a_line_break_cannot_split_the_file() {
-    let posts = Table::new("posts");
+    let posts = Table::named("posts");
     let schema = Schema::new().table(posts.clone()).policy(
-        Policy::new("p", &posts).using(SqlExpr::col("title").eq(SqlExpr::val("a\n-- down\nb"))),
+        Policy::new("p", &posts)
+            .using(SqlExpr::col_named("title").eq(SqlExpr::val("a\n-- down\nb"))),
     );
     let up = diff(&Snapshot::default(), &schema.snapshot().unwrap()).unwrap();
     // sea-query writes the line break as an escape, so the file stays one
@@ -391,7 +392,7 @@ fn the_down_part_never_drops_a_role() {
 #[test]
 fn a_security_definer_function_is_closed_to_public_and_open_to_its_roles() {
     let member = Role::new("member");
-    let posts = Table::new("posts");
+    let posts = Table::named("posts");
     let f = Function::new("lookup", SqlType::Boolean)
         .security_definer(&["app"])
         .grant_execute(&member)

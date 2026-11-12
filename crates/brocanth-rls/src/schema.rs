@@ -325,7 +325,7 @@ impl Schema {
                 return Err(RlsError::definition(
                     format!("{what}: the schema does not add the table"),
                     format!(
-                        "add `Table::new(\"{}\")` with `Schema::table`",
+                        "add `Table::named(\"{}\")` with `Schema::table`",
                         policy.table
                     ),
                 ));

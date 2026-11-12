@@ -55,13 +55,13 @@ pub fn member(n: &Names) -> Role {
 }
 
 pub fn posts(n: &Names) -> Table {
-    Table::in_schema(&n.schema, "posts")
+    Table::named_in(&n.schema, "posts")
         .force()
         .grant(&member(n), Privilege::CRUD)
 }
 
 pub fn notes(n: &Names) -> Table {
-    Table::in_schema(&n.schema, "notes").grant(&member(n), Privilege::CRUD)
+    Table::named_in(&n.schema, "notes").grant(&member(n), Privilege::CRUD)
 }
 
 pub fn current_tenant(n: &Names) -> Function {
@@ -77,8 +77,8 @@ pub fn example(n: &Names) -> Schema {
     let posts = posts(n);
     let notes = notes(n);
     let current_tenant = current_tenant(n);
-    let mine = SqlExpr::col("tenant_id").eq(current_tenant.call([]));
-    let own = SqlExpr::col("owner_id").eq(user().get());
+    let mine = SqlExpr::col_named("tenant_id").eq(current_tenant.call([]));
+    let own = SqlExpr::col_named("owner_id").eq(user().get());
     Schema::new()
         .role(member.clone())
         .role(Role::existing(&n.login))
@@ -220,8 +220,8 @@ pub fn changed(n: &Names) -> Schema {
     let posts = posts(n);
     let notes = notes(n);
     let current_tenant = current_tenant(n);
-    let mine = SqlExpr::col("tenant_id").eq(current_tenant.call([]));
-    let own = SqlExpr::col("owner_id").eq(user().get());
+    let mine = SqlExpr::col_named("tenant_id").eq(current_tenant.call([]));
+    let own = SqlExpr::col_named("owner_id").eq(user().get());
     Schema::new()
         // added: a role
         .role(member.clone().createdb())
@@ -245,7 +245,7 @@ pub fn changed(n: &Names) -> Schema {
             Policy::new(format!("notes_{}_select", n.member), &notes)
                 .command(Command::Select)
                 .to(&member)
-                .using(own.clone().or(SqlExpr::col("id").lt(SqlExpr::val(0)))),
+                .using(own.clone().or(SqlExpr::col_named("id").lt(SqlExpr::val(0)))),
         )
         // dropped: notes_app_member_insert, _update and _delete
         // added: staff reads every note
@@ -275,7 +275,7 @@ pub fn dropped_dependency(n: &Names) -> (Schema, Schema) {
             Policy::new("posts_tenant", &posts)
                 .to(&member)
                 .to(&staff)
-                .using(SqlExpr::col("tenant_id").eq(f.call([]))),
+                .using(SqlExpr::col_named("tenant_id").eq(f.call([]))),
         );
     let v2 = Schema::new()
         .role(member.clone())
@@ -284,7 +284,7 @@ pub fn dropped_dependency(n: &Names) -> (Schema, Schema) {
         .policy(
             Policy::new("posts_tenant", &posts)
                 .to(&member)
-                .using(SqlExpr::col("tenant_id").eq(tenant().get())),
+                .using(SqlExpr::col_named("tenant_id").eq(tenant().get())),
         );
     (v1, v2)
 }

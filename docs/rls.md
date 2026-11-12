@@ -20,9 +20,9 @@ use brocanth_rls::{crud, Command, Function, Policy, Privilege, Role, Schema, Set
 
 let member = Role::new("app_member").member("app_login");    // NOLOGIN, granted to the login
 let tenant = Setting::new("tenant_id", SqlType::BigInt);     // brocanth.tenant_id
-let posts = Table::new("posts").force();                     // ENABLE + FORCE
+let posts = Table::of(post::Entity).force();                // ENABLE + FORCE
 
-let mine = SqlExpr::col("tenant_id").eq(tenant.get());
+let mine = SqlExpr::column(post::Column::TenantId).eq(tenant.get());
 
 let schema = Schema::new()
     .role(member.clone())
@@ -40,7 +40,7 @@ let schema = Schema::new()
 | `Role::new(name)` | `CREATE ROLE "name" NOLOGIN` | `INHERIT`, no `CREATEDB`, no `CREATEROLE` |
 | `Role::existing(name)` | nothing: a role made elsewhere (the login, `postgres`) | |
 | `.member(login)` | `GRANT "name" TO "login"` | |
-| `Table::new(name)` / `Table::in_schema(s, name)` | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` | enabled, not forced |
+| `Table::of(Entity)` / `Table::of_in(s, Entity)`; strings: `Table::named(name)` / `Table::named_in(s, name)` | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` | enabled, not forced |
 | `.force()` | `ALTER TABLE … FORCE ROW LEVEL SECURITY` | |
 | `.grant(&role, privileges)` | `GRANT SELECT, … ON … TO …` | |
 | `Policy::new(name, &table)` | `CREATE POLICY` | `AS PERMISSIVE FOR ALL TO PUBLIC` |
@@ -64,7 +64,9 @@ re-exports. It adds one thing: the set of definitions the expression uses.
 function. `and`, `or`, `eq` and the other combinators merge the sets. So the
 policy knows what it needs without a parser.
 
-- A column is `SqlExpr::col("tenant_id")`, written `"tenant_id"`.
+- A column is `SqlExpr::column(post::Column::TenantId)` (any sea-query
+  `Iden`), written `"tenant_id"`. `SqlExpr::col_named("tenant_id")` is the
+  string escape hatch.
 - A value is `SqlExpr::val(v)`. DDL takes no bind parameter, so sea-query
   writes the value as a literal with its own escaping (`E'O\'Brien'`, a
   line break as `\n`). The value never passes through `format!`, and a
@@ -310,6 +312,15 @@ masks.
 - **A string DSL or HCL file** (Atlas). A string is parsed at run time, and
   a typo in a column name is found by Postgres in production. Rust code is
   checked by the compiler and reuses sea-query.
+
+  The guarantee is as strong as the names you use. `Table::of(post::Entity)`
+  and `SqlExpr::column(post::Column::TenantId)` take a sea-query `Iden`: a
+  SeaORM entity and its `Column` enum, or a `#[derive(Iden)]` enum in a
+  project without `model`. A typo there does not compile. `Table::named`
+  and `SqlExpr::col_named` take a string; they are the escape hatch for a
+  table with no entity. A typo in a string is found when the migration
+  runs: by `migrate up` in CI or on a laptop, not by the compiler. The
+  compiler does not check that a column belongs to the policy's table.
 - **Policies inside `brocanth-migrate`'s model scan.** That tool reads model
   source as text with `syn`. A policy expression is Rust that must run to
   produce SQL (sea-query builders), so the scan cannot read it. The schema

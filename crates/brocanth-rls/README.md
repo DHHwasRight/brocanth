@@ -35,8 +35,8 @@ use brocanth_rls::{Policy, Privilege, Role, Schema, Setting, SqlExpr, SqlType, T
 let member = Role::new("app_member").member("app_login");
 let login = Role::existing("app_login");
 let tenant = Setting::new("tenant_id", SqlType::BigInt);
-let posts = Table::new("posts").force().grant(&member, Privilege::CRUD);
-let mine = SqlExpr::col("tenant_id").eq(tenant.get());
+let posts = Table::named("posts").force().grant(&member, Privilege::CRUD);
+let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
 
 let schema = Schema::new()
     .role(member.clone())
@@ -67,8 +67,8 @@ none for that part, and Postgres refuses it.
 use brocanth_rls::{crud, Role, Schema, Setting, SqlExpr, SqlType, Table};
 
 let member = Role::new("member");
-let notes = Table::new("notes");
-let own = SqlExpr::col("owner_id").eq(Setting::new("user_id", SqlType::BigInt).get());
+let notes = Table::named("notes");
+let own = SqlExpr::col_named("owner_id").eq(Setting::new("user_id", SqlType::BigInt).get());
 let schema = Schema::new()
     .role(member.clone())
     .table(notes.clone())
@@ -89,7 +89,7 @@ assert_eq!(
 ```rust
 use brocanth_rls::{diff, Command, Policy, Schema, SqlExpr, Table};
 
-let posts = Table::new("posts");
+let posts = Table::named("posts");
 let v1 = Schema::new()
     .table(posts.clone())
     .policy(Policy::new("read", &posts).using(SqlExpr::always()))
@@ -142,7 +142,7 @@ written, with a `help:` line:
 ```rust
 use brocanth_rls::{Policy, Role, Schema, Table};
 
-let posts = Table::new("posts");
+let posts = Table::named("posts");
 let e = Schema::new()
     .table(posts.clone())
     .policy(Policy::new("p", &posts).to(&Role::new("ghost")))

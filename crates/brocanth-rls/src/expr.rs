@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use brocanth_db::sea_query::{
-    Expr, ExprTrait, Func, PostgresQueryBuilder, QueryBuilder, SelectStatement, Value,
+    Expr, ExprTrait, Func, Iden, PostgresQueryBuilder, QueryBuilder, SelectStatement, Value,
 };
 
 use crate::ident::{self, SqlType};
@@ -20,7 +20,7 @@ use crate::ident::{self, SqlType};
 /// use brocanth_rls::{Setting, SqlExpr, SqlType};
 ///
 /// let tenant = Setting::new("tenant_id", SqlType::BigInt);
-/// let mine = SqlExpr::col("tenant_id").eq(tenant.get());
+/// let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
 /// assert_eq!(
 ///     mine.to_sql(),
 ///     r#""tenant_id" = CAST(NULLIF(current_setting('brocanth.tenant_id', TRUE), '') AS bigint)"#
@@ -77,8 +77,23 @@ impl SqlExpr {
         SqlExpr { expr, uses }
     }
 
-    /// A column of the policy's table: `"name"`.
-    pub fn col(name: &str) -> SqlExpr {
+    /// A column of the policy's table, named by a sea-query [`Iden`]: a
+    /// SeaORM `Column` variant (`post::Column::TenantId`) or a
+    /// `#[derive(Iden)]` variant. The compiler checks the name.
+    pub fn column(name: impl Iden) -> SqlExpr {
+        SqlExpr::col_named(name.unquoted())
+    }
+
+    /// A column of another table, for a subquery, both named by an
+    /// [`Iden`]: `"table"."name"`.
+    pub fn table_column(table: impl Iden, name: impl Iden) -> SqlExpr {
+        SqlExpr::table_col_named(table.unquoted(), name.unquoted())
+    }
+
+    /// The escape hatch: a column by a string, `"name"`. Nothing checks
+    /// that the table has it before Postgres runs the migration. Prefer
+    /// [`SqlExpr::column`].
+    pub fn col_named(name: &str) -> SqlExpr {
         let mut e = SqlExpr::of(Expr::col(name.to_string()));
         if let Err(err) = ident::check("column", name) {
             e.uses.problems.push(err.to_string());
@@ -86,8 +101,9 @@ impl SqlExpr {
         e
     }
 
-    /// A column of another table, for a subquery: `"table"."name"`.
-    pub fn table_col(table: &str, name: &str) -> SqlExpr {
+    /// The escape hatch for [`SqlExpr::table_column`]: `"table"."name"`
+    /// from strings.
+    pub fn table_col_named(table: &str, name: &str) -> SqlExpr {
         let mut e = SqlExpr::of(Expr::col((table.to_string(), name.to_string())));
         for (what, n) in [("table", table), ("column", name)] {
             if let Err(err) = ident::check(what, n) {
@@ -386,28 +402,30 @@ mod tests {
 
     #[test]
     fn a_value_is_a_literal_with_its_quotes_doubled() {
-        let e = SqlExpr::col("status").eq(SqlExpr::val("it's'; DROP TABLE x; --"));
+        let e = SqlExpr::col_named("status").eq(SqlExpr::val("it's'; DROP TABLE x; --"));
         assert_eq!(e.to_sql(), r#""status" = E'it\'s\'; DROP TABLE x; --'"#);
     }
 
     #[test]
     fn a_line_break_in_a_value_stays_on_its_line() {
-        let e = SqlExpr::col("t").eq(SqlExpr::val("a\n-- down\nb"));
+        let e = SqlExpr::col_named("t").eq(SqlExpr::val("a\n-- down\nb"));
         assert!(!e.to_sql().contains('\n'), "{}", e.to_sql());
     }
 
     #[test]
     fn a_column_name_is_quoted() {
-        assert_eq!(SqlExpr::col(r#"we"ird"#).to_sql(), r#""we""ird""#);
+        assert_eq!(SqlExpr::col_named(r#"we"ird"#).to_sql(), r#""we""ird""#);
     }
 
     #[test]
     fn combinators_merge_what_each_side_uses() {
         let a = Setting::new("tenant_id", SqlType::BigInt);
         let b = Setting::new("user_id", SqlType::BigInt);
-        let e = SqlExpr::col("tenant_id")
-            .eq(a.get())
-            .and(SqlExpr::col("owner_id").eq(b.get()).or(SqlExpr::always()));
+        let e = SqlExpr::col_named("tenant_id").eq(a.get()).and(
+            SqlExpr::col_named("owner_id")
+                .eq(b.get())
+                .or(SqlExpr::always()),
+        );
         assert_eq!(
             e.used().settings.keys().collect::<Vec<_>>(),
             ["tenant_id", "user_id"]

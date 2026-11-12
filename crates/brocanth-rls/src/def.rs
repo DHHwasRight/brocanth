@@ -3,6 +3,8 @@
 
 use std::collections::BTreeSet;
 
+use brocanth_db::sea_query::Iden;
+
 use crate::expr::SqlExpr;
 use crate::ident::{self, SqlType};
 use crate::snapshot::{Command, PolicyKind, Privilege, Volatility};
@@ -79,7 +81,7 @@ impl Role {
 
 /// A table with row-level security on.
 ///
-/// `Table::new` writes `ENABLE ROW LEVEL SECURITY`: with no policy, the
+/// `Table::of` (or `Table::named`) writes `ENABLE ROW LEVEL SECURITY`: with no policy, the
 /// table shows no row to anyone but its owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
@@ -90,8 +92,33 @@ pub struct Table {
 }
 
 impl Table {
-    /// A table in the first schema of `search_path`.
-    pub fn new(name: impl Into<String>) -> Table {
+    /// A table named by a sea-query [`Iden`]: a SeaORM entity
+    /// (`post::Entity`) or a `#[derive(Iden)]` enum. The compiler checks the
+    /// name, so a typo does not build. In the first schema of
+    /// `search_path`.
+    ///
+    /// ```
+    /// use brocanth_db::sea_query::{self, Iden};
+    /// use brocanth_rls::Table;
+    ///
+    /// #[derive(Iden)]
+    /// enum Posts { Table }
+    ///
+    /// assert_eq!(Table::of(Posts::Table).key(), "posts");
+    /// ```
+    pub fn of(table: impl Iden) -> Table {
+        Table::named(table.unquoted())
+    }
+
+    /// [`Table::of`] in `schema`.
+    pub fn of_in(schema: impl Into<String>, table: impl Iden) -> Table {
+        Table::named_in(schema, table.unquoted())
+    }
+
+    /// The escape hatch: a table by a string, for a table with no entity
+    /// and no `Iden`. Nothing checks the name before Postgres runs the
+    /// migration. Prefer [`Table::of`].
+    pub fn named(name: impl Into<String>) -> Table {
         Table {
             schema: None,
             name: name.into(),
@@ -100,11 +127,11 @@ impl Table {
         }
     }
 
-    /// A table in `schema`.
-    pub fn in_schema(schema: impl Into<String>, name: impl Into<String>) -> Table {
+    /// [`Table::named`] in `schema`.
+    pub fn named_in(schema: impl Into<String>, name: impl Into<String>) -> Table {
         Table {
             schema: Some(schema.into()),
-            ..Table::new(name)
+            ..Table::named(name)
         }
     }
 
@@ -248,7 +275,7 @@ impl Policy {
 /// use brocanth_rls::{crud, Role, SqlExpr, Table};
 ///
 /// let member = Role::new("member");
-/// let posts = Table::new("posts");
+/// let posts = Table::named("posts");
 /// let policies = crud(&posts, &member, Some(SqlExpr::always()), None);
 /// assert_eq!(policies.len(), 1);
 /// assert_eq!(policies[0].name(), "posts_member_select");
@@ -291,7 +318,7 @@ pub fn crud(
 ///     .arg(SqlType::BigInt)
 ///     .immutable()
 ///     .body(SqlExpr::raw(brocanth_db::sea_query::Expr::cust("$1 % 2 = 0")));
-/// assert_eq!(is_even.call([SqlExpr::col("id")]).to_sql(), r#""is_even"("id")"#);
+/// assert_eq!(is_even.call([SqlExpr::col_named("id")]).to_sql(), r#""is_even"("id")"#);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Function {

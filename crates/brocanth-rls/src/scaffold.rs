@@ -113,8 +113,8 @@ const SCHEMA_RS: &str = r#"//! Row-level security: the roles, tables and policie
 //!
 //! let member = Role::new("app_member").member("app_login");
 //! let tenant = Setting::new("tenant_id", SqlType::BigInt);
-//! let posts = Table::new("posts").force().grant(&member, Privilege::CRUD);
-//! let mine = SqlExpr::col("tenant_id").eq(tenant.get());
+//! let posts = Table::named("posts").force().grant(&member, Privilege::CRUD);
+//! let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
 //! Schema::new()
 //!     .role(member.clone())
 //!     .table(posts.clone())
