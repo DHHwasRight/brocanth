@@ -353,9 +353,11 @@ pub fn to_core(request: Request) -> Result<CoreRequest, Unrepresentable> {
 
     let map = out.headers_mut();
     for (name, value) in headers {
-        let (Ok(name), Ok(value)) = (
+        // The bytes as they arrived: the server reads a value as ISO-8859-1
+        // so that a byte past ASCII is kept rather than emptied.
+        let (Ok(name), Some(Ok(value))) = (
             HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(&value),
+            crate::latin1_bytes(&value).map(HeaderValue::from_maybe_shared),
         ) else {
             continue;
         };

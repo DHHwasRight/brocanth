@@ -129,17 +129,33 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
-/// The most of a request body this server will hold in memory.
+/// The most of a request body this server holds in memory, unless
+/// [`Server::max_body`] says otherwise.
 ///
 /// Stated rather than unbounded: without a cap, one client announcing a large
-/// `Content-Length` is all it takes to exhaust the process.
-const MAX_BODY: usize = 2 * 1024 * 1024;
+/// `Content-Length` is all it takes to exhaust the process. 16 MiB is what
+/// `brocanth-input`'s multipart reader accepts by default, so a form with a
+/// photo from a phone arrives.
+pub const MAX_BODY: usize = 16 * 1024 * 1024;
+
+/// How long a client has to send the request line and headers, unless
+/// [`Server::header_timeout`] says otherwise.
+pub const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a client has to send the whole body, unless
+/// [`Server::body_timeout`] says otherwise.
+pub const BODY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many connections are served at once, unless
+/// [`Server::max_connections`] says otherwise. Past it, the server stops
+/// accepting until one closes, and the kernel's backlog holds the rest.
+pub const MAX_CONNECTIONS: usize = 1024;
 
 /// Why a server could not start, or could not keep running.
 #[derive(Debug)]
@@ -155,9 +171,21 @@ pub enum ServeError {
 impl std::fmt::Display for ServeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Bind { addr, reason } => write!(f, "cannot bind {addr}: {reason}"),
-            Self::Accept(e) => write!(f, "cannot accept a connection: {e}"),
-            Self::Signal(e) => write!(f, "cannot listen for SIGTERM: {e}"),
+            Self::Bind { addr, reason } => write!(
+                f,
+                "cannot bind {addr}: {reason}\n\
+                 help: stop the other process on {addr}, or set a different address or port"
+            ),
+            Self::Accept(e) => write!(
+                f,
+                "cannot accept a connection: {e}\n\
+                 help: raise the open-file limit (`ulimit -n`), or lower `Server::max_connections`"
+            ),
+            Self::Signal(e) => write!(
+                f,
+                "cannot listen for SIGTERM: {e}\n\
+                 help: run without `stop_on_signals`, or in a process that may install signal handlers"
+            ),
         }
     }
 }
@@ -173,7 +201,8 @@ pub struct Request {
     pub path: String,
     /// Everything after the first `?`, without it. Empty when there was none.
     pub query: String,
-    /// The body, up to [`MAX_BODY`]. Empty for the verbs that carry none.
+    /// The body, up to [`Server::max_body`]. Empty for the verbs that carry
+    /// none.
     pub body: Bytes,
     /// Who connected. `None` behind a proxy that did not say.
     pub peer: Option<SocketAddr>,
@@ -431,6 +460,16 @@ pub struct Server {
     streams: StreamGate,
     drain: Option<Duration>,
     signals: Option<Duration>,
+    limits: Limits,
+}
+
+/// What one client may cost: in memory, in time, and in connections.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    max_body: usize,
+    header_timeout: Duration,
+    body_timeout: Duration,
+    max_connections: usize,
 }
 
 impl Server {
@@ -452,7 +491,50 @@ impl Server {
             streams: StreamGate::new(),
             drain: None,
             signals: None,
+            limits: Limits {
+                max_body: MAX_BODY,
+                header_timeout: HEADER_TIMEOUT,
+                body_timeout: BODY_TIMEOUT,
+                max_connections: MAX_CONNECTIONS,
+            },
         })
+    }
+
+    /// The most of a request body this server holds in memory, in bytes.
+    /// A larger body gets 413 and never reaches the handler. Default
+    /// [`MAX_BODY`], 16 MiB.
+    #[must_use]
+    pub fn max_body(mut self, bytes: usize) -> Self {
+        self.limits.max_body = bytes;
+        self
+    }
+
+    /// How long a client has to send its request line and headers before
+    /// the connection is closed. Default [`HEADER_TIMEOUT`]. A client that
+    /// sends one byte a minute (slowloris) holds a connection no longer
+    /// than this.
+    #[must_use]
+    pub fn header_timeout(mut self, timeout: Duration) -> Self {
+        self.limits.header_timeout = timeout;
+        self
+    }
+
+    /// How long a client has to send the whole body. Past it the request
+    /// gets 408 and the handler does not run. Default [`BODY_TIMEOUT`].
+    #[must_use]
+    pub fn body_timeout(mut self, timeout: Duration) -> Self {
+        self.limits.body_timeout = timeout;
+        self
+    }
+
+    /// How many connections are served at once. Past it the server stops
+    /// accepting until one closes. Default [`MAX_CONNECTIONS`]. An open
+    /// SSE stream or WebSocket counts, so a server with many subscribers
+    /// raises it, and the process's open-file limit with it.
+    #[must_use]
+    pub fn max_connections(mut self, connections: usize) -> Self {
+        self.limits.max_connections = connections.max(1);
+        self
     }
 
     /// The address actually bound. Port 0 becomes a real port here, which is
@@ -538,7 +620,15 @@ impl Server {
         Fut: Future<Output = Response> + Send,
     {
         let handle = Arc::new(handle);
-        let builder = auto::Builder::new(TokioExecutor::new());
+        let limits = self.limits;
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        // hyper applies a header read timeout only when it has a timer.
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(limits.header_timeout);
+        builder.http2().timer(TokioTimer::new());
+        let slots = Arc::new(Semaphore::new(limits.max_connections));
         // hyper's own drain: it tells each connection to finish -- a GOAWAY on
         // h2, no further keep-alive on h1 -- and resolves when the last one is
         // done. Counting connections by hand would get the protocol half wrong.
@@ -560,6 +650,16 @@ impl Server {
         };
 
         loop {
+            // A slot first, then the accept: at the cap the server stops
+            // taking connections, rather than taking them and holding a
+            // task for each.
+            let slot = tokio::select! {
+                biased;
+                () = self.stop.notified() => break,
+                slot = Arc::clone(&slots).acquire_owned() => {
+                    slot.expect("the semaphore is never closed")
+                }
+            };
             let accepted = tokio::select! {
                 // Biased so a pending stop wins over a connection that arrived
                 // in the same tick; a busy listener could otherwise outrun it.
@@ -585,11 +685,14 @@ impl Server {
                     let handle = Arc::clone(&handle);
                     let streams = streams.clone();
                     async move {
-                        Ok::<_, Infallible>(exchange(req, peer, handle.as_ref(), &streams).await)
+                        Ok::<_, Infallible>(
+                            exchange(req, peer, handle.as_ref(), &streams, limits).await,
+                        )
                     }
                 });
                 let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
                 let _ = watcher.watch(conn).await;
+                drop(slot);
             });
         }
 
@@ -736,6 +839,7 @@ async fn exchange<F, Fut>(
     peer: SocketAddr,
     handle: &F,
     streams: &StreamGate,
+    limits: Limits,
 ) -> hyper::Response<OutBody>
 where
     F: Fn(Request) -> Fut,
@@ -744,7 +848,7 @@ where
     // Taken before the request is read into ours, because reading consumes
     // it. Unused unless the page answers 101; then it is the connection.
     let switched = hyper::upgrade::on(&mut req);
-    let request = match read(req, peer).await {
+    let request = match read(req, peer, limits).await {
         Ok(request) => request,
         // A verb the router has no name for cannot be dispatched, and 404
         // would be a claim about the path, which may be perfectly good.
@@ -757,6 +861,19 @@ where
         Err(Rejected::TooLarge) => {
             return render(
                 Response::text(413, "Payload Too Large"),
+                false,
+                streams,
+                None,
+            )
+        }
+        // The client stopped sending, or sent a body that does not frame.
+        // Not a size problem, so not a 413.
+        Err(Rejected::Unreadable) => {
+            return render(Response::text(400, "Bad Request"), false, streams, None)
+        }
+        Err(Rejected::Slow) => {
+            return render(
+                Response::text(408, "Request Timeout").with_header("connection", "close"),
                 false,
                 streams,
                 None,
@@ -852,12 +969,21 @@ fn failed() -> hyper::Response<OutBody> {
 enum Rejected {
     /// A verb the router has no name for.
     UnknownVerb,
-    /// A body past [`MAX_BODY`].
+    /// A body past [`Server::max_body`].
     TooLarge,
+    /// A body that broke off or did not frame: a client that left, or bad
+    /// chunking.
+    Unreadable,
+    /// A body that took longer than [`Server::body_timeout`].
+    Slow,
 }
 
 /// hyper's types into ours.
-async fn read(req: hyper::Request<Incoming>, peer: SocketAddr) -> Result<Request, Rejected> {
+async fn read(
+    req: hyper::Request<Incoming>,
+    peer: SocketAddr,
+    limits: Limits,
+) -> Result<Request, Rejected> {
     let verb = Verb::from_http(req.method()).ok_or(Rejected::UnknownVerb)?;
 
     let (parts, incoming) = req.into_parts();
@@ -867,20 +993,25 @@ async fn read(req: hyper::Request<Incoming>, peer: SocketAddr) -> Result<Request
     let headers = parts
         .headers
         .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_string(),
-                value.to_str().unwrap_or("").to_string(),
-            )
-        })
+        .map(|(name, value)| (name.as_str().to_string(), latin1(value.as_bytes())))
         .collect();
 
     // Capped while reading rather than after: the point is not to hold it in
     // the first place.
-    let body = http_body_util::Limited::new(incoming, MAX_BODY)
-        .collect()
-        .await
-        .map_err(|_| Rejected::TooLarge)?
+    let collected = tokio::time::timeout(
+        limits.body_timeout,
+        http_body_util::Limited::new(incoming, limits.max_body).collect(),
+    )
+    .await
+    .map_err(|_| Rejected::Slow)?;
+    let body = collected
+        .map_err(|e| {
+            if e.is::<http_body_util::LengthLimitError>() {
+                Rejected::TooLarge
+            } else {
+                Rejected::Unreadable
+            }
+        })?
         .to_bytes();
 
     Ok(Request {
@@ -893,9 +1024,53 @@ async fn read(req: hyper::Request<Incoming>, peer: SocketAddr) -> Result<Request
     })
 }
 
+/// A header value as text, every byte kept.
+///
+/// A value is visible ASCII almost always. The rest is `obs-text`, which
+/// RFC 9110 §5.5 reads as ISO-8859-1: each byte is the character with that
+/// code. Reading it so keeps every byte, where `to_str` refused the whole
+/// value, and one such byte in a sibling application's cookie emptied the
+/// `Cookie` header with the session in it. [`latin1_bytes`] gives the
+/// bytes back.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&byte| char::from(byte)).collect()
+}
+
+/// The bytes [`latin1`] read, or `None` for a character past U+00FF, which
+/// no header byte is.
+#[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+pub(crate) fn latin1_bytes(text: &str) -> Option<Vec<u8>> {
+    text.chars().map(|c| u8::try_from(c).ok()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_header_byte_past_ascii_survives_the_round_trip() {
+        let raw = b"theme=caf\xe9; session=abc";
+        let text = latin1(raw);
+        assert!(text.ends_with("session=abc"), "{text}");
+        assert_eq!(latin1_bytes(&text).as_deref(), Some(&raw[..]));
+        assert_eq!(latin1_bytes("\u{20ac}"), None);
+    }
+
+    #[test]
+    fn every_serve_error_says_what_to_do() {
+        let errors = [
+            ServeError::Bind {
+                addr: "0.0.0.0:3000".into(),
+                reason: "address in use".into(),
+            },
+            ServeError::Accept(std::io::Error::other("too many open files")),
+            ServeError::Signal(std::io::Error::other("denied")),
+        ];
+        for error in errors {
+            let text = error.to_string();
+            assert!(text.contains("\nhelp: "), "{text}");
+        }
+    }
 
     #[test]
     fn a_response_carries_its_content_type() {
