@@ -253,7 +253,7 @@ fn at(suffix: &str) -> String {
 /// Five REST routes, and the two a browser form can reach.
 #[test]
 fn seven_routes_appear_under_the_prefix_the_project_chose() {
-    let router = mounted(Posts::new());
+    let router = mounted(Posts::offline());
 
     let offered = [
         (Verb::Get, at("")),
@@ -290,7 +290,7 @@ fn seven_routes_appear_under_the_prefix_the_project_chose() {
 /// there, and hiding that hides the only fact that makes the mistake findable.
 #[test]
 fn a_verb_the_resource_does_not_offer_is_a_405() {
-    let router = mounted(Posts::new());
+    let router = mounted(Posts::offline());
 
     assert!(matches!(
         router.dispatch(Verb::Put, &at("/1")),
@@ -306,7 +306,7 @@ fn a_verb_the_resource_does_not_offer_is_a_405() {
 #[test]
 fn mount_api_offers_the_five_rest_routes_and_no_form_route() {
     let mut routes: RouterBuilder<Handler> = RouterBuilder::new();
-    pages::mount_api(&mut routes, PREFIX, Arc::new(Posts::new())).expect("the routes mount");
+    pages::mount_api(&mut routes, PREFIX, Arc::new(Posts::offline())).expect("the routes mount");
     let router = routes.build().expect("the table builds");
 
     for (verb, path) in [
@@ -345,7 +345,7 @@ fn a_page_and_a_resource_cannot_both_claim_a_path() {
         .route(&at(""), Verb::Get, page(|_: &mut Ctx| Ok("a page")))
         .expect("the page registers");
 
-    let refused = pages::mount(&mut routes, PREFIX, Arc::new(Posts::new()))
+    let refused = pages::mount(&mut routes, PREFIX, Arc::new(Posts::offline()))
         .expect_err("the resource claims a path the page already answers");
 
     match refused {
@@ -361,9 +361,9 @@ fn a_page_and_a_resource_cannot_both_claim_a_path() {
 #[test]
 fn one_prefix_takes_one_resource() {
     let mut routes: RouterBuilder<Handler> = RouterBuilder::new();
-    pages::mount(&mut routes, PREFIX, Arc::new(Posts::new())).expect("the first mount");
+    pages::mount(&mut routes, PREFIX, Arc::new(Posts::offline())).expect("the first mount");
 
-    let refused = pages::mount(&mut routes, PREFIX, Arc::new(Posts::new()))
+    let refused = pages::mount(&mut routes, PREFIX, Arc::new(Posts::offline()))
         .expect_err("the second mount claims every path the first one took");
 
     assert!(matches!(refused, BuildError::DuplicateHandler { .. }));
@@ -373,8 +373,8 @@ fn one_prefix_takes_one_resource() {
 #[test]
 fn two_prefixes_take_two_resources() {
     let mut routes: RouterBuilder<Handler> = RouterBuilder::new();
-    pages::mount(&mut routes, "/api/posts", Arc::new(Posts::new())).expect("the first mount");
-    pages::mount(&mut routes, "/api/drafts", Arc::new(Posts::new())).expect("the second mount");
+    pages::mount(&mut routes, "/api/posts", Arc::new(Posts::offline())).expect("the first mount");
+    pages::mount(&mut routes, "/api/drafts", Arc::new(Posts::offline())).expect("the second mount");
 
     let router = routes.build().expect("the table builds");
     assert!(router.dispatch(Verb::Get, "/api/posts/1").is_found());
@@ -388,7 +388,9 @@ fn two_prefixes_take_two_resources() {
 /// `Pred::Never` is a fact about the collection, so it is said: 403.
 #[test]
 fn a_null_rule_is_a_403_on_the_page_surface_too() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -403,7 +405,9 @@ fn a_null_rule_is_a_403_on_the_page_surface_too() {
 /// A 403 here would be an oracle for "something matches".
 #[test]
 fn an_unsatisfied_list_rule_is_an_empty_page() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "draft", "hidden")]);
     let router = mounted(posts);
 
@@ -417,7 +421,9 @@ fn an_unsatisfied_list_rule_is_an_empty_page() {
 /// byte.
 #[test]
 fn a_record_you_may_not_see_is_a_404_and_never_a_403() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -433,7 +439,9 @@ fn a_record_you_may_not_see_is_a_404_and_never_a_403() {
 /// 403 safe here.
 #[test]
 fn a_masked_column_is_a_403_that_says_which_one() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -447,7 +455,10 @@ fn a_masked_column_is_a_403_that_says_which_one() {
 /// to conceal.
 #[test]
 fn a_create_the_rule_refuses_is_a_400() {
-    let router = mounted(Posts::new());
+    let Some(posts) = Posts::new() else {
+        return;
+    };
+    let router = mounted(posts);
 
     let refused = answered(
         &router,
@@ -467,7 +478,9 @@ fn a_create_the_rule_refuses_is_a_400() {
 /// The same envelope the other surface sends, through the same writer.
 #[test]
 fn a_listing_is_the_envelope_with_the_total_of_the_set_it_paged() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -488,7 +501,9 @@ fn a_listing_is_the_envelope_with_the_total_of_the_set_it_paged() {
 /// order than the one the client paginated against.
 #[test]
 fn a_sort_the_resource_does_not_declare_is_a_400() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -500,7 +515,10 @@ fn a_sort_the_resource_does_not_declare_is_a_400() {
 
 #[test]
 fn a_create_answers_201_with_a_location_that_points_at_the_new_row() {
-    let router = mounted(Posts::new());
+    let Some(posts) = Posts::new() else {
+        return;
+    };
+    let router = mounted(posts);
 
     let made = answered(
         &router,
@@ -518,7 +536,9 @@ fn a_create_answers_201_with_a_location_that_points_at_the_new_row() {
 /// 204, and no `content-type`: there is no body for one to describe.
 #[test]
 fn a_delete_is_204_with_no_body_and_no_content_type() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -536,7 +556,9 @@ fn a_delete_is_204_with_no_body_and_no_content_type() {
 /// A browser cannot send PATCH. The same operation, the same status table.
 #[test]
 fn a_form_post_to_a_record_updates_it() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
     let router = mounted(posts);
 
@@ -553,7 +575,9 @@ fn a_form_post_to_a_record_updates_it() {
 /// A browser cannot send DELETE either, and the policy still decides.
 #[test]
 fn a_form_post_to_delete_removes_the_row_and_obeys_the_same_rule() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let router = mounted(posts);
 
@@ -573,7 +597,9 @@ fn a_form_post_to_delete_removes_the_row_and_obeys_the_same_rule() {
 /// 500, rather than being rendered to whoever asked.
 #[test]
 fn a_failure_of_the_application_leaves_as_an_error_and_not_as_a_body() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     // The table the policy compiled against is gone: this is the storage layer
     // failing, not a rule refusing.

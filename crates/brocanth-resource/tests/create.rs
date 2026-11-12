@@ -1,5 +1,5 @@
-//! The create path: the synthesised one-row admission test, in both dialects
-//! and against a real engine.
+//! The create path: the synthesised one-row admission test, as text and
+//! against a real engine.
 
 mod common;
 
@@ -7,40 +7,6 @@ use brocanth_policy::{Bound, Dialect, Entity, Pred, Value};
 use brocanth_resource::sql::create_admission;
 use brocanth_resource::{flow, Failure};
 use common::{Post, PostColumn, Posts, Visitor};
-
-#[test]
-fn the_sqlite_admission_puts_the_cte_binds_first_because_sqlite_counts_by_position() {
-    let pred: brocanth_policy::EntityPred<Post> =
-        Pred::eq(PostColumn::AuthorId, Bound::of(Value::Int(7)));
-    let condition = pred
-        .condition::<Post>(Dialect::Sqlite)
-        .expect("it compiles");
-
-    let statement = create_admission::<Post>(
-        Dialect::Sqlite,
-        &condition,
-        &[
-            (PostColumn::AuthorId, Value::Int(7)),
-            (PostColumn::Title, Value::Text("hello".to_owned())),
-        ],
-    )
-    .expect("it compiles");
-
-    assert_eq!(
-        statement.sql(),
-        "WITH \"posts\" AS (SELECT NULL AS \"id\", ? AS \"author_id\", NULL AS \"status\", \
-         ? AS \"title\") SELECT 1 FROM \"posts\" WHERE (\"posts\".\"author_id\" = ?) LIMIT 1"
-    );
-    // The CTE is written first, so its values bind first.
-    assert_eq!(
-        statement.binds(),
-        &[
-            Value::Int(7),
-            Value::Text("hello".to_owned()),
-            Value::Int(7)
-        ]
-    );
-}
 
 #[test]
 fn the_postgres_admission_continues_the_conditions_numbering_and_casts_every_bind() {
@@ -79,19 +45,10 @@ fn the_postgres_admission_continues_the_conditions_numbering_and_casts_every_bin
 }
 
 #[test]
-fn a_condition_compiled_for_another_dialect_is_refused_rather_than_retargeted() {
-    let pred: brocanth_policy::EntityPred<Post> = Pred::eq(PostColumn::AuthorId, 7i64);
-    let condition = pred
-        .condition::<Post>(Dialect::Sqlite)
-        .expect("it compiles");
-
-    let refused = create_admission::<Post>(Dialect::Postgres, &condition, &[]);
-    assert!(refused.is_err());
-}
-
-#[test]
 fn the_admission_runs_against_a_real_engine_and_admits_only_your_own_row() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
 
     let created = flow::create(&posts, &Visitor::user(7), b"author_id=7&title=mine")
         .expect("the policy admits a row whose author is the subject");
@@ -112,7 +69,8 @@ fn the_admission_runs_against_a_real_engine_and_admits_only_your_own_row() {
 
 #[test]
 fn an_anonymous_create_is_a_refusal_before_the_body_is_read() {
-    let posts = Posts::new();
+    // No database: the refusal comes before any query.
+    let posts = Posts::offline();
 
     let refused = flow::create(&posts, &Visitor::anonymous(), b"author_id=7&title=x");
 
@@ -130,7 +88,8 @@ fn an_anonymous_create_is_a_refusal_before_the_body_is_read() {
 
 #[test]
 fn the_mask_applies_to_a_create_as_well() {
-    let posts = Posts::new();
+    // No database: the refusal comes before any query.
+    let posts = Posts::offline();
 
     // The author may set the title and the author column, never the id.
     let refused = flow::create(&posts, &Visitor::user(7), b"id=1&author_id=7&title=x");
@@ -171,7 +130,9 @@ fn the_table_the_cte_shadows_is_the_entitys_own() {
 fn the_in_memory_interpretation_answers_the_same_question_as_the_database_one() {
     use common::InMemoryPosts;
 
-    let posts = InMemoryPosts::new();
+    let Some(posts) = InMemoryPosts::new() else {
+        return;
+    };
 
     let created = flow::create(&posts, &Visitor::user(7), b"author_id=7&title=mine")
         .expect("the predicate admits the proposed row");

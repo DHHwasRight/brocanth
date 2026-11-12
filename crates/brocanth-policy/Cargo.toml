@@ -27,8 +27,8 @@ thiserror = "2"
 # CLI, because what it must stay true to is this crate's own surface: that a
 # comparison takes a `Column` and never a string, that `Bound::or_deny` is the
 # word an author writes for an absent value, that `Ident::must` rejects a
-# table name while the program is being built, and that the two `Dialect`s
-# compile the same meaning rather than the same text. A copy of that knowledge
+# table name while the program is being built, and that `Dialect` names the
+# one database brocanth supports, PostgreSQL. A copy of that knowledge
 # in the CLI rots the first time a name here changes, and it rots in silence,
 # because nothing compiles the generator against this crate.
 #
@@ -62,17 +62,13 @@ optional = true
 # Checking that against a second implementation written here would only prove
 # the two agree with each other.
 #
-# `sqlx` rather than `rusqlite`, and the version is not a preference.
-# `libsqlite3-sys` sets `links = "sqlite3"`, so cargo permits exactly one copy
-# of it in the whole graph; `brocanth-jobs` already pins `sqlx 0.9`, which caps
-# it below 0.38, and every `rusqlite` recent enough to be worth taking wants
-# 0.38. Taking one here would fail resolution for the entire workspace, not
-# just for this crate. So: the version the workspace already resolves, with
-# `sqlite-bundled` so the test does not depend on what the machine has
-# installed. Dev only — nothing in `src/` knows a driver exists.
+# PostgreSQL, the only database brocanth supports. The tests skip when
+# `BROCANTH_TEST_DATABASE_URL` is not set. The `sqlx` version is the one the
+# workspace already resolves. Dev only — nothing in `src/` knows a driver
+# exists.
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
-    "sqlite-bundled",
+    "postgres",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
 proptest = "1"

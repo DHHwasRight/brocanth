@@ -97,14 +97,7 @@ fn a_page_size_past_bigint_is_written_as_the_largest_bigint() {
 }
 
 #[test]
-fn a_sqlite_condition_and_an_empty_index_say_what_to_do() {
-    let sqlite = Pred::<DocumentColumn>::Always
-        .condition::<Document>(Dialect::Sqlite)
-        .unwrap();
-    let error = documents::index().query(&sqlite, "x", 0, 20).unwrap_err();
-    assert!(matches!(error, SearchError::Dialect));
-    assert!(error.to_string().contains("help:"));
-
+fn an_empty_index_says_what_to_do() {
     let empty = brocanth_search::Index::<Document>::new("search");
     let error = empty.migration().unwrap_err();
     assert!(matches!(error, SearchError::NoSource { .. }));

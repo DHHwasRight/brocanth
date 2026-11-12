@@ -43,12 +43,9 @@
 //! `Condition` it would simply not compile. So: `after("model")`, for the
 //! order of the two config sections, and nothing stronger.
 //!
-//! That ordering is load-bearing in one place. The generated `[policy]`
-//! dialect follows whatever `[model]` was given: the model module's own
-//! default URL is SQLite, so a project with both gets `dialect = "sqlite"` and
-//! a project with neither gets Postgres, which is this crate's default and
-//! brocanth's base. A condition compiled for the wrong dialect is valid SQL
-//! the engine then rejects, and the generated file says so next to the field.
+//! The generated `[policy]` dialect is `postgres`, with a model or without.
+//! Brocanth supports PostgreSQL only (2026-11-11), so the setting has one
+//! legal value. It stays so that the generated `Rules` keeps its shape.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -137,20 +134,17 @@ const DIALECT: &str = "postgres";
 /// The `[policy]` section of `config/development.toml`.
 fn settings(project: &Project, dialect: &str) -> Vec<Setting> {
     let agrees = if project.has("model") {
-        "This follows `[db] url`, the Postgres database the model reads. Move the\n\
-         two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and\n\
-         only one of them parses, so a condition compiled for the wrong dialect is\n\
-         valid SQL that the engine rejects at the worst possible moment."
+        "This follows `[db] url`, the Postgres database the model reads.\n\
+         Brocanth supports Postgres only, so `postgres` is the one legal value."
     } else {
         "Nothing in this project opens a database yet, so this is the dialect your\n\
-         conditions are compiled for and nothing else. Add the model later and these\n\
-         two have to agree: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing\n\
-         and only one of them parses."
+         conditions are compiled for and nothing else. Brocanth supports Postgres\n\
+         only, so `postgres` is the one legal value."
     };
     vec![Setting::text(
         "dialect",
         dialect,
-        "The SQL a condition compiles to: postgres or sqlite.",
+        "The SQL a condition compiles to: postgres, the only dialect.",
     )
     .note(agrees)]
 }
@@ -387,7 +381,7 @@ impl Policy for PostPolicy {{
 /// {note}
 {derive}
 pub struct Settings {{
-    /// `postgres` or `sqlite`. A string here and an enum below: a config file
+    /// `postgres`, the only dialect. A string here and an enum below: a config file
     /// is text, and the translation is checked at startup where a typo can
     /// still be answered.
     pub dialect: String,
@@ -440,11 +434,10 @@ impl Plugin for Policies {{
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         let dialect = match self.settings.dialect.as_str() {{
             "postgres" => Dialect::Postgres,
-            "sqlite" => Dialect::Sqlite,
             other => {{
                 return Err(PluginError::new(format!(
                     "[policy] dialect is {{other:?}}, which is not a SQL dialect\n\
-                     help: set `dialect` under [policy] to postgres or sqlite"
+                     help: set `dialect` under [policy] to postgres"
                 )))
             }}
         }};

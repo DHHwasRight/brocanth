@@ -175,7 +175,7 @@ struct VerifiedInner<E: Entity> {
 /// #     const PRIMARY_KEY: Self::Column = Col;
 /// # }
 /// let verified: Verified<Post> = Pred::eq(Col, 1i64)
-///     .admission::<Post>(Dialect::Sqlite, 1i64)
+///     .admission::<Post>(Dialect::Postgres, 1i64)
 ///     .unwrap()
 ///     .resolve(1)
 ///     .unwrap();
@@ -377,8 +377,8 @@ impl<E: Entity> std::fmt::Debug for Write<E> {
 /// A condition compiled for one dialect, re-targeted at another.
 ///
 /// Mixing dialects is a mistake worth catching rather than a conversion worth
-/// doing, so this refuses instead: a witness checked against SQLite cannot
-/// quietly write PostgreSQL.
+/// doing, so this refuses instead. With one dialect the check always passes;
+/// it stays so that the API keeps its shape.
 fn recompiled(condition: &Condition, dialect: Dialect) -> Result<Condition, CompileError> {
     if condition.dialect() == dialect {
         return Ok(condition.clone());

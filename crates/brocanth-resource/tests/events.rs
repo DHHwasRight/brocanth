@@ -12,7 +12,9 @@ use common::{seed_eight, Posts, Visitor};
 
 #[test]
 fn a_successful_update_publishes_the_row_and_the_columns_it_wrote() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     flow::update(&posts, &Visitor::user(7), "1", b"title=renamed").expect("the update applies");
@@ -22,7 +24,9 @@ fn a_successful_update_publishes_the_row_and_the_columns_it_wrote() {
 
 #[test]
 fn a_successful_create_and_delete_publish_their_own_kinds() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
 
     let created = flow::create(&posts, &Visitor::user(7), b"author_id=7&title=new")
         .expect("the create applies");
@@ -36,7 +40,9 @@ fn a_successful_create_and_delete_publish_their_own_kinds() {
 
 #[test]
 fn a_refused_write_publishes_nothing() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     // One of each refusal: a rule that is Never, a condition that admits no
@@ -63,7 +69,9 @@ fn a_refused_write_publishes_nothing() {
 
 #[test]
 fn a_write_that_lost_the_race_publishes_nothing() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
     *posts.db.race.lock().unwrap() = Some((
         "UPDATE posts SET author_id = 99 WHERE id = 1".to_owned(),
@@ -81,7 +89,9 @@ fn a_write_that_lost_the_race_publishes_nothing() {
 
 #[test]
 fn nothing_is_built_when_nobody_is_listening() {
-    let posts = Posts::deaf();
+    let Some(posts) = Posts::deaf() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
 
     flow::update(&posts, &Visitor::user(7), "1", b"title=renamed").expect("the update applies");

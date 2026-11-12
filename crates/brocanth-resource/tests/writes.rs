@@ -10,7 +10,9 @@ use common::{seed_eight, Posts, Visitor};
 
 #[test]
 fn an_author_updates_a_row_the_policy_admits() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let updated =
@@ -26,7 +28,9 @@ fn an_author_updates_a_row_the_policy_admits() {
 
 #[test]
 fn a_row_that_belongs_to_somebody_else_is_the_same_answer_as_no_row() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     // Row 3 is author 8's. Row 99 does not exist. One answer for both, which
@@ -45,7 +49,9 @@ fn a_row_that_belongs_to_somebody_else_is_the_same_answer_as_no_row() {
 
 #[test]
 fn a_masked_field_is_refused_and_the_row_is_never_touched() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     // The author may write the title, never the status. PLAN.md §9's
@@ -68,7 +74,9 @@ fn a_masked_field_is_refused_and_the_row_is_never_touched() {
 
 #[test]
 fn a_mask_violation_names_every_rejected_column_at_once() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::update(&posts, &Visitor::user(7), "1", b"status=draft&id=4");
@@ -84,7 +92,9 @@ fn a_mask_violation_names_every_rejected_column_at_once() {
 
 #[test]
 fn an_update_that_loses_the_race_is_reported_rather_than_silently_doing_nothing() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     // Another transaction commits between the admission test and the write:
@@ -111,7 +121,9 @@ fn an_update_that_loses_the_race_is_reported_rather_than_silently_doing_nothing(
 
 #[test]
 fn an_empty_body_is_a_bad_request_rather_than_a_policy_failure() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::update(&posts, &Visitor::user(7), "1", b"");
@@ -123,7 +135,9 @@ fn an_empty_body_is_a_bad_request_rather_than_a_policy_failure() {
 
 #[test]
 fn a_write_that_moves_the_row_out_of_its_own_view_still_stands() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
 
     // The administrator may write the status; the author may not. Writing it
@@ -159,7 +173,9 @@ fn a_write_that_moves_the_row_out_of_its_own_view_still_stands() {
 /// author 7 from giving a post to author 8.
 #[test]
 fn an_author_cannot_give_their_post_to_somebody_else() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::update(&posts, &Visitor::user(7), "1", b"author_id=8");
@@ -187,7 +203,9 @@ fn an_author_cannot_give_their_post_to_somebody_else() {
 
 #[test]
 fn a_delete_rule_of_never_refuses_without_reading_a_row() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::delete(&posts, &Visitor::user(7), "1");
@@ -206,7 +224,9 @@ fn a_delete_rule_of_never_refuses_without_reading_a_row() {
 
 #[test]
 fn an_administrator_deletes_and_the_row_is_gone() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     flow::delete(&posts, &Visitor::admin(), "4").expect("the delete applies");
@@ -220,7 +240,9 @@ fn an_administrator_deletes_and_the_row_is_gone() {
 
 #[test]
 fn a_delete_that_loses_the_race_is_reported() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
 
     // The admin's delete rule is `Always`, which compiles to `1 = 1`, so the
@@ -235,7 +257,9 @@ fn a_delete_that_loses_the_race_is_reported() {
 
 #[test]
 fn an_id_that_is_not_a_key_is_a_bad_request() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::view(&posts, &Visitor::admin(), "not-a-number");
@@ -247,7 +271,9 @@ fn an_id_that_is_not_a_key_is_a_bad_request() {
 
 #[test]
 fn a_view_is_guarded_in_the_same_statement_that_reads() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let row = flow::view(&posts, &Visitor::anonymous(), "1").expect("published, so visible");

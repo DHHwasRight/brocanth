@@ -4,7 +4,7 @@
 //! `brocanth-resource`, `brocanth-realtime` and `brocanth-admin-model` write
 //! it today, and with `policy!`. Then it asserts, for every subject and every
 //! rule, that the two give the same `Pred` value and the same SQL text and
-//! binds in both dialects, and the same field mask.
+//! binds, and the same field mask.
 
 use brocanth_policy::{Column, Dialect, Entity, EntityPred, FieldMask, Policy, Pred};
 
@@ -283,12 +283,10 @@ where
                 format!("{h:?}"),
                 "rule `{action}`, visitor {index}"
             );
-            for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-                let (ms, mb) = sql::<M::Entity>(m, dialect);
-                let (hs, hb) = sql::<H::Entity>(h, dialect);
-                assert_eq!(ms, hs, "SQL of `{action}`, visitor {index}, {dialect:?}");
-                assert_eq!(mb, hb, "binds of `{action}`, visitor {index}, {dialect:?}");
-            }
+            let (ms, mb) = sql::<M::Entity>(m, Dialect::Postgres);
+            let (hs, hb) = sql::<H::Entity>(h, Dialect::Postgres);
+            assert_eq!(ms, hs, "SQL of `{action}`, visitor {index}");
+            assert_eq!(mb, hb, "binds of `{action}`, visitor {index}");
         }
         assert_eq!(
             mask(&by_macro.writable(who)),

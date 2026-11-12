@@ -3,8 +3,9 @@
 //! `brocanth-admin` set the pattern and the reason is PLAN.md §8.4: *"the ORM
 //! is recommended and absent"*. So this crate declares the smallest trait that
 //! can serve five routes and takes no dependency on SeaORM, on `sqlx`, on a
-//! driver or on a pool. `tests/common/mod.rs` implements it over a real SQLite database, because the
-//! claim under test is that the policy filters in the query.
+//! driver or on a pool. `tests/common/mod.rs` implements it over a real
+//! Postgres database, because the claim under test is that the policy filters
+//! in the query.
 //!
 //! # Six operations
 //!

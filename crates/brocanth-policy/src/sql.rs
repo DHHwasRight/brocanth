@@ -13,10 +13,6 @@
 //! is a later, separate crate that depends on both, and it is the only thing
 //! in the tree that has to.
 //!
-//! It also keeps `brocanth-jobs`' second dialect honest. That crate already
-//! supports PostgreSQL and SQLite behind features, so the workspace is not
-//! single-dialect and this crate must not assume it is.
-//!
 //! # SQL injection, structurally
 //!
 //! Two rules, and together they are the whole defence:
@@ -34,42 +30,35 @@
 //! `&'static str`, it may contain no quote at all, and its values go through
 //! the same bind list.
 //!
-//! # Dialect: PostgreSQL is the base, SQLite is the smaller setup
+//! # Dialect: PostgreSQL only
 //!
-//! Brocanth stores its queues, cache and blobs in PostgreSQL, so PostgreSQL is
-//! what this compiler is written for and [`Dialect::Postgres`] is
-//! [`Dialect::default`]. SQLite stays reachable, because a smaller deployment
-//! is a supported target, but it is the fallback rather than the shape the
-//! design follows.
+//! Brocanth supports PostgreSQL only (2026-11-11): RLS and one database keep
+//! the framework simple. [`Dialect`] has one variant, [`Dialect::Postgres`],
+//! and stays an **argument** at every entry point. It was the seam for a
+//! second backend. It stays so that the public API and the generated code
+//! keep their shape, not because a second dialect is planned.
 //!
-//! [`Dialect`] is still an **argument** at every entry point, never taken from
-//! the default. A default that the compiler could reach for is a dialect a
-//! reviewer cannot see; a default you have to name is documentation. Four
-//! things differ, and all four are here rather than assumed:
+//! What the compiler emits:
 //!
-//! | | PostgreSQL (base) | SQLite (smaller setups) |
-//! |---|---|---|
-//! | placeholder | `$1`, `$2`, … | `?` |
-//! | null-safe `=` | `IS NOT DISTINCT FROM` | `IS` |
-//! | null-safe `<>` | `IS DISTINCT FROM` | `IS NOT` |
-//! | constants | `TRUE`, `FALSE` | `1 = 1`, `1 = 0` |
+//! | | PostgreSQL |
+//! |---|---|
+//! | placeholder | `$1`, `$2`, … |
+//! | null-safe `=` | `IS NOT DISTINCT FROM` |
+//! | null-safe `<>` | `IS DISTINCT FROM` |
+//! | constants | `TRUE`, `FALSE` |
 //!
 //! `IS DISTINCT FROM` is the one worth naming. PLAN.md §9's whole subject is
 //! what `!=` means when a side is absent, and PocketBase answers it with
 //! `COALESCE` and grants access on a typo. PostgreSQL has the operator the
 //! question deserves: `IS DISTINCT FROM` is two-valued, never answers unknown,
-//! and treats `NULL` as a value. It is what [`Op::IsNot`] compiles to, and
-//! SQLite's `IS NOT` means exactly the same thing, so the author's decision
-//! survives the smaller setup unchanged. [`Op::Ne`] remains three-valued in
-//! both, because an author who writes `<>` asked for SQL's `<>`.
+//! and treats `NULL` as a value. It is what [`Op::IsNot`] compiles to.
+//! [`Op::Ne`] remains three-valued, because an author who writes `<>` asked
+//! for SQL's `<>`.
 //!
-//! **Numbered placeholders make bind order load-bearing**, which `?` lets you
-//! ignore. A [`Condition`] compiled on its own starts at `$1`; spliced after
-//! an id bind it has to start at `$2`. That renumbering is in `splice`, and
-//! `tests/snapshots.rs` asserts it, because it is the bug SQLite would have
-//! hidden until the day somebody moved.
-//!
-//! A third dialect is a variant and four match arms.
+//! **Numbered placeholders make bind order load-bearing.** A [`Condition`]
+//! compiled on its own starts at `$1`; spliced after an id bind it has to
+//! start at `$2`. That renumbering is in `splice`, and `tests/snapshots.rs`
+//! asserts it.
 //!
 //! # The one assumption a [`Condition`] makes about its host query
 //!
@@ -88,27 +77,21 @@ use crate::value::Value;
 
 /// Which database the SQL is for.
 ///
-/// `Postgres` is [`Default`] because brocanth's base deployment is PostgreSQL
-/// — queues, cache and blobs all live there. Every compile entry point still
-/// takes a `Dialect` argument explicitly, so the default is a statement about
-/// which dialect gets the care rather than one the compiler reaches for behind
-/// a call site.
+/// Brocanth supports PostgreSQL only, so this has one variant. Every compile
+/// entry point still takes a `Dialect` argument, so the call site names the
+/// database it compiles for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Dialect {
-    /// PostgreSQL. The base: numbered placeholders, real booleans, and
+    /// PostgreSQL: numbered placeholders, real booleans, and
     /// `IS DISTINCT FROM` for the null-safe comparisons PLAN.md §9 is about.
     #[default]
     Postgres,
-    /// SQLite. The smaller-setup target, kept reachable and compiled with the
-    /// same meaning, not the same text.
-    Sqlite,
 }
 
 impl Dialect {
     /// How this dialect spells the `n`th placeholder, counting from one.
     pub fn placeholder(self, index: usize) -> String {
         match self {
-            Dialect::Sqlite => "?".to_owned(),
             Dialect::Postgres => format!("${index}"),
         }
     }
@@ -121,8 +104,6 @@ impl Dialect {
             (_, Op::Le) => "<=",
             (_, Op::Gt) => ">",
             (_, Op::Ge) => ">=",
-            (Dialect::Sqlite, Op::Is) => "IS",
-            (Dialect::Sqlite, Op::IsNot) => "IS NOT",
             (Dialect::Postgres, Op::Is) => "IS NOT DISTINCT FROM",
             (Dialect::Postgres, Op::IsNot) => "IS DISTINCT FROM",
         }
@@ -156,9 +137,8 @@ impl Condition {
 
     /// The dialect this was compiled for.
     ///
-    /// Carried so that splicing a condition into a statement built for another
-    /// dialect is a visible mistake rather than a silent one: `$1` in SQLite
-    /// is a syntax error, and `?` in PostgreSQL is worse.
+    /// Carried so that a statement builder can check that it splices a
+    /// condition compiled for its own dialect.
     pub fn dialect(&self) -> Dialect {
         self.dialect
     }
@@ -299,21 +279,17 @@ pub(crate) fn write_pred<E: Entity<Column = C>, C: Column>(
     pred: &Pred<C>,
 ) -> Result<(), CompileError> {
     match pred {
-        // PostgreSQL has real booleans and gets them. SQLite has no boolean
-        // literal, so it gets the numeric form, which means the same thing.
         Pred::Always => builder.push(match builder.dialect() {
             Dialect::Postgres => "TRUE",
-            Dialect::Sqlite => "1 = 1",
         }),
         Pred::Never => builder.push(match builder.dialect() {
             Dialect::Postgres => "FALSE",
-            Dialect::Sqlite => "1 = 0",
         }),
         Pred::Cmp { column, op, value } => {
             builder.qualified(E::TABLE, column.ident()?);
-            // `IS NULL` rather than `IS ?` bound to NULL. Same meaning in both
-            // dialects, no untyped parameter for PostgreSQL to puzzle over,
-            // and a snapshot a reviewer recognises.
+            // `IS NULL` rather than `IS NOT DISTINCT FROM $n` bound to NULL:
+            // no untyped parameter for PostgreSQL to puzzle over, and a
+            // snapshot a reviewer recognises.
             if value.is_null() && op.is_null_safe() {
                 builder.push(if *op == Op::Is {
                     " IS NULL"
@@ -528,14 +504,9 @@ pub(crate) fn write_admission<E: Entity<Column = C>, C: Column>(
 ///
 /// A `Condition` was compiled on its own, so a PostgreSQL one starts at `$1`.
 /// Spliced after an id bind it has to start at `$2`, and this is where that
-/// happens. SQLite's `?` needs no renumbering, which is why the bug would hide
-/// there until the day somebody turned on PostgreSQL.
+/// happens.
 fn splice(builder: &mut Builder, condition: &Condition) {
     match builder.dialect() {
-        Dialect::Sqlite => {
-            builder.push(condition.sql());
-            builder.binds.extend(condition.binds().iter().cloned());
-        }
         Dialect::Postgres => {
             let offset = builder.binds.len();
             let mut rewritten = String::with_capacity(condition.sql().len());

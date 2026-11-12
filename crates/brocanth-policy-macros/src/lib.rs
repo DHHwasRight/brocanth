@@ -560,10 +560,10 @@ fn parse_eval(input: ParseStream, rule: &Ident) -> syn::Result<EvalClause> {
             "database" => database = Some(syn::parse2::<Expr>(tokens)?),
             "dialect" => {
                 let ident: Ident = syn::parse2(tokens)?;
-                if ident != "Postgres" && ident != "Sqlite" {
+                if ident != "Postgres" {
                     return Err(syn::Error::new(
                         ident.span(),
-                        format!("`{ident}` is not a dialect\nhelp: use `Postgres` or `Sqlite`"),
+                        format!("`{ident}` is not a dialect\nhelp: use `Postgres`, the only dialect brocanth supports"),
                     ));
                 }
                 dialect = Some(ident);
@@ -588,7 +588,7 @@ fn parse_eval(input: ParseStream, rule: &Ident) -> syn::Result<EvalClause> {
         database: database.ok_or_else(|| {
             missing("database", "name a function `fn(&[MapRow<Column>]) -> impl Oracle<Entity>` that returns a database with exactly these rows")
         })?,
-        dialect: dialect.ok_or_else(|| missing("dialect", "write `dialect: Postgres` or `dialect: Sqlite`"))?,
+        dialect: dialect.ok_or_else(|| missing("dialect", "write `dialect: Postgres`"))?,
         cases,
     })
 }

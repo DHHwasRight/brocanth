@@ -1,10 +1,16 @@
 //! Filters narrow the rows in the database, beside the rule, and a query
 //! string the declaration refuses is an error with a `help:` line.
+//!
+//! The database tests run on Postgres, each in a schema of its own. Without
+//! `BROCANTH_TEST_DATABASE_URL` they print `!! SKIPPED` and pass.
 
 use brocanth_filters::{Direction, FilterError, Filters, Lookup};
 use brocanth_policy::{Bound, Column, Dialect, Entity, Ident, Pred, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{AssertSqlSafe, Row, SqlitePool};
+use std::str::FromStr as _;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
+use sqlx::{AssertSqlSafe, Connection as _, Row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PostColumn {
@@ -59,42 +65,108 @@ fn declared() -> Filters<PostColumn> {
         .default_sort("id", PostColumn::Id, Direction::Ascending)
 }
 
+/// The database URL, or `None` when no database is set.
+fn url() -> Option<String> {
+    std::env::var("BROCANTH_TEST_DATABASE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+}
+
+/// Says on the real stderr that the test did not run. Cargo captures
+/// `eprintln!`, so the line goes to the stream directly.
+fn skipped() {
+    use std::io::Write as _;
+    let name = std::thread::current().name().unwrap_or("a test").to_owned();
+    let _ = std::io::stderr()
+        .write_all(format!("!! SKIPPED {name}: set BROCANTH_TEST_DATABASE_URL\n").as_bytes());
+}
+
+/// A pool on a schema of its own. The schema is dropped with the value.
+struct Db {
+    pool: PgPool,
+    url: String,
+    schema: String,
+}
+
+impl Drop for Db {
+    /// A thread and a runtime of its own: the test's runtime cannot block,
+    /// and the schema goes even when the test panics.
+    fn drop(&mut self) {
+        let url = self.url.clone();
+        let sql = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema);
+        let _ = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(async {
+                if let Ok(mut admin) = PgConnection::connect(&url).await {
+                    let _ = sqlx::query(AssertSqlSafe(sql)).execute(&mut admin).await;
+                    let _ = admin.close().await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
 /// Twelve posts: three authors, two statuses, scores 0 to 11, every third
-/// one featured, every fourth one closed.
-async fn database() -> SqlitePool {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+/// one featured, every fourth one closed. `None`, after a skip line, when no
+/// database is set.
+async fn database() -> Option<Db> {
+    static N: AtomicU32 = AtomicU32::new(0);
+    let Some(url) = url() else {
+        skipped();
+        return None;
+    };
+    let schema = format!(
+        "brocanth_filters_t{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut admin = PgConnection::connect(&url).await.expect("a database");
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&mut admin)
         .await
-        .expect("sqlite in memory");
+        .expect("the schema is created");
+    admin.close().await.expect("the connection closes");
+    let options = PgConnectOptions::from_str(&url)
+        .expect("a database URL")
+        .options([("search_path", schema.as_str())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("a pool");
+    let db = Db { pool, url, schema };
     sqlx::query(
-        "CREATE TABLE posts (id INTEGER PRIMARY KEY, author_id INTEGER, status TEXT, \
-         score INTEGER, featured BOOLEAN, closed_at TEXT)",
+        "CREATE TABLE posts (id BIGINT PRIMARY KEY, author_id BIGINT, status TEXT, \
+         score BIGINT, featured BOOLEAN, closed_at TEXT)",
     )
-    .execute(&pool)
+    .execute(&db.pool)
     .await
     .unwrap();
     for id in 1..=12_i64 {
-        sqlx::query("INSERT INTO posts VALUES (?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO posts VALUES ($1, $2, $3, $4, $5, $6)")
             .bind(id)
             .bind(id % 3)
             .bind(if id % 2 == 0 { "published" } else { "draft" })
             .bind(id - 1)
             .bind(id % 3 == 0)
             .bind((id % 4 == 0).then_some("2026-11-09"))
-            .execute(&pool)
+            .execute(&db.pool)
             .await
             .unwrap();
     }
-    pool
+    Some(db)
 }
 
 /// The ids the database returns for the rule AND the filters, in the
 /// order the filters ask for, and the count of the same `WHERE`.
-async fn ids(pool: &SqlitePool, rule: Pred<PostColumn>, query: &str) -> (Vec<i64>, i64) {
+async fn ids(db: &Db, rule: Pred<PostColumn>, query: &str) -> (Vec<i64>, i64) {
     let applied = declared().parse(query).expect("a query the list accepts");
     let condition = applied
-        .condition::<Post>(rule, Dialect::Sqlite)
+        .condition::<Post>(rule, Dialect::Postgres)
         .expect("compiles");
     let order = applied.order_by::<Post>(PostColumn::Id).expect("orders");
     let sql = format!(
@@ -113,59 +185,69 @@ async fn ids(pool: &SqlitePool, rule: Pred<PostColumn>, query: &str) -> (Vec<i64
             other => panic!("no bind for {other:?}"),
         };
     }
-    let rows = select.fetch_all(pool).await.unwrap();
-    let total: i64 = count.fetch_one(pool).await.unwrap().get(0);
+    let rows = select.fetch_all(&db.pool).await.unwrap();
+    let total: i64 = count.fetch_one(&db.pool).await.unwrap().get(0);
     (rows.iter().map(|row| row.get::<i64, _>(0)).collect(), total)
 }
 
 #[tokio::test]
 async fn a_filter_narrows_in_the_where_and_the_count_agrees() {
-    let pool = database().await;
-    let (rows, total) = ids(&pool, Pred::Always, "status=published&score__ge=5").await;
+    let Some(db) = database().await else {
+        return;
+    };
+    let (rows, total) = ids(&db, Pred::Always, "status=published&score__ge=5").await;
     assert_eq!(rows, [6, 8, 10, 12]);
     assert_eq!(total, 4, "the count reads the same WHERE");
 }
 
 #[tokio::test]
 async fn a_filter_never_widens_the_rule() {
-    let pool = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     // The rule admits author 1 only. Asking for author 2 finds nothing,
     // rather than author 2's rows.
     let rule = Pred::eq(PostColumn::AuthorId, Bound::or_deny(Some(1_i64)));
-    let (rows, total) = ids(&pool, rule.clone(), "author=2").await;
+    let (rows, total) = ids(&db, rule.clone(), "author=2").await;
     assert!(rows.is_empty());
     assert_eq!(total, 0);
-    let (rows, _) = ids(&pool, rule, "").await;
+    let (rows, _) = ids(&db, rule, "").await;
     assert_eq!(rows, [1, 4, 7, 10]);
-    let (rows, _) = ids(&pool, Pred::Never, "status=draft").await;
+    let (rows, _) = ids(&db, Pred::Never, "status=draft").await;
     assert!(rows.is_empty(), "a rule of Never stays Never");
 }
 
 #[tokio::test]
 async fn a_repeated_key_is_in_and_a_sort_orders_with_the_key_last() {
-    let pool = database().await;
-    let (rows, _) = ids(&pool, Pred::Always, "author=0&author=2&sort=-score").await;
+    let Some(db) = database().await else {
+        return;
+    };
+    let (rows, _) = ids(&db, Pred::Always, "author=0&author=2&sort=-score").await;
     assert_eq!(rows, [12, 11, 9, 8, 6, 5, 3, 2]);
-    let (rows, _) = ids(&pool, Pred::Always, "author__in=1,2&featured=true").await;
+    let (rows, _) = ids(&db, Pred::Always, "author__in=1,2&featured=true").await;
     assert!(rows.is_empty(), "featured posts have author 0");
-    let (rows, _) = ids(&pool, Pred::Always, "featured=yes").await;
+    let (rows, _) = ids(&db, Pred::Always, "featured=yes").await;
     assert_eq!(rows, [3, 6, 9, 12]);
 }
 
 #[tokio::test]
 async fn null_and_not_equal_keep_their_meaning() {
-    let pool = database().await;
-    let (rows, _) = ids(&pool, Pred::Always, "closed_at__null=false").await;
+    let Some(db) = database().await else {
+        return;
+    };
+    let (rows, _) = ids(&db, Pred::Always, "closed_at__null=false").await;
     assert_eq!(rows, [4, 8, 12]);
-    let (rows, total) = ids(&pool, Pred::Always, "closed_at__null=true&status__ne=draft").await;
+    let (rows, total) = ids(&db, Pred::Always, "closed_at__null=true&status__ne=draft").await;
     assert_eq!(rows, [2, 6, 10]);
     assert_eq!(total, 3);
 }
 
 #[tokio::test]
 async fn an_empty_value_and_an_undeclared_name_are_no_filter() {
-    let pool = database().await;
-    let (rows, _) = ids(&pool, Pred::Always, "status=&page=2&q=hello&sort=").await;
+    let Some(db) = database().await else {
+        return;
+    };
+    let (rows, _) = ids(&db, Pred::Always, "status=&page=2&q=hello&sort=").await;
     assert_eq!(rows.len(), 12);
 }
 
@@ -219,7 +301,7 @@ fn free_text() -> Filters<PostColumn> {
 }
 
 async fn rows_for(
-    pool: &SqlitePool,
+    db: &Db,
     filters: &Filters<PostColumn>,
     rule: Pred<PostColumn>,
     query: &str,
@@ -227,7 +309,7 @@ async fn rows_for(
     let condition = filters
         .parse(query)
         .expect("accepted")
-        .condition::<Post>(rule, Dialect::Sqlite)
+        .condition::<Post>(rule, Dialect::Postgres)
         .expect("compiles");
     let sql = format!(
         "SELECT \"posts\".\"id\" FROM \"posts\" WHERE {} ORDER BY \"posts\".\"id\"",
@@ -243,13 +325,15 @@ async fn rows_for(
             other => panic!("no bind for {other:?}"),
         };
     }
-    let rows = select.fetch_all(pool).await.unwrap();
+    let rows = select.fetch_all(&db.pool).await.unwrap();
     rows.iter().map(|row| row.get::<i64, _>(0)).collect()
 }
 
 #[tokio::test]
 async fn an_injection_looking_value_is_a_bind_and_matches_nothing() {
-    let pool = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let filters = free_text();
     for value in [
         "draft' OR '1'='1",
@@ -261,20 +345,20 @@ async fn an_injection_looking_value_is_a_bind_and_matches_nothing() {
         let query = format!("status={}", brocanth_pagination::query::encode(value));
         let applied = filters.parse(&query).unwrap();
         let condition = applied
-            .condition::<Post>(Pred::Always, Dialect::Sqlite)
+            .condition::<Post>(Pred::Always, Dialect::Postgres)
             .unwrap();
         assert!(!condition.sql().contains(value), "{value} is not SQL text");
         assert_eq!(condition.binds(), [Value::Text(value.into())]);
-        assert!(rows_for(&pool, &filters, Pred::Always, &query)
+        assert!(rows_for(&db, &filters, Pred::Always, &query)
             .await
             .is_empty());
     }
     // The table is still there, with every row.
-    assert_eq!(rows_for(&pool, &filters, Pred::Always, "").await.len(), 12);
+    assert_eq!(rows_for(&db, &filters, Pred::Always, "").await.len(), 12);
     // `__in` splits on `,`, and each part is its own bind.
     let applied = filters.parse("status__in=draft,x'%20OR%201=1").unwrap();
     let condition = applied
-        .condition::<Post>(Pred::Always, Dialect::Sqlite)
+        .condition::<Post>(Pred::Always, Dialect::Postgres)
         .unwrap();
     assert_eq!(
         condition.binds(),
@@ -353,10 +437,12 @@ fn a_value_of_the_wrong_type_is_refused() {
 
 #[tokio::test]
 async fn a_repeated_comparison_is_anded_and_a_repeated_sort_is_checked() {
-    let pool = database().await;
-    let (rows, _) = ids(&pool, Pred::Always, "score__gt=2&score__gt=8&score__lt=11").await;
+    let Some(db) = database().await else {
+        return;
+    };
+    let (rows, _) = ids(&db, Pred::Always, "score__gt=2&score__gt=8&score__lt=11").await;
     assert_eq!(rows, [10, 11], "every comparison holds");
-    let (rows, _) = ids(&pool, Pred::Always, "status=draft&status=draft").await;
+    let (rows, _) = ids(&db, Pred::Always, "status=draft&status=draft").await;
     assert_eq!(rows, [1, 3, 5, 7, 9, 11]);
     assert!(declared().parse("sort=score&sort=nope").is_err());
 }
@@ -387,7 +473,9 @@ fn a_sort_on_a_column_that_is_not_declared_is_refused() {
 
 #[tokio::test]
 async fn a_rule_with_an_or_stays_whole_when_a_filter_is_anded() {
-    let pool = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     // Author 1 OR featured. A filter after it must not bind tighter than
     // the rule's OR: `A OR B AND C` would let author 1's drafts through.
     let rule = Pred::any([
@@ -397,26 +485,28 @@ async fn a_rule_with_an_or_stays_whole_when_a_filter_is_anded() {
     let expected: Vec<i64> = (1..=12_i64)
         .filter(|id| (id % 3 == 1 || id % 3 == 0) && id % 2 == 0)
         .collect();
-    let (rows, total) = ids(&pool, rule.clone(), "status=published").await;
+    let (rows, total) = ids(&db, rule.clone(), "status=published").await;
     assert_eq!(rows, expected);
     assert_eq!(total, i64::try_from(expected.len()).unwrap());
 
     // A filter that names rows outside the rule finds only the overlap.
-    let (rows, _) = ids(&pool, rule.clone(), "author=2").await;
+    let (rows, _) = ids(&db, rule.clone(), "author=2").await;
     assert!(rows.is_empty(), "author 2 has no featured post");
-    let (rows, _) = ids(&pool, rule.clone(), "author__ne=1").await;
+    let (rows, _) = ids(&db, rule.clone(), "author__ne=1").await;
     assert_eq!(rows, [3, 6, 9, 12], "only the featured half of the rule");
     // A `__ne` never inverts the rule.
-    let (rows, _) = ids(&pool, rule, "featured=false").await;
+    let (rows, _) = ids(&db, rule, "featured=false").await;
     assert_eq!(rows, [1, 4, 7, 10]);
 }
 
 #[tokio::test]
 async fn an_in_list_of_only_commas_matches_nothing_and_widens_nothing() {
-    let pool = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let applied = declared().parse("author__in=,,").unwrap();
     assert_eq!(applied.pred(), &Pred::Never);
-    let (rows, total) = ids(&pool, Pred::Always, "author__in=,,").await;
+    let (rows, total) = ids(&db, Pred::Always, "author__in=,,").await;
     assert!(rows.is_empty());
     assert_eq!(total, 0);
 }

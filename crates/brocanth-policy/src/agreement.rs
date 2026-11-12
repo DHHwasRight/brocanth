@@ -17,33 +17,20 @@
 //! obligation is in CI the moment the author opts into `eval()`.
 //!
 //! This crate's own `tests/agreement.rs` drives [`check`] against a real
-//! SQLite database over a table of hand-written predicates, and
+//! PostgreSQL database over a table of hand-written predicates, and
 //! `tests/agreement_proptest.rs` drives it over generated ones, so the
 //! compiler and the evaluator are held together here even though an
 //! application's own policies are its own responsibility.
 //!
-//! # The dialect this crate's own agreement tests prove it on
+//! # Where this crate's own agreement tests run
 //!
-//! **SQLite, which is not the base dialect.** PostgreSQL is where brocanth
-//! deploys; SQLite is the smaller setup. The oracle in `tests/common/sqlite.rs`
-//! runs an in-memory SQLite, so `tests/agreement.rs` and
-//! `tests/agreement_proptest.rs` prove the two interpretations agree *on
-//! SQLite*.
+//! **PostgreSQL**, the only dialect brocanth supports. The oracle in
+//! `tests/common/postgres.rs` connects to `BROCANTH_TEST_DATABASE_URL`,
+//! creates a schema of its own for each test and drops it at the end. With no
+//! database set, the agreement tests print a skip line and pass.
 //!
-//! That is a stated limit rather than a hidden one. A test that runs on every
-//! machine with no server beats a better test that needs one, and the gap is
-//! narrow: the predicate shapes with dialect-specific SQL are the null-safe
-//! operators, where `IS DISTINCT FROM` and `IS NOT` are defined to mean the
-//! same thing, and the constants, where `FALSE` and `1 = 0` are. Closing it
-//! properly needs a live PostgreSQL in CI — a service container or a
-//! testcontainer — plus a `sqlx` `postgres` dev-feature and a second
-//! `Oracle`. [`Oracle`] is the seam for exactly that, and nothing else would
-//! change.
-//!
-//! The dialect-sensitive behaviour that *can* be checked without a server is
-//! checked: `tests/snapshots.rs` asserts the generated text for both dialects,
-//! including PostgreSQL's placeholder renumbering across a spliced condition,
-//! which is the one dialect difference that is a bug rather than a spelling.
+//! `tests/snapshots.rs` needs no server. It asserts the generated text,
+//! including PostgreSQL's placeholder renumbering across a spliced condition.
 //!
 //! # Why an [`Oracle`] rather than a database
 //!

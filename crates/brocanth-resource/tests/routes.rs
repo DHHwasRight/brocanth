@@ -98,7 +98,7 @@ fn body_of(response: &Response) -> String {
 
 #[test]
 fn five_routes_appear_under_the_prefix_the_application_chose() {
-    let mounted = mount(Posts::new());
+    let mounted = mount(Posts::offline());
     let plan = mounted.app.route_plan();
     let path = |name: &str| plan.named(name).expect("a route").path.clone();
 
@@ -115,7 +115,9 @@ fn five_routes_appear_under_the_prefix_the_application_chose() {
 
 #[test]
 fn a_listing_is_an_envelope_whose_total_counts_what_the_pages_hold() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -139,7 +141,9 @@ fn a_listing_is_an_envelope_whose_total_counts_what_the_pages_hold() {
 
 #[test]
 fn skip_total_leaves_the_fields_out_rather_than_filling_them_with_a_sentinel() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -152,7 +156,9 @@ fn skip_total_leaves_the_fields_out_rather_than_filling_them_with_a_sentinel() {
 
 #[test]
 fn an_unsatisfied_list_rule_is_an_empty_page_and_a_null_rule_is_a_403() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "draft", "hidden")]);
     let mounted = mount(posts);
 
@@ -169,7 +175,9 @@ fn an_unsatisfied_list_rule_is_an_empty_page_and_a_null_rule_is_a_403() {
 
 #[test]
 fn a_record_you_may_not_see_is_a_404_and_never_a_403() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -185,7 +193,9 @@ fn a_record_you_may_not_see_is_a_404_and_never_a_403() {
 
 #[test]
 fn a_masked_column_is_a_403_that_says_which_one() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -205,7 +215,9 @@ fn a_masked_column_is_a_403_that_says_which_one() {
 
 #[test]
 fn a_lost_race_is_a_409_rather_than_a_quiet_200() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
     *posts.db.race.lock().unwrap() = Some((
         "UPDATE posts SET author_id = 99 WHERE id = 1".to_owned(),
@@ -224,7 +236,10 @@ fn a_lost_race_is_a_409_rather_than_a_quiet_200() {
 
 #[test]
 fn a_create_answers_201_with_a_location_that_points_at_the_new_row() {
-    let mounted = mount(Posts::new());
+    let Some(posts) = Posts::new() else {
+        return;
+    };
+    let mounted = mount(posts);
 
     let response = mounted.call(
         "posts.create",
@@ -242,7 +257,10 @@ fn a_create_answers_201_with_a_location_that_points_at_the_new_row() {
 
 #[test]
 fn a_create_the_rule_refuses_is_a_400_and_one_nobody_may_make_is_a_403() {
-    let mounted = mount(Posts::new());
+    let Some(posts) = Posts::new() else {
+        return;
+    };
+    let mounted = mount(posts);
 
     let refused = mounted.call(
         "posts.create",
@@ -261,7 +279,9 @@ fn a_create_the_rule_refuses_is_a_400_and_one_nobody_may_make_is_a_403() {
 
 #[test]
 fn a_delete_is_204_and_a_delete_rule_of_never_is_403() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -283,7 +303,9 @@ fn a_delete_is_204_and_a_delete_rule_of_never_is_403() {
 
 #[test]
 fn an_update_that_hides_the_row_from_its_own_writer_is_a_204() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "published", "one")]);
     let mounted = mount(posts);
 
@@ -304,7 +326,9 @@ fn an_update_that_hides_the_row_from_its_own_writer_is_a_204() {
 
 #[test]
 fn an_update_that_changes_the_owner_is_a_403() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     posts.db.seed(&[(1, Some(7), "draft", "one")]);
     let mounted = mount(posts);
 
@@ -323,7 +347,9 @@ fn an_update_that_changes_the_owner_is_a_403() {
 
 #[test]
 fn a_sort_the_resource_does_not_declare_is_a_400_rather_than_a_different_order() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 
@@ -335,7 +361,9 @@ fn a_sort_the_resource_does_not_declare_is_a_400_rather_than_a_different_order()
 
 #[test]
 fn a_page_that_is_not_a_number_is_a_400_rather_than_a_quiet_page_one() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let mounted = mount(posts);
 

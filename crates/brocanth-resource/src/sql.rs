@@ -36,17 +36,13 @@
 //! # Bind order, which is the whole difficulty
 //!
 //! The condition is compiled on its own and numbers its placeholders from one.
-//! It cannot be renumbered without rewriting its text, so instead the two
-//! dialects get the two orders that need no rewriting:
+//! It cannot be renumbered without rewriting its text. PostgreSQL numbers
+//! explicitly, so the CTE continues the numbering from where the condition
+//! stopped and the binds are `condition ++ row`. Text order does not matter
+//! to `$n`.
 //!
-//! * **PostgreSQL** numbers explicitly, so the CTE continues the numbering
-//!   from where the condition stopped and the binds are
-//!   `condition ++ row`. Text order does not matter to `$n`.
-//! * **SQLite** numbers by position in the text, and the CTE comes first, so
-//!   the binds are `row ++ condition`.
-//!
-//! `tests/create.rs` pins both, and then runs the statement against a real
-//! engine.
+//! `tests/create.rs` pins the order, and then runs the statement against a
+//! real engine.
 //!
 //! # The cast, and the one case it cannot cover
 //!
@@ -125,11 +121,9 @@ pub fn create_admission<E: Entity>(
 
     let mut cte = String::new();
     let mut values: Vec<Value> = Vec::with_capacity(E::Column::ALL.len());
-    // PostgreSQL continues the condition's numbering; SQLite binds by
-    // position and the CTE is written first, so it starts at one.
+    // The CTE continues the condition's numbering.
     let first = match dialect {
         Dialect::Postgres => condition.binds().len() + 1,
-        Dialect::Sqlite => 1,
     };
 
     cte.push_str("WITH ");
@@ -168,10 +162,6 @@ pub fn create_admission<E: Entity>(
             binds.extend(values);
             binds
         }
-        Dialect::Sqlite => {
-            values.extend(condition.binds().iter().cloned());
-            values
-        }
     };
 
     Ok(Statement {
@@ -182,7 +172,7 @@ pub fn create_admission<E: Entity>(
 }
 
 /// A PostgreSQL parameter in a `SELECT` list has nothing to infer a type
-/// from, so it is told. SQLite has no static column types and needs none.
+/// from, so it is told. A `NULL` gets no cast: see the module documentation.
 fn pg_cast(dialect: Dialect, value: &Value) -> Option<&'static str> {
     if dialect != Dialect::Postgres {
         return None;

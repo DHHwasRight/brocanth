@@ -3,13 +3,15 @@
 //! The claim is structural — [`brocanth_policy::sql`] has exactly one path
 //! from a `Value` into a statement and it appends to the bind list — so this
 //! file is the proof rather than the mechanism. It throws the usual payloads
-//! at every predicate shape, in both dialects, and asserts that nothing the
+//! at every predicate shape and asserts that nothing the
 //! attacker wrote appears in the generated text.
 
 mod common;
 
 use brocanth_policy::{Dialect, Membership, Op, Pred, Value};
 use common::{Post, PostColumn as C, MEMBERS, MEMBERS_TEAM, MEMBERS_USER};
+
+const PG: Dialect = Dialect::Postgres;
 
 /// What a request body might carry.
 const PAYLOADS: &[&str] = &[
@@ -23,7 +25,7 @@ const PAYLOADS: &[&str] = &[
 ];
 
 /// Values that spell a placeholder. They cannot be tested by absence — the
-/// generated SQL contains `?` because every bind does — so
+/// generated SQL contains `$1` because every bind does — so
 /// [`a_value_that_looks_like_a_placeholder_changes_nothing`] tests them by
 /// shape instead.
 const PLACEHOLDER_LOOKALIKES: &[&str] = &["?", "$1", "?, ?", "$2"];
@@ -51,24 +53,21 @@ fn shapes(payload: &str) -> Vec<Pred<C>> {
 #[test]
 fn no_payload_reaches_the_sql_text() {
     for payload in PAYLOADS {
-        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-            for pred in shapes(payload) {
-                let condition = pred.condition::<Post>(dialect).expect("compiles");
-                assert!(
-                    !condition.sql().contains(payload),
-                    "payload {payload:?} appeared in {:?} SQL: {}",
-                    dialect,
-                    condition.sql()
-                );
-                assert!(
-                    condition
-                        .binds()
-                        .iter()
-                        .any(|v| matches!(v, Value::Text(t) if t == payload)),
-                    "payload {payload:?} did not reach the bind list for {}",
-                    condition.sql()
-                );
-            }
+        for pred in shapes(payload) {
+            let condition = pred.condition::<Post>(PG).expect("compiles");
+            assert!(
+                !condition.sql().contains(payload),
+                "payload {payload:?} appeared in SQL: {}",
+                condition.sql()
+            );
+            assert!(
+                condition
+                    .binds()
+                    .iter()
+                    .any(|v| matches!(v, Value::Text(t) if t == payload)),
+                "payload {payload:?} did not reach the bind list for {}",
+                condition.sql()
+            );
         }
     }
 }
@@ -76,26 +75,24 @@ fn no_payload_reaches_the_sql_text() {
 #[test]
 fn no_payload_reaches_a_whole_statement() {
     for payload in PAYLOADS {
-        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-            let pred = Pred::eq(C::Status, *payload);
+        let pred = Pred::eq(C::Status, *payload);
 
-            let listing = pred.matching_ids::<Post>(dialect).expect("compiles");
-            assert!(!listing.sql().contains(payload));
+        let listing = pred.matching_ids::<Post>(PG).expect("compiles");
+        assert!(!listing.sql().contains(payload));
 
-            let admission = pred.admission::<Post>(dialect, *payload).expect("compiles");
-            assert!(!admission.query().sql().contains(payload));
+        let admission = pred.admission::<Post>(PG, *payload).expect("compiles");
+        assert!(!admission.query().sql().contains(payload));
 
-            let write = admission
-                .resolve(1)
-                .expect("one row")
-                .update(dialect, [(C::Status, Value::Text((*payload).to_owned()))])
-                .expect("compiles");
-            assert!(
-                !write.query().sql().contains(payload),
-                "payload in UPDATE: {}",
-                write.query().sql()
-            );
-        }
+        let write = admission
+            .resolve(1)
+            .expect("one row")
+            .update(PG, [(C::Status, Value::Text((*payload).to_owned()))])
+            .expect("compiles");
+        assert!(
+            !write.query().sql().contains(payload),
+            "payload in UPDATE: {}",
+            write.query().sql()
+        );
     }
 }
 
@@ -106,14 +103,12 @@ fn the_generated_text_holds_no_quote_at_all() {
     // itself be the bug.
     for payload in PAYLOADS {
         for pred in shapes(payload) {
-            for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-                let sql = pred
-                    .condition::<Post>(dialect)
-                    .expect("compiles")
-                    .sql()
-                    .to_owned();
-                assert!(!sql.contains('\''), "a quote appeared in: {sql}");
-            }
+            let sql = pred
+                .condition::<Post>(PG)
+                .expect("compiles")
+                .sql()
+                .to_owned();
+            assert!(!sql.contains('\''), "a quote appeared in: {sql}");
         }
     }
 }
@@ -124,15 +119,13 @@ fn a_value_that_looks_like_a_placeholder_changes_nothing() {
     // renumber a placeholder, because the text is written from the shape and
     // the value is never read while writing it.
     let benign = Pred::all([Pred::eq(C::Status, "ok"), Pred::eq(C::Score, 1i64)]);
-    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-        let expected = benign.condition::<Post>(dialect).expect("compiles");
-        for payload in PLACEHOLDER_LOOKALIKES {
-            let pred = Pred::all([Pred::eq(C::Status, *payload), Pred::eq(C::Score, 1i64)]);
-            let condition = pred.condition::<Post>(dialect).expect("compiles");
-            assert_eq!(condition.sql(), expected.sql());
-            assert_eq!(condition.binds().len(), 2);
-            assert_eq!(condition.binds()[0], Value::Text((*payload).to_owned()));
-        }
+    let expected = benign.condition::<Post>(PG).expect("compiles");
+    for payload in PLACEHOLDER_LOOKALIKES {
+        let pred = Pred::all([Pred::eq(C::Status, *payload), Pred::eq(C::Score, 1i64)]);
+        let condition = pred.condition::<Post>(PG).expect("compiles");
+        assert_eq!(condition.sql(), expected.sql());
+        assert_eq!(condition.binds().len(), 2);
+        assert_eq!(condition.binds()[0], Value::Text((*payload).to_owned()));
     }
 }
 
@@ -179,7 +172,7 @@ fn a_column_whose_name_is_not_an_identifier_fails_the_query() {
 
     let pred = Pred::eq(Hostile, 1i64);
     assert!(matches!(
-        pred.condition::<Bad>(Dialect::Sqlite),
+        pred.condition::<Bad>(PG),
         Err(brocanth_policy::CompileError::BadIdentifier { .. })
     ));
 }
@@ -196,7 +189,7 @@ fn an_opaque_fragment_may_not_carry_a_literal() {
         vec![],
     ));
     assert!(matches!(
-        pred.condition::<Post>(Dialect::Sqlite),
+        pred.condition::<Post>(PG),
         Err(CompileError::LiteralInFragment { .. })
     ));
 
@@ -206,7 +199,7 @@ fn an_opaque_fragment_may_not_carry_a_literal() {
         vec![Value::Int(1)],
     ));
     assert!(matches!(
-        pred.condition::<Post>(Dialect::Sqlite),
+        pred.condition::<Post>(PG),
         Err(CompileError::PlaceholderMismatch {
             placeholders: 2,
             binds: 1,
@@ -220,7 +213,7 @@ fn an_opaque_fragment_may_not_carry_a_literal() {
         vec![Value::Int(1)],
     ));
     assert!(matches!(
-        pred.condition::<Post>(Dialect::Sqlite),
+        pred.condition::<Post>(PG),
         Err(CompileError::PlaceholderSyntax { .. })
     ));
 }
