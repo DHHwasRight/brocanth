@@ -99,10 +99,10 @@ pub fn dev(value: Option<&str>) -> bool {
 /// and tells Cargo what to watch.
 pub fn build() -> Result<Report, String> {
     println!("cargo:rerun-if-env-changed=DEV");
-    let root = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR")
-            .map_err(|_| "CARGO_MANIFEST_DIR is not set; call this from build.rs")?,
-    );
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
+        "brocanth-bundle: CARGO_MANIFEST_DIR is not set\n\
+                 help: call `brocanth_bundle::build()` from the crate's build.rs"
+    })?);
     let options = Options {
         root,
         assets: "assets",
@@ -120,7 +120,10 @@ pub fn build() -> Result<Report, String> {
 pub fn bundle(options: &Options) -> Result<Report, String> {
     let assets = options.root.join(options.assets);
     let mut report = Report::default();
-    // The directory itself: a new file in it re-runs the build.
+    // The directory itself: a new file in it re-runs the build. Cargo scans
+    // a watched directory for any newer file, so an output written into it
+    // would re-run the build every time: `write_if_changed` writes only
+    // bytes that differ, and an unchanged output keeps its mtime.
     report.sources.push(assets.clone());
 
     let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
@@ -141,7 +144,12 @@ pub fn bundle(options: &Options) -> Result<Report, String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| format!("brocanth-bundle: no runtime: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "brocanth-bundle: no runtime: {e}\n\
+                 help: the build script needs threads; check the build's resource limits"
+            )
+        })?;
     for (dir, list) in groups {
         let relative = dir
             .strip_prefix(&assets)
@@ -234,17 +242,16 @@ async fn js(
         })))),
         ..Default::default()
     })
-    .map_err(|e| format!("brocanth-bundle: {}: {e:?}", dir.display()))?;
+    .map_err(|e| format!("brocanth-bundle: {}: {e:?}\n{HELP_MODULE}", dir.display()))?;
     let output = bundler
         .generate()
         .await
-        .map_err(|e| format!("brocanth-bundle: {}: {e:?}", dir.display()))?;
+        .map_err(|e| format!("brocanth-bundle: {}: {e:?}\n{HELP_MODULE}", dir.display()))?;
     bundler.close().await.ok();
 
     // The chunks directory holds only this build's chunks.
     if chunks.exists() {
-        fs::remove_dir_all(chunks)
-            .map_err(|e| format!("brocanth-bundle: {}: {e}", chunks.display()))?;
+        fs::remove_dir_all(chunks).map_err(|e| io(chunks, &e))?;
     }
     let entries: Vec<String> = output
         .assets
@@ -264,11 +271,8 @@ async fn js(
                 report.sources.push(path);
             }
         }
-        let (path, name) = if chunk.is_entry {
-            (
-                dir.join(chunk.filename.as_str()),
-                chunk.filename.to_string(),
-            )
+        let path = if chunk.is_entry {
+            dir.join(chunk.filename.as_str())
         } else {
             // `chunks/x-hash.js` → `public/<dir>/chunks/x-hash.js`.
             let file = chunk.filename.trim_start_matches("chunks/");
@@ -278,19 +282,14 @@ async fn js(
                 .find(|i| entries.iter().any(|e| i.ends_with(e.as_str())))
             {
                 return Err(format!(
-                    "brocanth-bundle: chunk {} imports the entry {entry}, whose published name is fingerprinted. \
-                     Load the code the two share with import() from the entry instead.",
+                    "brocanth-bundle: chunk {} imports the entry {entry}, whose published name is fingerprinted\n\
+                     help: load the code the two share with import() from the entry instead",
                     chunk.filename
                 ));
             }
-            (chunks.join(file), format!("chunks/{file}"))
+            chunks.join(file)
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("brocanth-bundle: {}: {e}", parent.display()))?;
-        }
-        fs::write(&path, chunk.code.as_bytes())
-            .map_err(|e| format!("brocanth-bundle: {name}: {e}"))?;
+        write_if_changed(&path, chunk.code.as_bytes())?;
         report.written.push(path);
     }
     Ok(())
@@ -304,13 +303,13 @@ fn css(entry: &Path, minify: bool, report: &mut Report) -> Result<(), String> {
     let mut bundler = Bundler::new(&fs, None, ParserOptions::default());
     let sheet = bundler
         .bundle(entry)
-        .map_err(|e| format!("brocanth-bundle: {}: {e}", entry.display()))?;
+        .map_err(|e| format!("brocanth-bundle: {}: {e}\n{HELP_SHEET}", entry.display()))?;
     let css = sheet
         .to_css(PrinterOptions {
             minify,
             ..Default::default()
         })
-        .map_err(|e| format!("brocanth-bundle: {}: {e}", entry.display()))?;
+        .map_err(|e| format!("brocanth-bundle: {}: {e}\n{HELP_SHEET}", entry.display()))?;
     // `@import`ed files, for `rerun-if-changed`: every source the bundle read.
     for source in &sheet.sources {
         let path = PathBuf::from(source);
@@ -319,9 +318,38 @@ fn css(entry: &Path, minify: bool, report: &mut Report) -> Result<(), String> {
         }
     }
     let out = entry.with_file_name(format!("{}.css", output_name(entry)));
-    fs::write(&out, css.code).map_err(|e| format!("brocanth-bundle: {}: {e}", out.display()))?;
+    write_if_changed(&out, css.code.as_bytes())?;
     report.written.push(out);
     Ok(())
+}
+
+/// The help line of an error rolldown raised.
+const HELP_MODULE: &str =
+    "help: fix the module the message names; an import of a URL starts with `/` or `https://`";
+
+/// The help line of an error lightningcss raised.
+const HELP_SHEET: &str = "help: fix the style sheet at the place the message names";
+
+/// An I/O error at `at`, with what to do.
+fn io(at: &Path, error: &std::io::Error) -> String {
+    format!(
+        "brocanth-bundle: {}: {error}\n\
+         help: check that the directory exists and that the build can write to it",
+        at.display()
+    )
+}
+
+/// Writes `bytes` to `path` only when they differ from what is there. An
+/// output that did not change keeps its mtime, so Cargo, which watches the
+/// assets directory, does not run the build script again for it.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if fs::read(path).is_ok_and(|old| old == bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| io(parent, &e))?;
+    }
+    fs::write(path, bytes).map_err(|e| io(path, &e))
 }
 
 #[cfg(test)]
@@ -378,6 +406,33 @@ mod tests {
             "the import is inlined: {css}"
         );
         assert!(report.sources.iter().any(|s| s.ends_with("lazy.ts")));
+
+        // A second build with nothing changed writes nothing into the
+        // watched directory, so Cargo does not run the script again.
+        let before = fs::metadata(js.join("app.js")).unwrap().modified().unwrap();
+        let css_before = fs::metadata(root.join("assets/site.css"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        bundle(&Options {
+            root: root.clone(),
+            assets: "assets",
+            public: "public",
+            minify: false,
+        })
+        .unwrap();
+        assert_eq!(
+            fs::metadata(js.join("app.js")).unwrap().modified().unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::metadata(root.join("assets/site.css"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            css_before
+        );
         fs::remove_dir_all(root).ok();
     }
 }
