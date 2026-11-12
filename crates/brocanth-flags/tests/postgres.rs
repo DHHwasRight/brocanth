@@ -173,6 +173,32 @@ async fn the_postgres_store_keeps_the_contract() {
     sandbox.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replicas_that_migrate_at_once_all_succeed() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    // Each "replica" its own pool, so the statements run in parallel.
+    let url = url().expect("checked by the sandbox");
+    let mut runs = Vec::new();
+    for _ in 0..8 {
+        let mut cfg = DbConfig::new(&url);
+        cfg.max_connections = 1;
+        cfg.search_path = vec![sandbox.schema.clone()];
+        let db = Db::connect(&cfg).await.expect("connect");
+        runs.push(tokio::spawn(async move {
+            let done = PgStore::new(db.clone()).migrate().await;
+            db.close().await;
+            done
+        }));
+    }
+    for run in runs {
+        run.await.unwrap().expect("every replica migrates");
+    }
+    assert!(sandbox.store.load().await.unwrap().is_empty());
+    sandbox.drop().await;
+}
+
 #[tokio::test]
 async fn the_table_refuses_a_percent_outside_zero_to_a_hundred() {
     let Some(sandbox) = Sandbox::new().await else {
