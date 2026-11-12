@@ -198,12 +198,46 @@ impl Error {
 }
 
 impl From<DbErr> for Error {
+    /// The validation errors a hook encoded, or a unique violation as the
+    /// `taken` error [`crate::validators::uniqueness`] gives. Two writers
+    /// can both pass that check and race to the `INSERT`; the unique index
+    /// then refuses the second, and the form still reads a field error.
     fn from(err: DbErr) -> Self {
-        match Errors::from_db_err(&err) {
-            Some(errors) => Error::Invalid(errors),
-            None => Error::Db(err),
+        if let Some(errors) = Errors::from_db_err(&err) {
+            return Error::Invalid(errors);
         }
+        if let Some(column) = unique_violation(&err) {
+            let mut errors = Errors::new();
+            errors.add(column, "taken", "has already been taken");
+            return Error::Invalid(errors);
+        }
+        Error::Db(err)
     }
+}
+
+/// The first column of the key a unique violation (SQLSTATE 23505) names,
+/// read from the server's detail: `Key (email)=(…) already exists.`
+fn unique_violation(err: &DbErr) -> Option<String> {
+    use sea_orm::RuntimeErr;
+    let (DbErr::Exec(RuntimeErr::SqlxError(e)) | DbErr::Query(RuntimeErr::SqlxError(e))) = err
+    else {
+        return None;
+    };
+    let db = e.as_database_error()?;
+    if db.code().as_deref() != Some("23505") {
+        return None;
+    }
+    let pg = db.try_downcast_ref::<sea_orm::sqlx::postgres::PgDatabaseError>()?;
+    key_column(pg.detail()?)
+}
+
+/// `Key (email)=(a@b.co) already exists.` to `email`; `Key (a, b)=…` to `a`.
+fn key_column(detail: &str) -> Option<String> {
+    let columns = detail.strip_prefix("Key (")?.split_once(")=")?.0;
+    let first = columns.split(',').next()?.trim().trim_matches('"');
+    // An expression index, such as `lower(email::text)`, names no column.
+    let column = !first.is_empty() && first.chars().all(|c| c.is_alphanumeric() || c == '_');
+    column.then(|| first.to_string())
 }
 
 impl From<Error> for DbErr {
@@ -263,5 +297,22 @@ mod tests {
         let err = DbErr::Custom("something else".to_owned());
         assert!(Errors::from_db_err(&err).is_none());
         assert!(!Error::from(err).is_invalid());
+    }
+
+    #[test]
+    fn a_unique_violation_names_the_first_key_column() {
+        assert_eq!(
+            key_column("Key (email)=(a@b.co) already exists.").as_deref(),
+            Some("email")
+        );
+        assert_eq!(
+            key_column("Key (tenant_id, \"Slug\")=(1, x) already exists.").as_deref(),
+            Some("tenant_id")
+        );
+        assert_eq!(key_column("something else"), None);
+        assert_eq!(
+            key_column("Key (lower(email::text))=(a) already exists."),
+            None
+        );
     }
 }

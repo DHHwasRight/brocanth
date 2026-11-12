@@ -84,7 +84,18 @@ macro_rules! scalar_int {
         }
     )*};
 }
-scalar_int!(i8, i16, i32, i64, u8, u16, u32, u64);
+scalar_int!(i8, i16, i32, i64, u8, u16, u32);
+
+/// A `u64` above `i64::MAX` is no `i64`: a cast would make it negative. It
+/// becomes the nearest `f64`, which compares in the right order.
+impl AsScalar for u64 {
+    fn as_scalar(&self) -> Scalar<'_> {
+        match i64::try_from(*self) {
+            Ok(n) => Scalar::Int(n),
+            Err(_) => Scalar::Float(*self as f64),
+        }
+    }
+}
 
 macro_rules! scalar_float {
     ($($t:ty),*) => {$(
@@ -296,7 +307,8 @@ pub fn numericality(
     if value.is_missing() {
         return;
     }
-    let Some(n) = value.as_f64() else {
+    // NaN fails every comparison below, so it would pass every bound.
+    let Some(n) = value.as_f64().filter(|n| !n.is_nan()) else {
         errors.add(field, "not_a_number", message.unwrap_or("is not a number"));
         return;
     };
@@ -373,6 +385,11 @@ pub fn inclusion(
 /// 2.0's hooks are usable as an enforcement point: `before_save` takes one.
 /// `exclude` is the record's own primary key on an update, so a record does not
 /// collide with itself.
+///
+/// The column needs a unique index too. This check reads, then the write
+/// inserts, so two writers can both pass it. The index refuses the second
+/// write, and [`crate::Error`] turns that refusal (SQLSTATE `23505`) into
+/// the same `taken` error on the column, so the form reads one answer.
 pub async fn uniqueness<E, V, C>(
     errors: &mut Errors,
     field: &str,
@@ -408,6 +425,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nan_is_not_a_number_and_passes_no_bound() {
+        let mut e = Errors::new();
+        let bounds = Numericality {
+            greater_than: Some(0.0),
+            ..Default::default()
+        };
+        numericality(&mut e, "n", scalar(&f64::NAN), bounds, None);
+        assert_eq!(e.fields(), ["n"]);
+        assert_eq!((&e).into_iter().next().unwrap().code, "not_a_number");
+    }
+
+    #[test]
+    fn a_large_u64_stays_positive() {
+        let mut e = Errors::new();
+        let bounds = Numericality {
+            greater_than: Some(0.0),
+            ..Default::default()
+        };
+        numericality(&mut e, "n", scalar(&u64::MAX), bounds, None);
+        assert!(e.is_empty(), "{e}");
+        assert!(matches!(scalar(&7_u64), Scalar::Int(7)));
+    }
 
     #[test]
     fn presence_rejects_blank_text_and_missing_columns() {

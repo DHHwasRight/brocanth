@@ -43,7 +43,7 @@
 
 use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, Condition, ConnectionTrait, EntityTrait,
-    IntoActiveModel, QueryFilter, TransactionSession, TransactionTrait,
+    IntoActiveModel, QueryFilter, QuerySelect, TransactionSession, TransactionTrait,
 };
 
 use crate::{Error, Write};
@@ -130,6 +130,12 @@ where
 /// one at a time so hooks run.
 ///
 /// This is the hook-safe reading of `update_many().filter(..)`.
+///
+/// The rows load with `FOR UPDATE`, so a concurrent writer waits until this
+/// transaction ends: an `edit` or a hook that computes from the loaded value
+/// does not lose the other write. Every matching row loads into memory at
+/// once, so keep `filter` narrow, or call this per page of keys for a large
+/// set.
 pub async fn update_where<E, F, C>(
     filter: Condition,
     edit: F,
@@ -143,7 +149,7 @@ where
     C: ConnectionTrait + TransactionTrait,
 {
     let txn = db.begin().await?;
-    let found = E::find().filter(filter).all(&txn).await?;
+    let found = E::find().filter(filter).lock_exclusive().all(&txn).await?;
     let mut out = Vec::with_capacity(found.len());
     for model in found {
         let mut active = model.into_active_model();
@@ -155,6 +161,9 @@ where
 }
 
 /// Load every row matching `filter` and delete them one at a time so hooks run.
+///
+/// The rows load with `FOR UPDATE`, as in [`update_where`], and all at once:
+/// keep `filter` narrow, or call this per page of keys for a large set.
 pub async fn delete_where<E, C>(filter: Condition, db: &C) -> Result<u64, Error>
 where
     E: EntityTrait,
@@ -163,7 +172,7 @@ where
     C: ConnectionTrait + TransactionTrait,
 {
     let txn = db.begin().await?;
-    let found = E::find().filter(filter).all(&txn).await?;
+    let found = E::find().filter(filter).lock_exclusive().all(&txn).await?;
     let mut removed = 0;
     for model in found {
         removed += model.into_active_model().delete_checked(&txn).await?;
