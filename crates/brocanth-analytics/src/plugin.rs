@@ -29,8 +29,10 @@ static INSTALLED: OnceLock<Recorder> = OnceLock::new();
 ///
 /// The store is picked in `before_start`: a `brocanth_db::Db` in the
 /// application's services (the `db` plugin, registered before this one)
-/// gives a `PgStore`; without one the views are kept in memory and lost at
-/// restart. [`Analytics::with_store`] picks it in code instead.
+/// gives a `PgStore`. Without one, an enabled plugin with the `postgres`
+/// feature refuses to start; without the feature, the views are kept in
+/// memory and lost at restart. [`Analytics::with_store`] picks it in code
+/// instead.
 pub struct Analytics {
     config: AnalyticsConfig,
     recorder: Recorder,
@@ -120,7 +122,7 @@ impl Plugin for Analytics {
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.recorder.store().is_none() {
-            self.attach_store(lc);
+            self.attach_store(lc)?;
         }
         if !self.config.enabled {
             return Ok(());
@@ -147,10 +149,11 @@ impl Plugin for Analytics {
     }
 
     fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
-        if let Some(flusher) = self.flusher.take() {
+        let flusher = self.flusher.take();
+        if let Some(flusher) = &flusher {
             flusher.abort();
         }
-        if self.recorder.pending() == 0 {
+        if flusher.is_none() && self.recorder.pending() == 0 {
             return Ok(());
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -159,19 +162,32 @@ impl Plugin for Analytics {
         let recorder = self.recorder.clone();
         let remaining = sd.remaining();
         let last = async move {
-            let flush = recorder.flush();
-            match remaining {
-                Some(left) => {
-                    let _ = tokio::time::timeout(left, flush).await;
-                }
-                None => {
-                    let _ = flush.await;
+            // The aborted timer may have been in a flush. `Recorder::flush`
+            // is cancel-safe: once the task has ended, its batch is back on
+            // the buffer.
+            if let Some(flusher) = flusher {
+                let _ = flusher.await;
+            }
+            if recorder.pending() > 0 {
+                let flush = recorder.flush();
+                match remaining {
+                    Some(left) => {
+                        let _ = tokio::time::timeout(left, flush).await;
+                    }
+                    None => {
+                        let _ = flush.await;
+                    }
                 }
             }
+            // What a timeout or a failed write left behind ends with the
+            // process: count it.
+            recorder.drop_pending();
         };
         // The same two shapes as the `db` plugin's close: a task on a
         // current-thread runtime, whose only thread drives the I/O, and a
-        // scoped thread on a multi-thread one.
+        // scoped thread on a multi-thread one. The task cannot be waited
+        // for here, because this thread is the one that must run it: it
+        // writes what it can while the runtime still runs.
         if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
             runtime.spawn(last);
             return Ok(());
@@ -188,11 +204,24 @@ impl Plugin for Analytics {
 }
 
 impl Analytics {
+    /// With the `postgres` feature, a `brocanth_db::Db` in the services
+    /// gives a `PgStore`. Without one, an enabled plugin refuses to start:
+    /// views kept in memory would vanish at the next deploy, and nothing
+    /// would say so. A disabled plugin counts nothing, so it takes the
+    /// memory store. A test that wants memory says so with
+    /// [`Analytics::with_store`].
     #[cfg(feature = "postgres")]
-    fn attach_store(&mut self, lc: &mut Lifecycle<'_>) {
+    fn attach_store(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let Some(db) = lc.services().get::<brocanth_db::Db>().cloned() else {
+            if self.config.enabled {
+                return Err(PluginError::new(
+                    "[analytics] no database: the views would be kept in memory and lost at restart\n\
+                     help: register the `db` plugin before `analytics`, or build the plugin with \
+                     `Analytics::with_store` to choose a store in code",
+                ));
+            }
             self.recorder.attach(Arc::new(MemoryStore::new()));
-            return;
+            return Ok(());
         };
         let store = Arc::new(crate::postgres::PgStore::new(db));
         self.recorder.attach(store.clone());
@@ -218,11 +247,13 @@ impl Analytics {
                 }
             });
         }
+        Ok(())
     }
 
     #[cfg(not(feature = "postgres"))]
-    fn attach_store(&mut self, _lc: &mut Lifecycle<'_>) {
+    fn attach_store(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         self.recorder.attach(Arc::new(MemoryStore::new()));
+        Ok(())
     }
 }
 
@@ -270,8 +301,8 @@ struct Count {
 }
 
 impl RequestHook for Count {
-    fn after_dispatch(&self, request: &Request, response: &Response, _state: &mut RequestState) {
-        if let Some(pending) = self.page_view(request, response) {
+    fn after_dispatch(&self, request: &Request, response: &Response, state: &mut RequestState) {
+        if let Some(pending) = self.page_view(request, response, state) {
             self.recorder.record(pending);
         }
     }
@@ -279,7 +310,12 @@ impl RequestHook for Count {
 
 impl Count {
     /// The view this exchange was, or `None` when it was not one.
-    fn page_view(&self, request: &Request, response: &Response) -> Option<Pending> {
+    fn page_view(
+        &self,
+        request: &Request,
+        response: &Response,
+        state: &RequestState,
+    ) -> Option<Pending> {
         // A GET, answered with a whole HTML page or a dp-swap partial. A
         // partial is a navigation the visitor made in place of a full load,
         // so it counts once, like the load would have.
@@ -290,11 +326,8 @@ impl Count {
         if !(200..300).contains(&status) || status == 204 || status == 206 {
             return None;
         }
-        let html = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/html"));
+        let html =
+            brocanth::plugin_body::is_html(response.headers().get(http::header::CONTENT_TYPE));
         if !html {
             return None;
         }
@@ -317,6 +350,7 @@ impl Count {
             &self.config,
             &self.recorder,
             request,
+            state,
             Page {
                 site: self.recorder.site(),
                 path: request.uri().path(),
@@ -355,11 +389,13 @@ pub(crate) struct Page<'a> {
 /// A page view from the parts of a request that are kept, after the rules
 /// the hook and the collector share: no bot, no signal when the site
 /// respects it, no excluded path, and every field reduced. The address and
-/// the user agent come from `request`, which the browser sent.
+/// the user agent come from `request`, which the browser sent, and from
+/// the `proxy-headers` hook's reading of it in `state`.
 pub(crate) fn visit(
     config: &AnalyticsConfig,
     recorder: &Recorder,
     request: &Request,
+    state: &RequestState,
     page: Page<'_>,
 ) -> Option<Pending> {
     let Page {
@@ -386,7 +422,7 @@ pub(crate) fn visit(
     Some(Pending {
         site: site.to_string(),
         day: recorder.today(),
-        prehash: recorder.prehash(site, &address(config, request), ua),
+        prehash: recorder.prehash(site, &address(config, request, state), ua),
         path,
         query: clean_query(query, &config.query_allow),
         referrer: referrer_origin(referer, host).unwrap_or_default(),
@@ -401,9 +437,16 @@ pub(crate) fn visit(
     })
 }
 
-/// The client address as text: the edge's header when one is named, else
-/// the socket's. Only ever hashed.
-fn address(config: &AnalyticsConfig, request: &Request) -> String {
+/// The client address as text. Only ever hashed. In order: the address
+/// the `proxy-headers` hook read from a trusted proxy, the edge's header
+/// when one is named, the socket's.
+fn address(config: &AnalyticsConfig, request: &Request, state: &RequestState) -> String {
+    if let Some(client) = state
+        .get::<brocanth_middleware::ClientInfo>()
+        .and_then(|info| info.address)
+    {
+        return client.to_string();
+    }
     if let Some(name) = &config.ip_header {
         let first = header(request, name).split(',').next().unwrap_or("").trim();
         if !first.is_empty() {
@@ -415,4 +458,38 @@ fn address(config: &AnalyticsConfig, request: &Request) -> String {
         .get::<std::net::SocketAddr>()
         .map(|peer| peer.ip().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trusted_proxys_client_address_comes_before_the_header_and_the_socket() {
+        let config = AnalyticsConfig {
+            ip_header: Some("fly-client-ip".to_string()),
+            ..AnalyticsConfig::default()
+        };
+        let mut request = http::Request::builder()
+            .header("fly-client-ip", "203.0.113.9")
+            .body(Vec::new())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(std::net::SocketAddr::from(([10, 0, 0, 1], 443)));
+        let mut state = RequestState::new();
+        assert_eq!(address(&config, &request, &state), "203.0.113.9");
+        state.insert(brocanth_middleware::ClientInfo {
+            address: Some([198, 51, 100, 4].into()),
+            scheme: None,
+            host: None,
+            chain: Vec::new(),
+        });
+        assert_eq!(address(&config, &request, &state), "198.51.100.4");
+        assert_eq!(
+            address(&AnalyticsConfig::default(), &request, &RequestState::new()),
+            "10.0.0.1",
+            "behind no proxy, the socket"
+        );
+    }
 }

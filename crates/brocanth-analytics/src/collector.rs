@@ -61,7 +61,7 @@ impl Collect {
     }
 
     /// Counts the beacon if it passes every check. Silent either way.
-    fn take(&self, request: &Request) {
+    fn take(&self, request: &Request, state: &RequestState) {
         let method = request.method();
         let payload = if method == http::Method::GET {
             request.uri().query().unwrap_or("").as_bytes()
@@ -105,7 +105,7 @@ impl Collect {
             referer: &referer,
             host: Some(host),
         };
-        if let Some(pending) = visit(&self.config, &self.recorder, request, page) {
+        if let Some(pending) = visit(&self.config, &self.recorder, request, state, page) {
             self.recorder.record(pending);
         }
     }
@@ -130,12 +130,12 @@ impl RequestHook for Collect {
     fn before_dispatch(
         &self,
         request: &mut Request,
-        _state: &mut RequestState,
+        state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
         if request.uri().path() != self.config.collector_path {
             return Ok(Flow::Continue);
         }
-        self.take(request);
+        self.take(request, state);
         Ok(Flow::respond(answer(request.method() == http::Method::GET)))
     }
 }
@@ -166,8 +166,11 @@ fn decode(value: &str) -> Option<String> {
         match bytes[i] {
             b'+' => out.push(b' '),
             b'%' => {
+                // Two hex digits, checked first: `from_str_radix` alone
+                // takes a sign, so `%+1` would decode.
                 let hex = bytes
                     .get(i + 1..i + 3)
+                    .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
                     .and_then(|h| std::str::from_utf8(h).ok());
                 match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
                     Some(byte) => {
@@ -194,6 +197,8 @@ mod tests {
         assert_eq!(decode("a+b").as_deref(), Some("a b"));
         assert_eq!(decode("100%").as_deref(), Some("100%"));
         assert_eq!(decode("%zz").as_deref(), Some("%zz"));
+        assert_eq!(decode("%+1").as_deref(), Some("% 1"), "a sign is no digit");
+        assert_eq!(decode("%-1").as_deref(), Some("%-1"));
         assert_eq!(decode("%ff"), None);
     }
 
