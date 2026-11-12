@@ -58,7 +58,7 @@ fn body(out: &mut String, which: &str, changes: &[Change]) {
     let mut lines = Vec::new();
     for change in changes {
         lines.push(format!("// {}", change.describe()));
-        if let Some(check) = check(change) {
+        for check in checks(change) {
             lines.push(format!("// Check: {check}"));
         }
         let (method, stmt) = statement(change);
@@ -79,16 +79,47 @@ fn body(out: &mut String, which: &str, changes: &[Change]) {
 }
 
 /// What a reader must check before the commit, when there is something.
-fn check(change: &Change) -> Option<&'static str> {
+fn checks(change: &Change) -> Vec<String> {
     match change {
         Change::AddColumn { field, .. } if !field.nullable && !field.auto_increment => {
-            Some("NOT NULL with no default fails on a table with rows. Add a default.")
+            vec!["NOT NULL with no default fails on a table with rows. Add a default.".into()]
         }
         Change::DropColumn { .. } | Change::DropTable(_) => {
-            Some("this deletes data. The inverse step does not restore the data.")
+            vec!["this deletes data. The inverse step does not restore the data.".into()]
         }
-        Change::AlterColumn { .. } => Some("the existing data must convert to the new type."),
-        _ => None,
+        Change::AlterColumn {
+            table,
+            column,
+            from,
+            to,
+        } => {
+            let mut out = vec!["the existing data must convert to the new type.".to_string()];
+            // `modify_column` changes the type and the nullability only. A
+            // key or a unique constraint is a constraint with a name the
+            // server chose, so this file cannot add or drop it safely.
+            if from.unique != to.unique {
+                let verb = if to.unique { "add" } else { "drop" };
+                out.push(format!(
+                    "this step does not {verb} the UNIQUE constraint on `{table}.{column}`. \
+                     Write it: `manager.get_connection().execute_unprepared(\"ALTER TABLE .. \
+                     {} ..\")`.",
+                    if to.unique {
+                        "ADD UNIQUE"
+                    } else {
+                        "DROP CONSTRAINT"
+                    }
+                ));
+            }
+            if from.primary_key != to.primary_key {
+                let verb = if to.primary_key { "add" } else { "drop" };
+                out.push(format!(
+                    "this step does not {verb} the PRIMARY KEY on `{table}.{column}`. Write \
+                     it by hand."
+                ));
+            }
+            out
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -150,15 +181,21 @@ fn statement(change: &Change) -> (&'static str, E) {
             to,
             ..
         } => {
+            // The type and the nullability only. With `primary_key` or
+            // `unique_key` here, sea-query writes `ADD PRIMARY KEY` and
+            // `ADD UNIQUE`, which fail or duplicate on a column that has
+            // them. `checks` tells the reader about a constraint change.
             let named = Field {
                 name: c.clone(),
+                primary_key: false,
+                unique: false,
                 ..to.clone()
             };
             (
                 "alter_table",
                 alter(
                     table,
-                    Link::call("modify_column", vec![column(&named, true)]),
+                    Link::call("modify_column", vec![column(&named, false)]),
                 ),
             )
         }
@@ -364,6 +401,37 @@ mod tests {
             text.contains(
                 ".primary_key(Index::create().col(Alias::new(\"a\")).col(Alias::new(\"b\")))"
             ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_alter_changes_the_type_and_never_adds_a_key_or_a_unique() {
+        let mut from = field("id", "integer");
+        from.primary_key = true;
+        from.unique = true;
+        let mut to = field("id", "big_integer");
+        to.primary_key = true;
+        let text = render(
+            "m",
+            &[Change::AlterColumn {
+                table: "post".into(),
+                column: "id".into(),
+                from,
+                to,
+            }],
+        );
+        assert!(text.contains(".modify_column("), "{text}");
+        assert!(!text.contains(".primary_key()"), "{text}");
+        assert!(!text.contains(".unique_key()"), "{text}");
+        // The up step drops the unique and the down step adds it back:
+        // neither is written, and both are named for the reader.
+        assert!(
+            text.contains("does not drop the UNIQUE constraint on `post.id`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("does not add the UNIQUE constraint on `post.id`"),
             "{text}"
         );
     }

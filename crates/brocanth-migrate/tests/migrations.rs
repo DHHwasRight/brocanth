@@ -52,9 +52,9 @@ fn the_renames_are_renames() {
         said,
         [
             "rename table `user` to `account`",
+            "drop column `post.views`",
             "rename column `post.title` to `headline`",
             "add column `post.body` (string)",
-            "drop column `post.views`",
         ]
     );
 }
