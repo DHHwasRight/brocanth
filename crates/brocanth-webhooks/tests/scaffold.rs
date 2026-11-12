@@ -50,12 +50,40 @@ fn outgoing_webhooks_add_a_deliveries_tab_to_the_admin() {
     );
 }
 
-/// `webhooks-out` without `jobs` is refused, with the reason.
+/// `webhooks-out` without `db` is refused, with the reason. It needs no
+/// `jobs`: its queue is its own, on the `db` module's pool.
 #[test]
-fn outgoing_webhooks_without_jobs_are_refused_with_the_reason() {
+fn outgoing_webhooks_without_a_database_are_refused_with_the_reason() {
     let modules: [&dyn brocanth_scaffold::Module; 3] = [&Webhooks, &WebhooksIn, &WebhooksOut];
-    let wrong =
-        brocanth_cli::testing::generate("my-shop", &["db", "webhooks", "webhooks-out"], &modules)
-            .expect_err("jobs is needed");
-    assert!(wrong.contains("jobs"), "{wrong}");
+    let wrong = brocanth_cli::testing::generate("my-shop", &["webhooks", "webhooks-out"], &modules)
+        .expect_err("db is needed");
+    assert!(wrong.contains("db"), "{wrong}");
+    brocanth_cli::testing::generate("my-shop", &["db", "webhooks", "webhooks-out"], &modules)
+        .unwrap_or_else(|e| panic!("jobs is not needed: {e}"));
+}
+
+/// Outside development, the `example` source refuses the public
+/// development secret, and a config file with no secret starts with none.
+#[test]
+fn incoming_webhooks_refuse_the_development_secret_outside_development() {
+    let modules: [&dyn brocanth_scaffold::Module; 3] = [&Webhooks, &WebhooksIn, &WebhooksOut];
+    let files = brocanth_cli::testing::generate(
+        "my-shop",
+        &["config", "webhooks", "webhooks-in"],
+        &modules,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let plugin = files
+        .iter()
+        .find(|(path, _)| path.as_str() == "src/plugins/webhooks_in/mod.rs")
+        .map(|(_, text)| text.as_str())
+        .expect("the plugin file");
+    assert!(plugin.contains("secret: String::new(),"), "{plugin}");
+    assert!(plugin.contains("secret == DEVELOPMENT_SECRET && environment != \"development\""));
+    let development = files
+        .iter()
+        .find(|(path, _)| path.as_str() == "config/development.toml")
+        .map(|(_, text)| text.as_str())
+        .expect("the development file");
+    assert!(development.contains("whsec_"), "{development}");
 }

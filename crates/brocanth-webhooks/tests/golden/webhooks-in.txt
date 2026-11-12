@@ -2178,9 +2178,9 @@ tolerance = 300
 # The largest delivery accepted, in bytes.
 max_bytes = 1048576
 # The `example` source's Standard Webhooks secret.
-# Development only. Replace it with the secret the sender shows you, in
-# the environment or this file. No flag sets it: a flag is readable by
-# every user on the host.
+# Development only: outside development the start refuses this value.
+# Replace it with the secret the sender shows you, in the environment or
+# this file. No flag sets it: a flag is readable by every user on the host.
 secret = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ=="
 ===== src/plugins/webhooks_in/mod.rs =====
 //! Incoming webhooks, as this application receives them.
@@ -2251,6 +2251,16 @@ impl Handler for Example {
 // The plugin
 // ---------------------------------------------------------------------------
 
+/// The secret `config/development.toml` gives the `example` source. It is
+/// public, so the start refuses it outside development.
+pub const DEVELOPMENT_SECRET: &str = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ==";
+
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
 /// What this plugin is built from.
 ///
 /// It derives `Deserialize` because this application reads it from
@@ -2288,7 +2298,7 @@ impl Default for Settings {
             path: "/webhooks".to_string(),
             tolerance: 300,
             max_bytes: 1_048_576,
-            secret: "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ==".to_string(),
+            secret: String::new(),
         }
     }
 }
@@ -2314,6 +2324,16 @@ impl Plugin for WebhooksIn {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let environment = environment();
+        if self.settings.secret == DEVELOPMENT_SECRET && environment != "development" {
+            return Err(PluginError::new(format!(
+                "[webhooks_in] secret is the development one, in `{environment}`\n\
+                 help: set `[webhooks_in] secret` to the secret the sender shows you, \
+                 in the environment or config/{environment}.toml"
+            )));
+        }
+        // An empty secret -- a production file that sets none -- stops
+        // here, and the error's `help:` line says where to find one.
         let example = Scheme::standard(&self.settings.secret)
             .map_err(|e| PluginError::new(format!("[webhooks_in] secret: {e}")))?;
         let receiver = Incoming::new(&self.settings.path)
@@ -2366,7 +2386,7 @@ mod tests {
     async fn a_signed_delivery_runs_once() {
         let app = crate::app::build().expect("the application builds");
         let body = br#"{"type":"invoice.paid"}"#;
-        let key = brocanth_webhooks::sign::decode_secret(&super::Settings::default().secret)
+        let key = brocanth_webhooks::sign::decode_secret(super::DEVELOPMENT_SECRET)
             .expect("the development secret is valid");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

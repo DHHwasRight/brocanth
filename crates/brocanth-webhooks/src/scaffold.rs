@@ -10,7 +10,9 @@
 //!   `db`, the idempotency keys are rows; without it, they are in memory.
 //! * `webhooks-out` writes `src/plugins/webhooks_out/mod.rs`, which names
 //!   the crate's plugin and its settings. It needs `db` for the tables and
-//!   `jobs` for the retries.
+//!   for its queue. It does not need `jobs`: the deliveries keep their own
+//!   Postgres queue, so `Outgoing::emit_in` can join the caller's
+//!   transaction, which a memory queue cannot. See `crate::outgoing`.
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
@@ -172,9 +174,9 @@ fn incoming_settings(db: bool) -> Vec<Setting> {
             "The `example` source's Standard Webhooks secret.",
         )
         .note(
-            "Development only. Replace it with the secret the sender shows you, in\n\
-             the environment or this file. No flag sets it: a flag is readable by\n\
-             every user on the host.",
+            "Development only: outside development the start refuses this value.\n\
+             Replace it with the secret the sender shows you, in the environment or\n\
+             this file. No flag sets it: a flag is readable by every user on the host.",
         )
         .secret(),
     ];
@@ -216,6 +218,15 @@ fn incoming_rs(project: &Project, db: bool) -> String {
         )
     };
     let signed_test = if db { "" } else { SIGNED_TEST };
+    // With a config file the development secret is in the development file
+    // only, so a production file with no `secret` starts with none and is
+    // refused. Without one, the literal is the only place to set it, and the
+    // start refuses it outside development.
+    let default_secret = if project.has("config") {
+        "String::new()".to_string()
+    } else {
+        "DEVELOPMENT_SECRET.to_string()".to_string()
+    };
     INCOMING_RS
         .replace("@DERIVE@", &derive)
         .replace("@NOTE@", &note)
@@ -225,6 +236,7 @@ fn incoming_rs(project: &Project, db: bool) -> String {
         .replace("@BEFORE_START@", before_start)
         .replace("@USE_ARC@", use_arc)
         .replace("@SIGNED_TEST@", signed_test)
+        .replace("@DEFAULT_SECRET@", &default_secret)
         .replace("@SECRET@", DEV_SECRET)
 }
 
@@ -294,6 +306,16 @@ impl Handler for Example {
 // The plugin
 // ---------------------------------------------------------------------------
 
+/// The secret `config/development.toml` gives the `example` source. It is
+/// public, so the start refuses it outside development.
+pub const DEVELOPMENT_SECRET: &str = "@SECRET@";
+
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
 /// What this plugin is built from.
 ///
 /// @NOTE@
@@ -315,7 +337,7 @@ impl Default for Settings {
             path: "/webhooks".to_string(),
             tolerance: 300,
             max_bytes: 1_048_576,
-            secret: "@SECRET@".to_string(),
+            secret: @DEFAULT_SECRET@,
 @MIGRATE_DEFAULT@        }
     }
 }
@@ -341,6 +363,16 @@ impl Plugin for WebhooksIn {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let environment = environment();
+        if self.settings.secret == DEVELOPMENT_SECRET && environment != "development" {
+            return Err(PluginError::new(format!(
+                "[webhooks_in] secret is the development one, in `{environment}`\n\
+                 help: set `[webhooks_in] secret` to the secret the sender shows you, \
+                 in the environment or config/{environment}.toml"
+            )));
+        }
+        // An empty secret -- a production file that sets none -- stops
+        // here, and the error's `help:` line says where to find one.
         let example = Scheme::standard(&self.settings.secret)
             .map_err(|e| PluginError::new(format!("[webhooks_in] secret: {e}")))?;
         let receiver = Incoming::new(&self.settings.path)
@@ -432,7 +464,7 @@ const SIGNED_TEST: &str = r##"
     async fn a_signed_delivery_runs_once() {
         let app = crate::app::build().expect("the application builds");
         let body = br#"{"type":"invoice.paid"}"#;
-        let key = brocanth_webhooks::sign::decode_secret(&super::Settings::default().secret)
+        let key = brocanth_webhooks::sign::decode_secret(super::DEVELOPMENT_SECRET)
             .expect("the development secret is valid");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -464,19 +496,15 @@ impl Module for WebhooksOut {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "webhooks-out",
-            "signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs",
+            "signed outgoing webhooks: endpoints and a delivery log in Postgres, retries on a Postgres queue",
         )
         .category(Category::Enhancer)
-        .asked_in("doors", "Send signed webhooks, retried through jobs")
+        .asked_in("doors", "Send signed webhooks, retried on a Postgres queue")
         .part_of_but_off("webhooks")
         .because("it is the outgoing half of `brocanth-webhooks`, which the parent brings")
         .needs(
             "db",
             "the endpoints and the delivery log are rows in the `db` module's database",
-        )
-        .needs(
-            "jobs",
-            "a delivery is a job: its retries, backoff and dead letter are the queue's",
         )
         .adapts_to(
             "config",
@@ -549,6 +577,11 @@ fn outgoing_settings() -> Vec<Setting> {
              often on this machine. Production reads the default, false: a webhook URL\n\
              is chosen by whoever registers it, and this stops it reaching your network.",
         ),
+        Setting::integer(
+            "keep_days",
+            30,
+            "Days a delivered or failed delivery stays in the log. 0 keeps it.",
+        ),
     ]
 }
 
@@ -580,15 +613,34 @@ const OUTGOING_RS: &str = r#"//! Outgoing webhooks, as this application sends th
 //!
 //! The deliveries are retried on the `webhooks` queue by a worker this
 //! plugin runs, over the `db` module's pool. With the admin, they are the
-//! admin's `webhooks` tab.
+//! admin's `webhooks` tab. A delivered or failed row is deleted after
+//! `[webhooks_out] keep_days`.
+//!
+//! An event that must not be lost is emitted on the transaction that
+//! changed the data, with `hooks.emit_in(&mut tx, ..)`: the delivery rows
+//! and their jobs commit with it, or not at all.
 
-pub use brocanth_webhooks::{OutgoingConfig as Settings, OutgoingPlugin as WebhooksOut};
+pub use brocanth_webhooks::OutgoingConfig as Settings;
+
+/// The crate's plugin, stopped within this application's shutdown grace.
+pub type WebhooksOut = brocanth_webhooks::OutgoingPlugin<Grace>;
+
+/// `[server] shutdown_grace_secs`: how long a drain waits for the
+/// deliveries in progress.
+pub struct Grace;
+
+impl brocanth_webhooks::outgoing::ShutdownGrace for Grace {
+    fn grace() -> Result<std::time::Duration, String> {
+        crate::plugins::shutdown_grace()
+    }
+}
 "#;
 
 const OUT_AGENTS: &str = "\n\
     ## Outgoing webhooks\n\
     \n\
-    Send an event with `Outgoing::emit`, from the code that changed the data.\n\
+    Send an event with `Outgoing::emit_in` on the transaction that changed the\n\
+    data, or `Outgoing::emit` after it.\n\
     Do not post to a partner's URL from a page: the delivery log, the\n\
     signature and the retries come from `emit`. Show an endpoint's secret\n\
     once, to the person who registered it, and never log it.\n";
