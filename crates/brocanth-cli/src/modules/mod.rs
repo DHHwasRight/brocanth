@@ -142,9 +142,9 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_input::scaffold::Entry,
     &brocanth_client::scaffold::Client,
     &brocanth_middleware::scaffold::Middleware,
-    // The sixth hook in that crate, and the only one that arrives ticked:
-    // the other five are a fact about somebody's network, and this one is
-    // a fact about browsers.
+    // The sixth hook in that crate. With the security headers below, one
+    // of the two children that arrive ticked: the other five hooks are a
+    // fact about somebody's network, and this one is a fact about browsers.
     &brocanth_middleware::scaffold::Csrf,
     // Policy headers ride with the middleware; rate limiting waits to be
     // asked for, because its rules are a fact about one application.

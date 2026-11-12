@@ -1441,7 +1441,7 @@ impl Ctx {
 fn mounted(
     routes: &mut ::brocanth::routing::RouterBuilder<Handler>,
 ) -> Result<(), ::brocanth::routing::BuildError> {
-    crate::plugins::resource::mount(routes, "/api")?;
+    crate::plugins::resource::mount(routes, crate::modules::resource::MODULE.mount_at)?;
     crate::plugins::admin::mount(routes, crate::modules::admin::MODULE.mount_at)?;
     crate::plugins::auth_oauth::mount(routes, crate::modules::auth_oauth::MODULE.mount_at)?;
     crate::plugins::oauth_client::mount(routes, crate::modules::oauth_client::MODULE.mount_at)?;
@@ -2134,6 +2134,7 @@ macro_rules! register {
                     .keep_unprefixed(crate::modules::storage_routes::MODULE.path)
                     .keep_unprefixed(crate::modules::auth_oauth::MODULE.mount_at)
                     .keep_unprefixed(crate::modules::oauth_client::MODULE.mount_at)
+                    .keep_unprefixed(crate::modules::resource::MODULE.mount_at)
             })
             .map_err(|e| e.to_string())?;
         let builder = builder.hooks_off_from(
@@ -2310,7 +2311,9 @@ macro_rules! register {
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips in `ip_header`.
+        // strips in `ip_header`. Without either, every client behind the
+        // balancer shares its address and one bucket; the limiter says so
+        // once on stderr.
         //
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
@@ -5079,7 +5082,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: 73ad1b391357f302
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6664,11 +6667,14 @@ pub mod validation {
 /// The shape of src/modules/resource.rs.
 pub mod resource {
     /// What src/modules/resource.rs holds.
-    pub struct Module {}
+    pub struct Module {
+        /// Where the records API answers. Every resource is under it.
+        pub mount_at: &'static str,
+    }
 
     impl Module {
         /// The value of each field the file does not name.
-        pub const DEFAULT: Self = Self {};
+        pub const DEFAULT: Self = Self { mount_at: "/api" };
     }
 }
 
@@ -7440,7 +7446,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: b11a6128b6681c98
+// brocanth-digest: e18f573848b791cc
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -8720,14 +8726,18 @@ pub const MODULE: Module = Module {
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
-//!
-//! Nothing to choose yet. When a later version of the module adds a
-//! choice, this file takes its default.
 
 use crate::plugins::shape::resource::Module;
 
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
-pub const MODULE: Module = Module { ..Module::DEFAULT };
+pub const MODULE: Module = Module {
+    // Where the records API answers. Every resource is under it.
+    mount_at: "/api",
+
+    ..Module::DEFAULT
+};
 ===== src/modules/admin.rs =====
 //! `admin`: a Django-shaped backoffice at /admin, locked until you say who may
 //! in.
@@ -9905,7 +9915,7 @@ fail_open = true
 # `key` is a list of "ip", "session" and "user", first found wins.
 [[rate_limit.rules]]
 name = "login"
-paths = ["/login"]
+paths = ["/account/signin"]
 methods = ["POST"]
 limit = 5
 window_secs = 60
@@ -9941,8 +9951,9 @@ last_modified = true
 # The cookie this hook owns.
 cookie = "flash"
 # The environment variable that holds the signing key.
-# The name, not the key. Unset: a random key per process, so a message
-# can be lost when the next request reaches another instance.
+# The name, not the key, which is at least 32 bytes. Unset: a random key
+# per process and a warning, so a message can be lost when the next
+# request reaches another instance.
 key_env = "FLASH_KEY"
 # Send the cookie over HTTPS only.
 secure = true
@@ -17848,8 +17859,9 @@ mod tests {
 //! not compile), a data source and three conversions. That crate's own
 //! documentation has the worked example.
 //!
-//! `src/pages/mod.rs` calls [`mount`] at `/api`, so every route lands in the
-//! one table. A page and a resource that claim one path are a build error.
+//! `src/pages/mod.rs` calls [`mount`] at `mount_at` in
+//! `src/modules/resource.rs`, so every route lands in the one table. A page
+//! and a resource that claim one path are a build error.
 //!
 //! The three impls below make this project's `Ctx`, `Response` and `Error`
 //! the page triple `brocanth_resource::pages` is written against. A resource
@@ -19711,6 +19723,16 @@ The banner speaks the request's locale. Its words are the
 `[gtag.banner]` keys of `locales/*.toml`; change them there, in every
 catalog. The `banner.*` settings are only the fallback.
 
+## Records API and CSRF
+
+The CSRF check covers the records API under `mount_at` in
+`src/modules/resource.rs`. A browser form sends the hidden field. A
+`fetch` from a page sends the token in the `x-csrf-token` header: read
+it from `<meta name="csrf-token">`, or from the CSRF cookie. A
+client that is not a browser (a mobile app, a script with a token)
+has no CSRF cookie: add the records prefix to `exempt` under `[csrf]`,
+and authenticate that client by its own token.
+
 ## The admin
 
 `src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in
@@ -20286,14 +20308,17 @@ Never connect as a superuser: a superuser bypasses every policy.
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
-`src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).
+`src/plugins/mod.rs`. It has one example rule (`login`, 5 per 60 s,
+POST `/account/signin`).
 The numbers are an example. Do not invent limits: ask for the limit
 and the window of each route group.
 
 A request whose key cannot be found is not counted. Behind a proxy,
 the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
-`X-Forwarded-For`, unless the edge overwrites it.
+`X-Forwarded-For`, unless the edge overwrites it. Behind a load
+balancer with neither, every client has the balancer's address and
+shares one bucket: register `ProxyHeaders` trusting the balancer.
 
 ## Outgoing webhooks
 
@@ -20451,7 +20476,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 601daa6d9b794f3e -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20727,7 +20752,7 @@ kind = ["middleware"]
 files = ["src/modules/middleware_rate_limit.rs"]
 config = ["rate_limit"]
 crates = []
-adapted_to = ["config"]
+adapted_to = ["config", "auth-screens"]
 
 [modules.middleware-conditional-get]
 version = "0.1.0"
@@ -20783,7 +20808,7 @@ kind = ["routes"]
 files = ["src/modules/resource.rs", "src/plugins/resource/"]
 config = []
 crates = ["brocanth-resource"]
-adapted_to = []
+adapted_to = ["middleware-csrf"]
 
 [modules.admin]
 version = "0.1.0"
@@ -20975,7 +21000,7 @@ kind = ["middleware"]
 files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
-adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing", "admin", "storage-routes", "auth-oauth", "oauth-client"]
+adapted_to = ["config", "gtag", "rsx", "jt", "i18n-routing", "admin", "storage-routes", "auth-oauth", "oauth-client", "resource"]
 
 [modules.i18n-routing]
 version = "0.1.0"
@@ -21033,4 +21058,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 849b0e15340af607

@@ -475,6 +475,10 @@ impl Module for RateLimit {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .adapts_to(
+            "auth-screens",
+            "the example rule guards its sign-in form; without it the rule is written commented out",
+        )
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
@@ -496,14 +500,27 @@ impl Module for RateLimit {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        // The example rule guards the sign-in form, and only `auth-screens`
+        // serves one. Without it the rule would count a path nothing
+        // answers, so it is written commented out, for the form the
+        // project adds.
+        let signin = project.has("auth-screens");
         // The rules are records, so they live in the file when there is
         // one. Without it they are code: a list of records has no flag.
         let (prelude, adjust) = if project.has("config") {
             (RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_FILE), None)
+        } else if signin {
+            (
+                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
+                    + &LOGIN_RULE.replace("@PATH@", SIGNIN_PATH),
+                Some(".rule(login)".to_string()),
+            )
         } else {
             (
-                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE) + LOGIN_RULE,
-                Some(".rule(login)".to_string()),
+                RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
+                    + LOGIN_RULE_OFF
+                    + &commented(&LOGIN_RULE.replace("@PATH@", "/login"), "// "),
+                None,
             )
         };
         configurable_hooking(
@@ -541,12 +558,65 @@ impl Module for RateLimit {
             ],
         );
         if project.has("config") {
-            s.at(Slot::ConfigSections).block(RULES_TOML.to_string());
+            let rules = if signin {
+                RULES_TOML.replace("@PATH@", SIGNIN_PATH)
+            } else {
+                let (head, rule) = RULES_TOML
+                    .split_once("[[rate_limit.rules]]")
+                    .expect("the example has a rule");
+                format!(
+                    "{head}{}{}",
+                    LOGIN_RULE_OFF_TOML,
+                    commented(&format!("[[rate_limit.rules]]{rule}"), "# ")
+                        .replace("@PATH@", "/login")
+                )
+            };
+            s.at(Slot::ConfigSections).block(rules);
         }
+        let example = if signin {
+            RATE_LIMIT_AGENTS_RULE.replace("@PATH@", SIGNIN_PATH)
+        } else {
+            RATE_LIMIT_AGENTS_NO_RULE.to_string()
+        };
         s.at(Slot::AgentsSections)
-            .block(RATE_LIMIT_AGENTS.to_string());
+            .block(RATE_LIMIT_AGENTS.replace("@EXAMPLE@", &example));
     }
 }
+
+/// Where `auth-screens` serves its sign-in form, which is the route the
+/// example rule guards. A page file, `src/pages/account/signin.rs`, so a
+/// route and not a setting.
+const SIGNIN_PATH: &str = "/account/signin";
+
+/// Each line of `text` behind `prefix`. The prefix goes at the first
+/// line's indentation, as rustfmt puts a comment; a deeper line keeps the
+/// rest of its indentation after the prefix.
+fn commented(text: &str, prefix: &str) -> String {
+    let base = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map_or(0, |line| line.len() - line.trim_start().len());
+    text.lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                let rest = line.get(base..).unwrap_or(line.trim_start());
+                format!("{}{prefix}{rest}", " ".repeat(base))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// Above the example rule, as code, when nothing serves a sign-in form.
+const LOGIN_RULE_OFF: &str = "        // No module serves a sign-in form, so the example is off. Point\n\
+    \x20       // `paths` at yours, uncomment it, and add `.rule(login)` below.\n";
+
+/// Above the example rule, in the file, when nothing serves a sign-in form.
+const LOGIN_RULE_OFF_TOML: &str = "# No module serves a sign-in form, so the example is off. Point\n\
+    # `paths` at yours and uncomment it.\n";
 
 /// The comment above the registration. `@RULES@` says where the rules are.
 const RATE_LIMIT_PRELUDE: &str = r#"
@@ -559,7 +629,9 @@ const RATE_LIMIT_PRELUDE: &str = r#"
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips in `ip_header`.
+        // strips in `ip_header`. Without either, every client behind the
+        // balancer shares its address and one bucket; the limiter says so
+        // once on stderr.
         //
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
@@ -573,7 +645,7 @@ const RULES_IN_CODE: &str = "The rule is below: `brocanth add config` moves rule
 
 /// The example rule, as code.
 const LOGIN_RULE: &str = r#"        let login = brocanth_middleware::Rule::new("login", 5, 60)
-            .paths(["/login"])
+            .paths(["@PATH@"])
             .methods(["POST"]);
 "#;
 
@@ -586,7 +658,7 @@ const RULES_TOML: &str = r#"
 # `key` is a list of "ip", "session" and "user", first found wins.
 [[rate_limit.rules]]
 name = "login"
-paths = ["/login"]
+paths = ["@PATH@"]
 methods = ["POST"]
 limit = 5
 window_secs = 60
@@ -598,14 +670,24 @@ const RATE_LIMIT_AGENTS: &str = "\n\
     ## Rate limit\n\
     \n\
     `brocanth_middleware::RateLimit` is registered in\n\
-    `src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).\n\
+    `src/plugins/mod.rs`. @EXAMPLE@\n\
     The numbers are an example. Do not invent limits: ask for the limit\n\
     and the window of each route group.\n\
     \n\
     A request whose key cannot be found is not counted. Behind a proxy,\n\
     the address comes from `ProxyHeaders` or from `ip_header`. Never set\n\
     `ip_header` to a header the client can send, such as\n\
-    `X-Forwarded-For`, unless the edge overwrites it.\n";
+    `X-Forwarded-For`, unless the edge overwrites it. Behind a load\n\
+    balancer with neither, every client has the balancer's address and\n\
+    shares one bucket: register `ProxyHeaders` trusting the balancer.\n";
+
+/// The example sentence when `auth-screens` serves the sign-in form.
+const RATE_LIMIT_AGENTS_RULE: &str =
+    "It has one example rule (`login`, 5 per 60 s,\nPOST `@PATH@`).";
+
+/// The example sentence when nothing does.
+const RATE_LIMIT_AGENTS_NO_RULE: &str =
+    "Its example rule (`login`) is commented\nout, because no module serves a sign-in form.";
 
 /// Conditional GET, as a choice on the menu that arrives unticked.
 ///
@@ -879,8 +961,9 @@ impl Module for Flash {
                     "The environment variable that holds the signing key.",
                 )
                 .note(
-                    "The name, not the key. Unset: a random key per process, so a message\n\
-                     can be lost when the next request reaches another instance.",
+                    "The name, not the key, which is at least 32 bytes. Unset: a random key\n\
+                     per process and a warning, so a message can be lost when the next\n\
+                     request reaches another instance.",
                 ),
                 Setting::bool("secure", true, "Send the cookie over HTTPS only."),
             ],

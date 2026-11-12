@@ -1226,7 +1226,7 @@ fn mounted(
     routes: &mut ::brocanth::routing::RouterBuilder<Handler>,
 ) -> Result<(), ::brocanth::routing::BuildError> {
     crate::plugins::admin::mount(routes, crate::modules::admin::MODULE.mount_at)?;
-    crate::plugins::resource::mount(routes, "/api")?;
+    crate::plugins::resource::mount(routes, crate::modules::resource::MODULE.mount_at)?;
     Ok(())
 }
 
@@ -2102,15 +2102,18 @@ pub mod admin {
 /// The shape of src/modules/resource.rs.
 pub mod resource {
     /// What src/modules/resource.rs holds.
-    pub struct Module {}
+    pub struct Module {
+        /// Where the records API answers. Every resource is under it.
+        pub mount_at: &'static str,
+    }
 
     impl Module {
         /// The value of each field the file does not name.
-        pub const DEFAULT: Self = Self {};
+        pub const DEFAULT: Self = Self { mount_at: "/api" };
     }
 }
 
-// brocanth-digest: 1cce884c919884a9
+// brocanth-digest: df1d140fe08a2c45
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2206,14 +2209,18 @@ pub const MODULE: Module = Module {
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
-//!
-//! Nothing to choose yet. When a later version of the module adds a
-//! choice, this file takes its default.
 
 use crate::plugins::shape::resource::Module;
 
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
-pub const MODULE: Module = Module { ..Module::DEFAULT };
+pub const MODULE: Module = Module {
+    // Where the records API answers. Every resource is under it.
+    mount_at: "/api",
+
+    ..Module::DEFAULT
+};
 ===== src/plugins/admin/mod.rs =====
 //! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
@@ -2430,8 +2437,9 @@ mod tests {
 //! not compile), a data source and three conversions. That crate's own
 //! documentation has the worked example.
 //!
-//! `src/pages/mod.rs` calls [`mount`] at `/api`, so every route lands in the
-//! one table. A page and a resource that claim one path are a build error.
+//! `src/pages/mod.rs` calls [`mount`] at `mount_at` in
+//! `src/modules/resource.rs`, so every route lands in the one table. A page
+//! and a resource that claim one path are a build error.
 //!
 //! The three impls below make this project's `Ctx`, `Response` and `Error`
 //! the page triple `brocanth_resource::pages` is written against. A resource
