@@ -13,7 +13,7 @@ The wizard calls it: *Row-level security: Postgres hides the rows of other tenan
 | Part of | nothing |
 | Needs | [`db`](db.md): the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal; [`commands`](commands.md): the migration is written by `rls make`, a command of the project's binary that runs `schema()` |
 | After | [`db`](db.md), [`commands`](commands.md), [`model`](model.md) |
-| Adapts to | [`model`](model.md), [`config`](config.md) |
+| Adapts to | [`model`](model.md), [`admin-model`](admin-model.md), [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-rls` |
@@ -63,6 +63,15 @@ let rows: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).a
 true)` at the start of the transaction. Both end with it. A statement on
 `ctx.db()` outside `transact_as` runs as the login role, and a policy that
 reads a setting sees `NULL`.
+
+With [`model`](model.md), a SeaORM query takes the identity through
+`Orm::transact_as(&me, async |txn| …)`, which runs the same statements.
+
+With [`admin-model`](admin-model.md), the admin queries the `Orm` with no
+identity, as the login role. On a `FORCE` table it sees no row. Give the
+admin its own policy, or keep the tables it edits out of row-level
+security. A per-request identity for the admin's data source is not built
+yet.
 
 ## What it does not manage
 

@@ -532,3 +532,41 @@ async fn a_migration_role_without_superuser_or_createdb_applies_the_schema() {
     db.close().await;
     teardown(&admin, &n).await;
 }
+
+/// A project with `model` queries through SeaORM: `Orm::transact_as` runs
+/// the same identity statements, so a FORCE table shows the tenant's rows.
+#[tokio::test]
+async fn a_seaorm_transaction_runs_as_the_identity() {
+    use brocanth_model::sea_orm::{ConnectionTrait, Statement};
+
+    let url = require_db!();
+    let n = Names::unique("rls_orm");
+    let (admin, login) = enforced(&url, &n).await;
+    let orm = brocanth_model::Orm::from_db(&login);
+    let sql = format!("SELECT count(*) AS n FROM {}.posts", n.schema);
+    let count = |identity: DbIdentity| {
+        let (orm, sql) = (orm.clone(), sql.clone());
+        async move {
+            orm.transact_as(&identity, async |txn| {
+                let row = txn
+                    .query_one_raw(Statement::from_string(
+                        brocanth_model::sea_orm::DbBackend::Postgres,
+                        sql,
+                    ))
+                    .await?
+                    .expect("a row");
+                row.try_get::<i64>("", "n")
+            })
+            .await
+        }
+    };
+    assert_eq!(count(member(&n, 1, 10)).await.unwrap(), 2);
+    assert_eq!(count(member(&n, 2, 20)).await.unwrap(), 1);
+    // A value the policy cannot read is refused before any query.
+    let bad = DbIdentity::new()
+        .role(&n.member)
+        .setting(&common::tenant(), "seven");
+    let e = count(bad).await.unwrap_err().to_string();
+    assert!(e.contains("help:"), "{e}");
+    teardown(&admin, &n).await;
+}

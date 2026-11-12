@@ -29,7 +29,7 @@ brocanth-cli = { path = "../brocanth-cli" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # tests/seaorm.rs compiles the SeaORM migration `rls make` writes in a
 # project with `model`. Postgres, the model layer's default.
-brocanth-model = { path = "../brocanth-model" }
+brocanth-model = { path = "../brocanth-model", features = ["db"] }
 async-trait = "0.1"
 
 [features]

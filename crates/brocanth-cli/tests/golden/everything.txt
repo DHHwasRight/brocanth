@@ -17927,20 +17927,24 @@ impl PageError for Error {
 //! ```ignore
 //! use brocanth_rls::{Policy, Privilege, Role, Setting, SqlExpr, SqlType, Table};
 //!
+//! /// The tenant of the request: the policy reads it, the request sets it.
+//! pub const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
+//!
 //! let member = Role::new("app_member").member("app_login");
-//! let tenant = Setting::new("tenant_id", SqlType::BigInt);
-//! let posts = Table::named("posts").force().grant(&member, Privilege::CRUD);
-//! let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
+//! // With `model`, name the table and column by the entity: a typo does
+//! // not compile. `Table::named("posts")` is the string escape hatch.
+//! let posts = Table::of(post::Entity).force().grant(&member, Privilege::CRUD);
+//! let mine = SqlExpr::column(post::Column::TenantId).eq(TENANT.get());
 //! Schema::new()
 //!     .role(member.clone())
 //!     .table(posts.clone())
 //!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
 //! ```
 //!
-//! A request then runs as its principal, inside one transaction:
+//! A request then runs as its identity, inside one transaction:
 //!
 //! ```ignore
-//! let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+//! let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 //! ```
 
@@ -20254,16 +20258,34 @@ then run `brocanth rls make <name>` and read the file it writes. Commit it
 with `migrations/rls.json`.
 
 A request that reads or writes a table with a policy runs in one
-transaction, as its principal:
+transaction, as its identity. Set each value through the `Setting`
+constant the policy reads, so the key cannot drift:
 
 ```rust
-let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
 `transact_as` runs as the login role, and the policies see no value.
+
+A SeaORM query takes the identity the same way. `Orm::transact_as` runs
+the same statements in a SeaORM transaction:
+
+```rust
+orm.transact_as(&me, async |txn| post::Entity::find().all(txn).await).await?;
+```
+
+A query on the `Orm` itself runs as the login role, and on a `FORCE`
+table it sees no row.
+
+The admin's data source queries the `Orm` with no identity, as the login
+role. On a table with a policy it sees only what the login may see, and
+on a `FORCE` table nothing. Give the admin its own policy (`TO` the login
+role, or a staff role it is granted), or keep the tables it edits out of
+row-level security.
+
 Never connect as a superuser: a superuser bypasses every policy.
 
 ## Rate limit
@@ -20434,7 +20456,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: eb842f7f29d29ad1 -->
+<!-- brocanth-digest: 9a9ecedd623be9fb -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20646,7 +20668,7 @@ kind = ["enhancer"]
 files = ["src/modules/rls.rs", "src/commands/rls.rs", "src/plugins/rls/"]
 config = []
 crates = ["brocanth-rls"]
-adapted_to = ["model", "config"]
+adapted_to = ["model", "admin-model", "config"]
 
 [modules.storage]
 version = "0.1.0"
@@ -21016,4 +21038,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 3763369eef6dc4b3
+# brocanth-digest: fb61bb0ab73a7de4

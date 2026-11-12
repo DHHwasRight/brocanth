@@ -3031,20 +3031,24 @@ mod tests {
 //! ```ignore
 //! use brocanth_rls::{Policy, Privilege, Role, Setting, SqlExpr, SqlType, Table};
 //!
+//! /// The tenant of the request: the policy reads it, the request sets it.
+//! pub const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
+//!
 //! let member = Role::new("app_member").member("app_login");
-//! let tenant = Setting::new("tenant_id", SqlType::BigInt);
-//! let posts = Table::named("posts").force().grant(&member, Privilege::CRUD);
-//! let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
+//! // With `model`, name the table and column by the entity: a typo does
+//! // not compile. `Table::named("posts")` is the string escape hatch.
+//! let posts = Table::of(post::Entity).force().grant(&member, Privilege::CRUD);
+//! let mine = SqlExpr::column(post::Column::TenantId).eq(TENANT.get());
 //! Schema::new()
 //!     .role(member.clone())
 //!     .table(posts.clone())
 //!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
 //! ```
 //!
-//! A request then runs as its principal, inside one transaction:
+//! A request then runs as its identity, inside one transaction:
 //!
 //! ```ignore
-//! let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+//! let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 //! ```
 
@@ -3192,16 +3196,18 @@ then run `brocanth rls make <name>` and read the file it writes. Commit it
 with `migrations/rls.json`.
 
 A request that reads or writes a table with a policy runs in one
-transaction, as its principal:
+transaction, as its identity. Set each value through the `Setting`
+constant the policy reads, so the key cannot drift:
 
 ```rust
-let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
 `transact_as` runs as the login role, and the policies see no value.
+
 Never connect as a superuser: a superuser bypasses every policy.
 
 ## Tasks
@@ -3246,7 +3252,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b3e38a9b444791fb -->
+<!-- brocanth-digest: 0e3e6f63618fda1f -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

@@ -3,7 +3,7 @@
 //!
 //! The module is here and not in the CLI because what it writes is a
 //! statement about this crate: `Schema`, `migration::make`,
-//! `catalog::drift`, and `Db::transact_as` with a `Principal`.
+//! `catalog::drift`, and `Db::transact_as` with a `DbIdentity`.
 //!
 //! What a project gets:
 //!
@@ -46,6 +46,10 @@ impl Module for Rls {
             "`rls make` writes a SeaORM migration file, not a SQL file",
         )
         .adapts_to(
+            "admin-model",
+            "AGENTS.md says the admin queries as the login role, so a FORCE table shows it no row",
+        )
+        .adapts_to(
             "config",
             "`rls check` reads `[db] url` through the config loader, not from the environment alone",
         )
@@ -66,8 +70,19 @@ impl Module for Rls {
         s.at(Slot::PluginsMod).line("pub mod rls;");
         s.file("src/commands/rls.rs", command_rs(project));
         s.at(Slot::CommandsMod).line("pub mod rls;");
-        s.at(Slot::AgentsSections).block(AGENTS.to_string());
+        s.at(Slot::AgentsSections).block(agents(project));
     }
+}
+
+fn agents(project: &Project) -> String {
+    let mut extra = String::new();
+    if project.has("model") {
+        extra.push_str(MODEL_AGENTS);
+    }
+    if project.has("admin-model") {
+        extra.push_str(ADMIN_AGENTS);
+    }
+    AGENTS.replace("@MODEL@", &extra)
 }
 
 fn command_rs(project: &Project) -> String {
@@ -111,20 +126,24 @@ const SCHEMA_RS: &str = r#"//! Row-level security: the roles, tables and policie
 //! ```ignore
 //! use brocanth_rls::{Policy, Privilege, Role, Setting, SqlExpr, SqlType, Table};
 //!
+//! /// The tenant of the request: the policy reads it, the request sets it.
+//! pub const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
+//!
 //! let member = Role::new("app_member").member("app_login");
-//! let tenant = Setting::new("tenant_id", SqlType::BigInt);
-//! let posts = Table::named("posts").force().grant(&member, Privilege::CRUD);
-//! let mine = SqlExpr::col_named("tenant_id").eq(tenant.get());
+//! // With `model`, name the table and column by the entity: a typo does
+//! // not compile. `Table::named("posts")` is the string escape hatch.
+//! let posts = Table::of(post::Entity).force().grant(&member, Privilege::CRUD);
+//! let mine = SqlExpr::column(post::Column::TenantId).eq(TENANT.get());
 //! Schema::new()
 //!     .role(member.clone())
 //!     .table(posts.clone())
 //!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
 //! ```
 //!
-//! A request then runs as its principal, inside one transaction:
+//! A request then runs as its identity, inside one transaction:
 //!
 //! ```ignore
-//! let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+//! let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 //! ```
 
@@ -253,15 +272,37 @@ then run `brocanth rls make <name>` and read the file it writes. Commit it
 with `migrations/rls.json`.
 
 A request that reads or writes a table with a policy runs in one
-transaction, as its principal:
+transaction, as its identity. Set each value through the `Setting`
+constant the policy reads, so the key cannot drift:
 
 ```rust
-let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
 ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
 `transact_as` runs as the login role, and the policies see no value.
+@MODEL@
 Never connect as a superuser: a superuser bypasses every policy.
+"#;
+
+const MODEL_AGENTS: &str = r#"
+A SeaORM query takes the identity the same way. `Orm::transact_as` runs
+the same statements in a SeaORM transaction:
+
+```rust
+orm.transact_as(&me, async |txn| post::Entity::find().all(txn).await).await?;
+```
+
+A query on the `Orm` itself runs as the login role, and on a `FORCE`
+table it sees no row.
+"#;
+
+const ADMIN_AGENTS: &str = r#"
+The admin's data source queries the `Orm` with no identity, as the login
+role. On a table with a policy it sees only what the login may see, and
+on a `FORCE` table nothing. Give the admin its own policy (`TO` the login
+role, or a staff role it is granted), or keep the tables it edits out of
+row-level security.
 "#;
