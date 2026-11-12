@@ -48,7 +48,9 @@ http = { version = "1", optional = true }
 # is what makes a formatter `Sync`, so one can sit in a `static`.
 icu_plurals = { version = "2.1", optional = true }
 icu_decimal = { version = "2.1", optional = true }
-icu_locale_core = { version = "2.1", optional = true }
+# `alloc`: the tag parser `Locale::from_str`, which the build script uses
+# with no other ICU crate to turn it on.
+icu_locale_core = { version = "2.1", optional = true, features = ["alloc"] }
 icu_provider = { version = "2.1", features = ["sync"], optional = true }
 icu_datetime = { version = "2.1", optional = true }
 icu_calendar = { version = "2.1", optional = true }
