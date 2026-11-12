@@ -1364,7 +1364,7 @@ pub fn render_with(
 ) -> Result<Response, Error> {
     let mut body = out_of_band.concat();
     body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
+    Ok(page_response(body))
 }
 
 /// One skipped layout's replacement chrome, rendered on its own.
@@ -1403,7 +1403,7 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    Ok(Response::ok(content.render_to_string()?))
+    Ok(page_response(content.render_to_string()?))
 }
 
 impl Ctx {
@@ -1427,6 +1427,15 @@ impl Ctx {
             Some(value) => value.parse().unwrap_or(0),
         }
     }
+}
+
+/// A rendered page, marked as varying on `DP-Partial`.
+///
+/// One URL answers with the whole document or with a fragment, chosen by
+/// that header, so a cache that ignored it could hand a fragment to a first
+/// load. `Vary` tells every cache to key on it.
+fn page_response(body: String) -> Response {
+    Response::ok(body).with_header("vary", "DP-Partial")
 }
 
 /// Every route this project did not read off `src/pages`.
@@ -1716,9 +1725,12 @@ impl Ctx {
         let page = self.state.get::<brocanth_meta::Meta>();
         #[allow(unused_mut)]
         let mut head = brocanth_meta::Head::new(site, page).path(&self.path);
-        if let Some(current) = self.state.get::<brocanth_i18n::Current>() {
-            head = head.lang(current.tag());
-        }
+        // The locale the `i18n` plugin chose. This compiles only while that
+        // plugin is in the project, so removing it is an error here and not
+        // a page with no `lang`.
+        head = head.lang(brocanth_i18n::Locales::tag(crate::plugins::i18n::locale(
+            self,
+        )));
         // One URL per locale: the canonical one keeps the segment, and each
         // other locale is an alternate.
         if let Some(locale) = self.state.get::<brocanth_i18n::PathLocale>() {
@@ -9477,8 +9489,9 @@ name = "My Blog"
 # How a page's title becomes the document's. `%s` is the page's own title. Empty means none.
 # title_template = "%s | My Blog"
 # The site's address, scheme and host. A canonical URL and og:url need it. Empty means none.
-# Unset, a page has no canonical URL: a relative one is worse than none.
-# base_url = "https://example.com"
+# Unset, it is [sitemap] base_url, so a canonical URL and a sitemap <loc>
+# name one site.
+# base_url = "http://localhost:3000"
 # The description of a page that gives none. Empty means none.
 # description = ""
 # The og:image of a page that gives none: a path or a full URL. Empty means none.
@@ -10390,6 +10403,7 @@ impl MigratorTrait for Migrator {
 ===== public/dpswap.min.js =====
 "use strict";var dpswap=(()=>{var q=Object.defineProperty;var Me=Object.getOwnPropertyDescriptor;var qe=Object.getOwnPropertyNames;var Ce=Object.prototype.hasOwnProperty;var T=(e,t)=>{for(var n in t)q(e,n,{get:t[n],enumerable:!0})},Pe=(e,t,n,r)=>{if(t&&typeof t=="object"||typeof t=="function")for(let o of qe(t))!Ce.call(e,o)&&o!==n&&q(e,o,{get:()=>t[o],enumerable:!(r=Me(t,o))||r.enumerable});return e};var Re=e=>Pe(q({},"__esModule",{value:!0}),e);var ht={};T(ht,{config:()=>l,configure:()=>oe,fragmentUrl:()=>y,hydrate:()=>D,perform:()=>h,prefetch:()=>gt,process:()=>M,start:()=>ne,swapping:()=>pt});var l={fragmentSuffix:"/_fragment.html",fragmentMode:"suffix",partialHeader:"DP-Partial",layoutAttr:"dp-layout",requestClass:"dp-request",settlingClass:"dp-settling",defaultBoostTarget:"body",timeout:1e4,headOrigins:[],styleTimeout:3e3,prefetchLimit:32,fetch:(...e)=>globalThis.fetch(...e)};function oe(e){Object.assign(l,e)}function y(e,t){let n=new URL(e,t??"http://localhost");return l.fragmentMode==="header"||(n.pathname=n.pathname.replace(/\/+$/,"")+l.fragmentSuffix),n.pathname+n.search+n.hash}function L(e,t=1){let n={"DP-Request":"true"};return e&&l.fragmentMode==="header"&&(n[l.partialHeader]=t>1?String(t):"true"),n}var x=["innerHTML","outerHTML","beforebegin","afterbegin","beforeend","afterend","delete","none"];var P="dp-";function p(e,t){return e.getAttribute(P+t)}function R(e,t){return e.hasAttribute(P+t)}function d(e,t){let n=e;for(;n;){let r=n.getAttribute(P+t);if(r!==null)return r;n=n.parentElement}return null}function S(e,t){return!t||t==="this"?e:t.startsWith("closest ")?e.closest(t.slice(8).trim()):t.startsWith("find ")?e.querySelector(t.slice(5).trim()):t==="next"?e.nextElementSibling:t==="previous"?e.previousElementSibling:e.ownerDocument.querySelector(t)}var ie={style:"innerHTML",scroll:null,delay:0};function N(e){if(!e)return{...ie};let t=e.trim().split(/\s+/),n={...ie};for(let r of t)Ne(r)?n.style=r:r==="scroll:top"||r==="scroll:bottom"?n.scroll=r.slice(7):r.startsWith("swap:")&&(n.delay=C(r.slice(5)));return n}function Ne(e){return x.includes(e)}function se(e,t){let n={event:Oe(t),once:!1,delay:0,throttle:0,from:null,changed:!1};if(!e)return n;let r=e.trim().split(/\s+/),[o,...i]=r;o&&(n.event=o);for(let s of i)s==="once"?n.once=!0:s==="changed"?n.changed=!0:s.startsWith("delay:")?n.delay=C(s.slice(6)):s.startsWith("throttle:")?n.throttle=C(s.slice(9)):s.startsWith("from:")&&(n.from=s.slice(5));return n}function Oe(e){let t=e.tagName.toLowerCase();return t==="form"?"submit":t==="input"||t==="textarea"||t==="select"?"change":"click"}function C(e){let t=/^(\d+(?:\.\d+)?)(ms|s)?$/.exec(e.trim());if(!t)return 0;let n=Number(t[1]);return t[2]==="s"?n*1e3:n}function f(e,t,n={}){let o=e.ownerDocument.defaultView?.CustomEvent??globalThis.CustomEvent;return e.dispatchEvent(new o(t,{detail:n,bubbles:!0,cancelable:!0}))}var ae=new WeakSet;function D(e){for(let t of Array.from(e.querySelectorAll("[dp-island]")))le(t);Fe(e)&&e.hasAttribute("dp-island")&&le(e)}function Fe(e){return"hasAttribute"in e}function le(e){if(ae.has(e))return;ae.add(e);let t=Ue(p(e,"client")),n=()=>void Be(e);switch(t.kind){case"load":n();return;case"idle":Ie(e,n);return;case"visible":Ve(e,n);return;case"media":_e(e,t.query,n);return}}function Ue(e){if(!e)return{kind:"load"};let t=e.trim();return t.startsWith("media:")?{kind:"media",query:t.slice(6).trim()}:t==="idle"?{kind:"idle"}:t==="visible"?{kind:"visible"}:{kind:"load"}}async function Be(e){let t=p(e,"island");if(t)try{let n=await import(t),r=n.default??n.mount;if(typeof r!="function")throw new TypeError(`${t} exports no default function and no mount`);r(e,We(e)),f(e,"dp:island",{source:t})}catch(n){f(e,"dp:islandError",{source:t,error:n})}}function We(e){let t=p(e,"props");if(!t)return{};try{let n=JSON.parse(t);return n&&typeof n=="object"?n:{}}catch{return{}}}function Ie(e,t){let n=e.ownerDocument.defaultView,r=n?.requestIdleCallback;r?r.call(n,()=>t()):setTimeout(t,1)}function Ve(e,t){let n=e.ownerDocument.defaultView;if(!n||typeof n.IntersectionObserver!="function"){t();return}let r=new n.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(r.disconnect(),t())});r.observe(e)}function _e(e,t,n){let r=e.ownerDocument.defaultView;if(!r||typeof r.matchMedia!="function"){n();return}let o=r.matchMedia(t);if(o.matches){n();return}let i=()=>{o.matches&&(o.removeEventListener("change",i),n())};o.addEventListener("change",i)}var O="dpswap";function ue(e,t,n){e.defaultView?.history?.pushState({[O]:n},"",t)}function ce(e,t,n){e.defaultView?.history?.replaceState({[O]:n},"",t)}function F(e){if(!e||typeof e!="object")return null;let t=e[O];if(!t||typeof t!="object")return null;let{target:n,select:r}=t;return typeof n!="string"?null:{target:n,select:typeof r=="string"?r:null}}var W={};T(W,{clear:()=>Ke,prefetch:()=>U,size:()=>ze,take:()=>B});var g=new Map;function Ke(){g.clear()}function ze(){return g.size}function U(e,t){let n=y(e,t);g.has(n)||(je(),g.set(n,Ye(n)))}function B(e){return g.get(e)??null}async function Ye(e){try{let t=await l.fetch(e,{headers:L(!0)});return t.ok?await t.text():(g.delete(e),null)}catch{return g.delete(e),null}}function je(){if(g.size<l.prefetchLimit)return;let e=g.keys().next();e.done||g.delete(e.value)}var z={};T(z,{mergeScripts:()=>$,mergeStyles:()=>_,responseBase:()=>I,responseHead:()=>Qe,tracksChanged:()=>V,wholeDocument:()=>b});var fe='link[rel~="stylesheet"][href]',de="script[src]",Je='[data-dp-track="reload"]',Xe=["rel","media","type","title","crossorigin","integrity","referrerpolicy","fetchpriority","blocking","data-dp-track"],Ge=["type","nomodule","crossorigin","integrity","referrerpolicy","fetchpriority","blocking","data-dp-track"],me=globalThis.document?.currentScript?.nonce||null;function b(e,t){let n=t.replace(/^(?:\s|﻿|<!--[\s\S]*?-->)*/,"");if(!/^(?:<!doctype\s|<html[\s>]|<head[\s>])/i.test(n))return null;let r=e.defaultView?.DOMParser??globalThis.DOMParser;return typeof r!="function"?null:new r().parseFromString(t,"text/html")}function Qe(e,t){return b(e,t)?.head??null}function I(e,t){let n=e.querySelector("base[href]")?.getAttribute("href");return A(n??null,t)??t}function V(e,t,n){let r=pe(e.head,K(e)),o=pe(t,n);return r.size!==o.size||[...o].some(i=>!r.has(i))}function _(e,t,n){let r=ye(e,fe,"href"),o=he(e,t,fe,"href",n),i=[];return o.forEach(({source:s,url:a},u)=>{if(r.has(a))return;let c=we(e,s,"link","href",a,Xe),m=o.slice(u+1).find(v=>r.has(v.url)),E=m?r.get(m.url):null;e.head.insertBefore(c,E?.parentNode===e.head?E:null),r.set(a,c),i.push(c)}),i.length===0?Promise.resolve():new Promise(s=>{let a=setTimeout(s,l.styleTimeout);Promise.all(i.map(u=>Ee(e,u,be(u,"href")))).then(()=>{clearTimeout(a),s()})})}function $(e,t,n){let r=ye(e,de,"src"),o=[];for(let{source:s,url:a}of he(e,t,de,"src",n)){if(r.has(a))continue;let u=we(e,s,"script","src",a,Ge);u.async=s.hasAttribute("async"),e.head.appendChild(u),r.set(a,u),o.push(u)}let i=t.querySelector("title");return i&&(e.title=i.textContent??""),Promise.all(o.map(s=>Ee(e,s,be(s,"src")))).then(()=>{})}function he(e,t,n,r,o){let i=new Set([ge(K(e)),...l.headOrigins]),s=[];for(let a of Array.from(t.querySelectorAll(n))){let u=A(a.getAttribute(r),o);u&&i.has(ge(u))&&s.push({source:a,url:u})}return s}function ye(e,t,n){let r=K(e),o=new Map;for(let i of Array.from(e.querySelectorAll(t))){let s=A(i.getAttribute(n),r);s&&!o.has(s)&&o.set(s,i)}return o}function pe(e,t){let n=new Set;for(let r of Array.from(e.querySelectorAll(Je))){let o=A(r.getAttribute("src")??r.getAttribute("href"),t);o&&n.add(o)}return n}function K(e){return e.baseURI||e.defaultView?.location?.href||"http://localhost/"}function A(e,t){if(!e)return null;try{return new URL(e,t).href}catch{return null}}function ge(e){return new URL(e).origin}function be(e,t){return e.getAttribute(t)??""}function we(e,t,n,r,o,i){let s=e.createElement(n);for(let u of i){let c=t.getAttribute(u);c!==null&&s.setAttribute(u,c)}s.setAttribute(r,o);let a=Ze(e);return a&&s.setAttribute("nonce",a),s}function Ze(e){if(me)return me;let t=e.querySelector("script[nonce], link[nonce], style[nonce]");return t&&(t.nonce||t.getAttribute("nonce"))||null}function Ee(e,t,n){return new Promise(r=>{t.addEventListener("load",()=>r(),{once:!0}),t.addEventListener("error",()=>{t.remove(),f(e.documentElement,"dp:headError",{url:n,element:t}),r()},{once:!0})})}var ee={};T(ee,{applyOutOfBand:()=>J,layerTarget:()=>Z,narrowToSharedLayout:()=>G,parseFragment:()=>Y,selectFrom:()=>j,settle:()=>X,sharedLayerDepth:()=>Q,swapInto:()=>k});function Y(e,t,n=b(e,t)){let r=e.createElement("template");return r.innerHTML=n?n.body.innerHTML:t,r.content}function j(e,t,n){if(!n)return t;let r=e.createDocumentFragment();for(let o of Array.from(t.querySelectorAll(n)))r.appendChild(o);return r}function J(e,t){let n=Array.from(t.querySelectorAll("[dp-swap-oob]"));for(let r of n){let o=p(r,"swap-oob")??"outerHTML",[i,s]=et(o),a=s??(r.id?`#${r.id}`:null);if(r.removeAttribute("dp-swap-oob"),r.remove(),!a)continue;let u=e.querySelector(a);if(!u)continue;let c=e.createDocumentFragment();i==="outerHTML"?c.appendChild(r):c.append(...Array.from(r.childNodes)),k(u,c,{style:i,scroll:null,delay:0})}}function et(e){let t=e.indexOf(":"),n=t===-1?e:e.slice(0,t),r=t===-1?null:e.slice(t+1);return[tt(n)?n:"outerHTML",r||null]}function tt(e){return x.includes(e)}function k(e,t,n){switch(n.style){case"innerHTML":e.replaceChildren(t);break;case"outerHTML":e.replaceWith(t);break;case"beforebegin":e.parentElement?.insertBefore(t,e);break;case"afterbegin":e.insertBefore(t,e.firstChild);break;case"beforeend":e.appendChild(t);break;case"afterend":e.parentElement?.insertBefore(t,e.nextSibling);break;case"delete":e.remove();break;case"none":break}}function X(e,t){t.style==="delete"||t.style==="none"||e.isConnected&&(e.classList.add(l.settlingClass),queueMicrotask(()=>e.classList.remove(l.settlingClass)),t.scroll==="top"&&(e.scrollTop=0),t.scroll==="bottom"&&(e.scrollTop=e.scrollHeight))}function G(e,t){let n=l.layoutAttr;if(!n)return{target:e,content:t};let r=`[${n}]`,o=e,i=t;for(;;){let a=o.querySelector(r),u=i.querySelector(r);if(!a||!u||a.getAttribute(n)!==u.getAttribute(n))break;o=a,i=u}if(o===e)return{target:e,content:t};let s=e.ownerDocument.createDocumentFragment();return s.append(...Array.from(i.childNodes)),{target:o,content:s}}function Q(e,t){let n=l.layoutAttr;if(!n)return 1;let r=new URL(t,e.defaultView?.location?.href??"http://localhost").pathname,o=[...e.querySelectorAll(`[${n}]`)].map(s=>s.getAttribute(n)??""),i=0;for(let s of o){if(!(s==="/"||r===s||r.startsWith(`${s}/`)))break;i++}return Math.max(1,i)}function Z(e,t){let n=l.layoutAttr;if(!n||t<1)return null;let r=e,o=null;for(let i=0;i<t;i++){let s=r.querySelector(`[${n}]`);if(!s)return null;o=s,r=s}return o}async function h(e){if(!f(e.source,"dp:beforeRequest",{spec:e}))return;let t=ot(e),n=e.indicator;n?.classList.add(l.requestClass);try{let r=e.fragment?Q(e.target.ownerDocument,e.url):1,o=await B(t)?.catch(()=>null);if(o!=null){await Se(e,o,ve(e,t),r);return}let i=await it(t,e.fragment,r);if(!i.ok){f(e.source,"dp:responseError",{spec:e,response:i}),e.boosted&&te(e.source,e.url);return}await Se(e,await i.text(),i.url||ve(e,t),r)}catch(r){f(e.source,"dp:sendError",{spec:e,error:r}),e.boosted&&te(e.source,e.url)}finally{n?.classList.remove(l.requestClass),f(e.source,"dp:afterRequest",{spec:e})}}async function Se(e,t,n,r=1){let o=e.target.ownerDocument,i=b(o,t),s=i&&nt(e)?i.head:null,a=s?I(s,n):n;if(s&&V(o,s,a)){te(e.source,e.url);return}let u=Y(o,t,i);J(o,u);let c=j(o,u,e.select),m=e.target;if(!e.select&&e.swap.style==="innerHTML"){let v=r>1?Z(o,r):null;if(v)m=v;else{let re=G(m,c);m=re.target,c=re.content}}if(!f(m,"dp:beforeSwap",{spec:e,content:c}))return;let E=rt({...e,target:m});s&&await _(o,s,a),k(m,c,e.swap),f(E,"dp:afterSwap",{spec:e}),X(m,e.swap),f(E,"dp:afterSettle",{spec:e}),s&&$(o,s,a).then(()=>f(o.documentElement,"dp:headLoaded",{spec:e}))}function nt(e){return e.boosted||e.pushUrl!==null}function ve(e,t){return new URL(t,Te(e.source)??"http://localhost/").href}function rt(e){switch(e.swap.style){case"innerHTML":case"afterbegin":case"beforeend":case"none":return e.target;default:return e.target.parentElement??e.target.ownerDocument.documentElement}}function ot(e){let t=Te(e.source);if(e.fragment)return y(e.url,t);let n=new URL(e.url,t??"http://localhost");return n.pathname+n.search+n.hash}async function it(e,t,n){let r=new AbortController,o=setTimeout(()=>r.abort(),l.timeout);try{return await l.fetch(e,{signal:r.signal,headers:L(t,n)})}finally{clearTimeout(o)}}function Te(e){return e.ownerDocument.defaultView?.location.href}function te(e,t){e.ownerDocument.defaultView?.location?.assign(t)}var H=new WeakSet;function M(e){for(let t of Array.from(e.querySelectorAll("[dp-get]")))xe(t);Le(e)&&R(e,"get")&&xe(e);for(let t of Array.from(e.querySelectorAll("[dp-boost]")))De(t);Le(e)&&R(e,"boost")&&De(e)}function Le(e){return"getAttribute"in e}function xe(e){if(H.has(e))return;H.add(e);let t=se(p(e,"trigger"),e),n=dt(t.throttle,o=>{if(ct(e)&&o.preventDefault(),t.changed&&!ft(e))return;let i=st(e);i&&(t.delay>0?setTimeout(()=>void h(i),t.delay):h(i))});if(t.event==="load"){n(new Event("load"));return}if(t.event==="revealed"){mt(e,n);return}(t.from?e.ownerDocument.querySelector(t.from)??e:e).addEventListener(t.event,n,{once:t.once})}function st(e){let t=p(e,"get");if(!t)return null;let n=S(e,d(e,"target"));if(!n)return null;let r=d(e,"push-url");return{source:e,url:t,target:n,swap:N(d(e,"swap")),select:d(e,"select"),pushUrl:r==="true"?t:r==="false"||r===null?null:r,indicator:S(e,d(e,"indicator")),boosted:!1,fragment:d(e,"fragment")!==null}}function De(e){H.has(e)||(H.add(e),at(e),e.addEventListener("click",t=>{let n=ke(t);if(!n)return;t.preventDefault();let r=d(n,"target")??l.defaultBoostTarget,o=S(n,r);if(!o)return;let i=d(n,"select"),s=n.getAttribute("href")??"";ue(n.ownerDocument,s,{target:r,select:i}),h({source:n,url:s,target:o,swap:N(d(n,"swap")??"innerHTML"),select:i,pushUrl:s,indicator:S(n,d(n,"indicator")),boosted:!0,fragment:!0})}))}function ke(e){if(e.defaultPrevented)return null;let t=e;if(typeof t.button=="number"&&t.button!==0||t.metaKey||t.ctrlKey||t.shiftKey||t.altKey)return null;let n=e.target?.closest("a");if(!n||n.tagName.toLowerCase()!=="a")return null;let r=n.getAttribute("href");if(!r||r.startsWith("#")||n.hasAttribute("download"))return null;let o=n.getAttribute("target");if(o&&o!=="_self"||p(n,"boost")==="false")return null;let i=n.ownerDocument.defaultView;return i&&new URL(r,i.location.href).origin!==i.location.origin?null:n}function at(e){let t=n=>{let r=ke(n)??lt(n);if(!r)return;let o=d(r,"prefetch");if(o===null||o==="false")return;let i=r.getAttribute("href");i&&U(i,r.ownerDocument.defaultView?.location.href)};e.addEventListener("pointerenter",t,{capture:!0}),e.addEventListener("focusin",t),e.addEventListener("touchstart",t,{passive:!0})}function lt(e){let t=e.target?.closest("a");if(!t||t.tagName.toLowerCase()!=="a")return null;let n=t.getAttribute("href");return!n||n.startsWith("#")||n.includes("://")?null:t}function ut(e){return e.querySelector("[dp-boost][dp-target]")?.getAttribute("dp-target")||l.defaultBoostTarget}function He(e){let t=e.defaultView;t&&(F(t.history?.state)||ce(e,t.location.pathname+t.location.search,{target:ut(e),select:null}),t.addEventListener("popstate",n=>{let r=F(n.state);if(!r)return;let o=e.querySelector(r.target);o&&h({source:e.documentElement,url:t.location.pathname+t.location.search,target:o,swap:{style:"innerHTML",scroll:"top",delay:0},select:r.select,pushUrl:null,indicator:null,boosted:!0,fragment:!0})}))}function ct(e){let t=e.tagName.toLowerCase();return t==="a"||t==="form"||t==="button"}var Ae=new WeakMap;function ft(e){let t=e.value??"";return Ae.get(e)===t?!1:(Ae.set(e,t),!0)}function dt(e,t){if(e<=0)return t;let n=0;return r=>{let o=Date.now();o-n<e||(n=o,t(r))}}function mt(e,t){let n=e.ownerDocument.defaultView;if(!n||typeof n.IntersectionObserver!="function"){t(new Event("revealed"));return}let r=new n.IntersectionObserver(o=>{for(let i of o)i.isIntersecting&&(r.disconnect(),t(new Event("revealed")))});r.observe(e)}function ne(e=document){M(e),D(e),He(e),e.addEventListener("dp:afterSwap",t=>{let n=t.target;!n||!("querySelectorAll"in n)||(M(n),D(n))})}var pt={...ee,...z},gt=W,w=globalThis.document;w&&w.currentScript?.getAttribute("data-dp-auto")!=="false"&&(w.readyState==="loading"?w.addEventListener("DOMContentLoaded",()=>ne(w),{once:!0}):ne(w));return Re(ht);})();
 //# sourceMappingURL=dpswap.min.js.map
+dpswap.configure({fragmentMode:"header"});
 ===== src/assets.rs =====
 //! Every static file this binary serves.
 //!
@@ -10598,6 +10612,9 @@ mod tests {
 //! {"id":"0191a3f0-0000-7000-8000-000000000000","handle":"ada-lovelace"}
 //! ```
 //!
+//! The client calls the address `serve` listens on: `$MY_BLOG_ADDR`, or
+//! `127.0.0.1:3000`. `--base <URL>` reaches a server anywhere else.
+//!
 //! The flags come from the request body's own schema, and their help text
 //! is the sentence each field carries. Nothing here re-checks a rule: the
 //! server is the authority, and a client that validated too would be a
@@ -10622,8 +10639,10 @@ impl Command for Api {
         let mut argv: Vec<std::ffi::OsString> = vec!["api".into()];
         argv.extend(self.rest.into_iter().map(std::ffi::OsString::from));
 
-        let answered =
-            brocanth_client::run("api", &routes, &wire, argv).map_err(anyhow::Error::msg)?;
+        // The same address `serve` listens on, so the two agree without a flag.
+        let base = format!("http://{}", crate::app::default_addr());
+        let answered = brocanth_client::run_at("api", &routes, &wire, &base, argv)
+            .map_err(anyhow::Error::msg)?;
 
         println!("{}", answered.body);
         // The status is the exit code, so `api ... && something` means what
@@ -12195,59 +12214,34 @@ pub fn KeysetNav(pager: &brocanth_pagination::KeysetPager) -> Element {
 //! no headers of its own; the cookie goes with it, so a session reads as on
 //! any other page. Every topic passes `authorise` before it is filed, and
 //! one refusal refuses the request: a stream that quietly follows fewer
-//! topics than it asked for is a bug nobody sees.
+//! topics than it asked for is a bug nobody sees. `authorise` is in
+//! `src/plugins/realtime/authorise.rs`, shared with every transport.
 //!
 //! The transport is `crate::plugins::realtime_sse`.
 
-use brocanth_realtime::{Gate, Subscription, Topic};
-
 use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::authorise::{authorise, topics, value, viewer};
 use crate::plugins::realtime::Broadcast;
 use crate::plugins::realtime_sse::Frames;
 
-/// Collections any visitor may follow: every row, every change.
-///
-/// Empty, so nothing is public until somebody says so here.
-const PUBLIC: &[&str] = &[];
-
-/// Whether this request may follow `topic`, and gated by what.
-///
-/// The one place a topic is authorised, and the place to edit. A public
-/// collection takes `Gate::everyone()`. Rows that a policy decides take the
-/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
-/// with the view rule, and the broker inverts the rule into an index key, so
-/// a write is a map lookup and not a check per subscriber.
-///
-/// ```ignore
-/// let subject = /* who is asking: the session's user id */;
-/// return Ok(Subscription::from_policy(topic, &PostPolicy, &subject));
-/// ```
-fn authorise(_ctx: &Ctx, topic: Topic) -> Result<Subscription, Error> {
-    if PUBLIC.contains(&topic.collection_name()) {
-        return Ok(Subscription::new(topic, Gate::everyone()));
-    }
-    Err(Error::new(
-        403,
-        format!("no rule lets this request follow {topic}; add one to `authorise` in src/pages/realtime/events.rs"),
-    ))
-}
-
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let viewer = viewer(ctx);
+    let asked = topics(&ctx.query).map_err(|why| Error::new(400, why))?;
+    if asked.is_empty() {
+        return Err(Error::new(
+            400,
+            "this request names no topic to follow\n\
+             help: add ?topics=posts/* for a collection, or posts/42 for a row",
+        ));
+    }
     let mut subscriptions = Vec::new();
-    for topic in topics(&ctx.query)? {
-        subscriptions.push(authorise(ctx, topic)?);
+    for topic in asked {
+        subscriptions.push(authorise(&viewer, topic).map_err(|why| Error::new(403, why))?);
     }
     let broker = &ctx
         .provided::<Broadcast, _>()
         .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
         .broker;
-
-    // A browser that reconnects sends the id of the last frame it read. The
-    // broker keeps no history to replay, so the honest answer to "did I miss
-    // anything" is yes whenever a frame was published since.
-    let missed = ctx
-        .header("last-event-id")
-        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
 
     // At the cap the broker refuses rather than evicting somebody. The
     // browser retries on its own; `retry-after` says when.
@@ -12259,53 +12253,20 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
             .subscribe(subscription)
             .map_err(|e| Error::new(400, e.to_string()))?;
     }
+
+    // A browser that reconnects sends the id of the last frame it read: the
+    // `Last-Event-ID` header, or `?last=` from a page that reconnects by
+    // hand. The broker keeps no history to replay, so the honest answer to
+    // "did I miss anything" is yes whenever a frame was published since.
+    // Read after the subscriptions exist: a frame published before this read
+    // reached no mailbox, and this read then counts it as missed. An id this
+    // broker cannot compare (another process, or not a number) is missed too.
+    let missed = ctx
+        .header("last-event-id")
+        .map(str::to_string)
+        .or_else(|| value(&ctx.query, "last"))
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
     Ok(Response::events(Frames::new(client, missed)))
-}
-
-/// Every `topics=` in the query, split at commas and parsed.
-fn topics(query: &str) -> Result<Vec<Topic>, Error> {
-    let mut out = Vec::new();
-    for pair in query.split('&') {
-        let Some(("topics", value)) = pair.split_once('=') else {
-            continue;
-        };
-        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
-            let topic =
-                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
-            out.push(topic);
-        }
-    }
-    if out.is_empty() {
-        return Err(Error::new(
-            400,
-            "name what to follow: ?topics=posts/* for a collection, posts/42 for a row",
-        ));
-    }
-    Ok(out)
-}
-
-/// A query value with its `%XX` and `+` undone.
-fn decoded(value: &str) -> Result<String, Error> {
-    let bad = || {
-        Error::new(
-            400,
-            format!("the query value {value:?} is not percent-encoded UTF-8"),
-        )
-    };
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(byte) = rest.next() {
-        bytes.push(match byte {
-            b'+' => b' ',
-            b'%' => {
-                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
-                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
-                u8::from_str_radix(hex, 16).map_err(|_| bad())?
-            }
-            other => other,
-        });
-    }
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 #[cfg(test)]
@@ -12322,18 +12283,6 @@ mod tests {
         let mut request = Request::new(Verb::Get, path).with_header("accept", "text/event-stream");
         request.query = query.to_string();
         crate::app::handle(&app, request).await.status
-    }
-
-    #[test]
-    fn topics_are_read_from_the_query_encoded_or_not() {
-        let read = topics("topics=posts/*,posts%2F42&x=1&topics=users%2F*").expect("three");
-        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
-        assert_eq!(names, ["posts/*", "posts/42", "users/*"]);
-        assert!(
-            topics("").is_err(),
-            "no topic is a 400, not a silent stream"
-        );
-        assert!(topics("topics=posts").is_err(), "a topic has a slash");
     }
 
     #[tokio::test]
@@ -12368,62 +12317,26 @@ mod tests {
 //!    the socket. Else 403.
 //!
 //! A topic the browser asks for later (`subscribe <topic>`) passes the same
-//! `authorise`. The loop is `crate::plugins::realtime_websocket`.
+//! `authorise`, in `src/plugins/realtime/authorise.rs`. The loop is
+//! `crate::plugins::realtime_websocket`.
 
-use brocanth_realtime::{Gate, Subscription, Topic};
 use brocanth_server::websocket::Handshake;
 
 use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::authorise::{authorise, topics, value, viewer};
 use crate::plugins::realtime::Broadcast;
 use crate::plugins::realtime_websocket::{self, Filed};
-
-/// Collections any visitor may follow: every row, every change.
-///
-/// Empty, so nothing is public until somebody says so here.
-const PUBLIC: &[&str] = &[];
 
 /// Sites other than this host whose pages may open a socket, spelled as a
 /// browser sends its `Origin`: `"https://app.example.com"`.
 const ALLOWED_ORIGINS: &[&str] = &[];
-
-/// Who is asking: what `authorise` needs, read from the request once.
-///
-/// The socket outlives the request, so `authorise` cannot read the request
-/// when the browser subscribes later. Put here what it decides on: the
-/// session's user id, a role.
-pub struct Viewer;
-
-fn viewer(_ctx: &Ctx) -> Viewer {
-    Viewer
-}
-
-/// Whether `viewer` may follow `topic`, and gated by what.
-///
-/// The one place a topic is authorised, and the place to edit. A public
-/// collection takes `Gate::everyone()`. Rows that a policy decides take the
-/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
-/// with the view rule, and the broker inverts the rule into an index key, so
-/// a write is a map lookup and not a check per subscriber.
-///
-/// ```ignore
-/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
-/// ```
-fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
-    if PUBLIC.contains(&topic.collection_name()) {
-        return Ok(Subscription::new(topic, Gate::everyone()));
-    }
-    Err(format!(
-        "no rule lets this socket follow {topic}\n\
-         help: add one to `authorise` in src/pages/realtime/socket.rs"
-    ))
-}
 
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let handshake = Handshake::read(|name| ctx.header(name), ALLOWED_ORIGINS)
         .map_err(|refused| Error::new(refused.status(), refused.to_string()))?;
     let viewer = viewer(ctx);
     let mut subscriptions = Vec::new();
-    for topic in topics(&ctx.query)? {
+    for topic in topics(&ctx.query).map_err(|why| Error::new(400, why))? {
         let name = topic.to_string();
         let subscription = authorise(&viewer, topic).map_err(|why| Error::new(403, why))?;
         subscriptions.push((name, subscription));
@@ -12433,23 +12346,29 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
         .broker;
 
-    // A browser that reconnects sends the id of the last frame it read. The
-    // broker keeps no history to replay, so the honest answer to "did I miss
-    // anything" is yes whenever a frame was published since.
-    let missed = value(&ctx.query, "last")
-        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
-
     // At the cap the broker refuses rather than evicting somebody.
     let client = broker
         .connect()
         .map_err(|e| Error::new(503, e.to_string()).with_header("retry-after", "5"))?;
     let mut filed = Filed::new();
     for (name, subscription) in subscriptions {
+        if filed.contains_key(&name) {
+            continue;
+        }
         let subscribed = client
             .subscribe(subscription)
             .map_err(|e| Error::new(400, e.to_string()))?;
         filed.insert(name, subscribed.id);
     }
+
+    // A browser that reconnects sends the id of the last frame it read. The
+    // broker keeps no history to replay, so the honest answer to "did I miss
+    // anything" is yes whenever a frame was published since. Read after the
+    // subscriptions exist: a frame published before this read reached no
+    // mailbox, and this read then counts it as missed. An id this broker
+    // cannot compare (another process, or not a number) is missed too.
+    let missed = value(&ctx.query, "last")
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
 
     let headers = handshake.headers().into_iter().collect();
     let rule: realtime_websocket::Authorise = Box::new(move |topic| authorise(&viewer, topic));
@@ -12461,56 +12380,6 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         stream: Some(stream),
         ..Default::default()
     })
-}
-
-/// Every `topics=` in the query, split at commas and parsed. None is
-/// allowed: the browser can subscribe after the socket opens.
-fn topics(query: &str) -> Result<Vec<Topic>, Error> {
-    let mut out = Vec::new();
-    for pair in query.split('&') {
-        let Some(("topics", value)) = pair.split_once('=') else {
-            continue;
-        };
-        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
-            let topic =
-                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
-            out.push(topic);
-        }
-    }
-    Ok(out)
-}
-
-/// The first value of `name` in the query, as sent.
-fn value<'q>(query: &'q str, name: &str) -> Option<&'q str> {
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(key, _)| *key == name)
-        .map(|(_, value)| value)
-}
-
-/// A query value with its `%XX` and `+` undone.
-fn decoded(value: &str) -> Result<String, Error> {
-    let bad = || {
-        Error::new(
-            400,
-            format!("the query value {value:?} is not percent-encoded UTF-8"),
-        )
-    };
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(byte) = rest.next() {
-        bytes.push(match byte {
-            b'+' => b' ',
-            b'%' => {
-                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
-                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
-                u8::from_str_radix(hex, 16).map_err(|_| bad())?
-            }
-            other => other,
-        });
-    }
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 #[cfg(test)]
@@ -12538,16 +12407,6 @@ mod tests {
             async move { crate::app::handle(&app, request).await }
         }));
         (addr, stopper)
-    }
-
-    #[test]
-    fn topics_are_read_from_the_query_encoded_or_not() {
-        let read = topics("topics=posts/*,posts%2F42&x=1").expect("two");
-        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
-        assert_eq!(names, ["posts/*", "posts/42"]);
-        assert!(topics("").expect("none is allowed").is_empty());
-        assert!(topics("topics=posts").is_err(), "a topic has a slash");
-        assert_eq!(value("a=1&last=7", "last"), Some("7"));
     }
 
     #[tokio::test]
@@ -12677,20 +12536,23 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         views::search::Search {
             term: &term,
             hits: &hits.items,
+            more: hits.more,
             pager: &pager,
         }
     )
 }
 ===== src/pages/search.rsx =====
 // The site search. Every value is escaped on the way out: the term came
-// from the request and the rows from whoever wrote the index.
+// from the request and the rows from whoever wrote the index. A hit links
+// only to a path or an http(s) URL: a `javascript:` URL would run here.
 
-use brocanth_search::documents::Hit;
+use brocanth_search::documents::{safe_url, Hit};
 use brocanth_search::pagination::Pager;
+use brocanth_search::MAX_COUNT;
 
 use crate::pages::views::parts::pager::PageNav;
 
-pub fn Search(term: &str, hits: &[Hit], pager: &Pager) -> Element {
+pub fn Search(term: &str, hits: &[Hit], more: bool, pager: &Pager) -> Element {
     <h1>Search</h1>
     <form method="get" action="/search" role="search">
         <input type="search" name="q" value={term} aria-label="Search" />
@@ -12701,10 +12563,17 @@ pub fn Search(term: &str, hits: &[Hit], pager: &Pager) -> Element {
             <p>Nothing matches “{term}”.</p>
         } else {
             <p>{pager.summary()}</p>
+            if more {
+                <p>More than {MAX_COUNT} results: try a narrower term.</p>
+            }
             <ol>
                 for hit in hits {
                     <li>
-                        <a href={&hit.url}>{&hit.title}</a>
+                        if safe_url(&hit.url) {
+                            <a href={&hit.url}>{&hit.title}</a>
+                        } else {
+                            <span>{&hit.title}</span>
+                        }
                         <p>{hit.excerpt(200)}</p>
                     </li>
                 }
@@ -15788,6 +15657,9 @@ impl Default for Settings {
 /// Puts the site's metadata on the context, where `ctx.head()` reads it.
 pub struct Meta {
     site: Site,
+    /// Whether `[meta]` named the site's address itself.
+    #[allow(dead_code)]
+    has_base_url: bool,
 }
 
 impl Plugin for Meta {
@@ -15801,6 +15673,7 @@ impl Plugin for Meta {
         if let Some(template) = set(config.title_template) {
             site = site.title_template(template);
         }
+        let has_base_url = config.base_url.as_ref().is_some_and(|v| !v.is_empty());
         if let Some(url) = set(config.base_url) {
             site = site.base_url(url);
         }
@@ -15813,12 +15686,19 @@ impl Plugin for Meta {
         if let Some(handle) = set(config.twitter) {
             site = site.twitter(handle);
         }
-        Self { site }
+        Self { site, has_base_url }
     }
 
     /// A template with no `%s` or a base URL with no scheme stops the
     /// start: every page would carry the wrong tag.
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // `[meta] base_url` unset: the address `[sitemap]` lists the pages
+        // under, so a canonical URL and a sitemap <loc> name one site.
+        if !self.has_base_url {
+            if let Some(url) = sitemap_base_url(lc) {
+                self.site = std::mem::take(&mut self.site).base_url(url);
+            }
+        }
         self.site
             .check()
             .map_err(|why| PluginError::new(format!("[meta] {why}")))
@@ -15827,6 +15707,17 @@ impl Plugin for Meta {
     fn provide(&self, cx: &mut ContextBuilder) {
         cx.insert(self.site.clone());
     }
+}
+
+/// `[sitemap] base_url`, from the configuration the config plugin loaded.
+fn sitemap_base_url(lc: &Lifecycle<'_>) -> Option<String> {
+    #[derive(Default, serde::Deserialize)]
+    struct Address {
+        base_url: Option<String>,
+    }
+    let effective = brocanth_config::effective_of(lc.services())?;
+    let address: Address = effective.config().section("sitemap").ok()?;
+    address.base_url.filter(|url| !url.is_empty())
 }
 
 #[cfg(test)]
@@ -17134,6 +17025,139 @@ mod tests {
         assert!(write.applied(0).is_err(), "zero rows is a lost race");
     }
 }
+===== src/plugins/realtime/authorise.rs =====
+//! Who may follow which realtime topic: the one place a topic is
+//! authorised, for every transport.
+//!
+//! `GET /realtime/events` (server-sent events) and `GET /realtime/socket` (a
+//! WebSocket) both read the topics with `topics`, read the viewer with
+//! `viewer`, and pass each topic to `authorise`. The socket also passes each
+//! `subscribe <topic>` the browser sends later. Edit `authorise` here; never
+//! filter frames after delivery.
+//!
+//! A socket outlives the request that opened it, so the viewer is read once,
+//! when the connection opens, and kept for its life. A logout does not reach
+//! an open connection: the socket loop closes each socket after `MAX_AGE`
+//! (`src/plugins/realtime_websocket/mod.rs`) and the browser reconnects with
+//! a fresh viewer. Close a user's sockets at logout when that is too late.
+
+use brocanth_realtime::{Gate, Subscription, Topic};
+
+use crate::pages::Ctx;
+
+/// Collections any visitor may follow: every row, every change.
+///
+/// Empty, so nothing is public until somebody says so here.
+pub const PUBLIC: &[&str] = &[];
+
+/// Who is asking: what `authorise` needs, read from the request once.
+///
+/// Put here what `authorise` decides on: the session's user id, a role.
+pub struct Viewer;
+
+/// The viewer of this request.
+pub fn viewer(_ctx: &Ctx) -> Viewer {
+    Viewer
+}
+
+/// Whether `viewer` may follow `topic`, and gated by what.
+///
+/// A public collection takes `Gate::everyone()`. Rows that a policy decides
+/// take the policy: `from_policy` gates `posts/*` with the list rule and
+/// `posts/42` with the view rule, and the broker inverts the rule into an
+/// index key, so a write is a map lookup and not a check per subscriber.
+///
+/// ```ignore
+/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
+/// ```
+pub fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
+    if PUBLIC.contains(&topic.collection_name()) {
+        return Ok(Subscription::new(topic, Gate::everyone()));
+    }
+    Err(format!(
+        "no rule lets this request follow {topic}\n\
+         help: add one to `authorise` in src/plugins/realtime/authorise.rs"
+    ))
+}
+
+/// Every `topics=` in the query, split at commas, parsed, and each named
+/// once: a topic asked for twice is one subscription, not two.
+pub fn topics(query: &str) -> Result<Vec<Topic>, String> {
+    let mut out: Vec<Topic> = Vec::new();
+    for pair in query.split('&') {
+        let Some(("topics", value)) = pair.split_once('=') else {
+            continue;
+        };
+        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
+            let topic = Topic::parse(text).map_err(|e| format!("topic {text:?}: {e}"))?;
+            if !out.contains(&topic) {
+                out.push(topic);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The first value of `name` in the query, decoded.
+pub fn value(query: &str, name: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .and_then(|(_, value)| decoded(value).ok())
+}
+
+/// A query value with its `%XX` and `+` undone.
+fn decoded(value: &str) -> Result<String, String> {
+    let bad = || {
+        format!(
+            "the query value {value:?} is not percent-encoded UTF-8\n\
+             help: encode the topics with `encodeURIComponent`"
+        )
+    };
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
+                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
+                u8::from_str_radix(hex, 16).map_err(|_| bad())?
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topics_are_read_from_the_query_encoded_or_not() {
+        let read = topics("topics=posts/*,posts%2F42&x=1&topics=users%2F*").expect("three");
+        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["posts/*", "posts/42", "users/*"]);
+        assert!(topics("").expect("none is read").is_empty());
+        assert!(topics("topics=posts").is_err(), "a topic has a slash");
+        assert_eq!(value("a=1&last=7", "last").as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn a_topic_asked_for_twice_is_read_once() {
+        let read = topics("topics=posts/*,posts%2F*&topics=posts/*").expect("one");
+        assert_eq!(read.len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_public_until_listed() {
+        let refused =
+            authorise(&Viewer, Topic::parse("posts/*").expect("a topic")).expect_err("no rule yet");
+        assert!(refused.contains("\nhelp: "), "{refused}");
+    }
+}
 ===== src/plugins/realtime/mod.rs =====
 //! The realtime broker, as this application registers it.
 //!
@@ -17182,18 +17206,33 @@ mod tests {
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
 //!    transport at all.
-//! 3. **Long polling.** Keep the `Client` in the session; each request calls
+//! 3. **Long polling.** Keep each session's `Client` on the server, in a map
+//!    from session id to `Client` with an idle timeout (a `Client` holds the
+//!    broker, so it cannot go into a cookie); each request calls
 //!    `Mailbox::recv_timeout` for a few seconds, then `Mailbox::drain`, and
 //!    returns the frames as one finished body. Every hook runs exactly as
 //!    specified. It costs a request per interval and a little latency.
 //! 4. **Nothing.** The index costs what it holds, and an application that
 //!    publishes without subscribers pays for a map lookup that finds no one.
+//!
+//! # One process
+//!
+//! The broker lives in this process, and so do its subscribers. Two
+//! instances behind a load balancer do not see each other's writes: a
+//! browser connected to one hears nothing of a write handled by the other.
+//! `brocanth-realtime`'s `listen-notify` feature has the codec and the sink
+//! for Postgres `LISTEN/NOTIFY`; this file does not wire it. The frame ids
+//! start at the clock, so a browser that reconnects to a new process is told
+//! `lagged` rather than trusted to have missed nothing.
 
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth_realtime::{Broker, Config, Overflow};
+
+/// Who may follow which topic, for every transport.
+pub mod authorise;
 
 /// What this plugin is built from.
 ///
@@ -17297,6 +17336,9 @@ impl Plugin for Realtime {
                     queue: self.settings.queue,
                     overflow,
                 })
+                // An id from an earlier process never equals one from this
+                // process, so a reconnect across a restart reads `lagged`.
+                .frame_ids_from_clock()
                 .build(),
         );
         Ok(())
@@ -17578,7 +17620,9 @@ mod tests {
 //! stops taking from the mailbox, and `[realtime] overflow` decides what is
 //! lost: `drop-oldest` and `drop-newest` drop frames and the browser reads
 //! `lagged`; `disconnect` closes the mailbox, and this loop closes the
-//! socket with code 1013.
+//! socket with code 1013. A send that is not written within one `HEARTBEAT`
+//! ends the loop: a peer that stopped reading must not hold its client, and
+//! the pings cannot run while a send waits.
 //!
 //! # Ending
 //!
@@ -17588,18 +17632,29 @@ mod tests {
 //! * The server stops. The loop sends the frames already queued, then a
 //!   close frame with code 1001, and ends, so a deploy does not wait for a
 //!   subscriber. The browser reconnects with `?last=<id>`.
+//! * The socket reaches `MAX_AGE`. The loop closes it with code 1001 and the
+//!   browser reconnects. The viewer `authorise` decides on is read once,
+//!   when the socket opens, so this is the longest a socket keeps the rights
+//!   of a session that logged out or lost a role.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 use brocanth_realtime::{Client, Event, Subscription, SubscriptionId, Topic};
-use brocanth_server::websocket::{self, Incoming, WebSocket};
+use brocanth_server::websocket::{self, Gone, Incoming, WebSocket};
 use tokio::time::{Instant, MissedTickBehavior};
 
 /// How often the socket pings the browser. A browser that has not answered
 /// by the next ping is gone, so this is also the longest a dead subscriber
-/// holds its mailbox.
+/// holds its mailbox, and the longest one send may wait.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// How long one socket lives before the server closes it and the browser
+/// reconnects. The viewer is read again on the reconnect, so a logout or a
+/// role change reaches an open socket within this time. Shorten it when that
+/// matters more than a reconnect; or close the user's sockets at logout.
+pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
 
 /// Who may follow what: the page's `authorise`, with what it read from the
 /// request already captured.
@@ -17615,62 +17670,90 @@ pub type Filed = HashMap<String, SubscriptionId>;
 /// since the last one it read; the broker keeps no history, so the socket
 /// says `lagged` instead.
 pub async fn run(
+    socket: WebSocket,
+    client: Client,
+    authorise: Authorise,
+    filed: Filed,
+    missed: bool,
+) {
+    serve(socket, client, authorise, filed, missed, MAX_AGE).await;
+}
+
+/// [`run`], with the socket's age limit as an argument, so a test can wait
+/// for it.
+async fn serve(
     mut socket: WebSocket,
     client: Client,
     authorise: Authorise,
     mut filed: Filed,
     missed: bool,
+    max_age: Duration,
 ) {
-    if missed && socket.send_text(lagged(None)).await.is_err() {
+    if missed && !written(socket.send_text(lagged(None))).await {
         return;
     }
     let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let expiry = tokio::time::sleep(max_age);
+    tokio::pin!(expiry);
     loop {
         tokio::select! {
             event = client.mailbox().recv() => match event {
                 Some(event) => {
-                    if socket.send_text(encoded(event)).await.is_err() {
+                    if !written(socket.send_text(encoded(event))).await {
                         return;
                     }
                 }
                 // This loop holds the client, so only the overflow policy
                 // closes its mailbox: `disconnect` fired.
                 None => {
-                    return socket
-                        .close(websocket::TRY_AGAIN_LATER, "too far behind; reconnect")
-                        .await;
+                    return bye(socket, websocket::TRY_AGAIN_LATER, "too far behind; reconnect").await;
                 }
             },
             incoming = socket.recv() => match incoming {
                 Incoming::Text(command) => {
                     let answer = obey(&client, &authorise, &mut filed, &command);
-                    if socket.send_text(answer).await.is_err() {
+                    if !written(socket.send_text(answer)).await {
                         return;
                     }
                 }
                 Incoming::Binary(_) => {
-                    return socket.close(websocket::POLICY, "send text commands").await;
+                    return bye(socket, websocket::POLICY, "send text commands").await;
                 }
                 Incoming::Stopping => {
                     for event in client.mailbox().drain() {
-                        if socket.send_text(encoded(event)).await.is_err() {
+                        if !written(socket.send_text(encoded(event))).await {
                             return;
                         }
                     }
-                    return socket
-                        .close(websocket::GOING_AWAY, "the server is stopping")
-                        .await;
+                    return bye(socket, websocket::GOING_AWAY, "the server is stopping").await;
                 }
                 Incoming::Closed(_) => return,
             },
             _ = ticker.tick() => {
-                if socket.keepalive().await.is_err() {
+                if !written(socket.keepalive()).await {
                     return;
                 }
             }
+            () = &mut expiry => {
+                return bye(socket, websocket::GOING_AWAY, "reconnect to check the session again").await;
+            }
         }
     }
+}
+
+/// Whether a send was written within one `HEARTBEAT`.
+///
+/// A peer that stops reading leaves a write pending, and while it waits
+/// nothing else in the loop runs: no ping, no stop signal. So a send that
+/// takes longer than a heartbeat ends the connection.
+async fn written(send: impl Future<Output = Result<(), Gone>>) -> bool {
+    matches!(tokio::time::timeout(HEARTBEAT, send).await, Ok(Ok(())))
+}
+
+/// Sends a close frame, but waits no longer than one `HEARTBEAT` to write it.
+async fn bye(socket: WebSocket, code: u16, reason: &str) {
+    let _ = tokio::time::timeout(HEARTBEAT, socket.close(code, reason)).await;
 }
 
 /// One command from the browser, obeyed, and the record that answers it.
@@ -17750,6 +17833,11 @@ mod tests {
 
     /// A server whose one route is this loop, with every topic public.
     async fn open(broker: &Arc<Broker>) -> (WebSocket, Stopper) {
+        open_for(broker, MAX_AGE).await
+    }
+
+    /// [`open`], with sockets that live `max_age`.
+    async fn open_for(broker: &Arc<Broker>, max_age: Duration) -> (WebSocket, Stopper) {
         let server = Server::bind("127.0.0.1:0").await.expect("a port");
         let addr = server.local_addr().expect("an address");
         let stopper = server.stopper();
@@ -17762,7 +17850,9 @@ mod tests {
                 let client = broker.connect().expect("room");
                 let everyone: Authorise =
                     Box::new(|topic| Ok(Subscription::new(topic, Gate::everyone())));
-                handshake.response(move |socket| run(socket, client, everyone, Filed::new(), false))
+                handshake.response(move |socket| {
+                    serve(socket, client, everyone, Filed::new(), false, max_age)
+                })
             }
         }));
         let socket = websocket::connect(addr, "/", None).await.expect("open");
@@ -17819,6 +17909,17 @@ mod tests {
         assert_eq!(
             next(&mut socket).await,
             Incoming::Text("event:unsubscribed\ndata:posts/*\n\n".into())
+        );
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_socket_past_its_age_is_closed_so_the_browser_reconnects() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open_for(&broker, Duration::from_millis(200)).await;
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Closed(Some(websocket::GOING_AWAY))
         );
         stopper.stop();
     }
@@ -19756,9 +19857,12 @@ a URL: an access token is a password for that person's account.
 to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
 `src/pages/realtime/events.rs` is the route.
 
-- Authorise every topic in `authorise` in `src/pages/realtime/events.rs`.
+- Authorise every topic in `authorise` in `src/plugins/realtime/authorise.rs`.
   Nothing is public until it is listed in `PUBLIC` or gated there by a
   policy (`Subscription::from_policy`). Never filter frames after delivery.
+- Frames reach only the browsers connected to this process. Two instances
+  behind a load balancer do not share a broker; a browser that reconnects
+  to another one is told `lagged`.
 - Publish from a page after the write, with the row you already hold:
 
   ```rust
@@ -19782,16 +19886,20 @@ to a browser. `src/plugins/realtime_sse/mod.rs` is the stream;
 the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
 `src/pages/realtime/socket.rs` is the route.
 
-- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+- Authorise every topic in `authorise` in `src/plugins/realtime/authorise.rs`.
   It runs for the topics in the URL and for each `subscribe <topic>` the
   browser sends later, so read what it needs (the user id) into `Viewer`
   when the socket opens. Never filter frames after delivery.
+- A socket keeps the `Viewer` it opened with. The loop closes it after
+  `MAX_AGE` and the browser reconnects with a fresh one; a logout must
+  close the user's open sockets when that is too late.
+- Frames reach only the sockets open on this process.
 - A page on another site is refused by its `Origin`. List a second site of
   your own in `ALLOWED_ORIGINS`; never turn the check off.
 - Each message is one record in the server-sent-events format: `id:`,
   `event:` (the topic) and `data:` lines. `lagged` means the view may be
   stale: fetch it again. A close with code 1001 means the server is
-  stopping: reconnect with `?last=<id>`.
+  stopping or the socket reached its age: reconnect with `?last=<id>`.
 
   ```js
   const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
@@ -19801,17 +19909,16 @@ the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
 
 ## HTML from users
 
-HTML a user wrote reaches a template only as a
+HTML a user wrote reaches a page only as a
 `brocanth_sanitize::SafeHtml`. Make one with a policy:
 `brocanth_sanitize::comment(&row.body)` for a comment,
 `brocanth_sanitize::rich_text(&row.body)` for editor output, or a
 `Policy` built once in a `static` for anything else. Write it with
-`{! value }`.
+`{! value }`, and never write a `String` with `{! }`.
 
-Never write a `String` with `{! }`, and never widen a policy with
-`style`, `class`, `id`, an `on*` attribute or a `javascript:` URL.
-Store what the user wrote and clean it when the page renders, so a
-stricter policy also covers old rows.
+Never widen a policy with `style`, `class`, `id`, an `on*` attribute
+or a `javascript:` URL. Store what the user wrote and clean it when
+the page renders, so a stricter policy also covers old rows.
 
 ## Pagination
 
@@ -20202,9 +20309,13 @@ header and never changes for it.
 `migrations/m20260101_000000_search_documents.rs` creates the table. Run `migrate sync`
 once so `migrations/mod.rs` lists it, then `migrate up`.
 
-- Write a row with `brocanth_search::documents::upsert(ctx.db(), kind,
-  key, title, body, url)` when a thing changes, in the same
-  transaction or job, and `documents::remove` when it goes.
+- Write a row with `brocanth_search::documents::upsert(db, kind, key,
+  title, body, url)` when a thing changes, and `documents::remove`
+  when it goes. Pass the `&mut Tx` that writes the thing, so the row
+  commits with it, or `ctx.db()` from a job. `url` is a path or an
+  http(s) URL; anything else is refused.
+- The count stops at `brocanth_search::MAX_COUNT`. Put /search behind
+  a rate limit on a large index: each search runs two queries.
 - Every row is public. Index only what any visitor may read, or put
   the rule in `src/pages/search.rs`: it goes into the `WHERE`, so a
   hidden row is never ranked, counted or shown.
@@ -20451,7 +20562,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 9d00fdca2db20524 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20863,7 +20974,7 @@ kind = ["enhancer", "middleware"]
 files = ["src/modules/realtime.rs", "src/plugins/realtime/"]
 config = ["realtime"]
 crates = ["brocanth-realtime"]
-adapted_to = ["config"]
+adapted_to = ["config", "realtime-sse", "realtime-websocket"]
 
 [modules.realtime-sse]
 version = "0.1.0"
@@ -20927,7 +21038,7 @@ kind = ["renderer"]
 files = ["src/modules/sanitize.rs"]
 config = []
 crates = ["brocanth-sanitize"]
-adapted_to = []
+adapted_to = ["rsx"]
 
 [modules.robots]
 version = "0.1.0"
@@ -20991,7 +21102,7 @@ kind = ["renderer", "enhancer"]
 files = ["src/modules/meta.rs", "src/plugins/meta/"]
 config = ["meta"]
 crates = ["brocanth-meta"]
-adapted_to = ["config", "i18n", "i18n-routing", "rsx"]
+adapted_to = ["config", "i18n", "i18n-routing", "rsx", "sitemap"]
 
 [modules.errors]
 version = "0.1.0"
@@ -21033,4 +21144,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 32d93ee07a5ce032
