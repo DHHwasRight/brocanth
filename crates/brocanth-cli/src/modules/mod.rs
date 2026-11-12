@@ -136,6 +136,7 @@ pub const ALL: &[&dyn Module] = &[
     // Its HTTP edge, off until asked for: an upload route behind the
     // project's guard, a download route behind a file token, thumbnails.
     &brocanth_storage::scaffold::StorageRoutes,
+    &brocanth_storage::scaffold::StorageThumbnails,
     // The five edge hooks. The first crate in the workspace whose whole
     // job is to implement `HookSource`: the pipeline was there, tested,
     // and every implementation of it was a test fixture.

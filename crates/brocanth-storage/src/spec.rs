@@ -43,6 +43,11 @@ use crate::error::StorageError;
 /// whose only purpose is to make the server allocate.
 pub const MAX_VARIANT_DIM: u32 = 4096;
 
+/// The thumbnail sizes the file routes allow by default: a square crop, a
+/// card and a fit. Here and not in `routes`, so the scaffold, which is
+/// built without `routes`, writes the same list into a project.
+pub const DEFAULT_THUMB_SIZES: &[&str] = &["150x150t", "300x200", "600x600f"];
+
 /// Where a crop keeps the pixels it keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CropAnchor {

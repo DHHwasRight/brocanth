@@ -6,10 +6,11 @@
 //! project too with `BROCANTH_BUILD=1`.
 
 use brocanth_scaffold::testing;
-use brocanth_storage::scaffold::{FileStorage, StorageRoutes};
+use brocanth_storage::scaffold::{FileStorage, StorageRoutes, StorageThumbnails};
 
 fn shape(name: &str, picks: &[&'static str]) {
-    let modules: [&dyn brocanth_scaffold::Module; 2] = [&FileStorage, &StorageRoutes];
+    let modules: [&dyn brocanth_scaffold::Module; 3] =
+        [&FileStorage, &StorageRoutes, &StorageThumbnails];
     let files = brocanth_cli::testing::generate("my-photos", picks, &modules)
         .unwrap_or_else(|e| panic!("{e}"));
     testing::assert_formatted(&files);
@@ -40,10 +41,36 @@ fn the_routes_sit_around_the_csrf_check() {
     );
 }
 
+/// With thumbnails: the image decoders are linked, and `thumb_sizes` lists
+/// the sizes `?thumb=` may ask for.
+#[test]
+fn thumbnails_link_the_decoders_and_list_the_sizes() {
+    shape(
+        "storage-thumbnails",
+        &[
+            "config",
+            "middleware",
+            "middleware-csrf",
+            "storage",
+            "storage-routes",
+            "storage-thumbnails",
+        ],
+    );
+}
+
+/// With `db`: the objects live in Postgres, on the `db` pool.
+#[test]
+fn with_db_the_objects_live_in_postgres() {
+    shape("storage-db", &["config", "db", "storage"]);
+}
+
 /// Without a config file: the settings are literals and flags.
 #[test]
 fn the_routes_work_without_a_config_file() {
-    shape("storage-routes-no-config", &["storage", "storage-routes"]);
+    shape(
+        "storage-routes-no-config",
+        &["middleware", "middleware-csrf", "storage", "storage-routes"],
+    );
 }
 
 /// With `i18n-routing`, the routes moved in src/modules/storage_routes.rs
@@ -58,10 +85,13 @@ fn a_moved_path_keeps_no_locale_segment_with_no_other_edit() {
         "rsx",
         "i18n",
         "i18n-routing",
+        "middleware",
+        "middleware-csrf",
         "storage",
         "storage-routes",
     ];
-    let modules: [&dyn brocanth_scaffold::Module; 2] = [&FileStorage, &StorageRoutes];
+    let modules: [&dyn brocanth_scaffold::Module; 3] =
+        [&FileStorage, &StorageRoutes, &StorageThumbnails];
     let files = brocanth_cli::testing::generate("my-photos", &picks, &modules)
         .unwrap_or_else(|e| panic!("{e}"));
     let file = |path: &str| -> String {

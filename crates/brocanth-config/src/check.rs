@@ -24,6 +24,7 @@
 //! | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file |
 //! | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
 //! | `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
+//! | `deploy/storage-local` | warning | the project has `storage` and no `db`, so its files are on one machine's disk |
 //! | `deploy/csrf-off` | error | the project has cookies and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
@@ -562,6 +563,18 @@ fn deploy(
             );
         }
     }
+    if project.has("storage") && !project.has("db") {
+        let mut d = Finding::warning(
+            "deploy/storage-local",
+            "file storage is a directory on this machine's disk",
+        )
+        .note("a second instance does not see the files the first one stored, and a new machine has none")
+        .help("add the `db` module so the files live in Postgres, or run one instance on a disk that outlives it");
+        if let Some(v) = get(config, "storage.root") {
+            d = d.at(place(project, v));
+        }
+        out.push(d);
+    }
     // CSRF, and whether hooks run at all.
     let has_cookies = project.modules.is_empty() || project.has("sessions") || project.has("auth");
     let csrf = sources.find("brocanth_middleware::Csrf");
@@ -743,6 +756,16 @@ dialect = "mysql"
 [storage]
 secret = "development only: replace before anything is uploaded in anger"
 "#;
+
+    #[test]
+    fn storage_on_a_local_disk_is_a_warning_and_storage_on_db_is_not() {
+        let config = Config::from_toml("shop", "production", "").unwrap();
+        let src = sources(&[]);
+        let local = deploy(&project(&["storage"]), &config, &src, &|_| None);
+        assert!(ids(&local).contains(&"deploy/storage-local"));
+        let db = deploy(&project(&["storage", "db"]), &config, &src, &|_| None);
+        assert!(!ids(&db).contains(&"deploy/storage-local"));
+    }
 
     #[test]
     fn the_scaffold_s_development_config_fails_every_check_it_should() {

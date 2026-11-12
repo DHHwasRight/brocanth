@@ -103,8 +103,7 @@ pub struct RoutesConfig {
 /// buffers of a request body today.
 pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// The thumbnail sizes by default: a square crop, a card and a fit.
-pub const DEFAULT_THUMB_SIZES: &[&str] = &["150x150t", "300x200", "600x600f"];
+pub use crate::spec::DEFAULT_THUMB_SIZES;
 
 impl Default for RoutesConfig {
     fn default() -> Self {
