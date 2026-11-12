@@ -100,7 +100,8 @@ In an `.rsx` template:
 
 ### A name beginning with `_` is an input
 
-A file or directory whose name begins with `_` (or `.`) is not published.
+A file or directory whose name begins with `_` (or `.`) is not published,
+except the directory `.well-known/` (RFC 8615), which exists to be served.
 `_tailwind.css` is the input of the CSS build, and `_src/` holds the modules
 a bundle imports. `brocanth-bundle` builds them into published files.
 
