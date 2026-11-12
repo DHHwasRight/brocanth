@@ -184,13 +184,13 @@ brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
-# Empty by default, and that is the §8 rule rather than an oversight. The plan
-# puts sessions, cookies and argon2id in v1 and cuts OAuth from it, so the
-# common case here is an application with local accounts and no provider at
-# all — and that application must not link an HTTP client, a TLS stack and an
-# async runtime to hash a password. Turn the feature on to get
-# `ReqwestClient`; leave it off and implement `HttpClient` over whatever the
-# application already holds.
+# `runtime` by default: accounts, sessions and tokens, and no HTTP client.
+# The §8 rule: the plan puts sessions, cookies and argon2id in v1 and cuts
+# OAuth from it, so the common case here is an application with local
+# accounts and no provider at all — and that application must not link an
+# HTTP client, a TLS stack and an async runtime to hash a password. Turn
+# `reqwest-client` on to get `ReqwestClient`; leave it off and implement
+# `HttpClient` over whatever the application already holds.
 default = ["runtime"]
 # Accounts, sessions and tokens: everything but the scaffold module. The CLI
 # turns it off and takes `scaffold` alone, so `brocanth create` links no

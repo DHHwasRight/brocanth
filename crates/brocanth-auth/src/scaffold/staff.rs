@@ -50,6 +50,7 @@ impl Module for Superuser {
         )
         .adapts_to("jobs", "`createsuperuser` opens the accounts in Postgres")
         .adapts_to("cache", "`createsuperuser` opens the accounts in Postgres")
+        .adapts_to("db", "`createsuperuser` opens the accounts in Postgres")
         .integration(
             "admin",
             "the admin's policy is StaffPolicy: a superuser passes every check, a role holder what its roles grant",
@@ -93,7 +94,7 @@ impl Module for Superuser {
         // An account made by a command against a `MemoryStore` is gone when
         // the command exits, so the command exists only over Postgres. Both
         // are asked, so each declared adaptation is asked in every project.
-        let postgres = [uses_postgres(project), project.has("cache")].contains(&true);
+        let postgres = uses_postgres(project);
         if project.has("commands") && postgres {
             s.file(
                 "src/commands/createsuperuser.rs",

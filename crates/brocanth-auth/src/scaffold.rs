@@ -29,7 +29,7 @@
 //! which builds the pool lazily and leaves the wait to `serve`'s startup
 //! gate, exactly as `brocanth-cache` does.
 //!
-//! # What this module writes, out of a crate with 8,875 lines in it
+//! # What this module writes
 //!
 //! The local account path, and nothing else.
 //!
@@ -37,8 +37,8 @@
 //!   identity linking.** All of [`Auth`](crate::Auth), which is one `Arc` and
 //!   one context item, so a handler writes `ctx.provided()` and a handler in an
 //!   application that never registered the plugin does not compile.
-//! * **No provider.** The crate's own `default = []` is the argument, in its
-//!   own words: the common case is local accounts and no provider, and that
+//! * **No provider.** The crate's default feature is `runtime`, which has no
+//!   HTTP client: the common case is local accounts and no provider, and that
 //!   application must not link an HTTP client, a TLS stack and a second
 //!   runtime to hash a password. A provider is also not free in the other
 //!   currency -- it is a client id, a secret and a redirect URI registered at
@@ -49,33 +49,22 @@
 //!   struct literal in this crate, and the generated file is where that
 //!   literal goes.
 //!
-//!   The cost cannot be put behind a second tick on the menu either, which is
-//!   the shape [`crate::providers`] would otherwise suggest: `Manifest` is
-//!   static, a `Dep` carries its features with it, and the generator writes
-//!   one dependency line per chosen module -- so a child module that only
-//!   turned `reqwest-client` on would write `brocanth-auth` into the manifest
-//!   twice.
-//! * **No second factor, no one-time code, no login alert.** Each needs a
-//!   store trait of its own -- `MfaStore`, `OtpStore`, `SignInLocationStore` --
-//!   and [`crate::plugin`] keeps all three off `Auth` for exactly that reason:
-//!   putting them there would make every application implement a TOTP table to
-//!   get a password form. A scaffold that contradicted the plugin it is
-//!   scaffolding would be teaching the wrong thing on the first day.
+//!   Provider sign-in is the child module `auth-oauth`. Its `Dep` turns on
+//!   `reqwest-client`, and the CLI merges the features of every module that
+//!   names `brocanth-auth` into one dependency line.
+//! * **No page, no one-time code, no login alert.** The pages (sign-up,
+//!   sign-in, reset, verify, TOTP) are the child module `auth-screens`.
+//!   One-time codes and login alerts have no module yet; the stores
+//!   implement their traits, so an application builds them from
+//!   `auth.store()`.
 //! * **No impersonation.** It is an operator tool and it needs an operator:
 //!   a second account with a privilege this application has not defined yet.
 //!
-//! # What it cannot write, and why that is not this module's fault
+//! # Where the store lives
 //!
-//! A sign-in page. A generated handler is
-//! `Box<dyn Fn(&mut Ctx) -> Result<Response, Error>>` -- synchronous -- and
-//! every method here is `async fn`. The queue has the same gap and answers it
-//! the same way: the service goes on the context, the call is written out in
-//! the file, and the file says what has to change before a page can make it.
-//!
-//! The two middleware offers are not mounted either. `auth.session` and
-//! `auth.require_authenticated` are names with descriptions until the core's
-//! request hooks land; `MiddlewareCatalog` has no `mount` and the pattern is
-//! the application's decision in any case.
+//! `MemoryStore` alone, and `PgStore` when the project has a Postgres module
+//! ([`POSTGRES_WITH`]): the `postgres` feature is declared on the `Dep`
+//! with `feature_with`, so the CLI holds no rule for this crate.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -119,8 +108,16 @@ impl Module for Auth {
             "cache",
             "accounts live in the cache's Postgres, not in memory",
         )
+        .adapts_to(
+            "db",
+            "accounts live in the project's Postgres, not in memory",
+        )
+        .adapts_to(
+            "auth-oauth",
+            "the session cookie is SameSite=Lax, so the provider callback sees who is signed in",
+        )
         .asked_in("doors", "Accounts and passwords. No OAuth provider")
-        .krate(Dep::brocanth("brocanth-auth"))
+        .krate(postgres_with(Dep::brocanth("brocanth-auth")))
         // Only for the order of the `[auth]` section and the builder line:
         // the cookie name and the key's variable come out of the file the
         // config plugin loaded, so this belongs under it rather than above
@@ -134,11 +131,18 @@ impl Module for Auth {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let file = if uses_postgres(project) {
+        let mut file = if uses_postgres(project) {
             postgres_plugin_rs(project)
         } else {
             plugin_rs(project)
         };
+        if project.has("auth-oauth") {
+            assert!(
+                file.contains(STRICT),
+                "the auth scaffold lost its SameSite line"
+            );
+            file = file.replacen(STRICT, LAX, 1);
+        }
         s.file(
             "src/plugins/auth/mod.rs",
             redact_secrets(&file, &settings(project)),
@@ -174,13 +178,24 @@ impl Module for Auth {
 /// The modules that put a Postgres database in a project.
 ///
 /// With one of them, accounts and sessions go to Postgres too: the
-/// generated plugin is `PgStore`, and the CLI turns on this crate's
-/// `postgres` feature. Without one, the store stays `MemoryStore`.
-pub const POSTGRES_WITH: &[&str] = &["jobs", "cache"];
+/// generated plugin is `PgStore`, and this crate's `postgres` feature is on
+/// (see [`postgres_with`]). Without one, the store stays `MemoryStore`.
+/// `model` needs `db`, so `db` covers it.
+pub const POSTGRES_WITH: &[&str] = &["jobs", "cache", "db"];
+
+/// `dep` with the `postgres` feature on for each key of [`POSTGRES_WITH`],
+/// so the CLI needs no rule of its own for this crate.
+fn postgres_with(dep: Dep) -> Dep {
+    POSTGRES_WITH
+        .iter()
+        .fold(dep, |dep, key| dep.feature_with(key, "postgres"))
+}
 
 /// Whether this project's accounts live in Postgres. See [`POSTGRES_WITH`].
 pub fn uses_postgres(project: &Project) -> bool {
-    POSTGRES_WITH.iter().any(|key| project.has(key))
+    // Every key is asked, not the first that answers yes: a module that
+    // declares each one as an adaptation must read each one in every run.
+    POSTGRES_WITH.iter().filter(|key| project.has(key)).count() > 0
 }
 
 /// The plugin over `PgStore`: the `MemoryStore` file, with the store opened
@@ -203,16 +218,12 @@ const POSTGRES_EDITS: &[(&str, &str)] = &[
         "//! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
 //!    sessions last exactly as long as the process, so a restart is a logout
 //!    for everybody and a deploy loses every account. That is the one thing
-//!    in this file to replace before anybody else uses this application: write
-//!    an `AuthStore` over your database -- fourteen methods, of which the two
-//!    that carry a requirement are a unique email and a `consume_token` that
-//!    deletes and returns under one lock -- and change the line below.
-//!
-//!    When you do, the build moves: a pool is opened asynchronously and no
-//!    stage may wait for it, so `configure` becomes `before_start`, builds the
-//!    pool lazily and registers a readiness check that `serve` awaits before
-//!    it listens. `brocanth-cache` does it in about ten lines and they are
-//!    worth copying rather than inventing.",
+//!    in this file to replace before anybody else uses this application.
+//!    Do not write a store: `brocanth-auth` has `PgStore` behind its
+//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
+//!    and generate again, and this file is written over `PgStore`, with the
+//!    pool opened lazily in `before_start` and the tables made by a
+//!    readiness check.",
         "//! 1. **`Store = PgStore`.** Accounts and sessions are rows in the\n\
 //!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and\n\
 //!    a deploy. The pool is built in `before_start` with no connection, and\n\
@@ -375,6 +386,24 @@ pub type Store = PgStore;",
     ),
 ];
 
+/// The `same_site` line of the generated plugin with no provider.
+const STRICT: &str = "            // Strict, and not the crate's own `Lax` default. `Lax` is there
+            // for the cross-site top-level navigation an OAuth callback is,
+            // and this application has no provider. Add one and this line
+            // has to become `Lax` or the cookie is dropped on the way back.
+            same_site: SameSite::Strict,";
+
+/// The same line with `auth-oauth`: the callback is a cross-site top-level
+/// navigation, and it reads the session to tell a link from a sign-in and
+/// to replace the session it arrived with.
+const LAX: &str = "            // Lax, because `auth-oauth` is on. The provider callback is a
+            // cross-site top-level navigation, and it reads this cookie to
+            // tell a link from a sign-in. `Strict` would drop it there: a
+            // signed-in person who connects a provider would be signed in as
+            // the provider's account instead. Every form still carries the
+            // CSRF token, so `Lax` opens no cross-site post.
+            same_site: SameSite::Lax,";
+
 /// The `[auth]` section of `config/development.toml`.
 ///
 /// The key is not in it, and that is the point of the section: what is
@@ -478,7 +507,7 @@ fn plugin_rs(project: &Project) -> String {
 //! that never registered this plugin does not compile:
 //!
 //! ```ignore
-//! use brocanth_auth::mfa::{{Admission, Enrolled, FactorPolicy, FactorSet}};
+//! use brocanth_auth::mfa::{{Admission, FactorPolicy}};
 //!
 //! let auth = ctx.provided::<Services, _>().expect("a dispatched request");
 //!
@@ -486,21 +515,16 @@ fn plugin_rs(project: &Project) -> String {
 //! //    time whether or not the address has an account.
 //! let who = auth.accounts().login(email, password).await?;
 //!
-//! // 2. What this account could prove. Nothing: `Mfa` needs a store trait
-//! //    this application does not implement, so the enrolment is empty and
-//! //    the constructor is named so that a reviewer stops on it. The day
-//! //    there is an `MfaStore`, `Mfa::second_factors` answers this properly
-//! //    and this line goes.
-//! let enrolled =
-//!     Enrolled::without_asking_the_store(who.account().id.clone(), FactorSet::empty());
+//! // 2. What this account could prove: its confirmed TOTP and its
+//! //    recovery codes, read from the store.
+//! let proof = who.into_proof();
+//! let enrolled = auth.mfa()?.second_factors(&proof).await?;
 //!
 //! // 3. The policy, which consumes the proof. `Admitted` has no public
 //! //    constructor, so this step cannot be skipped -- a sign-in that
 //! //    forgot the second factor is a program that does not compile rather
 //! //    than one that ships.
-//! let Admission::Admit(admitted) =
-//!     FactorPolicy::default().admit(&enrolled, who.into_proof())
-//! else {{
+//! let Admission::Admit(admitted) = FactorPolicy::default().admit(&enrolled, proof) else {{
 //!     return Err(Error::new(401, "sign in"));
 //! }};
 //!
@@ -509,12 +533,11 @@ fn plugin_rs(project: &Project) -> String {
 //! // `started.cookie` is the `Set-Cookie` header to send back.
 //! ```
 //!
-//! **A page cannot do that yet.** A handler here is
-//! `Box<dyn Fn(&mut Ctx) -> Result<Response, Error>>`, which is synchronous,
-//! and every method above is `async fn`. What runs today is a test, a
-//! `manage` subcommand, and anything else of yours that already has a
-//! runtime. The sign-in form arrives with the core's request hooks, which are
-//! also what the two middleware offers below are waiting for.
+//! A page is an `async fn`, so it makes these calls itself. The
+//! `auth-screens` module writes the sign-up, sign-in, reset, verify and
+//! TOTP pages under `/account` that do exactly this; read
+//! `src/pages/account/signin.rs` and `src/plugins/auth_screens/mod.rs`
+//! (`admit`) before you write your own.
 //!
 //! # Three decisions this file makes, each in one line
 //!
@@ -524,16 +547,12 @@ fn plugin_rs(project: &Project) -> String {
 //! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
 //!    sessions last exactly as long as the process, so a restart is a logout
 //!    for everybody and a deploy loses every account. That is the one thing
-//!    in this file to replace before anybody else uses this application: write
-//!    an `AuthStore` over your database -- fourteen methods, of which the two
-//!    that carry a requirement are a unique email and a `consume_token` that
-//!    deletes and returns under one lock -- and change the line below.
-//!
-//!    When you do, the build moves: a pool is opened asynchronously and no
-//!    stage may wait for it, so `configure` becomes `before_start`, builds the
-//!    pool lazily and registers a readiness check that `serve` awaits before
-//!    it listens. `brocanth-cache` does it in about ten lines and they are
-//!    worth copying rather than inventing.
+//!    in this file to replace before anybody else uses this application.
+//!    Do not write a store: `brocanth-auth` has `PgStore` behind its
+//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
+//!    and generate again, and this file is written over `PgStore`, with the
+//!    pool opened lazily in `before_start` and the tables made by a
+//!    readiness check.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -547,7 +566,9 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # Adding a provider
 //!
-//! Three steps, and the flow code never learns the provider's name.
+//! The `auth-oauth` module does this for GitHub, Google, Microsoft and
+//! GitLab: the routes, their settings and the `Lax` cookie. By hand, it is
+//! three steps, and the flow code never learns the provider's name.
 //!
 //! 1. In `Cargo.toml`, `brocanth-auth = {{ ..., features = ["reqwest-client"] }}`.
 //! 2. Here, `pub type Http = brocanth_auth::http_client::ReqwestClient;`.
@@ -583,13 +604,10 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # What is not here
 //!
-//! Second factors, one-time codes and login alerts. Each needs a store trait
-//! of its own -- `MfaStore`, `OtpStore`, `SignInLocationStore` -- and
-//! `brocanth-auth` deliberately keeps all three off `Auth`, so that an
-//! application wanting a password form does not have to implement a TOTP
-//! table. An application that wants them builds them here, from the same
-//! `Arc<Store>`, and puts them on the context itself: one line each, in this
-//! file, where the decision is visible.
+//! One-time codes and login alerts. Both stores implement their traits
+//! (`OtpStore`, `SignInLocationStore`); an application that wants them
+//! builds them from `auth.store()` and puts them on the context itself.
+//! Second factors are `auth.mfa()`, and `auth-screens` has the TOTP page.
 
 use std::sync::Arc;
 

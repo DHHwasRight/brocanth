@@ -1550,6 +1550,7 @@ mod tests {
                 "/",
                 "/about",
                 "/account/code",
+                "/account/elevate",
                 "/account/forgot",
                 "/account/reset/{token}",
                 "/account/signin",
@@ -3373,6 +3374,73 @@ fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
     page.status = status;
     Ok(page)
 }
+===== src/pages/account/elevate.rs =====
+//! `/account/elevate` -- type the password again before a change to the
+//! way this account signs in.
+//!
+//! A right password elevates the session for a few minutes
+//! (`FactorPolicy::elevation_ttl`), then the browser goes back to
+//! `/account/totp`. An account with a second factor cannot elevate with the
+//! password alone.
+
+use brocanth_auth::{AccountHolder, AuthError, FactorPolicy};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Password {
+    #[check(zod::Text::new().min(1).max(1024))]
+    password: String,
+}
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    if screens::signed_in(ctx, &auth).await.is_none() {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    }
+    again(ctx, "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    AccountHolder::of(&session)?;
+    let Some(form) = screens::form::<Password>(ctx)? else {
+        return again(ctx, "Enter your password.", 422);
+    };
+    let email = screens::email_of(&auth, &session).await?;
+    let proof = match auth.accounts().login(&email, &form.password).await {
+        Ok(signed) => signed.into_proof(),
+        Err(AuthError::InvalidCredentials) => return again(ctx, "That password is wrong.", 422),
+        Err(other) => return Err(other.into()),
+    };
+    if proof.account() != &session.account {
+        return again(ctx, "That password is wrong.", 422);
+    }
+    let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let Some(elevation) = FactorPolicy::recommended().for_elevation(&enrolled, proof) else {
+        return again(
+            ctx,
+            "This account has a second factor, so a password alone cannot confirm the change.",
+            403,
+        );
+    };
+    let started = auth.sessions().elevate(&session.id, elevation).await?;
+    Ok(see_other("/account/totp").with_header("set-cookie", started.cookie.to_string()))
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(ctx, views::account::screens::Elevate { csrf: &csrf, error })?;
+    page.status = status;
+    Ok(page)
+}
 ===== src/pages/account/forgot.rs =====
 //! `/account/forgot` -- a reset link by mail, if the address has an account.
 
@@ -3577,6 +3645,18 @@ pub fn Code(csrf: &str, error: &str) -> Element {
     </section>
 }
 
+pub fn Elevate(csrf: &str, error: &str) -> Element {
+    <section>
+        <h1>Confirm it is you</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/elevate">
+            {! csrf}
+            <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+            <button>Continue</button>
+        </form>
+    </section>
+}
+
 pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) -> Element {
     <section>
         <h1>Two-step sign-in</h1>
@@ -3768,8 +3848,13 @@ fn again(ctx: &mut Ctx, email: &str, error: &str, status: u16) -> Result<Respons
 //!
 //! The GET draws a new key and stores it unconfirmed; the POST confirms it
 //! with a code from the app and shows the recovery codes, once.
+//!
+//! Both ask for a session that typed its password again a few minutes ago
+//! (`/account/elevate`): a stolen cookie alone must not enrol the thief's
+//! app. An account that already has TOTP keeps it: this page never draws
+//! a key over a working one.
 
-use brocanth_auth::{AccountHolder, AuthError};
+use brocanth_auth::{AccountHolder, AuthError, FactorKind};
 use brocanth_middleware::Level;
 
 use crate::pages::{html, views, Ctx, Error, Response};
@@ -3781,6 +3866,8 @@ pub struct Confirm {
     code: String,
 }
 
+const ON: &str = "Two-step sign-in is already on for this account.";
+
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let auth = screens::services(ctx)?;
     let links = screens::screens(ctx)?;
@@ -3789,13 +3876,23 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
         return Ok(see_other("/account/signin"));
     };
     let holder = AccountHolder::of(&session)?;
+    let mfa = auth.mfa()?;
+    if mfa.enrolled(&holder).await?.contains(FactorKind::Totp) {
+        return page(ctx, "", "", ON, &[], 200);
+    }
     let label = screens::email_of(&auth, &session).await?;
-    let enrolment = auth
-        .mfa()?
+    match mfa
         .begin_totp_enrolment(&holder, links.issuer(), &label)
-        .await?;
-    let secret = enrolment.secret.to_base32();
-    page(ctx, &secret, &enrolment.uri, "", &[], 200)
+        .await
+    {
+        Ok(enrolment) => {
+            let secret = enrolment.secret.to_base32();
+            page(ctx, &secret, &enrolment.uri, "", &[], 200)
+        }
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 200),
+        Err(other) => Err(other.into()),
+    }
 }
 
 pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -3836,6 +3933,8 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
             &[],
             422,
         ),
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 409),
         Err(other) => Err(other.into()),
     }
 }
@@ -3999,7 +4098,7 @@ pub fn Layout(children: Element) -> Element {
 //! that never registered this plugin does not compile:
 //!
 //! ```ignore
-//! use brocanth_auth::mfa::{Admission, Enrolled, FactorPolicy, FactorSet};
+//! use brocanth_auth::mfa::{Admission, FactorPolicy};
 //!
 //! let auth = ctx.provided::<Services, _>().expect("a dispatched request");
 //!
@@ -4007,21 +4106,16 @@ pub fn Layout(children: Element) -> Element {
 //! //    time whether or not the address has an account.
 //! let who = auth.accounts().login(email, password).await?;
 //!
-//! // 2. What this account could prove. Nothing: `Mfa` needs a store trait
-//! //    this application does not implement, so the enrolment is empty and
-//! //    the constructor is named so that a reviewer stops on it. The day
-//! //    there is an `MfaStore`, `Mfa::second_factors` answers this properly
-//! //    and this line goes.
-//! let enrolled =
-//!     Enrolled::without_asking_the_store(who.account().id.clone(), FactorSet::empty());
+//! // 2. What this account could prove: its confirmed TOTP and its
+//! //    recovery codes, read from the store.
+//! let proof = who.into_proof();
+//! let enrolled = auth.mfa()?.second_factors(&proof).await?;
 //!
 //! // 3. The policy, which consumes the proof. `Admitted` has no public
 //! //    constructor, so this step cannot be skipped -- a sign-in that
 //! //    forgot the second factor is a program that does not compile rather
 //! //    than one that ships.
-//! let Admission::Admit(admitted) =
-//!     FactorPolicy::default().admit(&enrolled, who.into_proof())
-//! else {
+//! let Admission::Admit(admitted) = FactorPolicy::default().admit(&enrolled, proof) else {
 //!     return Err(Error::new(401, "sign in"));
 //! };
 //!
@@ -4030,12 +4124,11 @@ pub fn Layout(children: Element) -> Element {
 //! // `started.cookie` is the `Set-Cookie` header to send back.
 //! ```
 //!
-//! **A page cannot do that yet.** A handler here is
-//! `Box<dyn Fn(&mut Ctx) -> Result<Response, Error>>`, which is synchronous,
-//! and every method above is `async fn`. What runs today is a test, a
-//! `manage` subcommand, and anything else of yours that already has a
-//! runtime. The sign-in form arrives with the core's request hooks, which are
-//! also what the two middleware offers below are waiting for.
+//! A page is an `async fn`, so it makes these calls itself. The
+//! `auth-screens` module writes the sign-up, sign-in, reset, verify and
+//! TOTP pages under `/account` that do exactly this; read
+//! `src/pages/account/signin.rs` and `src/plugins/auth_screens/mod.rs`
+//! (`admit`) before you write your own.
 //!
 //! # Three decisions this file makes, each in one line
 //!
@@ -4045,16 +4138,12 @@ pub fn Layout(children: Element) -> Element {
 //! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
 //!    sessions last exactly as long as the process, so a restart is a logout
 //!    for everybody and a deploy loses every account. That is the one thing
-//!    in this file to replace before anybody else uses this application: write
-//!    an `AuthStore` over your database -- fourteen methods, of which the two
-//!    that carry a requirement are a unique email and a `consume_token` that
-//!    deletes and returns under one lock -- and change the line below.
-//!
-//!    When you do, the build moves: a pool is opened asynchronously and no
-//!    stage may wait for it, so `configure` becomes `before_start`, builds the
-//!    pool lazily and registers a readiness check that `serve` awaits before
-//!    it listens. `brocanth-cache` does it in about ten lines and they are
-//!    worth copying rather than inventing.
+//!    in this file to replace before anybody else uses this application.
+//!    Do not write a store: `brocanth-auth` has `PgStore` behind its
+//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
+//!    and generate again, and this file is written over `PgStore`, with the
+//!    pool opened lazily in `before_start` and the tables made by a
+//!    readiness check.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -4068,7 +4157,9 @@ pub fn Layout(children: Element) -> Element {
 //!
 //! # Adding a provider
 //!
-//! Three steps, and the flow code never learns the provider's name.
+//! The `auth-oauth` module does this for GitHub, Google, Microsoft and
+//! GitLab: the routes, their settings and the `Lax` cookie. By hand, it is
+//! three steps, and the flow code never learns the provider's name.
 //!
 //! 1. In `Cargo.toml`, `brocanth-auth = { ..., features = ["reqwest-client"] }`.
 //! 2. Here, `pub type Http = brocanth_auth::http_client::ReqwestClient;`.
@@ -4104,13 +4195,10 @@ pub fn Layout(children: Element) -> Element {
 //!
 //! # What is not here
 //!
-//! Second factors, one-time codes and login alerts. Each needs a store trait
-//! of its own -- `MfaStore`, `OtpStore`, `SignInLocationStore` -- and
-//! `brocanth-auth` deliberately keeps all three off `Auth`, so that an
-//! application wanting a password form does not have to implement a TOTP
-//! table. An application that wants them builds them here, from the same
-//! `Arc<Store>`, and puts them on the context itself: one line each, in this
-//! file, where the decision is visible.
+//! One-time codes and login alerts. Both stores implement their traits
+//! (`OtpStore`, `SignInLocationStore`); an application that wants them
+//! builds them from `auth.store()` and puts them on the context itself.
+//! Second factors are `auth.mfa()`, and `auth-screens` has the TOTP page.
 
 use std::sync::Arc;
 
@@ -4783,6 +4871,7 @@ mod tests {
         "/account/reset/a-token",
         "/account/verify/a-token",
         "/account/totp",
+        "/account/elevate",
     ];
 
     #[tokio::test]
@@ -5095,6 +5184,16 @@ mod tests {
         let mut browser = Browser::new().await;
         browser.sign_up("ada@example.com").await;
         browser.sign_in("ada@example.com", PASSWORD).await;
+
+        // A session that did not type its password again is sent to do so.
+        let asked = browser.get("/account/totp").await;
+        assert_eq!(asked.header("location"), Some("/account/elevate"));
+        let wrong = browser.post("/account/elevate", "password=not+it").await;
+        assert_eq!(wrong.status, 422);
+        let password = format!("password={}", PASSWORD.replace(' ', "+"));
+        let elevated = browser.post("/account/elevate", &password).await;
+        assert_eq!(elevated.header("location"), Some("/account/totp"));
+
         let page = text(&browser.get("/account/totp").await);
         let start = page.find("<code>").expect("the key") + "<code>".len();
         let secret = &page[start..start + page[start..].find("</code>").expect("closed")];
@@ -5122,6 +5221,11 @@ mod tests {
             .map(|rest| rest[..rest.find("</code>").expect("closed")].to_string())
             .collect();
         assert!(!recovery.is_empty(), "the recovery codes, once: {page}");
+
+        // A GET on an enrolled account draws no new key over the working one.
+        let again = text(&browser.get("/account/totp").await);
+        assert!(again.contains("already on"), "{again}");
+        assert!(!again.contains("type the key"), "{again}");
 
         // The password alone now leads to the code page, not a session.
         browser.post("/account/signout", "").await;
@@ -5853,7 +5957,7 @@ adapted_to = ["config"]
 [modules.auth-screens]
 version = "0.1.0"
 kind = ["routes", "enhancer"]
-files = ["src/modules/auth_screens.rs", "src/pages/account/code.rs", "src/pages/account/forgot.rs", "src/pages/account/reset/[token].rs", "src/pages/account/screens.rsx", "src/pages/account/signin.rs", "src/pages/account/signout.rs", "src/pages/account/signup.rs", "src/pages/account/totp.rs", "src/pages/account/verify/[token].rs", "src/plugins/auth_screens/"]
+files = ["src/modules/auth_screens.rs", "src/pages/account/code.rs", "src/pages/account/elevate.rs", "src/pages/account/forgot.rs", "src/pages/account/reset/[token].rs", "src/pages/account/screens.rsx", "src/pages/account/signin.rs", "src/pages/account/signout.rs", "src/pages/account/signup.rs", "src/pages/account/totp.rs", "src/pages/account/verify/[token].rs", "src/plugins/auth_screens/"]
 config = ["auth_screens"]
 crates = []
 adapted_to = ["config", "auth-lockout"]
@@ -5914,4 +6018,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: d5db60d431997e9a
+# brocanth-digest: d69cbeb39d9d0067

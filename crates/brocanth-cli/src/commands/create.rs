@@ -1726,17 +1726,6 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
         }
     }
     for mut dep in picked {
-        // Accounts go to Postgres when the project already has a Postgres
-        // database. A manifest is static, so this one feature depends on
-        // the other picks here; `brocanth_auth::scaffold::POSTGRES_WITH` is
-        // the rule, and the plugin file it writes follows the same rule.
-        if dep.name == "brocanth-auth"
-            && brocanth_auth::scaffold::POSTGRES_WITH
-                .iter()
-                .any(|key| a.has(key))
-        {
-            dep = dep.feature("postgres");
-        }
         // A feature that exists for another module, on when that module is.
         for (key, feature) in dep.with.clone() {
             if a.has(key) && !dep.features.contains(&feature) {
