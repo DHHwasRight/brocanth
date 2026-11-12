@@ -71,6 +71,7 @@ pub const MASK: &str = "[redacted]";
 const SECRET_ANYWHERE: &[&str] = &[
     "password",
     "passwords",
+    "pass",
     "passwd",
     "passphrase",
     "pwd",
@@ -95,6 +96,10 @@ const SECRET_ANYWHERE: &[&str] = &[
 /// refinement, and it is the only one: everything else on the list above is
 /// a noun that is the secret rather than a noun secrets are described with.
 const SECRET_AT_THE_END: &[&str] = &["key", "keys"];
+
+/// Segments that name an encoding. A `key` followed only by these is still
+/// the last word of the name: `private_key_pem`, `signing_key_base64`.
+const ENCODINGS: &[&str] = &["pem", "der", "base64", "b64", "hex"];
 
 /// Why a value was hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +187,7 @@ impl Redaction {
     /// own vocabulary this list does not know: `.also("sas")`, `.also("pin")`.
     ///
     /// Matched the same way as the built-in segments: case-insensitively,
-    /// anywhere in the path, on `.`, `_` and `-` boundaries.
+    /// anywhere in the path, on `.`, `_`, `-` and lower-to-upper case boundaries.
     #[must_use]
     pub fn also(mut self, segment: impl Into<String>) -> Self {
         self.extra.push(segment.into().to_ascii_lowercase());
@@ -190,21 +195,63 @@ impl Redaction {
     }
 
     /// Whether this rule hides a key by its name alone.
+    ///
+    /// The path splits on `.`, `_` and `-`, and where a lower-case letter or
+    /// a digit meets an upper-case one, so `dbPassword` is `db` and
+    /// `password`.
     #[must_use]
     pub fn hides(&self, path: &str) -> bool {
         if self.off {
             return false;
         }
-        let segments: Vec<String> = path
-            .split(['.', '_', '-'])
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
-        let last = segments.last().map(String::as_str);
+        let segments = segments(path);
+        // `key` counts at the end, or when only encodings follow it.
+        let end = segments
+            .iter()
+            .rposition(|s| !ENCODINGS.contains(&s.as_str()))
+            .map(|i| segments[i].as_str());
         segments
             .iter()
             .any(|s| SECRET_ANYWHERE.contains(&s.as_str()) || self.extra.contains(s))
-            || last.is_some_and(|s| SECRET_AT_THE_END.contains(&s))
+            || end.is_some_and(|s| SECRET_AT_THE_END.contains(&s))
+    }
+
+    /// Whether a URL's query parameter carries a secret: the name rule, or a
+    /// name that ends with a secret word, as libpq's `sslpassword` does.
+    fn hides_param(&self, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        self.hides(name)
+            || SECRET_ANYWHERE
+                .iter()
+                .filter(|w| w.len() >= 5)
+                .any(|w| lower.ends_with(w))
+    }
+
+    /// The URL with its secrets replaced, or `None` when it carried none.
+    fn mask_url(&self, text: &str) -> Option<String> {
+        let userinfo = mask_url_password(text);
+        let base = userinfo.as_deref().unwrap_or(text);
+        self.mask_query(base).or(userinfo)
+    }
+
+    /// Replaces the value of each query parameter named like a secret:
+    /// `postgres://app@db/app?password=hunter2`.
+    fn mask_query(&self, text: &str) -> Option<String> {
+        text.find("://")?;
+        let start = text.find('?')? + 1;
+        let end = text[start..].find('#').map_or(text.len(), |i| start + i);
+        let mut changed = false;
+        let pairs: Vec<String> = text[start..end]
+            .split('&')
+            .map(|pair| match pair.split_once('=') {
+                Some((name, value)) if !value.is_empty() && self.hides_param(name) => {
+                    changed = true;
+                    format!("{name}={MASK}")
+                }
+                _ => pair.to_string(),
+            })
+            .collect();
+        changed.then(|| format!("{}{}{}", &text[..start], pairs.join("&"), &text[end..]))
     }
 
     /// One value, ready to print.
@@ -229,7 +276,7 @@ impl Redaction {
 
     fn show_kind(&self, kind: &ValueKind) -> Shown {
         match kind {
-            ValueKind::String(s) => match mask_url_password(s) {
+            ValueKind::String(s) => match self.mask_url(s) {
                 Some(masked) => Shown {
                     text: format!("{masked:?}"),
                     reason: Some(Reason::UrlPassword),
@@ -264,6 +311,29 @@ impl Redaction {
             },
         }
     }
+}
+
+/// A key's path, split into lower-case words: on `.`, `_` and `-`, and where
+/// a lower-case letter or a digit meets an upper-case one (`clientSecret`).
+fn segments(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in path.split(['.', '_', '-']) {
+        let mut word = String::new();
+        let mut previous: Option<char> = None;
+        for c in part.chars() {
+            if c.is_ascii_uppercase()
+                && previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+            {
+                out.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+            previous = Some(c);
+        }
+        if !word.is_empty() {
+            out.push(word);
+        }
+    }
+    out
 }
 
 /// Replaces the password in a URL's authority, and answers `None` when there
@@ -324,6 +394,12 @@ mod tests {
             "stripe.token",
             "server.tls.private_key",
             "db.credentials.user",
+            "app.dbPassword",
+            "oauth.clientSecret",
+            "api.authToken",
+            "smtp.pass",
+            "tls.private_key_pem",
+            "auth.signing_key_base64",
         ] {
             assert!(r.hides(path), "`{path}` should be hidden");
             assert_eq!(r.show(path, &string("hunter2")).text, MASK);
@@ -364,6 +440,31 @@ mod tests {
         // survives, which is the whole reason the whole string is not masked.
         assert!(shown.text.contains("db.internal:5432/app"));
         assert!(!shown.text.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_password_in_the_query_string_is_hidden() {
+        let r = Redaction::standard();
+        for (url, shown) in [
+            (
+                "postgres://app@db/app?password=hunter2",
+                "postgres://app@db/app?password=[redacted]",
+            ),
+            (
+                "postgres://app@db/app?sslmode=require&sslpassword=hunter2#x",
+                "postgres://app@db/app?sslmode=require&sslpassword=[redacted]#x",
+            ),
+            (
+                "postgres://app:pw@db/app?token=hunter2",
+                "postgres://app:[redacted]@db/app?token=[redacted]",
+            ),
+        ] {
+            let got = r.show("db.url", &string(url));
+            assert_eq!(got.text, format!("{shown:?}"));
+            assert_eq!(got.reason, Some(Reason::UrlPassword));
+        }
+        let plain = r.show("db.url", &string("postgres://app@db/app?sslmode=require"));
+        assert_eq!(plain.reason, None);
     }
 
     #[test]
