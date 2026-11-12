@@ -9,7 +9,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, OnceLock};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_body::Body;
@@ -24,6 +24,9 @@ use crate::{parse_choice, Choice, GtagConfig, CONSENT_LOG_MAX_BYTES, CONSENT_PAT
 /// Inserts the consent banner and the tag into every HTML page it may.
 pub struct Gtag {
     config: GtagConfig,
+    /// The consent log, opened in `before_start`: listing the hooks opens
+    /// no file and starts no thread.
+    log: Arc<OnceLock<ConsentLog>>,
 }
 
 impl Plugin for Gtag {
@@ -35,7 +38,10 @@ impl Plugin for Gtag {
     const INSTALLS_HOOKS: bool = true;
 
     fn new(config: Self::Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            log: Arc::new(OnceLock::new()),
+        }
     }
 
     /// The settings are checked here, at the stage the other plugins check
@@ -43,13 +49,25 @@ impl Plugin for Gtag {
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         self.config.check().map_err(PluginError::new)
     }
+
+    /// Opens the consent log, so a path this process cannot write stops
+    /// the start, not the first visitor's click.
+    fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if let Some(path) = &self.config.consent_log {
+            if self.log.get().is_none() {
+                let log = ConsentLog::open(PathBuf::from(path), CONSENT_LOG_MAX_BYTES)?;
+                let _ = self.log.set(log);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl HookSource for Gtag {
     type Families = Both<OnRequest, OnResponse>;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        if let Some(path) = &self.config.consent_log {
+        if self.config.consent_log.is_some() {
             registrar.request(
                 "consent-log",
                 // After the locale is known, so the record can read the
@@ -59,7 +77,7 @@ impl HookSource for Gtag {
                     .after_if_present("i18n.negotiate")
                     .after_if_present("rate_limit.count"),
                 Record {
-                    log: ConsentLog::open(PathBuf::from(path), CONSENT_LOG_MAX_BYTES)?,
+                    log: Arc::clone(&self.log),
                     banner: self.config.banner.clone(),
                     translate: self.config.translate,
                 },
@@ -82,7 +100,7 @@ impl HookSource for Gtag {
 
 /// Appends a consent choice to the log and answers `204`.
 struct Record {
-    log: ConsentLog,
+    log: Arc<OnceLock<ConsentLog>>,
     banner: crate::Banner,
     /// `GtagConfig::translate`: the banner follows the locale.
     #[cfg_attr(not(feature = "i18n"), allow(dead_code))]
@@ -156,10 +174,11 @@ impl RequestHook for Record {
             http::StatusCode::FORBIDDEN
         } else if let Some(choice) = parse_choice(query) {
             let line = Record::line(&choice, &self.version(state, choice.locale.as_deref()));
-            if self.log.push(line) {
+            if self.log.get().is_some_and(|log| log.push(line)) {
                 http::StatusCode::NO_CONTENT
             } else {
-                // The writer is behind by a whole queue: a flood.
+                // The writer is behind by a whole queue (a flood), or the
+                // application was never started.
                 http::StatusCode::SERVICE_UNAVAILABLE
             }
         } else {
