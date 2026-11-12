@@ -8,6 +8,9 @@
 //! The client follows no redirect: a token endpoint that answers 3xx is an
 //! error, not a hop that carries the client secret elsewhere. A response
 //! larger than one mebibyte is refused before it is all read.
+//!
+//! `brocanth-auth`'s `ReqwestClient` sends the sign-in requests through
+//! this type too, so both crates share one reqwest and one setup.
 
 use std::future::Future;
 use std::pin::Pin;

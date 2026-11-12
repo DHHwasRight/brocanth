@@ -81,8 +81,8 @@ pub fn sign_hs256(claims: &serde_json::Value) -> String {
     jsonwebtoken::encode(&header, claims, &key).expect("sign")
 }
 
-/// Seconds since the epoch, from the real clock, because `jsonwebtoken`
-/// validates `exp` against the system clock and takes no injected time.
+/// Seconds since the epoch, from the real clock. A token that expires after
+/// it is valid under any test clock.
 pub fn real_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -238,4 +238,13 @@ pub async fn elevated(
         .elevate(&started.session.id, elevation(account))
         .await
         .expect("elevate")
+}
+
+/// Whether `challenge` is the PKCE `S256` challenge of `verifier`: the
+/// base64url SHA-256 of the verifier, as RFC 7636 §4.6 checks it.
+pub fn pkce_matches(verifier: &str, challenge: &str) -> bool {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier))
+        == challenge
 }

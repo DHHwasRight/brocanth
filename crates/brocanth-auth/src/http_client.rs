@@ -178,22 +178,32 @@ mod reqwest_impl {
     use super::{HttpClient, HttpRequest, HttpResponse};
     use crate::error::AuthError;
     use async_trait::async_trait;
+    use brocanth_oauth_client::http::Http;
+    use brocanth_oauth_client::reqwest;
+    use oauth2::AsyncHttpClient as _;
 
     /// [`HttpClient`] over `reqwest`.
     ///
-    /// Behind the `reqwest-client` feature, which is on by default and which
-    /// an application that already owns a client turns off.
+    /// Behind the `reqwest-client` feature, which an application that
+    /// already owns a client leaves off.
+    ///
+    /// The transport is `brocanth-oauth-client`'s [`Http`], so the sign-in
+    /// and the connected accounts send requests the same way: no redirect
+    /// is followed (a token endpoint that answers 3xx would otherwise carry
+    /// the client secret to another host), and an answer larger than one
+    /// mebibyte is refused before it is all read.
     #[derive(Clone, Debug)]
-    pub struct ReqwestClient(reqwest::Client);
+    pub struct ReqwestClient(Http);
 
     impl ReqwestClient {
         /// Wraps an existing client, so connection pooling, proxies and
-        /// timeouts stay the application's decisions.
+        /// timeouts stay the application's decisions. Turn its redirects
+        /// off: `reqwest` follows ten by default.
         pub fn new(client: reqwest::Client) -> Self {
-            Self(client)
+            Self(Http::from_client(client))
         }
 
-        /// A client with a ten-second timeout.
+        /// A client with a ten-second timeout and no redirects.
         ///
         /// A provider that stops answering must not hold a request handler
         /// open: `reqwest`'s own default is no timeout at all, and inheriting
@@ -202,9 +212,7 @@ mod reqwest_impl {
         /// # Errors
         /// Returns [`AuthError::Http`] when the client cannot be built.
         pub fn with_default_timeout() -> Result<Self, AuthError> {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
+            Http::new(std::time::Duration::from_secs(10))
                 .map(Self)
                 .map_err(|e| AuthError::Http(e.to_string()))
         }
@@ -213,24 +221,37 @@ mod reqwest_impl {
     #[async_trait]
     impl HttpClient for ReqwestClient {
         async fn send(&self, request: HttpRequest) -> Result<HttpResponse, AuthError> {
-            let mut builder = self.0.request(request.method, &request.url);
+            let mut builder = http::Request::builder()
+                .method(request.method)
+                .uri(&request.url);
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }
-            if let Some(form) = &request.form {
-                builder = builder.form(form);
-            }
-            let response = builder
-                .send()
+            let body = match &request.form {
+                Some(form) => {
+                    builder = builder.header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    );
+                    url::form_urlencoded::Serializer::new(String::new())
+                        .extend_pairs(form)
+                        .finish()
+                        .into_bytes()
+                }
+                None => Vec::new(),
+            };
+            let request = builder
+                .body(body)
+                .map_err(|e| AuthError::Http(format!("could not build the request: {e}")))?;
+            let response = self
+                .0
+                .call(request)
                 .await
                 .map_err(|e| AuthError::Http(e.to_string()))?;
-            let status = response.status();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| AuthError::Http(e.to_string()))?
-                .to_vec();
-            Ok(HttpResponse { status, body })
+            Ok(HttpResponse {
+                status: response.status(),
+                body: response.into_body(),
+            })
         }
     }
 }

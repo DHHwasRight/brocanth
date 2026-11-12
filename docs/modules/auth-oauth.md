@@ -70,6 +70,51 @@ With `middleware-csrf`, the button and link forms carry the token.
   `src/modules/auth_oauth.rs`. The redirect URI is a constant at the
   provider's console, so it is not a setting.
 
+## Protocol
+
+The flow does not write OAuth or OIDC by hand. Two crates do it:
+
+- `oauth2` 5 builds the authorization URL, makes the `state` and the PKCE
+  pair (`S256`, always), and sends the code exchange and the refresh.
+  `brocanth-oauth-client` uses the same crate.
+- `openidconnect` 4.0 verifies the id_token: the signature against the
+  provider's key set, the issuer, the audience, the expiry and the nonce.
+
+Both send their requests through `brocanth_auth::http_client::HttpClient`,
+so an application that implements that trait keeps it. `ReqwestClient`
+sends through `brocanth_oauth_client::http::Http`: one reqwest, one TLS
+setup for the sign-in and the connected accounts. The `state` check, the
+signed flow cookie, the profile read and the provider quirks stay in
+`brocanth-auth`.
+
+The providers are static: each one names its endpoints and its key-set URL.
+The flow does no OIDC discovery.
+
+### Behaviour changes, and why
+
+- **`ReqwestClient` follows no redirect and reads at most 1 MiB.** Before,
+  it followed ten redirects. A token endpoint that answers 3xx would then
+  send the code, the verifier and the client secret to another host. An
+  answer without a size limit lets a provider fill the memory.
+- **An id_token with a second audience is refused.** Before, a token
+  passed when its `aud` list held this client and anything else. This
+  client trusts no other audience, and OIDC Core §3.1.3.7 says to reject a
+  token with an untrusted audience.
+- **An id_token must carry `iat`.** OIDC Core requires it, and
+  `openidconnect` reads it. Every provider in the catalogue sends it.
+- **`exp` is checked against the injected `Clock`,** with the same minute
+  of leeway as before. Before, it was checked against the system clock, so
+  a test clock did not reach it. With `SystemClock` nothing changes.
+- **With `ClientSecretBasic`, the client id goes only in the
+  `Authorization` header.** Before, it also went in the form body. RFC 6749
+  §2.3.1 says to use one method, not both. No provider in the catalogue
+  uses Basic.
+- **`TokenResponse::token_type` is lower case** (`bearer`), as `oauth2`
+  reads it. Compare it without case.
+- **A redirect URI that does not parse fails at `begin`,** with
+  `AuthError::Misconfigured`. Before, it went to the provider, which
+  refused it.
+
 ## Settings
 
 Section `[auth_oauth]`.

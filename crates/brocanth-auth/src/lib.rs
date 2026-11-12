@@ -27,7 +27,7 @@
 //! * **PKCE is mandatory.** There is no option to turn it off and no code path
 //!   that omits it. A public client without PKCE is an authorization-code
 //!   interception waiting to happen, and since OAuth 2.1 there is no remaining
-//!   reason to support the alternative. See [`oauth::pkce`].
+//!   reason to support the alternative. See [`oauth`].
 //! * **`state` is compared in constant time** and the comparison is the first
 //!   thing [`oauth::OauthClient::complete`] does. CSRF on the callback is the
 //!   attack; an early return on the first differing byte is the leak.

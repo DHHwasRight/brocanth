@@ -630,7 +630,7 @@ async fn the_token_request_proves_the_pkce_challenge() {
             .1
             .clone()
     };
-    assert!(brocanth_auth::oauth::pkce::verify(
+    assert!(common::pkce_matches(
         &field("code_verifier"),
         &param(&url, "code_challenge")
     ));

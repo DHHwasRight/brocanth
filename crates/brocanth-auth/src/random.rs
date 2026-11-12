@@ -50,12 +50,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// SHA-256 of `data`, base64url without padding. This is also the PKCE `S256`
-/// transformation, which is why it lives here rather than in two places.
-pub fn sha256_b64(data: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(sha256(data))
-}
-
 /// Base64url without padding.
 pub fn b64(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)

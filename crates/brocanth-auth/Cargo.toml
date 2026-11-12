@@ -26,6 +26,18 @@ jsonwebtoken = { version = "11", default-features = false, features = [
     "use_pem",
     "rust_crypto",
 ], optional = true }
+# The OAuth 2.0 protocol: the authorization URL, PKCE, the code exchange
+# and the refresh. `oauth2` 5, the crate `brocanth-oauth-client` already
+# links. Its default features bring reqwest 0.12, so they are off:
+# `src/oauth/transport.rs` sends its requests through `HttpClient`.
+oauth2 = { version = "5", default-features = false, optional = true }
+# OpenID Connect on top of `oauth2` 5: the id_token claims, the JWKS, and
+# the verification of signature, issuer, audience, expiry and nonce.
+# Default features off for the same reason. `accept-string-booleans`
+# because Apple sends `"email_verified": "true"` as a string.
+openidconnect = { version = "~4.0", default-features = false, features = [
+    "accept-string-booleans",
+], optional = true }
 # HMAC-SHA256 for the session cookie signature, for hashing the verifier half
 # of a single-use token, and for the keyed network digest a login alert stores.
 # RustCrypto again, same reason.
@@ -56,18 +68,23 @@ url = { version = "2", optional = true }
 # The storage trait and the HTTP client trait are both async and both
 # object-safe, which `async fn` in a trait still is not.
 async-trait = { version = "0.1", optional = true }
+# `openidconnect` takes the time to check `exp` against as a `chrono` value;
+# this crate passes its own `Clock`. Already in the tree through
+# `openidconnect`.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+], optional = true }
 
 # `reqwest` is the default HTTP client because it is what the ecosystem
 # already has in the tree, and rustls keeps it off the system TLS stack. It is
 # a feature, and the trait is the contract: an application already holding a
-# hyper or ureq client sets `default-features = false` and implements
-# `HttpClient` itself, and reqwest then appears nowhere in its lock file.
-reqwest = { version = "0.13", default-features = false, features = [
-    "rustls",
-    "http2",
-    "charset",
-    "form",
-], optional = true }
+# hyper or ureq client implements `HttpClient` itself, and reqwest then
+# appears nowhere in its lock file.
+#
+# `ReqwestClient` sends through `brocanth-oauth-client`'s `Http`: reqwest
+# 0.13 with rustls, no redirects and a size cap on an answer. One setup for
+# the sign-in and the connected accounts, and one reqwest in the tree.
+brocanth-oauth-client = { workspace = true, optional = true }
 
 # `src/postgres.rs` is `PgStore`: every storage trait in `src/storage.rs`,
 # over Postgres, so accounts and sessions survive a restart.
@@ -132,8 +149,9 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version
 
 [dev-dependencies]
 # The only thing the tests need that the library does not already provide: a
-# runtime to drive the async store and HTTP traits.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# runtime to drive the async store and HTTP traits. `net` and `io-util` for
+# the provider on a local port in `tests/oauth_mock_provider.rs`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 # `trybuild`: the standard way to assert that something does **not** compile.
 # The guarantee in `mfa` — that a sign-in which skipped the policy cannot be
 # written — is a claim about programs that do not exist, and no ordinary test
@@ -146,8 +164,9 @@ trybuild = "1.0.122"
 # tests render the real screens through the real `Admin` rather than asserting
 # on a context struct. A screen that compiles and produces the wrong page is
 # the failure worth catching. The ordinary dependency tree is unaffected: a
-# published build links no admin and no rsx.
-brocanth-auth = { path = ".", features = ["admin", "conformance", "policy"] }
+# published build links no admin and no rsx. `reqwest-client` so the mock
+# provider test goes through the real `ReqwestClient`.
+brocanth-auth = { path = ".", features = ["admin", "conformance", "policy", "reqwest-client"] }
 
 # The HTML assertions, and only those: `Html::assert_button` answers "is there
 # a button that says End every session", where `body.contains(..)` answers
@@ -180,6 +199,8 @@ runtime = [
     "dep:brocanth",
     "dep:argon2",
     "dep:jsonwebtoken",
+    "dep:oauth2",
+    "dep:openidconnect",
     "dep:hmac",
     "dep:sha2",
     "dep:sha1",
@@ -191,8 +212,9 @@ runtime = [
     "dep:serde_json",
     "dep:url",
     "dep:async-trait",
+    "dep:chrono",
 ]
-reqwest-client = ["runtime", "dep:reqwest"]
+reqwest-client = ["runtime", "dep:brocanth-oauth-client"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's
