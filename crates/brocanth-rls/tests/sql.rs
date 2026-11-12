@@ -236,18 +236,18 @@ fn a_schema_refuses_what_it_cannot_write_with_help() {
 }
 
 #[test]
-fn a_principal_is_checked_against_the_settings_the_policies_read() {
+fn an_identity_is_checked_against_the_settings_the_policies_read() {
     let schema = example(&names());
-    let ok = brocanth_rls::Principal::new()
+    let ok = brocanth_rls::DbIdentity::new()
         .role("app_member")
         .set("tenant_id", 1)
         .set("user_id", 2);
-    schema.check_principal(&ok).unwrap();
-    let typo = brocanth_rls::Principal::new().set("tenantid", 1);
-    let e = schema.check_principal(&typo).unwrap_err().to_string();
+    schema.check_identity(&ok).unwrap();
+    let typo = brocanth_rls::DbIdentity::new().set("tenantid", 1);
+    let e = schema.check_identity(&typo).unwrap_err().to_string();
     assert!(e.contains("tenant_id") && e.contains("help:"), "{e}");
-    let role = brocanth_rls::Principal::new().role("nobody");
-    assert!(schema.check_principal(&role).is_err());
+    let role = brocanth_rls::DbIdentity::new().role("nobody");
+    assert!(schema.check_identity(&role).is_err());
 }
 
 #[test]
@@ -263,4 +263,14 @@ fn a_value_with_a_line_break_cannot_split_the_file() {
         Ok(text) => assert_eq!(text.matches("\n-- down\n").count(), 1, "{text}"),
         Err(e) => assert!(e.to_string().contains("help:")),
     }
+}
+
+#[test]
+fn a_custom_built_in_type_survives_json_and_makes_no_step() {
+    let f = Function::new("one", SqlType::Custom("bigint".into()))
+        .arg(SqlType::Custom("int4".into()))
+        .body(SqlExpr::val(1));
+    let s = Schema::new().function(f).snapshot().unwrap();
+    let back = Snapshot::from_json(&s.to_json()).unwrap();
+    assert!(diff(&back, &s).unwrap().is_empty());
 }

@@ -5,6 +5,7 @@
 //! writer and its escaping, never by `format!`. Column, function and setting
 //! names are quoted or checked by this crate.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use brocanth_db::sea_query::{
@@ -277,10 +278,23 @@ impl SqlExpr {
 /// A value the request sets on its transaction: `brocanth.<key>`.
 ///
 /// [`Setting::get`] reads it as `type`, or `NULL` when the transaction did
-/// not set it. `brocanth_db::Principal::set(key, value)` sets it.
+/// not set it. [`DbIdentity::setting`](brocanth_db::DbIdentity::setting)
+/// sets it, from the same constant, so the key cannot drift between the
+/// policy and the request:
+///
+/// ```
+/// use brocanth_rls::{DbIdentity, Setting, SqlType};
+///
+/// const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
+///
+/// let me = DbIdentity::new().role("app_member").setting(&TENANT, 7);
+/// assert_eq!(me.settings()[0].0, "tenant_id");
+/// // A value the policy cannot read as `bigint` is refused.
+/// assert!(DbIdentity::new().setting(&TENANT, "seven").statements().is_err());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setting {
-    key: String,
+    key: Cow<'static, str>,
     ty: SqlType,
 }
 
@@ -289,7 +303,16 @@ impl Setting {
     /// `[a-z][a-z0-9_]*`; a schema refuses another.
     pub fn new(key: impl Into<String>, ty: SqlType) -> Setting {
         Setting {
-            key: key.into(),
+            key: Cow::Owned(key.into()),
+            ty,
+        }
+    }
+
+    /// [`Setting::new`] in a `const`, so the policy and the request name
+    /// one constant.
+    pub const fn of(key: &'static str, ty: SqlType) -> Setting {
+        Setting {
+            key: Cow::Borrowed(key),
             ty,
         }
     }
@@ -320,8 +343,24 @@ impl Setting {
         if let Err(err) = self.ty.check() {
             e.uses.problems.push(err.to_string());
         }
-        e.uses.settings.insert(self.key.clone(), self.ty.clone());
+        e.uses
+            .settings
+            .insert(self.key.to_string(), self.ty.clone());
         e
+    }
+}
+
+impl brocanth_db::principal::SettingKey for Setting {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn sql_type(&self) -> &str {
+        self.ty.as_sql()
+    }
+
+    fn accepts(&self, value: &str) -> bool {
+        self.ty.accepts(value)
     }
 }
 

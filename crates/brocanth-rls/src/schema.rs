@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use brocanth_db::Principal;
+use brocanth_db::DbIdentity;
 
 use crate::def::{Function, Grantee, Policy, Role, Table};
 use crate::error::RlsError;
@@ -71,27 +71,30 @@ impl Schema {
         all
     }
 
-    /// Checks a principal against the schema: each key is a setting a
+    /// Checks an identity against the schema: each key is a setting a
     /// policy reads, and the role is a role of the schema. A typo in a key
     /// would otherwise read as `NULL`, and admit no row with no error.
     ///
     /// # Errors
     /// [`RlsError::Definition`] naming the unknown key or role.
-    pub fn check_principal(&self, principal: &Principal) -> Result<(), RlsError> {
+    pub fn check_identity(&self, identity: &DbIdentity) -> Result<(), RlsError> {
         let settings = self.settings();
-        for (key, _) in principal.settings() {
+        for (key, _) in identity.settings() {
             if !settings.contains_key(key) {
                 let known: Vec<&str> = settings.keys().map(String::as_str).collect();
                 return Err(RlsError::definition(
-                    format!("the principal sets `{key}`, which no policy reads"),
-                    format!("set one of: {}", known.join(", ")),
+                    format!("the identity sets `{key}`, which no policy reads"),
+                    format!(
+                        "set one of: {}; or use `DbIdentity::setting` with the policy's `Setting`",
+                        known.join(", ")
+                    ),
                 ));
             }
         }
-        if let Some(role) = principal.role_name() {
+        if let Some(role) = identity.role_name() {
             if !self.roles.iter().any(|r| r.name == role) {
                 return Err(RlsError::definition(
-                    format!("the principal's role `{role}` is not a role of the schema"),
+                    format!("the identity's role `{role}` is not a role of the schema"),
                     format!("add `Role::new(\"{role}\")` or `Role::existing(\"{role}\")`"),
                 ));
             }
@@ -173,8 +176,14 @@ impl Schema {
             let spec = FunctionSpec {
                 schema: function.schema.clone(),
                 name: function.name.clone(),
-                args: function.args.clone(),
-                returns: function.returns.clone(),
+                // `Custom("bigint")` is `BigInt`, as the JSON reads it back.
+                args: function
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(SqlType::normalized)
+                    .collect(),
+                returns: function.returns.clone().normalized(),
                 volatility: function.volatility,
                 definer: function.definer.clone(),
                 body: body.to_sql(),

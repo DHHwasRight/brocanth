@@ -113,17 +113,22 @@ assert!(diff(&v2, &v2).unwrap().is_empty());
 `migrations/rls.json` and writes `migrations/<UTC>_<name>.sql`, the file
 `brocanth_db::migrate` applies.
 
-### A request as its principal
+### A request as its identity
 
-`brocanth-db` sets the principal on the transaction. It ends with the
-transaction, so it never reaches the next user of the connection:
+`brocanth-db` sets the identity on the transaction. It ends with the
+transaction, so it never reaches the next user of the connection. The
+policy and the request name one `Setting` constant, so the key cannot
+drift, and a value the policy cannot read as its type is refused:
 
 ```rust,no_run
 use brocanth_db::sea_query::Query;
-use brocanth_db::{Db, DbError, Exec, Principal};
+use brocanth_db::{Db, DbError, DbIdentity, Exec};
+use brocanth_rls::{Setting, SqlType};
+
+const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
 
 async fn titles(db: &Db, tenant: i64) -> Result<Vec<(String,)>, DbError> {
-    let me = Principal::new().role("app_member").set("tenant_id", tenant);
+    let me = DbIdentity::new().role("app_member").setting(&TENANT, tenant);
     let q = Query::select().column("title").from("posts").to_owned();
     db.transact_as(&me, async |tx| tx.all(&q).await).await
 }

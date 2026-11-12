@@ -10,7 +10,7 @@
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
 //! - [`migrate`]: plain SQL migrations, for a project with no ORM.
-//! - [`Principal`]: who a transaction runs as, for row-level security.
+//! - [`DbIdentity`]: who a transaction runs as, for row-level security.
 //!   [`Db::transact_as`] and [`Tx::assume`] set it.
 //!
 //! [`sea_query`] and [`sqlx`] are re-exported, so an application names one
@@ -42,7 +42,7 @@ pub use error::DbError;
 #[cfg(feature = "runtime")]
 pub use exec::{Exec, WriteStatement};
 #[cfg(feature = "runtime")]
-pub use principal::Principal;
+pub use principal::DbIdentity;
 
 #[cfg(feature = "runtime")]
 pub use sea_query;

@@ -118,9 +118,9 @@ db.ping().await?; // for a readiness probe
 # }
 ```
 
-### The principal, for row-level security
+### The identity, for row-level security
 
-`Db::transact_as` runs a transaction as a `Principal`: `SET LOCAL ROLE`,
+`Db::transact_as` runs a transaction as a `DbIdentity`: `SET LOCAL ROLE`,
 then `set_config('brocanth.<key>', $value, true)` for each value. A policy
 reads `current_setting('brocanth.<key>', true)`. Both end with the
 transaction, so the next user of the connection starts as the login role
@@ -129,10 +129,10 @@ design.
 
 ```rust,no_run
 use brocanth_db::sea_query::Query;
-use brocanth_db::{Db, DbError, Exec, Principal};
+use brocanth_db::{Db, DbError, Exec, DbIdentity};
 
 # async fn example(db: Db) -> Result<(), DbError> {
-let me = Principal::new().role("app_member").set("tenant_id", 7);
+let me = DbIdentity::new().role("app_member").set("tenant_id", 7);
 let q = Query::select().column("title").from("posts").to_owned();
 let titles: Vec<(String,)> = db.transact_as(&me, async |tx| tx.all(&q).await).await?;
 # let _ = titles;
@@ -141,7 +141,11 @@ let titles: Vec<(String,)> = db.transact_as(&me, async |tx| tx.all(&q).await).aw
 ```
 
 A value is a bind parameter. The role is a quoted identifier, because `SET`
-takes no parameter. A key is `[a-z][a-z0-9_]*`.
+takes no parameter. A key is `[a-z][a-z0-9_]*`. `DbIdentity::setting` takes
+the key as a typed constant (`brocanth_rls::Setting`), so the policy and
+the request share it, and a value the policy cannot read is refused. A
+second `assume` in one transaction replaces the first: a key it does not
+set is cleared, and with no role it returns to the login role.
 
 ## Settings
 

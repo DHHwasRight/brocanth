@@ -105,7 +105,7 @@ Function ─▶ Function
   the names on it.
 - A setting is not a node: it creates nothing in Postgres.
   `Schema::settings()` lists the settings the expressions read, and
-  `Schema::check_principal` refuses a `Principal` key no policy reads: a
+  `Schema::check_identity` refuses a `DbIdentity` key no policy reads: a
   typo would otherwise read as `NULL` and admit no row, with no error.
 
 `Schema::snapshot()` checks the graph: a policy on an undeclared table, a
@@ -208,7 +208,7 @@ any other file. With `model`, `rls make` writes a SeaORM migration file,
 `migrations/m<UTC>_<name>.rs`, that runs the same SQL, and prints the
 `migrate sync` step that lists it.
 
-## 4. The principal in Postgres
+## 4. The identity in Postgres
 
 A policy reads who is asking from the transaction:
 
@@ -219,11 +219,12 @@ USING ("tenant_id" = CAST(NULLIF(current_setting('brocanth.tenant_id', TRUE), ''
 `brocanth-db` sets it:
 
 ```rust
-let me = Principal::new().role("app_member").set("tenant_id", 7);
+const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);   // the policy reads TENANT.get()
+let me = DbIdentity::new().role("app_member").setting(&TENANT, 7);
 db.transact_as(&me, async |tx| tx.all(&query).await).await?;
 ```
 
-`Tx::assume(&principal)` runs, inside the transaction:
+`Tx::assume(&identity)` runs, inside the transaction:
 
 ```sql
 SET LOCAL ROLE "app_member";
@@ -245,6 +246,18 @@ SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
   a `Tx`.
 - **Savepoints.** `assume` on a nested `Tx` ends with the outer
   transaction, but a rolled-back savepoint reverts it.
+- **A second `assume` replaces the first.** It does not merge: a key the
+  first set and the second does not is set to `''` (read as `NULL`), and
+  with no role the transaction returns to the login role
+  (`SET LOCAL ROLE NONE`). The `Tx` and its savepoints share the record of
+  what was set.
+- **One key, one constant.** `DbIdentity::setting(&TENANT, v)` takes the
+  `Setting` the policy reads, so the key cannot drift, and refuses a value
+  the policy cannot read as its type (`"seven"` for a `bigint`).
+  `DbIdentity::set("tenant_id", v)` is the untyped form.
+- **The name.** `brocanth_admin::Principal` is the signed-in user of a
+  request; `brocanth_db::DbIdentity` is who the database transaction runs
+  as. A request maps the first to the second.
 
 The login role needs `GRANT app_member TO app_login` (`Role::member`) for
 `SET ROLE`. It needs no privilege on the tables.

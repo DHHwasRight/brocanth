@@ -65,7 +65,7 @@ impl Role {
     }
 
     /// `GRANT "this" TO "login"`: `login` may `SET ROLE` to this role. The
-    /// application's login needs it for `Principal::role`.
+    /// application's login needs it for `DbIdentity::role`.
     pub fn member(mut self, login: impl Into<String>) -> Role {
         self.members.insert(login.into());
         self

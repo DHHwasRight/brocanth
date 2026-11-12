@@ -42,7 +42,7 @@ mod schema;
 pub mod snapshot;
 
 #[cfg(feature = "runtime")]
-pub use brocanth_db::Principal;
+pub use brocanth_db::DbIdentity;
 #[cfg(feature = "runtime")]
 pub use def::{crud, Function, Grantee, Policy, Role, Table};
 #[cfg(feature = "runtime")]

@@ -52,10 +52,10 @@ With [`model`](model.md), the file is a SeaORM migration,
 `migrate sync` after `rls make` to list it in `migrations/mod.rs`.
 Without `model`, it is a SQL file, `migrations/<UTC>_<name>.sql`.
 
-## A request as its principal
+## A request as its identity
 
 ```rust
-let me = brocanth_db::Principal::new().role("app_member").set("tenant_id", tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_member").setting(&crate::plugins::rls::TENANT, tenant_id);
 let rows: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 

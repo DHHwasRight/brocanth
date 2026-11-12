@@ -8,7 +8,7 @@
 mod common;
 
 use brocanth_db::sea_query::{Expr, ExprTrait, Query};
-use brocanth_db::{sqlx, Db, DbError, Exec, Principal};
+use brocanth_db::{sqlx, Db, DbError, DbIdentity, Exec};
 use brocanth_rls::migration::{self, Format};
 use brocanth_rls::{catalog, diff, Snapshot};
 use common::{apply, changed, connect, example, grant_usage, setup, teardown, url, Names};
@@ -33,8 +33,8 @@ fn titles(n: &Names) -> brocanth_db::sea_query::SelectStatement {
         .to_owned()
 }
 
-fn member(n: &Names, tenant: i64, user: i64) -> Principal {
-    Principal::new()
+fn member(n: &Names, tenant: i64, user: i64) -> DbIdentity {
+    DbIdentity::new()
         .role(&n.member)
         .set("tenant_id", tenant)
         .set("user_id", user)
@@ -279,7 +279,7 @@ async fn force_makes_the_owner_obey_and_without_force_the_owner_sees_all() {
 
     // posts is forced: the owner sees its tenant's rows, and none without
     // a tenant.
-    let as_tenant_1 = Principal::new().set("tenant_id", 1);
+    let as_tenant_1 = DbIdentity::new().set("tenant_id", 1);
     let (n1,): (i64,) = owner
         .transact_as(&as_tenant_1, async |tx| tx.one(&count("posts")).await)
         .await
@@ -350,7 +350,7 @@ async fn the_principal_never_reaches_the_next_transaction_on_the_connection() {
         .unwrap_err();
     assert_eq!(e.code(), Some("42501"), "{e}");
     let rows: Vec<(String,)> = login
-        .transact_as(&Principal::new().role(&n.member), async |tx| {
+        .transact_as(&DbIdentity::new().role(&n.member), async |tx| {
             tx.all(&titles(&n)).await
         })
         .await
@@ -365,10 +365,39 @@ async fn a_role_the_login_is_not_granted_is_refused_with_help() {
     let n = Names::new("rls_role");
     let (admin, login) = enforced(&url, &n).await;
     let e = login
-        .transact_as(&Principal::new().role(&n.owner), async |_| Ok(()))
+        .transact_as(&DbIdentity::new().role(&n.owner), async |_| Ok(()))
         .await
         .unwrap_err()
         .to_string();
     assert!(e.contains("help:"), "{e}");
+    teardown(&admin, &n).await;
+}
+
+#[tokio::test]
+async fn a_second_identity_replaces_the_first_and_does_not_merge() {
+    let url = require_db!();
+    let n = Names::new("rls_assume");
+    let (admin, login) = enforced(&url, &n).await;
+    let who = "SELECT current_user::text, \
+               coalesce(nullif(current_setting('brocanth.user_id', true), ''), '<null>'), \
+               coalesce(nullif(current_setting('brocanth.tenant_id', true), ''), '<null>')";
+    let seen: (String, String, String) = login
+        .transact(async |tx| {
+            tx.assume(&member(&n, 1, 10)).await?;
+            // A savepoint shares the record: its assume replaces too.
+            let mut inner = tx.begin().await?;
+            inner.assume(&DbIdentity::new().set("tenant_id", 2)).await?;
+            let seen = sqlx::query_as(who).fetch_one(inner.executor()).await?;
+            inner.commit().await?;
+            Ok(seen)
+        })
+        .await
+        .unwrap();
+    // No role: back to the login. No user_id: cleared, not kept from the
+    // first identity.
+    assert_eq!(
+        seen,
+        (n.login.clone(), "<null>".to_string(), "2".to_string())
+    );
     teardown(&admin, &n).await;
 }

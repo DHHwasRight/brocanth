@@ -51,6 +51,16 @@ pub enum RlsError {
 }
 
 impl RlsError {
+    /// A `brocanth-db` refusal of a name or key, as a definition error.
+    pub(crate) fn from_config(e: brocanth_db::DbError) -> RlsError {
+        match e {
+            brocanth_db::DbError::Config { message, help } => {
+                RlsError::Definition { message, help }
+            }
+            other => RlsError::Db(other),
+        }
+    }
+
     pub(crate) fn definition(message: impl Into<String>, help: impl Into<String>) -> RlsError {
         RlsError::Definition {
             message: message.into(),
