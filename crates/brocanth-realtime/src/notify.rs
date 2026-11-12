@@ -17,25 +17,42 @@
 //! that is off must mean the code is absent, and a single-process deployment
 //! has no business linking a JSON codec to broadcast in memory.
 //!
-//! # No driver here
+//! # No driver here, and a queue instead
 //!
-//! [`Notifier`] has one method and the application implements it in about ten
-//! lines against whatever it already opened:
+//! [`Notifier::notify`] is synchronous, because [`ChangeSink::publish`] is: the
+//! model layer calls it inside an `async` write and must not wait on a second
+//! round trip. A driver call is `async`, so it cannot run there. [`queue`] is
+//! the notifier this crate ships: [`Queued`] puts each notification on a
+//! bounded queue and returns at once, and the application drains the
+//! [`Outbox`] on a thread of its own, against the pool it already opened:
 //!
 //! ```ignore
-//! impl Notifier for MyPool {
-//!     fn notify(&self, channel: &str, payload: &str) -> Result<(), NotifyError> {
+//! let (notifier, outbox) = brocanth_realtime::notify::queue(1024);
+//! let sink = NotifySink::new(notifier).only(["posts"]);
+//! // ... install `sink` beside the broker ...
+//!
+//! let runtime = tokio::runtime::Handle::current();
+//! let db = db.clone(); // brocanth_db::Db
+//! std::thread::spawn(move || {
+//!     while let Some(notification) = outbox.recv_blocking() {
 //!         // `pg_notify` rather than `NOTIFY`, because the channel name is a
 //!         // value there and an identifier in the statement form.
-//!         sqlx::query("SELECT pg_notify($1, $2)")
-//!             .bind(channel)
-//!             .bind(payload)
-//!             .execute(&self.0)
-//!             .map_err(|e| NotifyError::new(e.to_string()))?;
-//!         Ok(())
+//!         let sent = runtime.block_on(
+//!             sqlx::query("SELECT pg_notify($1, $2)")
+//!                 .bind(&notification.channel)
+//!                 .bind(&notification.payload)
+//!                 .execute(db.pool()),
+//!         );
+//!         if let Err(e) = sent {
+//!             tracing::warn!(channel = %notification.channel, "pg_notify failed: {e}");
+//!         }
 //!     }
-//! }
+//! });
 //! ```
+//!
+//! The listening side (`LISTEN` on [`channel_for`] each collection, then
+//! [`decode`] and publish into the local broker) is the application's too.
+//! The generated `realtime` module does neither: it serves one process.
 //!
 //! # The 8000-byte limit, and the pointer
 //!
@@ -251,7 +268,8 @@ pub struct Notification {
 /// The change did not fit even without its field list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "a change needs {needed} bytes and NOTIFY accepts {MAX_PAYLOAD}, with nothing left to elide"
+    "a change needs {needed} bytes and NOTIFY accepts {MAX_PAYLOAD}, with nothing left to elide\n\
+     help: give the collection a shorter key; the row id is all that is left"
 )]
 pub struct PayloadTooLarge {
     /// How many bytes the pointer form still needed.
@@ -343,17 +361,26 @@ impl Inbound {
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     /// Not the JSON this crate writes.
-    #[error("the notification payload is not a change envelope: {0}")]
+    #[error(
+        "the notification payload is not a change envelope: {0}\n\
+         help: send on this channel only what `notify::encode` writes"
+    )]
     Malformed(#[from] serde_json::Error),
     /// A version this build does not know. A newer process is on the channel,
     /// and guessing at its format is how a rolling deploy corrupts a stream.
-    #[error("the notification is version {found}, and this build speaks {VERSION}")]
+    #[error(
+        "the notification is version {found}, and this build speaks {VERSION}\n\
+         help: deploy the same build to every process on the channel"
+    )]
     Version {
         /// What arrived.
         found: u8,
     },
     /// A 128-bit id that is not a number.
-    #[error("the notification carries a 128-bit row id that is not a number")]
+    #[error(
+        "the notification carries a 128-bit row id that is not a number\n\
+         help: send on this channel only what `notify::encode` writes"
+    )]
     BadRowId,
 }
 
@@ -393,8 +420,9 @@ pub fn decode(channel: &str, payload: &str) -> Result<Inbound, DecodeError> {
 
 /// Whatever can run `pg_notify`.
 ///
-/// One method, so the application's own pool implements it without this crate
-/// taking a driver. See the module documentation for the ten lines.
+/// One synchronous method, called inside the write that made the change, so
+/// it must not wait on the database. [`Queued`] is the implementation this
+/// crate ships; see the module documentation for the thread that drains it.
 pub trait Notifier: Send + Sync {
     /// Send a payload on a channel.
     fn notify(&self, channel: &str, payload: &str) -> Result<(), NotifyError>;
@@ -410,6 +438,76 @@ impl NotifyError {
     /// Wrap a driver's message.
     pub fn new(message: impl Into<String>) -> NotifyError {
         NotifyError(message.into())
+    }
+}
+
+/// A notification on its way to `pg_notify`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// The channel, from [`channel_for`].
+    pub channel: String,
+    /// The payload, from [`encode`].
+    pub payload: String,
+}
+
+/// A bounded queue of notifications: [`Queued`] fills it, [`Outbox`] empties
+/// it.
+///
+/// `capacity` is how many notifications wait before [`Queued`] refuses one.
+/// A refusal is counted by [`NotifySink::failures`] and kept in
+/// [`NotifySink::last_failure`]; the write that made the change still
+/// succeeds.
+pub fn queue(capacity: usize) -> (Queued, Outbox) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(capacity.max(1));
+    (Queued { sender }, Outbox { receiver })
+}
+
+/// The [`Notifier`] this crate ships: it queues, and never waits.
+#[derive(Debug)]
+pub struct Queued {
+    sender: std::sync::mpsc::SyncSender<Pending>,
+}
+
+impl Notifier for Queued {
+    fn notify(&self, channel: &str, payload: &str) -> Result<(), NotifyError> {
+        let pending = Pending {
+            channel: channel.to_owned(),
+            payload: payload.to_owned(),
+        };
+        self.sender.try_send(pending).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => NotifyError::new(
+                "the notify queue is full, so this change reaches no other process\n\
+                 help: drain the outbox faster, or pass a larger capacity to `notify::queue`",
+            ),
+            std::sync::mpsc::TrySendError::Disconnected(_) => NotifyError::new(
+                "the notify outbox was dropped, so no change reaches another process\n\
+                 help: keep the thread that drains the `Outbox` running",
+            ),
+        })
+    }
+}
+
+/// The other end of [`queue`]: what the application sends with `pg_notify`.
+#[derive(Debug)]
+pub struct Outbox {
+    receiver: std::sync::mpsc::Receiver<Pending>,
+}
+
+impl Outbox {
+    /// The next notification, waiting for one. `None` when every [`Queued`]
+    /// is gone, which is the signal to stop.
+    pub fn recv_blocking(&self) -> Option<Pending> {
+        self.receiver.recv().ok()
+    }
+
+    /// The next notification if one waits.
+    pub fn try_recv(&self) -> Option<Pending> {
+        self.receiver.try_recv().ok()
+    }
+
+    /// Every notification that waits now.
+    pub fn drain(&self) -> Vec<Pending> {
+        self.receiver.try_iter().collect()
     }
 }
 
@@ -435,7 +533,8 @@ where
 /// there is nobody left to apologise to."* A notifier that errors increments
 /// [`NotifySink::failures`]; a change that cannot fit increments
 /// [`NotifySink::oversized`]. Both are numbers an operator watches, and
-/// neither takes a write down with it.
+/// neither takes a write down with it. [`NotifySink::last_failure`] keeps the
+/// message of the latest one, so a log line or a health check can say why.
 pub struct NotifySink<N> {
     notifier: N,
     origin: Origin,
@@ -444,6 +543,7 @@ pub struct NotifySink<N> {
     truncated: AtomicU64,
     oversized: AtomicU64,
     failures: AtomicU64,
+    last_failure: std::sync::Mutex<Option<String>>,
 }
 
 impl<N: Notifier> NotifySink<N> {
@@ -457,6 +557,7 @@ impl<N: Notifier> NotifySink<N> {
             truncated: AtomicU64::new(0),
             oversized: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            last_failure: std::sync::Mutex::new(None),
         }
     }
 
@@ -497,6 +598,18 @@ impl<N: Notifier> NotifySink<N> {
     pub fn failures(&self) -> u64 {
         self.failures.load(Ordering::Relaxed)
     }
+
+    /// Why the latest notification was refused or did not fit, if one was.
+    pub fn last_failure(&self) -> Option<String> {
+        self.last_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn failed(&self, why: String) {
+        *self.last_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+    }
 }
 
 impl<N: Notifier> ChangeSink for NotifySink<N> {
@@ -513,13 +626,15 @@ impl<N: Notifier> ChangeSink for NotifySink<N> {
                     Ok(()) => {
                         self.sent.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(_) => {
+                    Err(e) => {
                         self.failures.fetch_add(1, Ordering::Relaxed);
+                        self.failed(format!("{}: {e}", notification.channel));
                     }
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 self.oversized.fetch_add(1, Ordering::Relaxed);
+                self.failed(format!("{}: {e}", change.collection));
             }
         }
     }
@@ -658,11 +773,34 @@ mod tests {
         sink.publish(&RowChange::deleted("secrets", 1i64));
         assert_eq!(sink.sent(), 1);
         assert_eq!(sink.failures(), 1);
+        assert_eq!(sink.last_failure().as_deref(), Some("bc_secrets: no"));
         assert_eq!(sent.lock().unwrap().len(), 1);
 
         let names: Vec<String> = (0..600).map(|n| format!("column_number_{n:04}")).collect();
         sink.publish(&RowChange::updated("posts", 2i64, names));
         assert_eq!(sink.truncated(), 1);
         assert_eq!(sink.oversized(), 0);
+    }
+
+    #[test]
+    fn the_queue_notifier_never_waits_and_the_outbox_gets_what_it_queued() {
+        let (notifier, outbox) = queue(1);
+        let sink = NotifySink::new(notifier);
+        sink.publish(&RowChange::created("posts", 1i64));
+        sink.publish(&RowChange::created("posts", 2i64));
+        assert_eq!(sink.sent(), 1);
+        assert_eq!(sink.failures(), 1, "the second finds the queue full");
+        let why = sink.last_failure().expect("a reason");
+        assert!(why.contains("full") && why.contains("\nhelp: "), "{why}");
+
+        let pending = outbox.drain();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel, "bc_posts");
+        let inbound = decode(&pending[0].channel, &pending[0].payload).unwrap();
+        assert_eq!(inbound.change.row, RowId::I64(1));
+        assert_eq!(outbox.try_recv(), None);
+
+        drop(sink);
+        assert_eq!(outbox.recv_blocking(), None, "every sender is gone");
     }
 }

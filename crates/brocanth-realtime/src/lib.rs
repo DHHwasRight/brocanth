@@ -150,8 +150,11 @@
 //!
 //! Long polling, which was the answer while the core buffered and is still a
 //! reasonable answer for an application that wants no open connections. A
-//! handler calls [`Broker::connect`] once, keeps the [`Client`] in the
-//! session, and on each request calls
+//! handler calls [`Broker::connect`] once and keeps the [`Client`] on the
+//! server, in a map from session id to `Client` that the plugin owns, with an
+//! idle timeout that drops a client nobody polled for a while. (A `Client`
+//! holds the broker and its mailbox, so it cannot go into a cookie session.)
+//! On each request the handler takes the session's client and calls
 //! [`Mailbox::recv_timeout`] for a few seconds and then [`Mailbox::drain`],
 //! returning every frame it got as **one complete `Vec<u8>`**. The body is
 //! finished when the handler returns, so `Response` does not change, every
@@ -177,8 +180,14 @@
 //!
 //! §10: *"The same trait over `LISTEN/NOTIFY` buys multi-process realtime —
 //! which PocketBase cannot have at any price, its broker being in-memory
-//! beside an embedded database."* That is the `listen-notify` feature, off by
-//! default. See [`notify`].
+//! beside an embedded database."* The `listen-notify` feature, off by
+//! default, is the part of that this crate owns: the payload codec, a
+//! [`ChangeSink`](brocanth_events::ChangeSink) that encodes each change, and
+//! a bounded queue that the sink fills without waiting. Running `pg_notify`
+//! from that queue, and `LISTEN` plus [`Broker::publish_change`] on the other
+//! side, is the application's: about twenty lines over its own pool, shown in
+//! `notify`. The generated `realtime` module does not write them, so a
+//! generated project delivers frames within one process only.
 //!
 //! # The payload
 //!

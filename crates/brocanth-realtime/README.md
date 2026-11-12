@@ -54,17 +54,20 @@ brocanth create my_app --with realtime,realtime-sse
 ```
 
 It writes `src/plugins/realtime_sse/mod.rs` (the stream) and
-`src/pages/realtime/events.rs` (the route). List a collection in `PUBLIC`
-there, or gate it by a policy in `authorise`, before a browser can follow
-it. `realtime-websocket` adds the duplex transport:
+`src/pages/realtime/events.rs` (the route). Both transports share
+`src/plugins/realtime/authorise.rs`: list a collection in `PUBLIC` there,
+or gate it by a policy in `authorise`, before a browser can follow it.
+Frames reach only the connections of one process. `realtime-websocket` adds the duplex transport:
 
 ```sh
 brocanth create my_app --with realtime,realtime-websocket
 ```
 
 It writes `src/plugins/realtime_websocket/mod.rs` (the loop) and
-`src/pages/realtime/socket.rs` (the route, `PUBLIC`, `ALLOWED_ORIGINS` and
-`authorise`). A page on another site is refused by its `Origin`.
+`src/pages/realtime/socket.rs` (the route and `ALLOWED_ORIGINS`). A page on
+another site is refused by its `Origin`. A socket keeps the viewer it opened
+with and closes after `MAX_AGE`, so the browser reconnects and is checked
+again.
 
 ### By hand
 
@@ -75,7 +78,7 @@ brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 
 | Feature | Default | Adds |
 | --- | --- | --- |
-| `listen-notify` | off | Multi-process realtime over Postgres `LISTEN/NOTIFY` (`notify` module). Adds `serde` and `serde_json`. |
+| `listen-notify` | off | The codec, a sink and a queue for Postgres `LISTEN/NOTIFY` (`notify` module). The application runs `pg_notify` and `LISTEN`. Adds `serde` and `serde_json`. |
 | `admin` | off | `admin::RealtimePanel`, a read-only tab for `brocanth-admin`. Adds the admin and `rsx`, still no `brocanth`. |
 | `scaffold` | off | The generator module. Only the CLI turns it on. |
 
@@ -197,17 +200,20 @@ fn poll(client: &Client) -> Vec<u8> {
 }
 ```
 
-`no_run`: it waits up to 25 seconds. Keep the `Client` between requests (in
-the session); open it with `Broker::connect`.
+`no_run`: it waits up to 25 seconds. Keep the `Client` between requests on
+the server, in a map from session id to `Client` with an idle timeout; open
+it with `Broker::connect`. A `Client` cannot go into a cookie session.
 
 ## Multi-process (`listen-notify`)
 
 Four web processes install two `brocanth_events::ChangeSink`s each: the
 local `Broker`, and a `notify::NotifySink` that puts the change on a
 Postgres channel. A listener in each process decodes with `notify::decode`
-and publishes into its own broker. The application implements
-`notify::Notifier` (one method) against the pool it already opened. This
-crate opens no connection.
+and publishes into its own broker. `notify::queue` gives the sink a
+notifier that never waits; the application drains its `Outbox` and runs
+`pg_notify` against the pool it already opened, and runs the `LISTEN` side.
+This crate opens no connection, and the generated `realtime` module writes
+neither side: a generated project delivers within one process.
 
 ## Testing
 
