@@ -507,6 +507,21 @@ impl<L: Locales> Negotiator<L> {
         !file && !kept
     }
 
+    /// Every URL a page at `path` answers at with no redirect: one per
+    /// offered locale (`/en/about`, `/fr/about`) while `paths` is on, or
+    /// `path` itself when it keeps no segment (a file, a prefix of
+    /// `unprefixed`) or `paths` is off. For a list of URLs written at
+    /// startup, such as a sitemap.
+    pub fn localized(&self, path: &str) -> Vec<String> {
+        if !self.config.paths || !self.redirects(path) {
+            return vec![path.to_string()];
+        }
+        self.offered
+            .iter()
+            .map(|locale| prefixed(locale.tag(), path))
+            .collect()
+    }
+
     /// What a page is told about a locale its path named.
     pub fn path_locale(&self, locale: L) -> PathLocale {
         PathLocale {
@@ -908,6 +923,20 @@ mod tests {
         assert_eq!(current.source(), Source::Cookie);
         // This test type has no catalog, so the trait's default answers.
         assert_eq!(current.text("title"), None);
+    }
+
+    #[test]
+    fn a_page_is_listed_once_per_locale_while_paths_are_on() {
+        let off = Negotiator::<L>::new(NegotiatorConfig::default());
+        assert_eq!(off.localized("/about"), ["/about"]);
+        let on = Negotiator::<L>::new(NegotiatorConfig {
+            available: vec!["en".into(), "fr".into()],
+            ..NegotiatorConfig::default().with_paths(true)
+        });
+        assert_eq!(on.localized("/about"), ["/en/about", "/fr/about"]);
+        assert_eq!(on.localized("/"), ["/en", "/fr"]);
+        assert_eq!(on.localized("/api/users"), ["/api/users"], "unprefixed");
+        assert_eq!(on.localized("/robots.txt"), ["/robots.txt"], "a file");
     }
 
     #[test]

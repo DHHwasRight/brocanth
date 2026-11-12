@@ -51,9 +51,16 @@ impl Module for Robots {
             "static",
             "the file says index = true, because the export is what gets published",
         )
+        .adapts_to(
+            "i18n-routing",
+            "each rule path is also written under each locale segment: /drafts and /fr/drafts",
+        )
         .asked_in("pages", "A robots.txt that says what crawlers may read")
         .krate(Dep::brocanth("brocanth-robots"))
         .after("config")
+        // The `i18n` plugin puts its negotiator in the services at
+        // `configure`; this one reads it there.
+        .after("i18n")
         .absent(
             "brocanth-robots",
             "no robots.txt; every crawler reads every page, and so does every staging server's",
@@ -144,7 +151,13 @@ fn settings(project: &Project) -> Vec<Setting> {
             "disallow",
             &[],
             "Paths no crawler may read, each from the root: \"/admin\".",
-        ),
+        )
+        .note(if project.has("i18n-routing") {
+            "Each path is also written under each locale segment: \"/drafts\" keeps\n\
+             crawlers out of /fr/drafts too."
+        } else {
+            ""
+        }),
         Setting::list(
             "allow",
             &[],
@@ -298,8 +311,8 @@ const SITEMAP_FROM_PLUGIN: &str =
         }";
 
 const RENDER_AT_CONFIGURE: &str =
-    "    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let _ = RENDERED.set(self.rendered()?);
+    "    fn configure(&mut self, @LC@: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+@LOCALIZED@        let _ = RENDERED.set(self.rendered(&localized)?);
         Ok(())
     }";
 
@@ -307,10 +320,28 @@ const RENDER_AT_CONFIGURE: &str =
 const RENDER_AFTER_CONFIG: &str =
     "    // After `configure`: the sitemap plugin sets its URL there, and every
     // plugin finishes one stage before any plugin starts the next.
-    fn after_config(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let _ = RENDERED.set(self.rendered()?);
+    fn after_config(&mut self, @LC@: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+@LOCALIZED@        let _ = RENDERED.set(self.rendered(&localized)?);
         Ok(())
     }";
+
+/// A rule path, with no locale segment.
+const LOCALIZED_PLAIN: &str = "        let localized = |path: &str| vec![path.to_string()];\n";
+
+/// A rule path under each locale segment, from the negotiator the `i18n`
+/// plugin put in the services.
+const LOCALIZED_ROUTING: &str =
+    "        // Each rule path under each locale segment too, from the negotiator
+        // the `i18n` plugin put in the services: /drafts and /fr/drafts.
+        let i18n = lc
+            .services()
+            .get::<brocanth_i18n::Negotiator<crate::plugins::i18n::Locale>>()
+            .cloned();
+        let localized = move |path: &str| {
+            i18n.as_ref()
+                .map_or_else(|| vec![path.to_string()], |n| n.localized(path))
+        };
+";
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "robots");
@@ -324,11 +355,21 @@ fn plugin_rs(project: &Project) -> String {
     } else {
         SITEMAP_FROM_SETTING
     };
+    let routing = project.has("i18n-routing");
     let stage = if project.has("sitemap") {
         RENDER_AFTER_CONFIG
     } else {
         RENDER_AT_CONFIGURE
-    };
+    }
+    .replace("@LC@", if routing { "lc" } else { "_lc" })
+    .replace(
+        "@LOCALIZED@",
+        if routing {
+            LOCALIZED_ROUTING
+        } else {
+            LOCALIZED_PLAIN
+        },
+    );
     let admin = admin_rule(project);
     format!(
         r##"//! The robots.txt, as this application answers it.
@@ -339,7 +380,9 @@ fn plugin_rs(project: &Project) -> String {
 //! ignore that line, and the page it was meant to hide would be indexed.
 //!
 //! `index = false` answers `User-agent: *` / `Disallow: /` and nothing
-//! else. That is the answer for development and staging.
+//! else. That is the answer for development and staging. The rules are
+//! still checked then, so a bad one stops the development server, not the
+//! first production one.
 //!
 //! Only the root `/robots.txt` of a host is read. Under a base path, as on
 //! a GitHub Pages project site, crawlers never ask for this file.
@@ -404,18 +447,31 @@ pub struct Robots {{
     settings: Settings,
 }}
 
-impl Robots {{
-    /// The builder these settings describe.
-    fn text(&self) -> Result<Text, PluginError> {{
-        if !self.settings.index {{
-            return Ok(Text::closed());
+/// A rule path, then each other URL `localized` gives for it.
+fn rule_paths(path: &str, localized: &dyn Fn(&str) -> Vec<String>) -> Vec<String> {{
+    let mut out = vec![path.to_string()];
+    for other in localized(path) {{
+        if !out.contains(&other) {{
+            out.push(other);
         }}
+    }}
+    out
+}}
+
+impl Robots {{
+    /// The builder these settings describe, as if `index` were true.
+    /// `localized` gives the other URLs a rule path covers.
+    fn open(&self, localized: &dyn Fn(&str) -> Vec<String>) -> Result<Text, PluginError> {{
         let mut text = Text::new();
 {admin}        for path in &self.settings.disallow {{
-            text = text.disallow(path.as_str());
+            for path in rule_paths(path, localized) {{
+                text = text.disallow(path);
+            }}
         }}
         for path in &self.settings.allow {{
-            text = text.allow(path.as_str());
+            for path in rule_paths(path, localized) {{
+                text = text.allow(path);
+            }}
         }}
         for named in &self.settings.groups {{
             let Some((first, rest)) = named.agents.split_first() else {{
@@ -429,10 +485,14 @@ impl Robots {{
                 group = group.agent(agent.as_str());
             }}
             for path in &named.disallow {{
-                group = group.disallow(path.as_str());
+                for path in rule_paths(path, localized) {{
+                    group = group.disallow(path);
+                }}
             }}
             for path in &named.allow {{
-                group = group.allow(path.as_str());
+                for path in rule_paths(path, localized) {{
+                    group = group.allow(path);
+                }}
             }}
             text = text.group(group);
         }}
@@ -440,11 +500,16 @@ impl Robots {{
         Ok(text)
     }}
 
-    /// The text these settings describe, or why it cannot be served.
-    fn rendered(&self) -> Result<String, PluginError> {{
-        self.text()?
-            .render()
-            .map_err(|e| PluginError::new(format!("[robots] {{e}}")))
+    /// The text these settings describe, or why it cannot be served. The
+    /// open text is rendered even when `index` is false, so a bad rule
+    /// stops the development server too.
+    fn rendered(&self, localized: &dyn Fn(&str) -> Vec<String>) -> Result<String, PluginError> {{
+        let failed = |e: brocanth_robots::RobotsError| PluginError::new(format!("[robots] {{e}}"));
+        let open = self.open(localized)?.render().map_err(failed)?;
+        if !self.settings.index {{
+            return Text::closed().render().map_err(failed);
+        }}
+        Ok(open)
     }}
 }}
 
@@ -464,6 +529,10 @@ impl Plugin for Robots {{
 mod tests {{
     use super::*;
 
+    fn rendered(robots: &Robots) -> Result<String, PluginError> {{
+        robots.rendered(&|path| vec![path.to_string()])
+    }}
+
     fn ai_crawlers() -> CrawlerGroup {{
         CrawlerGroup {{
             agents: vec!["GPTBot".to_string(), "CCBot".to_string()],
@@ -479,7 +548,18 @@ mod tests {{
             groups: vec![ai_crawlers()],
             ..Settings::default()
         }});
-        assert_eq!(robots.rendered().unwrap(), "User-agent: *\nDisallow: /\n");
+        assert_eq!(rendered(&robots).unwrap(), "User-agent: *\nDisallow: /\n");
+    }}
+
+    #[test]
+    fn a_bad_rule_stops_a_closed_site_too() {{
+        let robots = Robots::new(Settings {{
+            index: false,
+            disallow: vec!["private".to_string()],
+            ..Settings::default()
+        }});
+        let error = rendered(&robots).unwrap_err().to_string();
+        assert!(error.contains("help:"), "{{error}}");
     }}
 
     #[test]
@@ -491,7 +571,7 @@ mod tests {{
             groups: vec![ai_crawlers()],
             ..Settings::default()
         }});
-        let text = robots.rendered().unwrap();
+        let text = rendered(&robots).unwrap();
         assert!(text.contains("Disallow: /private\n"), "{{text}}");
         assert!(text.contains("Allow: /private/help\n"), "{{text}}");
         assert!(
@@ -510,7 +590,7 @@ mod tests {{
             groups: vec![CrawlerGroup::default()],
             ..Settings::default()
         }});
-        let error = robots.rendered().unwrap_err().to_string();
+        let error = rendered(&robots).unwrap_err().to_string();
         assert!(error.contains("help:"), "{{error}}");
     }}
 }}
