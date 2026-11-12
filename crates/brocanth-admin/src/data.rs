@@ -242,9 +242,43 @@ impl Locked {
     }
 }
 
+/// Who a request is for, as a data source may need it: to open its
+/// connection as that person, for a database that applies its own row
+/// rules (`SET ROLE`, a session variable an RLS policy reads).
+///
+/// `#[non_exhaustive]`, so a field can be added -- a database identity the
+/// application resolved, a request id -- without a change to the sources
+/// that do not read it.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct RequestCx<'a> {
+    /// The person, as the policy sees them.
+    pub principal: crate::policy::Principal<'a>,
+}
+
+impl<'a> RequestCx<'a> {
+    /// The context of a request made by `principal`.
+    pub fn new(principal: crate::policy::Principal<'a>) -> RequestCx<'a> {
+        RequestCx { principal }
+    }
+}
+
 /// Everything the admin needs from the layer that stores rows.
 #[async_trait]
 pub trait AdminData: Send + Sync + 'static {
+    /// The source one request reads and writes through, or `None` for this
+    /// one.
+    ///
+    /// The admin asks before each read and write of a request, and sends
+    /// that call to the source returned. A source over a database that
+    /// applies its own row rules returns one bound to the person's database
+    /// identity. The default returns `None`: every request shares this
+    /// source.
+    fn for_request(&self, cx: &RequestCx<'_>) -> Option<SharedData> {
+        let _ = cx;
+        None
+    }
+
     /// Every model this source holds, before the admin's discovery filter.
     ///
     /// Synchronous, because an entity registry is read out of the binary and

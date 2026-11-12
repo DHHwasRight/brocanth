@@ -567,12 +567,15 @@ impl Admin {
             term: &query.search,
             columns: &search_columns,
         };
-        let total = self.data.count(descriptor, search, scope).await?;
+        let total = self
+            .source(principal)
+            .count(descriptor, search, scope)
+            .await?;
         let page = admin
             .page_limits()
             .page(query.page, query.per_page, total as u64);
         let rows = self
-            .data
+            .source(principal)
             .list(ListRequest {
                 model: descriptor,
                 offset: usize::try_from(page.offset()).unwrap_or(usize::MAX),
@@ -685,7 +688,11 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::ViewDetail);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let admin = &entry.admin;
@@ -841,7 +848,8 @@ impl Admin {
             return self.form_page(principal, entry, form, None, sets(built), 422);
         }
         let values = form.values();
-        let mut writer = self.writer(&built).await?;
+        let data = self.source(principal);
+        let mut writer = Admin::writer(data.as_ref(), &built).await?;
         let key = match writer.insert(&entry.descriptor, &values).await {
             Ok(key) => key,
             Err(DataError::Invalid(errors)) => {
@@ -900,7 +908,11 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::Update);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let choices = self
@@ -950,7 +962,7 @@ impl Admin {
             return Ok(refused);
         }
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, &record, pending.scope())
             .await?;
         let Some(row) = found else {
@@ -986,7 +998,8 @@ impl Admin {
             return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
         }
         let values = form.values();
-        let mut writer = self.writer(&built).await?;
+        let data = self.source(principal);
+        let mut writer = Admin::writer(data.as_ref(), &built).await?;
         let written = writer
             .update(&entry.descriptor, &record, &values, guard.scope())
             .await;
@@ -1050,7 +1063,11 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::Delete);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let label = entry.admin.label_for(&entry.descriptor, &row);
@@ -1099,14 +1116,14 @@ impl Admin {
             return self.refuse(principal, Action::Delete);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, &record, pending.scope())
             .await?;
         let Ok(guard) = pending.resolve(usize::from(found.is_some())) else {
             return self.missing(principal);
         };
         let removed = self
-            .data
+            .source(principal)
             .delete_locked(&entry.descriptor, &record, guard.scope())
             .await?;
         if guard.applied(removed.rows).is_err() {
@@ -1322,7 +1339,11 @@ impl Admin {
                 let Some(scope) = gate.scope() else {
                     return self.refuse(principal, Action::ViewDetail);
                 };
-                let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+                let Some(row) = self
+                    .source(principal)
+                    .fetch(&entry.descriptor, &record, scope)
+                    .await?
+                else {
                     return self.missing(principal);
                 };
                 let screen = entry.admin.allows_update()
@@ -1796,7 +1817,7 @@ impl Admin {
                             direction: Direction::Ascending,
                         });
                 let mut rows = self
-                    .data
+                    .source(principal)
                     .list(ListRequest {
                         model: &child.descriptor,
                         offset: 0,
@@ -2087,7 +2108,7 @@ impl Admin {
             return Ok(false);
         };
         Ok(self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, scope)
             .await?
             .is_some())
@@ -2109,7 +2130,7 @@ impl Admin {
             return Ok(None);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&child.descriptor, key, pending.scope())
             .await?;
         let belongs = found
@@ -2124,11 +2145,22 @@ impl Admin {
     /// Where a save writes. A save with inline writes opens one
     /// transaction, so the parent and its children are kept together or not
     /// at all. A save of one row writes straight to the data source.
-    async fn writer(&self, built: &[Built<'_>]) -> Result<Writer<'_>, DataError> {
+    async fn writer<'d>(
+        data: &'d dyn AdminData,
+        built: &[Built<'_>],
+    ) -> Result<Writer<'d>, DataError> {
         if built.iter().all(|b| b.ops.is_empty()) {
-            return Ok(Writer::Direct(self.data.as_ref()));
+            return Ok(Writer::Direct(data));
         }
-        Ok(Writer::Transaction(self.data.begin().await?))
+        Ok(Writer::Transaction(data.begin().await?))
+    }
+
+    /// The source this principal's request reads and writes through:
+    /// [`AdminData::for_request`], or the admin's own.
+    fn source(&self, principal: Principal<'_>) -> SharedData {
+        self.data
+            .for_request(&crate::data::RequestCx::new(principal))
+            .unwrap_or_else(|| Arc::clone(&self.data))
     }
 
     /// Runs the inline writes after the parent's own, then keeps or
@@ -2303,7 +2335,7 @@ impl Admin {
                 direction: Direction::Ascending,
             };
             let rows = self
-                .data
+                .source(principal)
                 .list(ListRequest {
                     model: &target.descriptor,
                     offset: 0,
@@ -2341,7 +2373,7 @@ impl Admin {
                 let view = self.gate(principal, target, RowAction::View)?;
                 let found = match view.scope() {
                     Some(scope) => {
-                        self.data
+                        self.source(principal)
                             .fetch_many(
                                 &target.descriptor,
                                 &relation.target_column,
@@ -2413,7 +2445,7 @@ impl Admin {
             }
             let found = match gate.scope() {
                 Some(scope) => !self
-                    .data
+                    .source(principal)
                     .fetch_many(
                         &target.descriptor,
                         &relation.target_column,
@@ -2480,7 +2512,7 @@ impl Admin {
                 continue;
             }
             let found = self
-                .data
+                .source(principal)
                 .fetch_many(&target.descriptor, &relation.target_column, &keys, scope)
                 .await?;
             for row in found {
@@ -2738,7 +2770,11 @@ impl Admin {
                 skipped += 1;
                 continue;
             }
-            match self.data.fetch(&entry.descriptor, &record, scope).await? {
+            match self
+                .source(principal)
+                .fetch(&entry.descriptor, &record, scope)
+                .await?
+            {
                 Some(row) => selected.push(Selected {
                     label: entry.admin.label_for(&entry.descriptor, &row),
                     key: record,
@@ -3018,7 +3054,7 @@ impl Admin {
             return Ok(false);
         };
         let Some(row) = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, pending.scope())
             .await?
         else {
@@ -3028,7 +3064,7 @@ impl Admin {
             return Ok(false);
         };
         let done = match self
-            .data
+            .source(principal)
             .update_locked(&entry.descriptor, key, values, guard.scope())
             .await
         {
@@ -3070,7 +3106,7 @@ impl Admin {
             return Ok(false);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, pending.scope())
             .await?;
         let Some(row) = found else {
@@ -3080,7 +3116,7 @@ impl Admin {
             return Ok(false);
         };
         let removed = self
-            .data
+            .source(principal)
             .delete_locked(&entry.descriptor, key, guard.scope())
             .await?;
         if guard.applied(removed.rows).is_err() {
