@@ -2661,9 +2661,9 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
 "##,
         // The flags the modules declared, as arguments every command takes.
         run = if flags {
-            "    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)"
+            "    brocanth_command::main_with(brocanth_command::Context::boot(crate::app::APP)?, plugins::flag_args)"
         } else {
-            "    brocanth_command::main(brocanth_command::Context::boot()?)"
+            "    brocanth_command::main(brocanth_command::Context::boot(crate::app::APP)?)"
         },
         title = a.title,
         mods = crate_mods(&own, built),

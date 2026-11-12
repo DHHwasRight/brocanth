@@ -7,5 +7,5 @@
 mod commands;
 
 fn main() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main(brocanth_command::Context::boot()?)
+    brocanth_command::main(brocanth_command::Context::boot("demo-app")?)
 }

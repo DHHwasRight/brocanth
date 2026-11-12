@@ -99,13 +99,15 @@ fn flags(command: clap::Command) -> anyhow::Result<clap::Command> {
 }
 
 fn main() -> anyhow::Result<()> {
-    main_with(Context::boot()?, flags)
+    main_with(Context::boot("my-app")?, flags)
 }
 ```
 
 `no_run`: it parses the process arguments and exits.
 
-`Context::boot()` reads `$BROCANTH_ENV` (default `development`) and finds
+`Context::boot(app)` reads `$<APP>_ENV` (`MY_APP_ENV` for `my-app`, the
+variable the configuration loader reads), then `$BROCANTH_ENV`, and
+defaults to `development`. It finds
 the project root: the nearest directory with `brocanth.toml`, else the
 current directory. `Context::env()` and `Context::root()` return them.
 
@@ -205,7 +207,7 @@ To test a command in an application, call `run` on a value you build:
 # impl Command for SeedDemo {
 #     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> { Ok(()) }
 # }
-let mut ctx = Context::boot()?;
+let mut ctx = Context::boot("my-app")?;
 SeedDemo { count: 3 }.run(&mut ctx)?;
 # Ok::<(), anyhow::Error>(())
 ```
