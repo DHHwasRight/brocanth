@@ -34,7 +34,8 @@
 //! `@daily`, `@midnight`, `@hourly`.
 //!
 //! When **both** day-of-month and day-of-week are restricted, a day matches if
-//! **either** does. That is Vixie cron's rule, it surprises everybody once, and
+//! **either** does. A field that starts with `*`, such as `*/2`, is not
+//! restricted, so `0 0 */2 * 1` needs both. That is Vixie cron's rule, it surprises everybody once, and
 //! deviating from it would surprise everybody twice.
 //!
 //! Seconds are not a field. A queue that polls every few seconds cannot honour
@@ -117,8 +118,11 @@ impl Cron {
             days,
             months,
             weekdays,
-            day_restricted: fields[2] != "*",
-            weekday_restricted: fields[4] != "*",
+            // Vixie cron reads a field that starts with `*` as unrestricted,
+            // `*/2` included: `0 0 */2 * 1` is odd days *and* Mondays there,
+            // so it is here.
+            day_restricted: !fields[2].starts_with('*'),
+            weekday_restricted: !fields[4].starts_with('*'),
         })
     }
 
@@ -169,12 +173,13 @@ impl Cron {
     fn day_matches(&self, at: DateTime<Utc>) -> bool {
         let dom = bit(self.days, at.day());
         let dow = bit(self.weekdays, at.weekday().num_days_from_sunday());
-        match (self.day_restricted, self.weekday_restricted) {
-            // Vixie's rule: both restricted means either may match.
-            (true, true) => dom || dow,
-            (true, false) => dom,
-            (false, true) => dow,
-            (false, false) => true,
+        // Vixie's rule: both restricted means either may match. Otherwise
+        // both must, and a field that is `*` matches every day anyway, while
+        // a `*/2` still narrows the days.
+        if self.day_restricted && self.weekday_restricted {
+            dom || dow
+        } else {
+            dom && dow
         }
     }
 }
@@ -297,6 +302,17 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, h, mi, 0).unwrap()
+    }
+
+    #[test]
+    fn a_star_step_day_with_a_weekday_needs_both() {
+        // 1 May 2026 is a Friday. Odd days AND Mondays: the 11th, a Monday.
+        // The OR rule would have fired on the 3rd.
+        let c = Cron::parse("0 0 */2 * 1").unwrap();
+        assert_eq!(
+            c.next_after(at(2026, 5, 1, 0, 0)),
+            Some(at(2026, 5, 11, 0, 0))
+        );
     }
 
     #[test]
