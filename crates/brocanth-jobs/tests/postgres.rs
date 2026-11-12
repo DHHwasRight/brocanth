@@ -155,7 +155,10 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
     // during a rolling deploy its old worker may still be running it.
     let stats = queue.stats().await.expect("stats");
     assert_eq!(stats.ready, 1, "the waiting job is ready again: {stats:?}");
-    assert_eq!(stats.retrying, 1, "the running job waits a lease: {stats:?}");
+    assert_eq!(
+        stats.retrying, 1,
+        "the running job waits a lease: {stats:?}"
+    );
     assert_eq!(stats.dead, 1);
     let dead = queue.dead_jobs(10, 0).await.expect("dead");
     assert_eq!(dead[0].kind, "echo");
@@ -183,15 +186,19 @@ async fn migrate_moves_the_first_queues_rows_into_the_engine() {
         .register::<Echo>()
         .start()
         .expect("start");
-    wait_for("the waiting job to run", Duration::from_secs(10), || async {
-        log(&t).len() == 1
-    })
+    wait_for(
+        "the waiting job to run",
+        Duration::from_secs(10),
+        || async { log(&t).len() == 1 },
+    )
     .await;
-    sqlx::query("UPDATE queue_bulk SET available_at = now() \
-         WHERE attempts > 0 AND lease_token IS NULL")
-        .execute(&pool)
-        .await
-        .expect("end the old lease");
+    sqlx::query(
+        "UPDATE queue_bulk SET available_at = now() \
+         WHERE attempts > 0 AND lease_token IS NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("end the old lease");
     wait_for(
         "both moved jobs to run",
         Duration::from_secs(10),
