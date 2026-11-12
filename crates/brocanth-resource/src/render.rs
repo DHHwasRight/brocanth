@@ -22,7 +22,7 @@ use brocanth_policy::Value;
 use crate::error::Failure;
 use crate::json;
 use crate::page::{Listing, PageRequest};
-use crate::resource::{ColumnOf, Direction, Resource, RowOf, Sort};
+use crate::resource::{ColumnOf, Resource, RowOf, Sort};
 use crate::status::{generic_message, outcome, Action};
 
 /// What to send, or that there is nothing to send.
@@ -198,17 +198,18 @@ pub fn sort_from<R: Resource>(
     resource: &R,
     query: Option<&str>,
 ) -> Result<Option<Sort<ColumnOf<R>>>, Failure> {
-    let Some(raw) = param(query, "sort") else {
+    // Decoded and parsed as `brocanth-filters` does, so both list paths
+    // read `sort` the same way.
+    let Some(raw) = query.and_then(|q| brocanth_pagination::query::param(q, "sort")) else {
         return Ok(None);
     };
-    let (direction, name) = match raw.strip_prefix('-') {
-        Some(rest) => (Direction::Descending, rest),
-        None => (Direction::Ascending, raw.trim_start_matches('+')),
-    };
+    let (direction, name) = brocanth_pagination::query::sort(&raw);
     match resource.sort_column(name) {
         Some(column) => Ok(Some(Sort { column, direction })),
         None => Err(Failure::bad_request(format!(
-            "`{name}` is not a sortable column of this resource"
+            "`{name}` is not a sortable column of this resource\n\
+             help: sort on a column this resource names in `Resource::sort_column`, \
+             with `-` in front for largest first"
         ))),
     }
 }

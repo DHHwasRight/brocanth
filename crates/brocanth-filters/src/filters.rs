@@ -439,12 +439,7 @@ impl<C: Column> Filters<C> {
     }
 
     fn sort_from(&self, raw: &str) -> Result<Sort<C>, FilterError> {
-        // `+` in a query string decodes to a space, so `sort=+title` arrives
-        // as ` title`. Both mean ascending.
-        let (direction, name) = match raw.strip_prefix('-') {
-            Some(rest) => (Direction::Descending, rest),
-            None => (Direction::Ascending, raw.trim_start_matches(['+', ' '])),
-        };
+        let (direction, name) = query::sort(raw);
         self.sorts
             .iter()
             .find(|(declared, _)| *declared == name)

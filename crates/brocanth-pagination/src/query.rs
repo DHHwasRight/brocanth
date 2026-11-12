@@ -20,6 +20,22 @@ pub fn pairs(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A decoded `sort` value as a direction and a name: `name` and `+name`
+/// are ascending, `-name` is descending.
+///
+/// `+` in a query string decodes to a space, so `sort=+title` arrives as
+/// ` title`; a leading space counts as `+`. The one parser for `sort`, so
+/// every list reads it the same way.
+pub fn sort(raw: &str) -> (crate::Direction, &str) {
+    match raw.strip_prefix('-') {
+        Some(rest) => (crate::Direction::Descending, rest),
+        None => (
+            crate::Direction::Ascending,
+            raw.trim_start_matches(['+', ' ']),
+        ),
+    }
+}
+
 /// The first value of `name`, decoded. `None` when the key is absent; an
 /// empty string when it is present with no value.
 pub fn param(query: &str, name: &str) -> Option<String> {
@@ -122,5 +138,16 @@ mod tests {
         );
         assert_eq!(param("flag", "flag").as_deref(), Some(""));
         assert_eq!(param("a=1", "b"), None);
+    }
+
+    #[test]
+    fn a_sort_reads_its_direction_and_a_decoded_plus_is_ascending() {
+        use crate::Direction::{Ascending, Descending};
+        assert_eq!(sort("title"), (Ascending, "title"));
+        assert_eq!(sort("-title"), (Descending, "title"));
+        assert_eq!(sort("+title"), (Ascending, "title"));
+        // `sort=+title` as `param` decodes it.
+        let raw = param("sort=+title", "sort").unwrap();
+        assert_eq!(sort(&raw), (Ascending, "title"));
     }
 }

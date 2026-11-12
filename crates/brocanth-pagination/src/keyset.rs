@@ -90,10 +90,7 @@ impl<C: brocanth_policy::Column> Keyset<C> {
     /// [`CompileError::BadIdentifier`] for a column name that is not a bare
     /// SQL identifier.
     pub fn order_by<E: Entity<Column = C>>(&self) -> Result<String, CompileError> {
-        let way = match self.direction {
-            Direction::Ascending => "ASC",
-            Direction::Descending => "DESC",
-        };
+        let way = self.direction.as_sql();
         let table = E::TABLE.as_str();
         let column = |c: C| -> Result<String, CompileError> {
             Ok(format!("\"{table}\".\"{}\" {way}", c.ident()?.as_str()))

@@ -58,24 +58,9 @@ pub type RowOf<R> = <<R as Resource>::Data as ResourceData<<R as Resource>::Enti
 /// The column enum a resource's entity is written in.
 pub type ColumnOf<R> = <<R as Resource>::Entity as Entity>::Column;
 
-/// Which way a listing is ordered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    /// `ASC`
-    Ascending,
-    /// `DESC`
-    Descending,
-}
-
-impl Direction {
-    /// The SQL keyword.
-    pub fn as_sql(self) -> &'static str {
-        match self {
-            Direction::Ascending => "ASC",
-            Direction::Descending => "DESC",
-        }
-    }
-}
+/// Which way a listing is ordered: the one `Direction` that
+/// `brocanth-pagination` and `brocanth-filters` use too.
+pub use brocanth_pagination::Direction;
 
 /// One column and a direction.
 ///
