@@ -525,3 +525,72 @@ fn a_filtered_list_keeps_its_filters_through_a_page_link() {
     assert_eq!(after.sort_param(), before.sort_param());
     assert_eq!(after.active(), before.active());
 }
+
+#[test]
+fn too_many_values_for_one_filter_is_a_400_not_a_failed_query() {
+    // Each value is a bind, and PostgreSQL refuses more than 65535. A cap
+    // turns a long query string into a 400 with a `help:` line.
+    let filters = declared();
+    let at_cap = vec!["1"; brocanth_filters::MAX_VALUES].join(",");
+    assert!(filters.parse(&format!("score__in={at_cap}")).is_ok());
+    let over = vec!["1"; brocanth_filters::MAX_VALUES + 1].join(",");
+    let error = filters.parse(&format!("score__in={over}")).unwrap_err();
+    assert!(matches!(error, FilterError::TooMany { .. }), "{error:?}");
+    assert!(error.to_string().contains("help:"));
+
+    let repeated = vec!["author=1"; brocanth_filters::MAX_VALUES + 1].join("&");
+    let error = filters.parse(&repeated).unwrap_err();
+    assert!(matches!(error, FilterError::TooMany { .. }), "{error:?}");
+}
+
+#[test]
+fn a_nul_byte_in_a_text_value_is_a_400() {
+    // PostgreSQL refuses 0x00 in text (SQLSTATE 22021): a 500 otherwise.
+    let error = free_text().parse("status=a%00b").unwrap_err();
+    assert!(matches!(error, FilterError::Value { .. }), "{error:?}");
+    assert!(free_text().parse("status=ab").is_ok());
+}
+
+#[test]
+fn an_in_list_with_no_value_is_no_filter() {
+    // `id__in=,` names nothing, like `id__in=`. `IN ()` would hide every row.
+    let filters = declared();
+    for query in ["score__in=,", "score__in=,,,"] {
+        let applied = filters.parse(query).unwrap();
+        assert!(applied.is_empty(), "{query}");
+        assert!(applied.pred().is_always(), "{query}");
+    }
+}
+
+#[test]
+fn a_plus_before_a_sort_is_ascending() {
+    // `+` in a query string decodes to a space.
+    let applied = declared().parse("sort=+score").unwrap();
+    let sort = applied.sort().unwrap();
+    assert_eq!(sort.name, "score");
+    assert_eq!(sort.direction, Direction::Ascending);
+}
+
+#[test]
+#[should_panic(expected = "drops out of every page after the first")]
+fn a_sort_on_a_nullable_column_is_refused() {
+    let _ = Filters::new()
+        .int("score", PostColumn::Score)
+        .nullable()
+        .sort("score", PostColumn::Score);
+}
+
+#[test]
+#[should_panic(expected = "drops out of every page after the first")]
+fn a_nullable_filter_on_a_sorted_column_is_refused() {
+    let _ = Filters::new()
+        .sort("score", PostColumn::Score)
+        .int("score", PostColumn::Score)
+        .nullable();
+}
+
+#[test]
+#[should_panic(expected = "holds `__`")]
+fn a_filter_name_with_a_double_underscore_is_refused() {
+    let _ = Filters::new().int("closed__at", PostColumn::Score);
+}

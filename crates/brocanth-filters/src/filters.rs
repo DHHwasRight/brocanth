@@ -8,6 +8,13 @@ use brocanth_policy::{Column, CompileError, Condition, Dialect, Entity, Pred, Va
 /// The query-string key of the sort: `sort=title`, `sort=-created_at`.
 pub const SORT: &str = "sort";
 
+/// The most values one filter takes: `id__in=1,2,…` or `status=a&status=b…`.
+///
+/// Each value is a bind, and PostgreSQL refuses a statement with more than
+/// 65535. Without a cap, one long query string fails every list query with a
+/// 500. A form never sends this many.
+pub const MAX_VALUES: usize = 100;
+
 /// What a filter's value is parsed into before it becomes a bind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -48,7 +55,11 @@ impl Kind {
                 "false" | "0" | "off" | "no" => Some(Value::Bool(false)),
                 _ => None,
             },
-            Kind::Text => Some(Value::Text(raw.to_string())),
+            // PostgreSQL refuses a NUL byte in text (SQLSTATE 22021): a
+            // decoded `%00` is a value of the wrong kind, a 400, not a 500.
+            Kind::Text => Some(raw)
+                .filter(|raw| !raw.contains('\0'))
+                .map(|raw| Value::Text(raw.to_string())),
             Kind::Choice(words) => words
                 .iter()
                 .find(|word| **word == raw)
@@ -176,7 +187,19 @@ impl<C: Column> Filters<C> {
 
     /// A filter of `kind` on `column`, read from `name`, with the lookups
     /// the kind allows.
+    ///
+    /// # Panics
+    ///
+    /// When `name` holds `__`, which separates the name from the lookup in
+    /// the query string: `created__at` would be read as `created` with the
+    /// lookup `at`, and the filter could never match.
     pub fn field(mut self, name: &'static str, column: C, kind: Kind) -> Self {
+        assert!(
+            !name.contains("__"),
+            "the filter name `{name}` holds `__`, which separates a name from its lookup\n\
+             help: name the filter with one `_` at most between words, for example `{}`",
+            name.replace("__", "_")
+        );
         self.fields.push(Field {
             name,
             column,
@@ -214,7 +237,26 @@ impl<C: Column> Filters<C> {
     }
 
     /// Lets the last declared filter ask for absence: `name__null=true`.
+    ///
+    /// # Panics
+    ///
+    /// When the same column is also a sort: see [`Filters::sort`].
     pub fn nullable(mut self) -> Self {
+        if let Some(field) = self.fields.last() {
+            let column = field.column;
+            let sorted = self
+                .sorts
+                .iter()
+                .find(|(_, c)| *c == column)
+                .map(|(n, _)| *n);
+            let sorted = sorted.or(self
+                .default_sort
+                .filter(|s| s.column == column)
+                .map(|s| s.name));
+            if let Some(sort) = sorted {
+                nullable_sort(sort, field.name);
+            }
+        }
         if let Some(field) = self.fields.last_mut() {
             if !field.lookups.contains(&Lookup::Null) {
                 field.lookups.push(Lookup::Null);
@@ -232,14 +274,30 @@ impl<C: Column> Filters<C> {
     }
 
     /// A sort on `column`, asked for as `sort=name` or `sort=-name`.
+    ///
+    /// **The column must be `NOT NULL`.** The keyset cursor compares the sort
+    /// key, and a row whose key is `NULL` matches no comparison: it shows on
+    /// the first page and drops out of every later one.
+    ///
+    /// # Panics
+    ///
+    /// When a filter on the same column is declared [`Filters::nullable`]:
+    /// that says the column holds `NULL`.
     pub fn sort(mut self, name: &'static str, column: C) -> Self {
+        self.refuse_nullable(name, column);
         self.sorts.push((name, column));
         self
     }
 
     /// The sort when the request names none. It need not be declared with
+    /// [`Filters::sort`]. The column must be `NOT NULL`, as for
     /// [`Filters::sort`].
+    ///
+    /// # Panics
+    ///
+    /// When a filter on the same column is declared [`Filters::nullable`].
     pub fn default_sort(mut self, name: &'static str, column: C, direction: Direction) -> Self {
+        self.refuse_nullable(name, column);
         self.default_sort = Some(Sort {
             name,
             column,
@@ -298,6 +356,12 @@ impl<C: Column> Filters<C> {
                 Lookup::Eq => {
                     let v = value(&raw)?;
                     match equal.iter_mut().find(|(i, _)| *i == index) {
+                        Some((_, values)) if values.len() >= MAX_VALUES => {
+                            return Err(FilterError::TooMany {
+                                key: key.clone(),
+                                max: MAX_VALUES,
+                            })
+                        }
                         Some((_, values)) => values.push(v),
                         None => equal.push((index, vec![v])),
                     }
@@ -309,9 +373,20 @@ impl<C: Column> Filters<C> {
                 Lookup::Gt => Some(Pred::gt(field.column, value(&raw)?)),
                 Lookup::Ge => Some(Pred::ge(field.column, value(&raw)?)),
                 Lookup::In => {
-                    let values = raw
-                        .split(',')
-                        .filter(|part| !part.is_empty())
+                    let parts: Vec<&str> = raw.split(',').filter(|part| !part.is_empty()).collect();
+                    if parts.is_empty() {
+                        // `id__in=,` names no value: no filter, as for an
+                        // empty value. `IN ()` would hide every row.
+                        continue;
+                    }
+                    if parts.len() > MAX_VALUES {
+                        return Err(FilterError::TooMany {
+                            key: key.clone(),
+                            max: MAX_VALUES,
+                        });
+                    }
+                    let values = parts
+                        .into_iter()
                         .map(value)
                         .collect::<Result<Vec<_>, _>>()?;
                     Some(Pred::one_of(field.column, values))
@@ -353,10 +428,22 @@ impl<C: Column> Filters<C> {
         })
     }
 
+    fn refuse_nullable(&self, sort: &str, column: C) {
+        let nullable = self
+            .fields
+            .iter()
+            .find(|f| f.column == column && f.lookups.contains(&Lookup::Null));
+        if let Some(field) = nullable {
+            nullable_sort(sort, field.name);
+        }
+    }
+
     fn sort_from(&self, raw: &str) -> Result<Sort<C>, FilterError> {
+        // `+` in a query string decodes to a space, so `sort=+title` arrives
+        // as ` title`. Both mean ascending.
         let (direction, name) = match raw.strip_prefix('-') {
             Some(rest) => (Direction::Descending, rest),
-            None => (Direction::Ascending, raw.trim_start_matches('+')),
+            None => (Direction::Ascending, raw.trim_start_matches(['+', ' '])),
         };
         self.sorts
             .iter()
@@ -371,6 +458,15 @@ impl<C: Column> Filters<C> {
                 allowed: self.sorts.iter().map(|(n, _)| (*n).to_string()).collect(),
             })
     }
+}
+
+/// A sort on a column that a filter says can be `NULL`.
+fn nullable_sort(sort: &str, filter: &str) -> ! {
+    panic!(
+        "the sort `{sort}` is on the column of the nullable filter `{filter}`: a row with \
+         a NULL sort key drops out of every page after the first\n\
+         help: sort on a NOT NULL column, or make the column NOT NULL and drop `.nullable()`"
+    )
 }
 
 /// One filter a request set, as it was written.
@@ -510,6 +606,13 @@ pub enum FilterError {
         /// What the filter takes.
         expected: String,
     },
+    /// More values for one filter than [`MAX_VALUES`].
+    TooMany {
+        /// The key as written.
+        key: String,
+        /// The cap.
+        max: usize,
+    },
     /// A sort on a name that is not declared.
     Sort {
         /// The name as written, without `-`.
@@ -536,6 +639,11 @@ impl fmt::Display for FilterError {
                 f,
                 "`{key}={value}`: the value is not {expected}\n\
                  help: give `{key}` {expected}, or leave it empty to drop the filter"
+            ),
+            FilterError::TooMany { key, max } => write!(
+                f,
+                "`{key}` has more than {max} values\n\
+                 help: ask for {max} values or fewer, and narrow the list with another filter"
             ),
             FilterError::Sort { name, allowed } if allowed.is_empty() => write!(
                 f,

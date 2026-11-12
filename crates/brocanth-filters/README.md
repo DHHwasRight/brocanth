@@ -102,8 +102,12 @@ assert!(error.contains("help:"));
 | `sort=name`, `sort=-name` | ordered, smallest or largest first | declared with `.sort()` |
 
 An empty value is no filter, because a GET form sends `status=` for a
-select left on "any". A name that is not declared is left alone, because
-`page`, `q` and other keys share the query string.
+select left on "any". `name__in=,` names no value, so it is no filter too.
+A name that is not declared is left alone, because `page`, `q` and other
+keys share the query string. One filter takes at most 100 values
+(`MAX_VALUES`); more is a 400, because each value is a bind and PostgreSQL
+refuses more than 65535. A text value with a NUL byte is a 400, because
+PostgreSQL refuses it. `sort=+name` is `sort=name`.
 
 ## Decisions
 
@@ -124,3 +128,8 @@ select left on "any". A name that is not declared is left alone, because
 - **The sort ends with the primary key.** `Applied::order_by` and
   `Applied::keyset` add it, so two pages never share a row and a keyset
   page has a total order.
+- **A sort column is `NOT NULL`.** A row with a `NULL` sort key matches
+  no keyset comparison, so it shows on the first page and on no later one.
+  `.sort()` on a column whose filter is `.nullable()` panics.
+- **A filter name has no `__`.** `__` separates the name from the
+  lookup, so `created__at` could never match. `.field()` panics.
