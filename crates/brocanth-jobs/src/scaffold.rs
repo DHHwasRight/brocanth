@@ -88,6 +88,14 @@ impl Module for Jobs {
             "jobs-memory",
             "the queue lives in the process, and [jobs] has no url and no migrate",
         )
+        .adapts_to(
+            "observability",
+            "each job run gets a span, a log line and a counter from the `Observer`",
+        )
+        .adapts_to(
+            "observability-metrics",
+            "/metrics shows the queue's depth and the age of its oldest job",
+        )
         .integration(
             "admin",
             "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",

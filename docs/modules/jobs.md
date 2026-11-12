@@ -13,7 +13,7 @@ The wizard calls it: *Background jobs, with retries and a dead letter*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md), [`db`](db.md) |
-| Adapts to | [`config`](config.md), [`db`](db.md), [`jobs-memory`](jobs-memory.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md), [`db`](db.md), [`jobs-memory`](jobs-memory.md), [`observability`](observability.md), [`observability-metrics`](observability-metrics.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-jobs` (feature `admin` with `admin`), `serde` (features `derive`) |

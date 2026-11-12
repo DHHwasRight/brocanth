@@ -13,7 +13,7 @@ The wizard calls it: *Feature flags: turn code on for some users without a deplo
 | Part of | nothing |
 | Needs | [`db`](db.md): the rules are rows in the database the `db` module opens |
 | After | [`db`](db.md) |
-| Adapts to | [`config`](config.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md), [`auth`](auth.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-flags` (feature `config` with `config`, `admin` with `admin`) |

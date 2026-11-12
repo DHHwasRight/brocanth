@@ -59,10 +59,6 @@ impl Module for Observe {
         .adapts_to("observability-health", "`/up` and `/readyz` are answered, and shutdown drains")
         .adapts_to("observability-metrics", "a side listener serves `/metrics`")
         .adapts_to("observability-tracing", "spans are exported to a collector")
-        .adapts_to(
-            "jobs",
-            "each job run gets a span, a log line and a counter, and /metrics shows the queue's depth",
-        )
         .asked_in("operations", "Observability: logs, health probes, metrics (traces off)")
         .krate(krate())
         .after("config")

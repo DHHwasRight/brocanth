@@ -20524,7 +20524,7 @@ kind = ["middleware", "enhancer", "routes"]
 files = ["src/modules/observability.rs", "src/plugins/observability/"]
 config = ["observability"]
 crates = ["brocanth-observe"]
-adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "jobs"]
+adapted_to = ["config", "observability-logs", "observability-health", "observability-metrics", "observability-tracing"]
 
 [modules.observability-logs]
 version = "0.1.0"
@@ -20620,7 +20620,7 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config", "db", "jobs-memory", "admin"]
+adapted_to = ["config", "db", "jobs-memory", "observability", "observability-metrics", "admin"]
 
 [modules.jobs-memory]
 version = "0.1.0"
@@ -21086,4 +21086,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 5046ed8c135945fa
+# brocanth-digest: 616d9aff9d16b0a8
