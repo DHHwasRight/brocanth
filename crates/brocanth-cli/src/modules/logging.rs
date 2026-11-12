@@ -64,7 +64,7 @@ impl Module for Logging {
             vec![Setting::text(
                 "level",
                 "debug",
-                "The least severe line written: error, warn, info or debug.",
+                "error: 5xx only. warn: 4xx and 5xx. info or debug: every response.",
             )],
         );
     }
@@ -97,7 +97,8 @@ use brocanth::plugin_order::Order;
 /// {note}
 {derive}
 pub struct Settings {{
-    /// `error`, `warn`, `info` or `debug`.
+    /// Which responses get a line: `error` writes only a 5xx, `warn` a 4xx
+    /// and a 5xx, `info` and `debug` every response.
     pub level: String,
 }}
 
@@ -109,8 +110,43 @@ impl Default for Settings {{
     }}
 }}
 
+/// The least severe line written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Level {{
+    Error,
+    Warn,
+    Info,
+    Debug,
+}}
+
+impl Level {{
+    fn parse(text: &str) -> Result<Self, String> {{
+        match text.trim().to_ascii_lowercase().as_str() {{
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            other => Err(format!(
+                "[logging] level `{{other}}` is unknown\n\
+                 help: set `level` under [logging] to error, warn, info or debug"
+            )),
+        }}
+    }}
+
+    /// Whether a response with this status gets a line.
+    fn writes(self, status: u16) -> bool {{
+        match self {{
+            Self::Error => status >= 500,
+            Self::Warn => status >= 400,
+            Self::Info | Self::Debug => true,
+        }}
+    }}
+}}
+
 pub struct Logging {{
-    level: String,
+    /// The level, or why the setting is not one. `Plugin::new` cannot
+    /// fail, so a bad level fails `configure`, with the line to write.
+    level: Result<Level, String>,
 }}
 
 impl Plugin for Logging {{
@@ -122,12 +158,17 @@ impl Plugin for Logging {{
 
     fn new(config: Settings) -> Self {{
         Self {{
-            level: config.level,
+            level: Level::parse(&config.level),
         }}
     }}
 
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+        self.level.as_ref().map(drop).map_err(PluginError::new)
+    }}
+
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        let (instance, level) = (lc.instance(), &self.level);
+        let instance = lc.instance();
+        let level = format!("{{:?}}", self.level.as_ref().unwrap_or(&Level::Info)).to_lowercase();
         crate::plugins::say!(info, "[{{instance}}] level {{level}}"; instance, %level);
         Ok(())
     }}
@@ -137,13 +178,16 @@ impl HookSource for Logging {{
     type Families = OnRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {{
-        registrar.request("line", Order::new(), Line);
+        let level = *self.level.as_ref().unwrap_or(&Level::Info);
+        registrar.request("line", Order::new(), Line {{ level }});
         Ok(())
     }}
 }}
 
-/// The hook that writes the line.
-struct Line;
+/// The hook that writes the line, for the responses `level` keeps.
+struct Line {{
+    level: Level,
+}}
 
 impl RequestHook for Line {{
     /// After the response is final, whatever answered: the response hooks
@@ -152,6 +196,9 @@ impl RequestHook for Line {{
     /// A page can add to the line: put a value on the request state with
     /// `ctx.hook_insert`, and read it here from `state`.
     fn after_dispatch(&self, request: &Request, response: &Response, _state: &mut RequestState) {{
+        if !self.level.writes(response.status().as_u16()) {{
+            return;
+        }}
         eprintln!(
             "{{}} {{}} -> {{}}",
             request.method(),
