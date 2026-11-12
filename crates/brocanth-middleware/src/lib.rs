@@ -134,7 +134,9 @@ pub use flash::{
 #[cfg(feature = "runtime")]
 pub use method_override::{MethodOverride, MethodOverrideConfig};
 #[cfg(feature = "runtime")]
-pub use proxy_headers::{ClientInfo, PeerAddress, ProxyHeaders, ProxyHeadersConfig};
+pub use proxy_headers::{
+    ClientInfo, ForwardedHeader, PeerAddress, ProxyHeaders, ProxyHeadersConfig,
+};
 #[cfg(feature = "runtime")]
 pub use rate_limit::{RateLimit, RateLimitConfig, Rule, SharedRateLimit};
 #[cfg(feature = "runtime")]
@@ -229,34 +231,59 @@ fn form_field(request: &brocanth::plugin_hooks::Request, field: &str) -> Option<
 /// body. This reads a field name and a token beside it, and a dependency
 /// for that would be the whole cost of this crate.
 fn decode(raw: &str) -> String {
+    // On bytes, not on `str`: a `%` before a multibyte character must not
+    // slice inside it, and `%C3%A9` is two bytes of one character.
     let bytes = raw.as_bytes();
-    let mut out = String::with_capacity(raw.len());
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
         match bytes[at] {
             b'+' => {
-                out.push(' ');
+                out.push(b' ');
                 at += 1;
             }
-            b'%' if at + 2 < bytes.len() => {
-                let hex = &raw[at + 1..at + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte as char);
-                        at += 3;
-                    }
-                    Err(_) => {
-                        out.push('%');
-                        at += 1;
-                    }
+            b'%' if at + 2 < bytes.len() => match (hex(bytes[at + 1]), hex(bytes[at + 2])) {
+                (Some(high), Some(low)) => {
+                    out.push(high * 16 + low);
+                    at += 3;
                 }
-            }
-            _ => {
-                let ch = raw[at..].chars().next().expect("at a boundary");
-                out.push(ch);
-                at += ch.len_utf8();
+                _ => {
+                    out.push(b'%');
+                    at += 1;
+                }
+            },
+            byte => {
+                out.push(byte);
+                at += 1;
             }
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(feature = "runtime")]
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod decode_tests {
+    use super::decode;
+
+    #[test]
+    fn a_percent_before_a_multibyte_character_does_not_panic() {
+        assert_eq!(decode("%a\u{e9}"), "%a\u{e9}");
+        assert_eq!(decode("%\u{e9}x"), "%\u{e9}x");
+    }
+
+    #[test]
+    fn an_encoded_multibyte_character_decodes_to_itself() {
+        assert_eq!(decode("%C3%A9t%C3%A9"), "\u{e9}t\u{e9}");
+        assert_eq!(decode("a+b%2Bc"), "a b+c");
+    }
 }
