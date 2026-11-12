@@ -1309,7 +1309,7 @@ pub fn render_with(
 ) -> Result<Response, Error> {
     let mut body = out_of_band.concat();
     body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
+    Ok(page_response(body))
 }
 
 /// One skipped layout's replacement chrome, rendered on its own.
@@ -1348,7 +1348,7 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    Ok(Response::ok(content.render_to_string()?))
+    Ok(page_response(content.render_to_string()?))
 }
 
 impl Ctx {
@@ -1359,6 +1359,12 @@ impl Ctx {
     pub fn partial_depth(&self) -> u32 {
         0
     }
+}
+
+/// A rendered page. Every load is the whole document, so it varies on
+/// nothing.
+fn page_response(body: String) -> Response {
+    Response::ok(body)
 }
 
 /// What a page says about itself, and the tags a layout writes for it.
@@ -2344,7 +2350,7 @@ name = "My Blog"
 # title_template = "%s | My Blog"
 # The site's address, scheme and host. A canonical URL and og:url need it. Empty means none.
 # Unset, a page has no canonical URL: a relative one is worse than none.
-# base_url = "https://example.com"
+# base_url = "http://localhost:3000"
 # The description of a page that gives none. Empty means none.
 # description = ""
 # The og:image of a page that gives none: a path or a full URL. Empty means none.
@@ -2507,6 +2513,9 @@ impl Default for Settings {
 /// Puts the site's metadata on the context, where `ctx.head()` reads it.
 pub struct Meta {
     site: Site,
+    /// Whether `[meta]` named the site's address itself.
+    #[allow(dead_code)]
+    has_base_url: bool,
 }
 
 impl Plugin for Meta {
@@ -2520,6 +2529,7 @@ impl Plugin for Meta {
         if let Some(template) = set(config.title_template) {
             site = site.title_template(template);
         }
+        let has_base_url = config.base_url.as_ref().is_some_and(|v| !v.is_empty());
         if let Some(url) = set(config.base_url) {
             site = site.base_url(url);
         }
@@ -2532,7 +2542,7 @@ impl Plugin for Meta {
         if let Some(handle) = set(config.twitter) {
             site = site.twitter(handle);
         }
-        Self { site }
+        Self { site, has_base_url }
     }
 
     /// A template with no `%s` or a base URL with no scheme stops the
