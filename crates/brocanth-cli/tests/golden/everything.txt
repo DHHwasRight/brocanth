@@ -28,7 +28,7 @@ brocanth-mail = { git = "https://github.com/DHHwasRight/brocanth.git", features 
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["reqwest-client", "policy", "postgres", "admin"] }  # the provider requests: a token exchange and a profile read
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git" }  # roles, grants and policies in Rust, diffed into migrations
-brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants"] }
+brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants", "postgres"] }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
@@ -65,7 +65,6 @@ serde = { version = "1", features = ["derive"] }  # the config plugin reads type
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 ===== .gitignore =====
 /target
-/var/uploads
 /node_modules
 /tmp/mail
 ===== rust-toolchain.toml =====
@@ -2153,9 +2152,6 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::storage::Files>("storage")
-            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: CSRF ------------------------------------
         //
@@ -2225,23 +2221,9 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
             .map_err(|e| e.to_string())?;
-
-        // -- file routes ---------------------------------------------------
-        //
-        // POST /files stores the `file` part of a form, if `may_upload` in
-        // src/plugins/storage_routes/mod.rs says yes. GET /files/{address}
-        // serves it to a request with a token the application minted.
-        //
         let builder = builder
-            .plugin_hooking_from_config::<crate::plugins::storage_routes::StorageRoutes>(
-                "storage_routes",
-            )
+            .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
-        let builder = builder.hooks_off_from(
-            "storage_routes",
-            "src/modules/storage_routes.rs",
-            crate::modules::storage_routes::MODULE.hooks.off(),
-        );
 
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -2300,6 +2282,23 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::policy::Policies>("policy")
             .map_err(|e| e.to_string())?;
+
+        // -- file routes ---------------------------------------------------
+        //
+        // POST /files stores the `file` part of a form, if `may_upload` in
+        // src/plugins/storage_routes/mod.rs says yes. GET /files/{address}
+        // serves it to a request with a token the application minted.
+        //
+        let builder = builder
+            .plugin_hooking_from_config::<crate::plugins::storage_routes::StorageRoutes>(
+                "storage_routes",
+            )
+            .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "storage_routes",
+            "src/modules/storage_routes.rs",
+            crate::modules::storage_routes::MODULE.hooks.off(),
+        );
 
         // -- brocanth-middleware: rate limit ------------------------------
         //
@@ -2400,8 +2399,7 @@ type WithMeta = After<crate::plugins::meta::Meta, WithI18n>;
 type WithObservability = After<crate::plugins::observability::Observe, WithMeta>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithAuth = After<crate::plugins::auth::Auth, WithDb>;
-type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithAuth>;
 type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
@@ -2413,15 +2411,16 @@ type WithJobs = After<crate::plugins::jobs::Jobs, WithModel>;
 type WithFlags = After<crate::plugins::flags::Flags, WithJobs>;
 type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithFlags>;
 type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
-type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithSuperuser>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithStorageRoutes>;
+type WithStorage = After<crate::plugins::storage::Files, WithSuperuser>;
+type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithStorage>;
 type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithMiddlewareSecurityHeaders>;
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithWebhooksIn>;
 type WithCache = After<crate::plugins::cache::Cache, WithOauthClient>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithCache>;
 type WithMail = After<crate::plugins::mail::MailPlugin, WithAudit>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithMail>;
-type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
+type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithPolicy>;
+type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithStorageRoutes>;
 type WithWebhooksOut = After<crate::plugins::webhooks_out::WebhooksOut, WithMiddlewareRateLimit>;
 type WithErrors = After<brocanth_errors::Errors, WithWebhooksOut>;
 type WithMiddlewareConditionalGet = After<brocanth_middleware::ConditionalGet, WithErrors>;
@@ -2434,16 +2433,16 @@ type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
 type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
-type HookedStorageRoutes =
-    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedAnalytics>;
 type HookedSecurityHeaders =
-    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedStorageRoutes>;
+    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
 type HookedWebhooksIn =
     Both<<crate::plugins::webhooks_in::WebhooksIn as HookSource>::Families, HookedSecurityHeaders>;
 type HookedAuditPlugin =
     Both<<brocanth_audit::AuditPlugin as HookSource>::Families, HookedWebhooksIn>;
+type HookedStorageRoutes =
+    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedAuditPlugin>;
 type HookedRateLimit =
-    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedAuditPlugin>;
+    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedStorageRoutes>;
 type HookedErrors = Both<<brocanth_errors::Errors as HookSource>::Families, HookedRateLimit>;
 type HookedConditionalGet =
     Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedErrors>;
@@ -2490,15 +2489,15 @@ macro_rules! announce {
             %cookie,
             providers
         );
-        let files: &plugins::storage::FileStore = cx.extract();
-        let ttl = files.tokens.ttl();
-        crate::plugins::say!(info, "storage: ready, download links last {ttl}s"; ttl);
         let checks: &brocanth_schema::Validation = cx.extract();
         let style = checks.report_style();
         crate::plugins::say!(info, "validation: reports as {style:?}"; ?style);
         let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
         let max_clients = realtime.broker.config().max_clients;
         crate::plugins::say!(info, "realtime: up to {max_clients} clients"; max_clients);
+        let files: &plugins::storage::FileStore = cx.extract();
+        let ttl = files.tokens.ttl();
+        crate::plugins::say!(info, "storage: ready, download links last {ttl}s"; ttl);
         let rules: &crate::plugins::policy::Rules = cx.extract();
         let dialect = &rules.dialect;
         crate::plugins::say!(info, "policy: compiling for {dialect:?}"; ?dialect);
@@ -3170,33 +3169,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "storage.root",
-        help: "Where uploads are stored.",
-        flag: true,
-        file: "src/modules/storage.rs",
-        flags: crate::modules::storage::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "storage.secret",
-        help: "Signs file tokens and keys object addresses.",
-        flag: false,
-        file: "src/modules/storage.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "storage.token_ttl",
-        help: "Seconds a file token lives.",
-        flag: true,
-        file: "src/modules/storage.rs",
-        flags: crate::modules::storage::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "csrf.cookie",
         help: "The cookie this hook owns.",
         flag: true,
@@ -3557,31 +3529,31 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
-        path: "storage_routes.max_bytes",
-        help: "The largest file accepted, in bytes.",
+        path: "storage.migrate",
+        help: "Create the two storage tables at startup if they are absent.",
         flag: true,
-        file: "src/modules/storage_routes.rs",
-        flags: crate::modules::storage_routes::MODULE.flags,
+        file: "src/modules/storage.rs",
+        flags: crate::modules::storage::MODULE.flags,
         none_as: None,
         text: false,
     },
     Setting {
-        path: "storage_routes.csrf_field",
-        help: "The form field that carries the CSRF token: `[csrf] field`.",
-        flag: true,
-        file: "src/modules/storage_routes.rs",
-        flags: crate::modules::storage_routes::MODULE.flags,
+        path: "storage.secret",
+        help: "Signs file tokens and keys object addresses.",
+        flag: false,
+        file: "src/modules/storage.rs",
+        flags: Flags::Off,
         none_as: None,
         text: true,
     },
     Setting {
-        path: "storage_routes.csrf_header",
-        help: "The header the CSRF check reads: `[csrf] header`.",
+        path: "storage.token_ttl",
+        help: "Seconds a file token lives.",
         flag: true,
-        file: "src/modules/storage_routes.rs",
-        flags: crate::modules::storage_routes::MODULE.flags,
+        file: "src/modules/storage.rs",
+        flags: crate::modules::storage::MODULE.flags,
         none_as: None,
-        text: true,
+        text: false,
     },
     Setting {
         path: "security_headers.behind_tls",
@@ -3960,6 +3932,24 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::policy::MODULE.flags,
         none_as: None,
         text: true,
+    },
+    Setting {
+        path: "storage_routes.max_bytes",
+        help: "The largest file accepted, in bytes.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "storage_routes.dedupe",
+        help: "Store identical uploads once, at their content address.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
     },
     Setting {
         path: "rate_limit.ip_header",
@@ -4486,7 +4476,6 @@ fn defaults() -> Vec<(&'static str, String)> {
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
-    let storage = crate::plugins::storage::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
     let openapi = crate::plugins::openapi::Settings::default();
     let validation = crate::plugins::validation::Settings::default();
@@ -4498,7 +4487,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let flags = brocanth_flags::FlagsConfig::default();
     let auth_oauth = crate::plugins::auth_oauth::Settings::default();
     let superuser = crate::plugins::superuser::Settings::default();
-    let storage_routes = crate::plugins::storage_routes::Settings::default();
+    let storage = crate::plugins::storage::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let webhooks_in = crate::plugins::webhooks_in::Settings::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
@@ -4506,6 +4495,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let audit = brocanth_audit::AuditConfig::default();
     let mail = crate::plugins::mail::Settings::default();
     let policy = crate::plugins::policy::Settings::default();
+    let storage_routes = crate::plugins::storage_routes::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let webhooks_out = crate::plugins::webhooks_out::Settings::default();
     let errors = brocanth_errors::ErrorsConfig::default();
@@ -4610,9 +4600,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.absolute_timeout",
             format!("{:?}", auth.absolute_timeout),
         ),
-        ("storage.root", format!("{:?}", storage.root)),
-        ("storage.secret", format!("{:?}", storage.secret)),
-        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         ("csrf.cookie", format!("{:?}", csrf.cookie)),
         ("csrf.field", format!("{:?}", csrf.field)),
         ("csrf.header", format!("{:?}", csrf.header)),
@@ -4707,18 +4694,9 @@ fn defaults() -> Vec<(&'static str, String)> {
             "superuser.password_env",
             format!("{:?}", superuser.password_env),
         ),
-        (
-            "storage_routes.max_bytes",
-            format!("{:?}", storage_routes.max_bytes),
-        ),
-        (
-            "storage_routes.csrf_field",
-            format!("{:?}", storage_routes.csrf_field),
-        ),
-        (
-            "storage_routes.csrf_header",
-            format!("{:?}", storage_routes.csrf_header),
-        ),
+        ("storage.migrate", format!("{:?}", storage.migrate)),
+        ("storage.secret", format!("{:?}", storage.secret)),
+        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         (
             "security_headers.behind_tls",
             format!("{:?}", security_headers.behind_tls),
@@ -4833,6 +4811,14 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("mail.smtp_password", format!("{:?}", mail.smtp_password)),
         ("mail.worker", format!("{:?}", mail.worker)),
         ("policy.dialect", format!("{:?}", policy.dialect)),
+        (
+            "storage_routes.max_bytes",
+            format!("{:?}", storage_routes.max_bytes),
+        ),
+        (
+            "storage_routes.dedupe",
+            format!("{:?}", storage_routes.dedupe),
+        ),
         (
             "rate_limit.ip_header",
             format!("{:?}", rate_limit.ip_header),
@@ -5079,7 +5065,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: 4c44b8106ff34521
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6074,7 +6060,7 @@ pub mod storage {
     /// flag, so it has no variant here and cannot be renamed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
-        Root,
+        Migrate,
         TokenTtl,
     }
 
@@ -6082,7 +6068,7 @@ pub mod storage {
         /// The setting, as `config/<env>.toml` and the flag spell it.
         pub const fn path(self) -> &'static str {
             match self {
-                Key::Root => "storage.root",
+                Key::Migrate => "storage.migrate",
                 Key::TokenTtl => "storage.token_ttl",
             }
         }
@@ -6114,8 +6100,7 @@ pub mod storage_routes {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         MaxBytes,
-        CsrfField,
-        CsrfHeader,
+        Dedupe,
     }
 
     impl Key {
@@ -6123,8 +6108,7 @@ pub mod storage_routes {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::MaxBytes => "storage_routes.max_bytes",
-                Key::CsrfField => "storage_routes.csrf_field",
-                Key::CsrfHeader => "storage_routes.csrf_header",
+                Key::Dedupe => "storage_routes.dedupe",
             }
         }
     }
@@ -6164,8 +6148,6 @@ pub mod storage_routes {
         /// Serve a file to a request with no token. Off, every download needs a
         /// token.
         pub public: bool,
-        /// Answer ?thumb=WxH with a thumbnail, rendered once per size.
-        pub thumbnails: bool,
     }
 
     impl Module {
@@ -6176,8 +6158,18 @@ pub mod storage_routes {
             hooks: Hooks::DEFAULT,
             path: "/files",
             public: false,
-            thumbnails: true,
         };
+    }
+}
+
+/// The shape of src/modules/storage_thumbnails.rs.
+pub mod storage_thumbnails {
+    /// What src/modules/storage_thumbnails.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -7440,7 +7432,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: b11a6128b6681c98
+// brocanth-digest: 79f7991685b178de
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -7525,6 +7517,7 @@ pub mod sessions;
 pub mod sitemap;
 pub mod storage;
 pub mod storage_routes;
+pub mod storage_thumbnails;
 pub mod superuser;
 pub mod validation;
 pub mod webhooks;
@@ -7561,6 +7554,7 @@ pub const ALL: &[&str] = &[
     "rls",
     "storage",
     "storage-routes",
+    "storage-thumbnails",
     "input",
     "client",
     "middleware",
@@ -7607,7 +7601,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: cf079e075a31e670
+// brocanth-digest: aac373d67ee5b564
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -8279,8 +8273,8 @@ use crate::plugins::shape::rls::Module;
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/storage.rs =====
-//! `storage`: uploads on a local disk, addressed by content hash; no object
-//! store and no S3.
+//! `storage`: uploads on a local disk, or in Postgres with `db`, addressed by
+//! content hash; no S3.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -8302,15 +8296,15 @@ pub const MODULE: Module = Module {
 
     // Another name for a flag, or no flag. The variable and the config key
     // keep the declared name. Examples:
-    //   (Key::Root, Flag::As("root")),
-    //   (Key::Root, Flag::Hidden),
+    //   (Key::Migrate, Flag::As("migrate")),
+    //   (Key::Migrate, Flag::Hidden),
     rename: &[],
 
     ..Module::DEFAULT
 };
 ===== src/modules/storage_routes.rs =====
 //! `storage-routes`: POST /files and GET /files/{address}?token=: uploads your
-//! guard allows, downloads behind a file token, thumbnails.
+//! guard allows, downloads behind a file token.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -8353,11 +8347,22 @@ pub const MODULE: Module = Module {
     // token.
     public: false,
 
-    // Answer ?thumb=WxH with a thumbnail, rendered once per size.
-    thumbnails: true,
-
     ..Module::DEFAULT
 };
+===== src/modules/storage_thumbnails.rs =====
+//! `storage-thumbnails`: ?thumb=WxH on the file routes, in listed sizes,
+//! rendered once each; links four image decoders.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::storage_thumbnails::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/input.rs =====
 //! `input`: a form or a JSON body, read into a struct, with every fault at
 //! once.
@@ -9560,25 +9565,6 @@ idle_timeout = 28800
 # Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
 
-[storage]
-# Where uploads are stored.
-# Below the working directory, so an upload is not source and `.gitignore`
-# already says so. Move it off the deployment's disk and every instance stops
-# seeing the same files: an object store is a separate crate behind the same
-# trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.
-root = "var/uploads"
-# Signs file tokens and keys object addresses.
-# Development only, and the one line to change first. While it is this
-# string, anybody who has read this repository can mint a token for any
-# object, and anybody holding a copy of a file can compute whether somebody
-# uploaded it. No flag sets it: a flag is readable by every user on the host.
-secret = "development only: replace before anything is uploaded in anger"
-# Seconds a file token lives.
-# It cannot be revoked, so this number is the window in which a URL pasted
-# into a chat still works. Two minutes is long enough for a page full of
-# images and short enough to be dead before anyone clicks it.
-token_ttl = 120
-
 [csrf]
 # The cookie this hook owns.
 cookie = "csrf_token"
@@ -9754,15 +9740,22 @@ after_sign_in = "/"
 # Not the password. It is read only to create the account.
 password_env = "MY_BLOG_SUPERUSER_PASSWORD"
 
-[storage_routes]
-# The largest file accepted, in bytes.
-# The server buffers at most 2 MiB of a request body today, so a larger
-# value takes effect only when that limit moves.
-max_bytes = 2097152
-# The form field that carries the CSRF token: `[csrf] field`.
-csrf_field = "_csrf_token"
-# The header the CSRF check reads: `[csrf] header`.
-csrf_header = "x-csrf-token"
+[storage]
+# Create the two storage tables at startup if they are absent.
+# Development only: see `PgStorage::migrate` and `brocanth_storage::postgres::sql`
+# for the statements to put in a migration instead.
+migrate = true
+# Signs file tokens and keys object addresses.
+# Development only, and the one line to change first. While it is this
+# string, anybody who has read this repository can mint a token for any
+# object; outside development the plugin refuses to start with it. No flag
+# sets it: a flag is readable by every user on the host.
+secret = "development only: replace before anything is uploaded in anger"
+# Seconds a file token lives.
+# It cannot be revoked, so this number is the window in which a URL pasted
+# into a chat still works. Two minutes is long enough for a page full of
+# images and short enough to be dead before anyone clicks it.
+token_ttl = 120
 
 [security_headers]
 # Every request arrives through a TLS terminator, so HSTS always goes out.
@@ -9890,6 +9883,20 @@ worker = true
 # This follows `[db] url`, the Postgres database the model reads.
 # Brocanth supports Postgres only, so `postgres` is the one legal value.
 dialect = "postgres"
+
+[storage_routes]
+# The largest file accepted, in bytes.
+# The server buffers at most 2 MiB of a request body today, so a larger
+# value takes effect only when that limit moves.
+max_bytes = 2097152
+# Store identical uploads once, at their content address.
+# Off, each upload has an address of its own. On, a delete removes the file
+# for every holder: count the references before you delete.
+dedupe = false
+# The only sizes ?thumb= may ask for; any other is a 400.
+# WxH crops to the middle, WxHt to the top, WxHb to the bottom, WxHf fits,
+# Wx0 and 0xH scale. Each size is rendered once per file and kept.
+thumb_sizes = ["150x150t", "300x200", "600x600f"]
 
 [rate_limit]
 # A header that holds the client address, set by your edge. Empty means none.
@@ -14287,7 +14294,7 @@ use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
-use brocanth_cache::CacheHandle;
+use brocanth_cache::{CacheHandle, CacheReadiness};
 use brocanth_cache_redis::RedisCache;
 
 /// What this plugin is built from.
@@ -14361,25 +14368,17 @@ impl Plugin for Cache {
         })?;
         let cache = {
             let _entered = runtime.enter();
-            RedisCache::open(&self.settings.url)
+            RedisCache::connect_lazy(&self.settings.url)
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
-        // Ready when one read answers. A miss is a pass: the question is
-        // whether the server answers. `serve` awaits this once before it
+        // Ready when one read answers: `CacheReadiness` is the check
+        // `CachePlugin` registers. `serve` awaits this once before it
         // listens, so an unreachable server stops the start there.
-        let probe = Arc::clone(&cache);
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            async move {
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!("{e}\nhelp: check `[cache] url`, and that the Redis server runs")
-                })
-            }
-        });
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .help("check `[cache] url`, and that the Redis server runs"),
+        );
         let handle = CacheHandle::new(cache);
         // The first cache this process opens is the one the admin's cache
         // tab reads: the admin is built before any plugin starts.
@@ -18537,17 +18536,20 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 //! defanged for the `Content-Disposition` header it ends up in, and never
 //! touches the filesystem.
 //!
+//! The objects live in the `db` database, in `bytea` columns, on the `db`
+//! plugin's pool: every instance sees every file, and a backup of the
+//! database holds them.
+//!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
 //! through no other route. Delete the registration in `src/plugins/mod.rs`
 //! and delete this file, and the application stores no files and links
 //! nothing to store them with.
 //!
-//! # Uploading
+//! # Uploading and serving
 //!
-//! There is no upload route here, on purpose: `brocanth-storage` parses no
-//! multipart body and knows nothing about HTTP, and whether *this*
-//! application lets *this* request store a file is a policy question a
-//! generator cannot answer. A handler that has already asked it writes:
+//! The `storage-routes` module writes the HTTP edge: an upload route behind a
+//! guard this project writes, and a download route behind a file token.
+//! Without it, a handler that has already asked its own policy stores a file:
 //!
 //! ```ignore
 //! let files = ctx.provided::<FileStore, _>().expect("a dispatched request");
@@ -18561,12 +18563,10 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 //! bytes rather than from `sent_type`, because a client that labels a file
 //! `text/html` is choosing what this origin serves back to the next visitor.
 //!
-//! # Serving
-//!
-//! Also the application's, and for a sharper reason: a file token says "the
-//! bearer may read this object" and carries no identity at all. Mint one only
-//! for a request that has already passed the policy, because after that the
-//! token is the only thing between the object and whoever the URL reaches.
+//! A file token says "the bearer may read this object" and carries no
+//! identity at all. Mint one only for a request that has already passed the
+//! policy, because after that the token is the only thing between the object
+//! and whoever the URL reaches.
 //!
 //! ```ignore
 //! let token = files.tokens.issue(&key);           // after the policy said yes
@@ -18574,18 +18574,14 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 //! let meta = files.store.meta(&key).await?;
 //! ```
 //!
-//! `ObjectMeta::content_type` answers `is_safe_to_inline`, which is the bit
-//! the download route needs to force an attachment for everything that is not
-//! a recognised image.
-//!
 //! # Thumbnails
 //!
-//! `get_variant` and `put_variant` are here already, with the `variants`
-//! feature off: moving derived bytes needs no codec, so this build can serve
-//! a variant another process computed and cannot compute one itself. Turning
-//! the feature on in `Cargo.toml` adds `derive_variant`, and adds png, jpeg,
-//! gif and webp decoders pointed at stranger-supplied bytes. An application
-//! that stores documents should leave it off.
+//! `get_variant` and `put_variant` are here already: moving derived bytes
+//! needs no codec, so this build can serve a variant another process
+//! computed. The `storage-thumbnails` module turns on the `variants` feature,
+//! which adds `derive_variant` and png, jpeg, gif and webp decoders pointed
+//! at stranger-supplied bytes. An application that stores documents should
+//! leave it off.
 //!
 //! # One secret, two keys
 //!
@@ -18594,14 +18590,19 @@ fn serve_asset(request: &brocanth_server::Request) -> Option<brocanth_server::Re
 //! separators, so an address key cannot sign a token and a token key cannot
 //! address an object. Rotating the secret invalidates every outstanding token
 //! at once, which is the break-glass, and it also changes the address new
-//! uploads are stored at -- objects already on disk keep the address they
+//! uploads are stored at -- objects already stored keep the address they
 //! were written under, so rotate it with a plan rather than on a Friday.
+//! Outside development the plugin refuses the scaffold's secret and any
+//! secret shorter than 32 characters.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_storage::{FileTokenKey, FileTokens, HashKey, LocalDisk, Storage};
+use brocanth_storage::{
+    Deferred, FileTokenKey, FileTokens, HashKey, ObjectKey, PgStorage, Storage,
+};
 
 /// What this plugin is built from.
 ///
@@ -18611,9 +18612,8 @@ use brocanth_storage::{FileTokenKey, FileTokens, HashKey, LocalDisk, Storage};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// Where the objects live, relative to the working directory or absolute.
-    /// Created if it is not there.
-    pub root: String,
+    /// Create the two storage tables at startup if they are absent.
+    pub migrate: bool,
     /// The deployment secret. It signs file tokens and keys object addresses;
     /// see the module header for what each of those means.
     pub secret: String,
@@ -18627,7 +18627,7 @@ pub struct Settings {
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
-            .field("root", &self.root)
+            .field("migrate", &self.migrate)
             .field("secret", &"<redacted>")
             .field("token_ttl", &self.token_ttl)
             .finish()
@@ -18637,31 +18637,44 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            root: "var/uploads".to_string(),
+            migrate: true,
             secret: "development only: replace before anything is uploaded in anger".to_string(),
             token_ttl: 120,
         }
     }
 }
 
+/// The scaffold's secret, which the repository shows to anybody.
+const DEVELOPMENT_SECRET: &str = "development only: replace before anything is uploaded in anger";
+
+/// Whether this process runs in development or a test: `$<APP>_ENV` unset,
+/// `development` or `test`. The variable the config plugin reads too.
+fn development() -> bool {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    match std::env::var(var) {
+        Ok(env) => env == "development" || env == "test",
+        Err(_) => true,
+    }
+}
+
+/// Whether `secret` may sign tokens here. In development anything goes;
+/// elsewhere not the scaffold's secret, which this repository shows to
+/// anybody, and not one shorter than 32 characters.
+fn usable_secret(secret: &str, development: bool) -> bool {
+    development || (secret != DEVELOPMENT_SECRET && secret.len() >= 32)
+}
+
 /// What this plugin puts on the context.
 ///
 /// A wrapper and not the two values loose, because `ContextItem` is
-/// brocanth's trait and both of these are `brocanth-storage`'s types. That
-/// crate deliberately does not depend on the core -- it has no routes, parses
-/// no multipart body and knows nothing about HTTP -- so the impl that joins
-/// the two belongs in the one crate that can see both, which is this one.
+/// brocanth's trait and both of these are `brocanth-storage`'s types, so the
+/// impl that joins the two belongs in this crate, which names both.
 pub struct FileStore {
-    /// The store, behind the trait rather than as a `LocalDisk`, so swapping
-    /// the backend is a change in this file and nowhere else.
+    /// The store, behind the trait, so swapping the backend is a change in
+    /// this file and nowhere else.
     ///
-    /// Allowed to be unread, and only until one thing changes. Every
-    /// `Storage` method is `async` and the startup line below is not, so
-    /// nothing the generator writes can touch this field — a handler is
-    /// what uses it, and a handler cannot reach the per-request context
-    /// yet, because `Ctx` in `src/pages/mod.rs` has no extractor. Delete
-    /// this attribute the moment you write the first upload route; it is
-    /// a note about today, not about the field.
+    /// Nothing this project generated reads it: a handler does, with
+    /// `ctx.provided::<FileStore, _>()`. Delete this attribute when one does.
     #[allow(dead_code)]
     pub store: Arc<dyn Storage>,
     /// Mints and verifies the short-lived tokens a download route checks.
@@ -18676,6 +18689,9 @@ pub struct Files {
     /// `Plugin::new` cannot.
     store: Option<Arc<dyn Storage>>,
     tokens: Option<FileTokens>,
+    /// The store the routes hold; the Postgres store goes behind it at
+    /// `before_start`, once the `db` pool is open.
+    deferred: Option<Deferred>,
 }
 
 impl Plugin for Files {
@@ -18688,16 +18704,11 @@ impl Plugin for Files {
             settings: config,
             store: None,
             tokens: None,
+            deferred: None,
         }
     }
 
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.settings.root.is_empty() {
-            return Err(PluginError::new(
-                "[storage] root is required; there is no default directory\n\
-                 help: set `root` under [storage] in the config file, such as \"var/uploads\"",
-            ));
-        }
         if self.settings.secret.is_empty() {
             // An empty secret is not a weaker store, it is two different
             // stores: addresses stop being keyed, and a token key of no bytes
@@ -18707,34 +18718,76 @@ impl Plugin for Files {
                  help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
+        if !usable_secret(&self.settings.secret, development()) {
+            return Err(PluginError::new(
+                "[storage] secret is the scaffold's development value or shorter than 32 characters\n\
+                 help: set the variable for `storage.secret` to 32 random bytes, such as the output of `head -c 32 /dev/urandom | base64`",
+            ));
+        }
         if self.settings.token_ttl <= 0 {
             return Err(PluginError::new(
                 "[storage] token_ttl must be at least one second, or no token is ever valid\n\
                  help: set `token_ttl` under [storage] to 1 or more seconds",
             ));
         }
-        // Synchronous: `std::fs`, a `create_dir_all` and a `canonicalize`.
-        // Unlike a pool there is nothing to open, so there is no
-        // `before_start`.
-        let disk = LocalDisk::open(&self.settings.root)
-            .map_err(|e| {
-                PluginError::new(format!(
-                    "[storage] opening {:?}: {e}\n\
-                     help: set `root` under [storage] to a directory this process can create and write",
-                    self.settings.root
-                ))
-            })?
-            .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()));
-        let store: Arc<dyn Storage> = Arc::new(disk);
+        // The `db` pool opens at the `db` plugin's `before_start`, after the
+        // routes are built. So the routes hold this deferred store, and
+        // `before_start` below puts the Postgres store behind it.
+        let deferred = Deferred::new();
+        let store: Arc<dyn Storage> = Arc::new(deferred.clone());
         let tokens = FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
             .with_ttl(self.settings.token_ttl);
         // On the services too, where a plugin registered after this one
-        // reads them at its own `configure`: the upload and download routes
-        // of `storage-routes` do.
+        // reads them: the upload and download routes of `storage-routes` do.
         lc.services_mut().insert(Arc::clone(&store));
         lc.services_mut().insert(tokens.clone());
         self.store = Some(store);
         self.tokens = Some(tokens);
+        self.deferred = Some(deferred);
+        Ok(())
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The pool the `db` plugin opened in its own `before_start`, which
+        // runs first because that plugin is registered first.
+        let db = lc.services().get::<brocanth_db::Db>().ok_or_else(|| {
+            PluginError::new(
+                "[storage] found no database pool\n\
+                 help: register the `db` plugin before storage in src/plugins/mod.rs",
+            )
+        })?;
+        let store = Arc::new(
+            PgStorage::from_pool(db.pool().clone())
+                .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes())),
+        );
+        if let Some(deferred) = &self.deferred {
+            deferred.set(store.clone());
+        }
+        // Ready when one read of the tables answers. With `migrate`, the
+        // first check creates them, so a new project starts; a project with
+        // reviewers turns it off and keeps the statements in a migration.
+        // `serve` awaits this once before it listens.
+        let migrated = Arc::new(AtomicBool::new(!self.settings.migrate));
+        lc.ready_when(move || {
+            let store = Arc::clone(&store);
+            let migrated = Arc::clone(&migrated);
+            async move {
+                if !migrated.load(Ordering::Acquire) {
+                    store
+                        .migrate()
+                        .await
+                        .map_err(|e| format!("creating the storage tables: {e}"))?;
+                    migrated.store(true, Ordering::Release);
+                }
+                let probe = ObjectKey::of(b"brocanth.readyz");
+                store.exists(&probe).await.map(drop).map_err(|e| {
+                    format!(
+                        "{e}\nhelp: check `[db] url`; with `migrate = false`, the storage \
+                         tables must exist: `brocanth_storage::postgres::sql` has the statements"
+                    )
+                })
+            }
+        });
         Ok(())
     }
 
@@ -18752,6 +18805,16 @@ impl Plugin for Files {
 
 #[cfg(test)]
 mod tests {
+    use super::{usable_secret, DEVELOPMENT_SECRET};
+
+    #[test]
+    fn the_development_secret_is_refused_outside_development() {
+        assert!(usable_secret(DEVELOPMENT_SECRET, true));
+        assert!(!usable_secret(DEVELOPMENT_SECRET, false));
+        assert!(!usable_secret("short", false));
+        assert!(usable_secret(&"x".repeat(32), false));
+    }
+
     #[test]
     fn a_printed_settings_never_shows_a_secret() {
         let settings = super::Settings {
@@ -18769,13 +18832,14 @@ mod tests {
 //! `POST /files` takes a `multipart/form-data` form, stores its `file` part
 //! and answers `303` to the form's `return_to` field, with `?file=` and
 //! `&token=` added, or `201` with the address. `GET /files/{address}` serves
-//! the file to a request whose `?token=` opens it; add `&thumb=300x200` for
-//! a thumbnail. The path, `public` and `thumbnails` are in
-//! `src/modules/storage_routes.rs`.
+//! the file to a request whose `?token=` opens it.
+//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists.
+//! The path and `public` are in `src/modules/storage_routes.rs`.
 //!
 //! A plain form works with no script. The CSRF check reads no multipart
-//! body, so the `lift` hook copies the form's `_csrf_token` field into the
-//! header the check reads, before it runs:
+//! body, so the `lift` hook copies the form's CSRF field into the header the
+//! check reads, before it runs. The field and the header are the `[csrf]`
+//! ones: this plugin reads them from the CSRF plugin and keeps no copy.
 //!
 //! ```html
 //! <form method="post" action="/files" enctype="multipart/form-data">
@@ -18784,6 +18848,10 @@ mod tests {
 //!   <button>Upload</button>
 //! </form>
 //! ```
+//!
+//! Each upload is stored at an address of its own, unless `dedupe` is on.
+//! With `dedupe`, identical files share one object, and a `delete` removes
+//! it for every holder: count the references before you delete.
 //!
 //! A page shows a stored file with a link it mints after its own policy
 //! allowed the read:
@@ -18800,17 +18868,27 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
 use brocanth::plugin_order::Order;
-use brocanth_storage::routes::{FileRoutes, RoutesConfig};
-use brocanth_storage::{FileTokens, Storage};
+use brocanth_middleware::CsrfConfig;
+use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
+use brocanth_storage::{FileTokens, Storage, VariantSpec};
 
 /// Whether this request may store a file.
 ///
 /// It answers no, so nobody can upload until you say who may. The request
 /// has passed the session and the CSRF check by now; read the signed-in
-/// account from `state` and ask your policy. A "yes" for everyone is a free
-/// disk for every stranger.
-fn may_upload(_request: &Request, _state: &RequestState) -> bool {
+/// account from `state` and ask your policy, which may await a row. A "yes"
+/// for everyone is a free disk for every stranger.
+async fn may_upload(_request: &Request, _state: &RequestState) -> bool {
     false
+}
+
+/// `may_upload`, as the routes call it.
+struct Guard;
+
+impl UploadGuard for Guard {
+    fn may_upload<'a>(&'a self, request: &'a Request, state: &'a RequestState) -> GuardFuture<'a> {
+        Box::pin(may_upload(request, state))
+    }
 }
 
 /// What this plugin is built from.
@@ -18823,25 +18901,28 @@ fn may_upload(_request: &Request, _state: &RequestState) -> bool {
 pub struct Settings {
     /// The largest file accepted, in bytes.
     pub max_bytes: usize,
-    /// The form field that carries the CSRF token: `[csrf] field`.
-    pub csrf_field: String,
-    /// The header the CSRF check reads: `[csrf] header`.
-    pub csrf_header: String,
+    /// Store identical uploads once, at their content address.
+    pub dedupe: bool,
+    /// The only sizes `?thumb=` may ask for; any other is a 400.
+    pub thumb_sizes: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_bytes: 2_097_152,
-            csrf_field: "_csrf_token".to_string(),
-            csrf_header: "x-csrf-token".to_string(),
+            dedupe: false,
+            thumb_sizes: brocanth_storage::routes::DEFAULT_THUMB_SIZES
+                .iter()
+                .map(|size| size.to_string())
+                .collect(),
         }
     }
 }
 
 pub struct StorageRoutes {
     settings: Settings,
-    /// Built at `configure`, from the store the storage plugin published.
+    /// Built at `after_config`, from the store the storage plugin published.
     routes: Option<FileRoutes>,
 }
 
@@ -18858,7 +18939,9 @@ impl Plugin for StorageRoutes {
         }
     }
 
-    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // After every plugin registered: the store and the tokens are the
+        // storage plugin's, the field and the header the CSRF plugin's.
         let store = lc.services().get::<Arc<dyn Storage>>().cloned();
         let tokens = lc.services().get::<FileTokens>().cloned();
         let (Some(store), Some(tokens)) = (store, tokens) else {
@@ -18867,16 +18950,40 @@ impl Plugin for StorageRoutes {
                  help: register the storage plugin before this one in src/app.rs",
             ));
         };
+        let Some(csrf) = lc.services().get::<CsrfConfig>() else {
+            return Err(PluginError::new(
+                "[storage_routes] no CSRF check is registered, so any site could post files here\n\
+                 help: register `brocanth_middleware::Csrf` with `plugin_hooking` in src/plugins/mod.rs",
+            ));
+        };
+        let Some(csrf_header) = csrf.header.clone() else {
+            return Err(PluginError::new(
+                "[storage_routes] [csrf] header is unset, so an upload form's token has no way to the check\n\
+                 help: set `header` under [csrf], such as \"x-csrf-token\"",
+            ));
+        };
+        let thumb_sizes = self
+            .settings
+            .thumb_sizes
+            .iter()
+            .map(|size| {
+                VariantSpec::parse(size).map_err(|e| {
+                    PluginError::new(format!("[storage_routes] thumb_sizes `{size}`: {e}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let config = RoutesConfig {
             path: crate::modules::storage_routes::MODULE.path.to_string(),
             max_bytes: self.settings.max_bytes,
             public: crate::modules::storage_routes::MODULE.public,
-            thumbnails: crate::modules::storage_routes::MODULE.thumbnails,
-            csrf_field: self.settings.csrf_field.clone(),
-            csrf_header: self.settings.csrf_header.clone(),
+            thumbnails: true,
+            thumb_sizes,
+            dedupe: self.settings.dedupe,
+            csrf_field: csrf.field.clone(),
+            csrf_header,
             ..RoutesConfig::default()
         };
-        self.routes = Some(FileRoutes::new(store, tokens, config, may_upload)?);
+        self.routes = Some(FileRoutes::new(store, tokens, config, Guard)?);
         Ok(())
     }
 }
@@ -19576,8 +19683,9 @@ request.
 - `roles`  roles that grant permissions, stored with the accounts, for staff and the admin
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `rls`  Postgres row-level security declared in Rust; `rls make` writes the migration
-- `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
-- `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails
+- `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
+- `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token
+- `storage-thumbnails`  ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders
 - `input`  a form or a JSON body, read into a struct, with every fault at once
 - `client`  a subcommand that calls this application's own API, built from its routes
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
@@ -20045,14 +20153,6 @@ reset.
 superuser flag from a form or a page: an operator sets it, with
 `[superuser] email` at start or the `createsuperuser` command.
 
-## File routes
-
-Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
-answers no until you change it; ask the policy there, not in a page. A
-download needs a token: mint it with `FileStore::tokens` after your policy
-allowed the read, and never log the URL. Do not write an upload or
-download page beside these routes.
-
 ## Security headers
 
 `brocanth_middleware::SecurityHeaders` is registered in
@@ -20283,6 +20383,14 @@ row-level security.
 
 Never connect as a superuser: a superuser bypasses every policy.
 
+## File routes
+
+Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
+answers no until you change it. It is async: ask the policy there, not in
+a page. A download needs a token: mint it with `FileStore::tokens` after
+your policy allowed the read, and never log the URL. Do not write an
+upload or download page beside these routes.
+
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
@@ -20451,7 +20559,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: a8d833035e104761 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20463,7 +20571,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -20671,7 +20779,7 @@ kind = ["enhancer", "middleware"]
 files = ["src/modules/storage.rs", "src/plugins/storage/"]
 config = ["storage"]
 crates = ["brocanth-storage"]
-adapted_to = ["config"]
+adapted_to = ["config", "db"]
 
 [modules.storage-routes]
 version = "0.1.0"
@@ -20679,7 +20787,15 @@ kind = ["middleware"]
 files = ["src/modules/storage_routes.rs", "src/plugins/storage_routes/"]
 config = ["storage_routes"]
 crates = ["brocanth-storage"]
-adapted_to = ["config"]
+adapted_to = ["config", "storage-thumbnails"]
+
+[modules.storage-thumbnails]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/storage_thumbnails.rs"]
+config = []
+crates = ["brocanth-storage"]
+adapted_to = []
 
 [modules.input]
 version = "0.1.0"
@@ -21033,4 +21149,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: c0ce44f3b759ff2b

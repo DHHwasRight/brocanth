@@ -2394,7 +2394,7 @@ request.
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `flash`  one-shot messages across a redirect, in a signed cookie, drawn into the layout
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2536,7 +2536,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: fe0ce35884eb7cac -->
+<!-- brocanth-digest: 740684eb6ed1a04d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
