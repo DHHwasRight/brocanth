@@ -145,8 +145,9 @@ drains, because `App::shutdown` flips the bit before `begin_shutdown`.
 `prometheus-client`, over `metrics` + `metrics-exporter-prometheus`. It adds
 four small crates (dtoa, itoa, parking_lot, a derive). The exporter brings
 its own hyper server, `quanta` and a process-global recorder. A registry
-that belongs to one `Observer` also keeps ADR 1: two applications in one
-process do not count each other's requests.
+that belongs to one `Observer` also keeps the rule of PLAN.md §3 (no
+global registry): two applications in one process do not count each
+other's requests.
 
 | Series | Kind | Labels |
 | --- | --- | --- |
@@ -242,11 +243,10 @@ flag. See `docs/modules/observability.md`.
   wrap is `src/plugins/observability/serving.rs`, named in
   `Slot::ServerWrap`.
   `drain_delay_secs` counts against `[server] shutdown_grace_secs`.
-- **No database readiness check.** `brocanth-model`'s plugin opens no pool,
-  so there is nothing to ping. The same gap blocks pool stats.
-- **The generated cache and jobs plugins** (`brocanth-cache`'s and
-  `brocanth-jobs`' scaffold files) do not call `ready_when`. Only the library
-  plugins do.
+- **No pool stats.** The generated `db`, `cache` and `jobs` plugins each
+  register a readiness check (`ready_when`), so `/readyz` reaches the
+  database. Nothing exports the pool's size, idle and waiting counts on
+  `/metrics` yet.
 - **A job's `perform` does not run inside its span**, and the enqueuing
   request's trace does not reach the job. Both need `brocanth-jobs` to carry
   a trace context, which it deliberately does not link.
