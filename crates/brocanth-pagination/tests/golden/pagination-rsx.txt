@@ -66,7 +66,7 @@ edition = "2021"
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
-brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["macro"] }
 brocanth-pagination = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["policy"] }  # pages, cursors and the links between them
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
@@ -1528,14 +1528,12 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth::plugin_api::Plugin;
 
-        // No file and no TOML parser. Each plugin below starts from its
-        // defaults and takes what this run was given on top: the
-        // environment, then the flags.
-        let given = crate::plugins::given()?;
+        // No file lookup, no merge order, no TOML parser: the core takes
+        // values that are already built, so each plugin below is handed a
+        // literal the compiler checks. Add the config plugin when a file is
+        // wanted; nothing else changes.
         let builder = $builder;
-        let builder = builder.plugin(crate::plugins::policy::Policies::new(
-            crate::plugins::policy_settings(&given)?,
-        ));
+        let builder = builder.plugin(crate::plugins::policy::Policies::new(()));
         builder
     }};
 }
@@ -1644,24 +1642,14 @@ pub struct Setting {
 
 /// Every setting the framework and the modules declared. `brocanth add`
 /// rewrites this list; a file in src/modules/ renames or hides a flag.
-pub const SETTINGS: &[Setting] = &[
-    Setting {
-        path: "policy.dialect",
-        help: "The SQL a condition compiles to: postgres, the only dialect.",
-        flag: true,
-        file: "src/modules/policy.rs",
-        flags: crate::modules::policy::MODULE.flags,
-        env: "MY_BLOG_POLICY__DIALECT",
-    },
-    Setting {
-        path: "server.shutdown_grace_secs",
-        help: "Seconds a stop waits for open requests, then for the plugins.",
-        flag: true,
-        file: "src/modules/brocanth.rs",
-        flags: Flags::Project,
-        env: "MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS",
-    },
-];
+pub const SETTINGS: &[Setting] = &[Setting {
+    path: "server.shutdown_grace_secs",
+    help: "Seconds a stop waits for open requests, then for the plugins.",
+    flag: true,
+    file: "src/modules/brocanth.rs",
+    flags: Flags::Project,
+    env: "MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS",
+}];
 
 /// One value this run was given, above the defaults.
 pub struct Given {
@@ -1721,9 +1709,6 @@ fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
 fn renames() -> Vec<(&'static str, Flag)> {
     let mut renames = Vec::new();
     for (key, flag) in crate::modules::brocanth::MODULE.rename {
-        renames.push((key.path(), *flag));
-    }
-    for (key, flag) in crate::modules::policy::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     renames
@@ -1844,15 +1829,11 @@ pub fn read_line() -> Result<bool, String> {
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
-    let policy = crate::plugins::policy::Settings::default();
     let server = crate::plugins::ServerSettings::default();
-    vec![
-        ("policy.dialect", format!("{:?}", policy.dialect)),
-        (
-            "server.shutdown_grace_secs",
-            format!("{:?}", server.shutdown_grace_secs),
-        ),
-    ]
+    vec![(
+        "server.shutdown_grace_secs",
+        format!("{:?}", server.shutdown_grace_secs),
+    )]
 }
 
 /// One value, as the type of the field it sets.
@@ -1865,18 +1846,6 @@ where
         .value
         .parse()
         .map_err(|e| format!("{} is {:?}: {e}", given.from, given.value))
-}
-
-/// `[policy]`, as this binary runs it without a file: the plugin's
-/// defaults, then the environment, then the flags.
-pub fn policy_settings(given: &[Given]) -> Result<crate::plugins::policy::Settings, String> {
-    let mut settings = crate::plugins::policy::Settings::default();
-    for given in given {
-        if given.setting.path == "policy.dialect" {
-            settings.dialect = parsed(given)?;
-        }
-    }
-    Ok(settings)
 }
 
 /// `[server]`, as this binary runs it without a file: the plugin's
@@ -1893,15 +1862,11 @@ pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings
 
 /// Each setting as the plugin holds it, after every layer.
 fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
-    let policy = policy_settings(given)?;
     let server = server_settings(given)?;
-    Ok(vec![
-        ("policy.dialect", format!("{:?}", policy.dialect)),
-        (
-            "server.shutdown_grace_secs",
-            format!("{:?}", server.shutdown_grace_secs),
-        ),
-    ])
+    Ok(vec![(
+        "server.shutdown_grace_secs",
+        format!("{:?}", server.shutdown_grace_secs),
+    )])
 }
 
 /// Every settings layer on its own, lowest first, then the merged values.
@@ -2020,7 +1985,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ef64de983be39ffd
+// brocanth-digest: c1767a35a9eb48f4
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2116,38 +2081,12 @@ pub mod rsx {
 
 /// The shape of src/modules/policy.rs.
 pub mod policy {
-    pub use super::{Flag, Flags};
-
-    /// A setting of `[policy]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Key {
-        Dialect,
-    }
-
-    impl Key {
-        /// The setting, as `config/<env>.toml` and the flag spell it.
-        pub const fn path(self) -> &'static str {
-            match self {
-                Key::Dialect => "policy.dialect",
-            }
-        }
-    }
-
     /// What src/modules/policy.rs holds.
-    pub struct Module {
-        /// Whether the settings of this module have flags.
-        pub flags: Flags,
-        /// Flags under another name, or no flag.
-        pub rename: &'static [(Key, Flag)],
-    }
+    pub struct Module {}
 
     impl Module {
         /// The value of each field the file does not name.
-        pub const DEFAULT: Self = Self {
-            flags: Flags::Project,
-            rename: &[],
-        };
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -2162,7 +2101,7 @@ pub mod pagination {
     }
 }
 
-// brocanth-digest: 67c868bc792ddf51
+// brocanth-digest: fe22d89ce6d237ba
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2239,29 +2178,13 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
 //!
-//! A value that differs per deployment is a setting, not a choice: [policy] in
-//! the config file, an environment variable, or a flag.
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
-#[allow(unused_imports)]
-use crate::plugins::shape::policy::{Flag, Flags, Key, Module};
+use crate::plugins::shape::policy::Module;
 
-// Every field is written out so you can read the choices. The last line
-// gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
-pub const MODULE: Module = Module {
-    // The command-line flags of [policy]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
-    flags: Flags::Project,
-
-    // Another name for a flag, or no flag. The variable and the config key
-    // keep the declared name. Examples:
-    //   (Key::Dialect, Flag::As("dialect")),
-    //   (Key::Dialect, Flag::Hidden),
-    rename: &[],
-
-    ..Module::DEFAULT
-};
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/pagination.rs =====
 //! `pagination`: offset and keyset pages, with links that keep the query; no
 //! dependency.
@@ -2447,12 +2370,12 @@ pub fn Layout(children: Element) -> Element {
 //!
 //! `Post` is here so that this file compiles into something that runs. Move
 //! it, and whatever follows it, into `src/policies/` once there is more than
-//! one -- what must stay here is the plugin, because that is what reads the
-//! dialect and puts it on the context.
+//! one -- what must stay here is the plugin, because that is what puts the
+//! dialect on the context.
 //!
-//! The column enum is written by hand on purpose: the `policy!` macro is
-//! deliberately late, after a real application has used the algebra, so that
-//! the syntax is informed rather than imitated.
+//! `policy!` writes the column enum (`PostColumn`), the `Entity` impl and the
+//! `Policy` impl. `docs/policy.md` has the syntax. Keep the rules in the
+//! macro: a hand-written `impl Policy` is one the database cannot read back.
 //!
 //! # Listing, and then writing
 //!
@@ -2465,21 +2388,22 @@ pub fn Layout(children: Element) -> Element {
 //! ```
 //!
 //! A write is the same predicate carried into the statement, which is what
-//! closes the window between the check and the change. The field mask comes
-//! first, before any row is read:
+//! closes the window between the check and the change. The write takes the
+//! field mask too, and refuses a column the mask does not permit:
 //!
 //! ```ignore
-//! PostPolicy.writable(&visitor).check(["body"])?;   // which columns
 //! let admission = PostPolicy.update(&visitor).admission::<Post>(rules.dialect, id)?;
 //! let rows = /* run admission.query(), count the rows */;
 //! let verified = admission.resolve(rows)?;          // zero rows is a denial
-//! let write = verified.update(rules.dialect, [(PostColumn::Body, "new text".into())])?;
+//! let mask = PostPolicy.writable(&visitor);         // which columns
+//! let write = verified.update(rules.dialect, &mask, [(PostColumn::Body, "new text".into())])?;
 //! // run write.query(); then:
 //! write.applied(affected)?;                          // zero affected is RaceLost
 //! ```
 //!
 //! `Verified` is taken by value everywhere it is used, and a debug build fails
-//! the test that checked one and then forgot to spend it.
+//! the test that checked one and then forgot to spend it. A refused update
+//! gives it back: `refused.into_verified()`.
 //!
 //! # Two masks: create and update
 //!
@@ -2493,53 +2417,10 @@ pub fn Layout(children: Element) -> Element {
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_policy::{Bound, Column, Dialect, Entity, EntityPred, FieldMask, Ident, Policy, Pred};
+use brocanth_policy::{Dialect, Policy};
 
 // ---------------------------------------------------------------------------
-// An entity
-// ---------------------------------------------------------------------------
-
-/// The columns of `posts`, as an enum, because a rule is written in them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PostColumn {
-    /// Primary key.
-    Id,
-    /// Who wrote it.
-    AuthorId,
-    /// `draft` or `published`.
-    Status,
-    /// The text.
-    Body,
-}
-
-impl Column for PostColumn {
-    /// Required rather than derived: a changed-field name that is not one of
-    /// these is rejected instead of quietly permitted.
-    const ALL: &'static [Self] = &[Self::Id, Self::AuthorId, Self::Status, Self::Body];
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::AuthorId => "author_id",
-            Self::Status => "status",
-            Self::Body => "body",
-        }
-    }
-}
-
-/// The table the rules below are about.
-pub struct Post;
-
-impl Entity for Post {
-    type Column = PostColumn;
-    /// Checked at compile time, because a table name is program text and the
-    /// only honest moment to reject one is while the program is being built.
-    const TABLE: Ident = Ident::must("posts");
-    const PRIMARY_KEY: Self::Column = PostColumn::Id;
-}
-
-// ---------------------------------------------------------------------------
-// A subject, and the rules about it
+// A subject, an entity, and the rules about them
 // ---------------------------------------------------------------------------
 
 /// Whoever is asking. `brocanth-policy` never looks inside it.
@@ -2561,65 +2442,51 @@ impl Visitor {
     }
 }
 
-/// The rules for `posts`.
-///
-/// Only `list` is required, because list authorisation is the one that cannot
-/// be done per object: a paginator that filters after reading lies about its
-/// totals. Everything else defaults to deny, which is what makes shipping this
-/// file as it stands safe rather than lucky.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PostPolicy;
-
-impl Policy for PostPolicy {
-    type Entity = Post;
-    type Subject = Visitor;
-
-    fn list(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            // `Pred::is_always` reports this, so a test can assert which
-            // subjects see everything.
-            return Pred::Always;
-        }
-        Pred::any([
-            Pred::eq(PostColumn::Status, "published"),
-            // `or_deny` is the word that says what an anonymous visitor's
-            // missing id means: they own nothing.
-            Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id)),
-        ])
+brocanth_policy::policy! {
+    /// The table the rules below are about. A column is a `PostColumn`, never
+    /// a string, and the table name is checked at compile time.
+    pub entity Post in "posts" {
+        #[key] id: i64,
+        /// Who wrote it.
+        author_id: i64,
+        /// `draft` or `published`.
+        status: String,
+        /// The text.
+        body: String,
     }
 
-    fn create(&self, who: &Visitor) -> EntityPred<Post> {
-        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id))
-    }
-
-    fn update(&self, who: &Visitor) -> EntityPred<Post> {
-        if who.admin {
-            return Pred::Always;
+    /// The rules for `posts`.
+    ///
+    /// Only `list` is required, because list authorisation is the one that
+    /// cannot be done per object: a paginator that filters after reading lies
+    /// about its totals. Every rule left out denies, which is what makes
+    /// shipping this file as it stands safe rather than lucky.
+    pub policy PostPolicy(who: &Visitor) for Post {
+        // `else deny` is the word that says what an anonymous visitor's
+        // missing id means: they own nothing.
+        list {
+            who.admin => always,
+            status == "published" || author_id == who.account_id else deny,
         }
-        Pred::eq(PostColumn::AuthorId, Bound::or_deny(who.account_id))
-    }
-
-    /// Which columns an update may change. `update` says which rows; this
-    /// says which columns.
-    fn writable(&self, who: &Visitor) -> FieldMask<PostColumn> {
-        if who.admin {
-            FieldMask::except([PostColumn::Id])
-        } else {
-            // The author edits the body. Never the status, and never the
-            // owner: `update` reads the row as stored, so `AuthorId` here
-            // would let an author give a post to somebody else.
-            FieldMask::only([PostColumn::Body])
+        create: author_id == who.account_id else deny,
+        update {
+            who.admin => always,
+            author_id == who.account_id else deny,
         }
-    }
-
-    /// Which columns a create may set.
-    fn writable_on_create(&self, who: &Visitor) -> FieldMask<PostColumn> {
-        if who.admin {
-            return self.writable(who);
+        // Which columns an update may change. `update` says which rows; this
+        // says which columns. The author edits the body. Never the status,
+        // and never the owner: `update` reads the row as stored, so
+        // `author_id` here would let an author give a post to somebody else.
+        writable {
+            who.admin => except [id],
+            only [body],
         }
-        // A create names its owner, and `create` above admits only the
-        // author's own id.
-        FieldMask::only([PostColumn::Body, PostColumn::AuthorId])
+        // Which columns a create may set. A create names its owner, and
+        // `create` above admits only the author's own id.
+        writable_on_create {
+            who.admin => except [id],
+            only [body, author_id],
+        }
     }
 }
 
@@ -2627,74 +2494,40 @@ impl Policy for PostPolicy {
 // The plugin
 // ---------------------------------------------------------------------------
 
-/// What this plugin is built from.
-///
-/// Nothing deserialises it: `main` builds it from a literal, and the
-/// compiler checks that literal. `Plugin::Config` carries no bounds the
-/// core imposes, so there is no deserialiser here to link.
-#[derive(Debug)]
-pub struct Settings {
-    /// `postgres`, the only dialect. A string here and an enum below: a config file
-    /// is text, and the translation is checked at startup where a typo can
-    /// still be answered.
-    pub dialect: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            dialect: "postgres".to_string(),
-        }
-    }
-}
-
 /// What this plugin puts on the context.
 ///
 /// The dialect, and only the dialect. Every compile entry point still takes
 /// one as an argument -- the call site says which it meant -- and this is
-/// where the call site gets it, so one database is named once.
+/// where the call site gets it.
 ///
 /// The policies are not here. `PostPolicy` is a unit struct and a value, not
 /// a service: a handler writes `PostPolicy.list(&who)` and has nothing to
-/// look up. What a handler cannot work out on its own is which dialect this
-/// deployment is, so that is what the context carries.
+/// look up.
 pub struct Rules {
-    /// Which dialect this application's conditions are compiled for.
+    /// Which dialect this application's conditions are compiled for:
+    /// Postgres, the only one brocanth supports.
     pub dialect: Dialect,
 }
 
 impl ContextItem for Rules {}
 
+/// Compiles the rules once at startup, and puts [`Rules`] on the context.
 pub struct Policies {
-    settings: Settings,
-    /// Read at `configure` and not in `new`, because turning a string into a
-    /// dialect can fail and `Plugin::new` cannot.
-    dialect: Option<Dialect>,
+    /// Set by `configure`, once the example rule has compiled.
+    ready: bool,
 }
 
 impl Plugin for Policies {
-    type Config = Settings;
+    /// No setting: the dialect is a constant, not a choice.
+    type Config = ();
     type Provides = ProvidesContext<Rules>;
     const NAME: &'static str = "policy";
 
-    fn new(config: Settings) -> Self {
-        Self {
-            settings: config,
-            dialect: None,
-        }
+    fn new(_config: ()) -> Self {
+        Self { ready: false }
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let dialect = match self.settings.dialect.as_str() {
-            "postgres" => Dialect::Postgres,
-            other => {
-                return Err(PluginError::new(format!(
-                    "[policy] dialect is {other:?}, which is not a SQL dialect\n\
-                     help: set `dialect` under [policy] to postgres"
-                )))
-            }
-        };
-
         // Compile one rule at startup. It costs a string and it answers the
         // only question this file can get wrong without anybody noticing: a
         // column whose name is not a bare identifier fails the query rather
@@ -2702,7 +2535,7 @@ impl Plugin for Policies {
         // finding it out on the first list request.
         let condition = PostPolicy
             .list(&Visitor::anonymous())
-            .condition::<Post>(dialect)
+            .condition::<Post>(Dialect::Postgres)
             .map_err(|e| {
                 PluginError::new(format!(
                     "[policy] posts: {e}\n\
@@ -2712,15 +2545,17 @@ impl Plugin for Policies {
         let sql = condition.sql();
         crate::plugins::say!(info, "[policy] posts, anonymous: {sql}"; sql);
 
-        self.dialect = Some(dialect);
+        self.ready = true;
         Ok(())
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
         // `configure` runs before the server is handed the application, so
-        // the dialect is here by the time any request builds a context.
-        if let Some(dialect) = self.dialect {
-            cx.insert(Rules { dialect });
+        // the rules have compiled by the time any request builds a context.
+        if self.ready {
+            cx.insert(Rules {
+                dialect: Dialect::Postgres,
+            });
         }
     }
 }
@@ -2754,19 +2589,32 @@ mod tests {
     #[test]
     fn an_update_changes_the_body_and_never_the_author() {
         let ada = author(7);
-        // The mask first, before any row is read: the update rule reads the
-        // row as stored, so it cannot refuse a change of owner.
-        assert!(PostPolicy.writable(&ada).check(["author_id"]).is_err());
-        assert_eq!(PostPolicy.writable(&ada).check(["body"]), Ok(()));
-
-        // Then the witness, spent by the write that carries its condition.
+        let mask = PostPolicy.writable(&ada);
         let admission = PostPolicy
             .update(&ada)
             .admission::<Post>(Dialect::Postgres, 1_i64)
             .expect("the rule compiles");
         let verified = admission.resolve(1).expect("the admission found the row");
+
+        // The update rule reads the row as stored, so it cannot refuse a
+        // change of owner. The mask on the write does, and gives the witness
+        // back.
+        let refused = verified
+            .update(
+                Dialect::Postgres,
+                &mask,
+                [(PostColumn::AuthorId, 8_i64.into())],
+            )
+            .expect_err("the mask leaves out author_id");
+        let verified = refused.into_verified();
+
+        // The witness, spent by the write that carries its condition.
         let write = verified
-            .update(Dialect::Postgres, [(PostColumn::Body, "new text".into())])
+            .update(
+                Dialect::Postgres,
+                &mask,
+                [(PostColumn::Body, "new text".into())],
+            )
             .expect("the update compiles");
         assert!(write.query().sql().contains("\"author_id\""));
         assert!(write.applied(0).is_err(), "zero rows is a lost race");
@@ -2978,7 +2826,7 @@ adapted_to = []
 version = "0.1.0"
 kind = ["middleware"]
 files = ["src/modules/policy.rs", "src/plugins/policy/"]
-config = ["policy"]
+config = []
 crates = ["brocanth-policy"]
 adapted_to = []
 
@@ -2990,4 +2838,4 @@ config = []
 crates = ["brocanth-pagination"]
 adapted_to = ["rsx", "policy"]
 
-# brocanth-digest: 08a88f6c7161d1d3
+# brocanth-digest: cb35b3cd5cc4f5c9
