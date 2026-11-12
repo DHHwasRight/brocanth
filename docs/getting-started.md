@@ -157,7 +157,7 @@ router, a context and nothing else.
 | `logging` | A plain request logger written into the project. `create` refuses it beside `observability-logs`: both write a line per request. |
 | `config` | `config/<env>.toml`, four sources merged, typed per section. |
 | `sessions` | Cookie sessions, and a `Session` on the context. |
-| `model` | The model layer: SeaORM, validations and migrations. SQLite in development, Postgres in production. |
+| `model` | The model layer: SeaORM, validations and migrations, on Postgres. |
 | `commands` | The project's own command line: `serve`, `routes`, `settings`, and the subcommands you add. |
 | `rsx` | HTML from `.rsx` templates beside the pages, with layouts. See below. |
 | `rsx-tailwind` | A CSS build over the class names in your templates. Needs node. |
@@ -952,17 +952,9 @@ subcommand, and the route table is `pages::router()`.
 
 ## One thing to know if you pass `--with model`
 
-The model layer now defaults to **Postgres**. The generated manifest names
-`brocanth-model` with no features, so a new project gets the Postgres driver
-and expects a server. For the small single-machine setup, edit the dependency
-yourself:
-
-```toml
-brocanth-model = { path = "...", default-features = false, features = ["sqlite"] }
-```
-
-The generator does not know to write that, which is a rough edge rather than a
-decision.
+The model layer runs on **Postgres**, the only database brocanth supports
+(2026-11-11): RLS and one database keep the framework simple. A new project
+gets the Postgres driver and expects a server, in development too.
 
 ## Where to go next
 

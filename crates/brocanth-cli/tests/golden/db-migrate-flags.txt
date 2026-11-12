@@ -2325,7 +2325,7 @@ impl Command for Settings {
 //! `dbshell` -- the database's own client, on this application's database.
 //!
 //! Reads `[db] url` the way the server does and replaces itself with `psql`
-//! or `sqlite3` on it. `--print` shows the command line; a password goes in
+//! on it. `--print` shows the command line; a password goes in
 //! `PGPASSWORD` and never on it. See `brocanth_db::shell`.
 //!
 //! Ordinary project code, like `serve`: rename it or delete it, and delete
@@ -2335,14 +2335,14 @@ use std::ffi::OsString;
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
-/// Open psql or sqlite3 on the database in `[db] url`
+/// Open psql on the database in `[db] url`
 #[cmd]
 #[derive(clap::Args)]
 pub struct Dbshell {
     /// Print the command line instead of running it. The password is not printed
     #[arg(long)]
     print: bool,
-    /// Passed to psql or sqlite3 unchanged, after `--`
+    /// Passed to psql unchanged, after `--`
     #[arg(last = true, value_name = "CLIENT ARGS")]
     rest: Vec<OsString>,
 }

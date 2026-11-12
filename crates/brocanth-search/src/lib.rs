@@ -51,13 +51,6 @@ pub enum SearchError {
         /// The table.
         table: &'static str,
     },
-    /// The condition was compiled for SQLite. Full-text search here is
-    /// Postgres.
-    #[error(
-        "the condition was compiled for SQLite, and this search is Postgres\n\
-         help: compile the rule with `Dialect::Postgres`"
-    )]
-    Dialect,
     /// A column name is not a bare SQL identifier.
     #[error("{0}\nhelp: name the column with letters, digits and `_`")]
     Compile(#[from] brocanth_policy::CompileError),

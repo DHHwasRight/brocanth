@@ -343,9 +343,9 @@ async fn a_half_written_impersonation_marker_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_url_that_is_not_postgres_is_refused_with_help() {
-    let err = PgStore::connect("sqlite://app.db").await.unwrap_err();
+    let err = PgStore::connect("mysql://localhost/app").await.unwrap_err();
     let text = err.to_string();
-    assert!(text.contains("`sqlite` is not a Postgres URL"), "{text}");
+    assert!(text.contains("`mysql` is not a Postgres URL"), "{text}");
     assert!(text.contains("help:"), "{text}");
 }
 

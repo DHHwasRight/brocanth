@@ -1,6 +1,10 @@
 //! Proof that the model layer runs: migrations, validations, nested
 //! transactions, bulk-write hook coverage, dirty tracking, N+1 detection and
-//! the entity registry, against in-memory SQLite.
+//! the entity registry. Each database test runs in a Postgres schema of its
+//! own and skips when no server is named.
+
+#[macro_use]
+mod support;
 
 #[path = "../fixtures/blog.rs"]
 mod blog;
@@ -15,17 +19,19 @@ use sea_orm::sea_query::IntoCondition;
 use sea_orm::{ConnectionTrait, PaginatorTrait, Statement};
 use std::sync::{Arc, Mutex};
 
+/// The tables of the current schema, which is the harness's own.
 async fn tables(db: &impl ConnectionTrait) -> Vec<String> {
     let rows = db
         .query_all_raw(Statement::from_string(
             db.get_database_backend(),
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            "SELECT table_name::text AS name FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' \
+             ORDER BY table_name",
         ))
         .await
-        .expect("sqlite_master");
+        .expect("information_schema.tables");
     rows.iter()
         .map(|r| r.try_get::<String>("", "name").expect("name"))
-        .filter(|n| !n.starts_with("sqlite_"))
         .collect()
 }
 
@@ -35,7 +41,7 @@ async fn tables(db: &impl ConnectionTrait) -> Vec<String> {
 
 #[tokio::test]
 async fn migrations_go_up_and_come_back_down() {
-    let harness = Harness::sqlite().await.expect("connect");
+    let harness = or_skip!(Harness::isolated());
 
     harness.migrate::<Migrator>().await.expect("up");
     let up = tables(harness.conn()).await;
@@ -59,7 +65,7 @@ async fn migrations_go_up_and_come_back_down() {
 #[tokio::test]
 async fn an_invalid_record_is_rejected_before_any_statement_is_issued() {
     let probe = Probe::default();
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
 
@@ -98,7 +104,7 @@ async fn an_invalid_record_is_rejected_before_any_statement_is_issued() {
 #[tokio::test]
 async fn a_bad_format_is_caught_and_the_only_statement_is_the_uniqueness_lookup() {
     let probe = Probe::default();
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
 
@@ -130,7 +136,7 @@ async fn a_bad_format_is_caught_and_the_only_statement_is_the_uniqueness_lookup(
 
 #[tokio::test]
 async fn the_hook_fires_even_on_a_raw_sea_orm_insert() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     // No brocanth helper anywhere: SeaORM's own `insert`.
@@ -153,7 +159,7 @@ async fn the_hook_fires_even_on_a_raw_sea_orm_insert() {
 
 #[tokio::test]
 async fn uniqueness_queries_and_does_not_collide_a_record_with_itself() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let ada = user::ActiveModel {
@@ -188,7 +194,7 @@ async fn uniqueness_queries_and_does_not_collide_a_record_with_itself() {
 
 #[tokio::test]
 async fn valid_answers_without_writing() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let good = post::ActiveModel {
@@ -220,14 +226,12 @@ async fn valid_answers_without_writing() {
 // 3. A nested transaction producing a real SAVEPOINT
 // ---------------------------------------------------------------------------
 
-/// SQLite rejects `BEGIN` inside an open transaction with "cannot start a
-/// transaction within a transaction". The nested `begin()` below therefore
-/// could not have issued one: it issued a `SAVEPOINT`. The partial rollback
-/// proves the same thing from the other side — rolling the inner one back keeps
+/// Postgres answers a second `BEGIN` with a warning, not an error, so the
+/// proof is the partial rollback: rolling the inner transaction back keeps
 /// the outer one's row, which only a savepoint does.
 #[tokio::test]
 async fn a_nested_transaction_is_a_real_savepoint() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let outer = harness.begin().await.expect("begin");
 
     user::ActiveModel {
@@ -238,17 +242,6 @@ async fn a_nested_transaction_is_a_real_savepoint() {
     .insert_checked(&*outer)
     .await
     .expect("insert");
-
-    assert!(
-        outer
-            .execute_raw(Statement::from_string(
-                outer.get_database_backend(),
-                "BEGIN",
-            ))
-            .await
-            .is_err(),
-        "a transaction is open, so a second BEGIN must fail"
-    );
 
     // Discarded savepoint.
     let inner = outer.begin().await.expect("savepoint");
@@ -300,7 +293,7 @@ async fn a_nested_transaction_is_a_real_savepoint() {
 
 #[tokio::test]
 async fn the_fan_out_path_runs_hooks_and_the_bypass_does_not() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 3, 1).await.expect("seed");
 
@@ -362,7 +355,7 @@ async fn the_fan_out_path_runs_hooks_and_the_bypass_does_not() {
 
 #[tokio::test]
 async fn insert_each_is_atomic_and_validated() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let rows = vec![
@@ -394,7 +387,7 @@ async fn insert_each_is_atomic_and_validated() {
 
 #[tokio::test]
 async fn dirty_tracking_reports_what_changed_and_what_it_was() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let row = user::ActiveModel {
@@ -458,7 +451,7 @@ async fn the_probe_flags_a_hand_rolled_n_plus_one() {
         ..Default::default()
     });
 
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 5, 2).await.expect("seed");
@@ -489,7 +482,7 @@ async fn the_probe_flags_a_hand_rolled_n_plus_one() {
 #[tokio::test]
 async fn a_probe_that_is_off_can_be_switched_on_per_request() {
     let probe = Probe::off();
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
 
@@ -521,8 +514,8 @@ fn the_registry_enumerates_every_model_in_the_binary() {
 #[test]
 fn the_registry_describes_columns_for_a_generator() {
     let registry = ModelRegistry::new()
-        .with("user", user::Entity, DbBackend::Sqlite)
-        .with("post", post::Entity, DbBackend::Sqlite);
+        .with("user", user::Entity, DbBackend::Postgres)
+        .with("post", post::Entity, DbBackend::Postgres);
 
     assert_eq!(registry.names(), ["user", "post"]);
     assert_eq!(registry.tables(), ["user", "post"]);
@@ -560,7 +553,7 @@ fn the_registry_describes_columns_for_a_generator() {
 fn the_schema_planner_proposes_and_never_applies() {
     use brocanth_model::schema_sync::{PlanOnly, SchemaPlanner};
 
-    let plan = PlanOnly::new(DbBackend::Sqlite)
+    let plan = PlanOnly::new(DbBackend::Postgres)
         .with(user::Entity)
         .with(post::Entity)
         .plan();

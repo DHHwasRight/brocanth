@@ -27,7 +27,7 @@ brocanth-cli = { path = "../brocanth-cli" }
 # The version `brocanth-policy` and `brocanth-resource` already resolve.
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
-    "sqlite-bundled",
+    "postgres",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
 

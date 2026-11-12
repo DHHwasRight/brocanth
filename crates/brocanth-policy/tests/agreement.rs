@@ -1,5 +1,5 @@
 //! `eval(row) == (row in query(condition))`, over a table of hand-written
-//! cases and a real SQLite database.
+//! cases and a real PostgreSQL database.
 //!
 //! PLAN.md §9 obligation 1 says the two interpretations can disagree and
 //! PocketBase cannot have that bug because it has only one. This is the test
@@ -7,16 +7,17 @@
 //! against a second guess of what the engine does.
 
 mod common;
-#[path = "common/sqlite.rs"]
-mod sqlite;
+#[path = "common/postgres.rs"]
+mod postgres;
 
 use brocanth_policy::agreement::{check, HarnessError};
 use brocanth_policy::{Dialect, MapRow, Pred, Value};
 use common::{Post, PostColumn as C, SCHEMA};
 
-/// Four rows that between them cover a NULL in every nullable column.
-fn fixture() -> (sqlite::Sqlite, Vec<MapRow<C>>) {
-    let db = sqlite::Sqlite::new(SCHEMA);
+/// Four rows that between them cover a NULL in every nullable column, or
+/// `None` when no database is set.
+fn fixture() -> Option<(postgres::Postgres, Vec<MapRow<C>>)> {
+    let db = postgres::Postgres::new(SCHEMA)?;
     let rows = vec![
         row(1, Some(7), Some(3), Some("published"), Some(10)),
         row(2, Some(7), None, Some("draft"), Some(5)),
@@ -25,7 +26,7 @@ fn fixture() -> (sqlite::Sqlite, Vec<MapRow<C>>) {
     ];
     for r in &rows {
         db.execute(
-            "INSERT INTO posts (id, author_id, team_id, status, score) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO posts (id, author_id, team_id, status, score) VALUES ($1, $2, $3, $4, $5)",
             &[
                 cell(r, C::Id),
                 cell(r, C::AuthorId),
@@ -35,7 +36,7 @@ fn fixture() -> (sqlite::Sqlite, Vec<MapRow<C>>) {
             ],
         );
     }
-    (db, rows)
+    Some((db, rows))
 }
 
 fn cell(row: &MapRow<C>, column: C) -> Value {
@@ -140,9 +141,11 @@ fn cases() -> Vec<(&'static str, Pred<C>)> {
 
 #[test]
 fn the_two_interpretations_agree() {
-    let (mut db, rows) = fixture();
+    let Some((mut db, rows)) = fixture() else {
+        return;
+    };
     for (name, pred) in cases() {
-        match check::<Post, _, _>(&pred, &rows, Dialect::Sqlite, &mut db) {
+        match check::<Post, _, _>(&pred, &rows, Dialect::Postgres, &mut db) {
             Ok(()) => {}
             Err(HarnessError::Disagreed(d)) => panic!(
                 "case `{name}` disagreed: eval() said {:?}, the query said {}, for row {}\n  {}",
@@ -159,7 +162,9 @@ fn the_harness_reports_a_disagreement_rather_than_passing() {
     // whose two interpretations are deliberately different must be caught.
     use brocanth_policy::{Opaque, Truth};
 
-    let (mut db, rows) = fixture();
+    let Some((mut db, rows)) = fixture() else {
+        return;
+    };
     let lying: Pred<C> = Pred::Opaque(
         Opaque::new(
             "deliberately inconsistent",
@@ -169,7 +174,7 @@ fn the_harness_reports_a_disagreement_rather_than_passing() {
         .with_eval(|_row| Truth::True),
     );
     assert!(matches!(
-        check::<Post, _, _>(&lying, &rows, Dialect::Sqlite, &mut db),
+        check::<Post, _, _>(&lying, &rows, Dialect::Postgres, &mut db),
         Err(HarnessError::Disagreed(_))
     ));
 }
@@ -179,13 +184,15 @@ fn a_predicate_with_only_one_interpretation_is_not_a_disagreement() {
     use brocanth_policy::{Membership, Op};
     use common::{MEMBERS, MEMBERS_TEAM, MEMBERS_USER};
 
-    let (mut db, rows) = fixture();
+    let Some((mut db, rows)) = fixture() else {
+        return;
+    };
     let pred = Membership::new(C::TeamId, MEMBERS, MEMBERS_TEAM)
         .filter_by(MEMBERS_USER, Op::Eq, 7i64)
         .expect("present")
         .into_pred();
     assert!(matches!(
-        check::<Post, _, _>(&pred, &rows, Dialect::Sqlite, &mut db),
+        check::<Post, _, _>(&pred, &rows, Dialect::Postgres, &mut db),
         Err(HarnessError::NotEvaluable(_))
     ));
 }
@@ -198,18 +205,20 @@ fn the_admission_query_and_the_list_query_select_the_same_rows() {
     // evaluator at all.
     use brocanth_policy::RowView as _;
 
-    let (mut db, rows) = fixture();
+    let Some((mut db, rows)) = fixture() else {
+        return;
+    };
     for (name, pred) in cases() {
         let listed = {
             let query = pred
-                .matching_ids::<Post>(Dialect::Sqlite)
+                .matching_ids::<Post>(Dialect::Postgres)
                 .expect("compiles");
             Oracle::<Post>::matching(&mut db, &query).expect("the query runs")
         };
         for row in &rows {
             let id = row.get(C::Id);
             let admission = pred
-                .admission::<Post>(Dialect::Sqlite, id.clone())
+                .admission::<Post>(Dialect::Postgres, id.clone())
                 .expect("compiles");
             let matched = {
                 // `SELECT 1 …` returns a 1, which the oracle reads as an id.

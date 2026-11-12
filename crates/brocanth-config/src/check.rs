@@ -24,7 +24,6 @@
 //! | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file |
 //! | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
 //! | `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
-//! | `deploy/database` | error | a database URL is in memory or under a temporary directory |
 //! | `deploy/csrf-off` | error | the project has cookies and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
@@ -395,9 +394,7 @@ fn always(project: &Project, config: &Config) -> Vec<Finding> {
 }
 
 fn backend_of(url: &str) -> Option<&'static str> {
-    if url.starts_with("sqlite:") {
-        Some("sqlite")
-    } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         Some("postgres")
     } else {
         None
@@ -565,28 +562,6 @@ fn deploy(
             );
         }
     }
-    for section in ["db", "cache", "jobs"] {
-        let Some(v) = get(config, &format!("{section}.url")) else {
-            continue;
-        };
-        let Some(url) = v.as_str() else { continue };
-        if let Some(problem) = temporary_database(url) {
-            out.push(
-                Finding::error(
-                    "deploy/database",
-                    format!(
-                        "`[{section}] url` {problem}, so the data does not outlive the process"
-                    ),
-                )
-                .at(place(project, v))
-                .help(format!(
-                    "point ${} at a Postgres server, or at a SQLite file on a persistent disk",
-                    project.variable(section, "url")
-                )),
-            );
-        }
-    }
-
     // CSRF, and whether hooks run at all.
     let has_cookies = project.modules.is_empty() || project.has("sessions") || project.has("auth");
     let csrf = sources.find("brocanth_middleware::Csrf");
@@ -718,23 +693,6 @@ fn same_file(a: &str, b: &str) -> bool {
     a.rsplit_once(':').map(|x| x.0) == b.rsplit_once(':').map(|x| x.0)
 }
 
-/// Why a database URL does not outlive the process, if it does not.
-fn temporary_database(url: &str) -> Option<&'static str> {
-    let rest = url
-        .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))?;
-    let path = rest.split('?').next().unwrap_or(rest);
-    if path.is_empty() || path == ":memory:" || rest.contains("mode=memory") {
-        return Some("is an in-memory SQLite database");
-    }
-    let tmp = std::env::temp_dir();
-    let under_tmp = ["/tmp/", "/var/tmp/", "/private/tmp/", "/dev/shm/"]
-        .iter()
-        .any(|p| path.starts_with(p))
-        || Path::new(path).starts_with(&tmp);
-    under_tmp.then_some("is a SQLite file under a temporary directory")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,7 +727,7 @@ level = "debug"
 secure = false
 
 [db]
-url = "sqlite::memory:"
+url = "postgres://localhost/shop"
 
 [jobs]
 migrate = true
@@ -780,7 +738,7 @@ cookie_name = "session"
 secure = false
 
 [policy]
-dialect = "postgres"
+dialect = "mysql"
 
 [storage]
 secret = "development only: replace before anything is uploaded in anger"
@@ -802,7 +760,6 @@ secret = "development only: replace before anything is uploaded in anger"
             "deploy/default-secret",
             "deploy/debug-logging",
             "deploy/jobs-migrate",
-            "deploy/database",
             "deploy/csrf-off",
             "deploy/hsts",
         ] {
@@ -955,10 +912,22 @@ dialect = "postgres"
     }
 
     #[test]
-    fn a_temporary_sqlite_file_does_not_outlive_the_process() {
-        assert!(temporary_database("sqlite:///tmp/x.sqlite?mode=rwc").is_some());
-        assert!(temporary_database("sqlite://db/production.sqlite").is_none());
-        assert!(temporary_database("postgres://db/x").is_none());
+    fn a_dialect_that_is_not_the_database_is_an_error() {
+        let config = Config::from_toml(
+            "shop",
+            "development",
+            "[db]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"mysql\"\n",
+        )
+        .unwrap();
+        let found = always(&project(&["db", "policy"]), &config);
+        assert_eq!(ids(&found), ["check/dialect"]);
+        let config = Config::from_toml(
+            "shop",
+            "development",
+            "[db]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"postgres\"\n",
+        )
+        .unwrap();
+        assert!(always(&project(&["db", "policy"]), &config).is_empty());
     }
 
     #[test]

@@ -312,9 +312,7 @@ fn postgres() -> Backend {
             sweep_setting(),
         ],
         fields: concat!(
-            "    /// The Postgres URL the cache lives in. Postgres and nothing else, on\n",
-            "    /// purpose: a cache for a SQLite deployment is a separate crate behind the\n",
-            "    /// same `Cache` trait.\n",
+            "    /// The Postgres URL the cache lives in. Brocanth supports Postgres only.\n",
             "    pub url: String,\n",
             "    /// Create the unlogged cache table at startup if it is absent.\n",
             "    pub migrate: bool,\n",

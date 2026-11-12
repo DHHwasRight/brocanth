@@ -69,8 +69,7 @@
 //! A record that sets an integer primary key leaves the table's sequence
 //! behind the rows. On Postgres the loader moves each sequence it touched to
 //! the largest key, as Django does, so the next `INSERT` without a key does
-//! not collide. SQLite needs nothing: its next key is always past the
-//! largest.
+//! not collide.
 //!
 //! # Not here
 //!

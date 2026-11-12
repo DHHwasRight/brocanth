@@ -142,8 +142,6 @@ CMD ["/app/@NAME@", "serve"]
 const DOCKERIGNORE: &str = "/target
 /.git
 /db
-*.sqlite
-*.sqlite-*
 /node_modules
 ";
 

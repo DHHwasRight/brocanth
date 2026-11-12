@@ -277,14 +277,13 @@ fn in_set(lhs: &Value, values: &[Value]) -> Truth {
     }
 }
 
-/// Ordering between two non-`NULL` values, in SQLite's storage-class order:
-/// integers and reals compare numerically with each other, then text, then
-/// blobs.
+/// Ordering between two non-`NULL` values: integers and reals compare
+/// numerically with each other, then text, then blobs.
 ///
-/// A policy that compares a text column to an integer is relying on dialect
-/// behaviour — SQLite coerces by column affinity, PostgreSQL raises a type
-/// error — and [`crate::agreement`] is how you find that out rather than this
-/// function. Comparing like with like has no such question.
+/// The order across types is arbitrary but total. A policy that compares a
+/// text column to an integer gets a type error from PostgreSQL, and
+/// [`crate::agreement`] is how you find that out rather than this function.
+/// Comparing like with like has no such question.
 fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (lhs, rhs) {
@@ -294,7 +293,7 @@ fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
         (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
-        // SQLite stores a boolean as an integer, so this is the same question.
+        // A boolean against a number compares as 0 or 1.
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Bool(a), other) => order(&Value::Int(i64::from(*a)), other),
         (other, Value::Bool(b)) => order(other, &Value::Int(i64::from(*b))),
@@ -302,7 +301,7 @@ fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// SQLite's storage-class ordering: NULL < numeric < text < blob.
+/// The order across types: NULL < numeric < text < blob.
 fn class(value: &Value) -> u8 {
     match value {
         Value::Null => 0,

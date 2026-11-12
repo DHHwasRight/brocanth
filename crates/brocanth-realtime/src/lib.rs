@@ -16,7 +16,7 @@
 //! <rule>`. At a thousand connections with six hundred subscribers, one write
 //! is six hundred point queries: 1.2–6 ms on in-process SQLite, and **about
 //! 180 ms on Postgres**, which does not work at all. Postgres is brocanth's
-//! base, so that number is the whole point.
+//! only database, so that number is the whole point.
 //!
 //! Because a brocanth policy is a *value* — `brocanth_policy::Pred`, an enum
 //! with public variants — it can be matched rather than executed.

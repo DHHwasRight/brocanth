@@ -19,10 +19,11 @@ serde_json = "1"
 syn = { version = "2", features = ["full", "parsing", "printing"] }
 
 [dev-dependencies]
-# The generated migrations are compiled and run against an in-memory SQLite
-# database by `tests/migrations.rs`. A golden file that only compares text
-# can be wrong in the same way twice.
-brocanth-model = { path = "../brocanth-model", default-features = false, features = ["sqlite"] }
+# The generated migrations are compiled and run against Postgres by
+# `tests/migrations.rs`, in a schema of their own; the test skips when no
+# database is set. A golden file that only compares text can be wrong in the
+# same way twice.
+brocanth-model = { path = "../brocanth-model", features = ["postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints.rust]

@@ -60,15 +60,12 @@ brocanth-policy = { workspace = true, features = ["macro"] }
 # The claim under test is that the policy filters **in the query**. A fixture
 # that filtered in Rust would prove only that this crate and that fixture agree
 # about a predicate neither of them sent to a database, so the tests run against
-# a real engine, exactly as `brocanth-policy`'s agreement tests do.
-#
-# The version is not a preference. `libsqlite3-sys` sets `links = "sqlite3"`, so
-# cargo permits one copy of it in the whole graph; `brocanth-jobs` pins
-# `sqlx 0.9` and `brocanth-policy` already resolves to it. Taking anything else
-# here would fail resolution for the workspace rather than for this crate.
+# a real engine, exactly as `brocanth-policy`'s agreement tests do:
+# PostgreSQL, skipped when no database is set. The `sqlx` version is the one
+# the workspace already resolves.
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
-    "sqlite-bundled",
+    "postgres",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
 

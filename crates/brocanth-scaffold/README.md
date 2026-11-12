@@ -177,7 +177,7 @@ use brocanth_scaffold::{config_section, Setting};
 let text = config_section(
     "db",
     &[
-        Setting::text("url", "sqlite://db", "Where the database is.").secret(),
+        Setting::text("url", "postgres://localhost/db", "Where the database is.").secret(),
         Setting::integer("pool.max_size", 5, "Connections at most."),
         Setting::integer("pool.limit", -1, "Rows per page.").none_as("-1"),
     ],
@@ -186,7 +186,7 @@ let expected = [
     "",
     "[db]",
     "# Where the database is.",
-    "url = \"sqlite://db\"",
+    "url = \"postgres://localhost/db\"",
     "",
     "[db.pool]",
     "# Connections at most.",

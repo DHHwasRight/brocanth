@@ -575,7 +575,7 @@ mod tests {
 
     fn defaults() -> Db {
         Db {
-            url: "sqlite://app.db".into(),
+            url: "postgres://localhost/app".into(),
             pool: Pool {
                 max_size: 5,
                 timeout_s: 30,

@@ -1882,13 +1882,14 @@ impl Default for Settings {
             "db",
             &[
                 Setting::integer("pool.max_size", 5, "Connections at most."),
-                Setting::text("url", "sqlite://db", "Where the database is.").note("Two\nlines"),
+                Setting::text("url", "postgres://localhost/db", "Where the database is.")
+                    .note("Two\nlines"),
                 Setting::bool("pool.lazy", true, "Open on first use."),
             ],
         );
         assert_eq!(
             text,
-            "\n[db]\n# Where the database is.\n# Two\n# lines\nurl = \"sqlite://db\"\n\
+            "\n[db]\n# Where the database is.\n# Two\n# lines\nurl = \"postgres://localhost/db\"\n\
              \n[db.pool]\n# Connections at most.\nmax_size = 5\n# Open on first use.\nlazy = true\n"
         );
     }

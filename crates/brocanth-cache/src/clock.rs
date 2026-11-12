@@ -5,9 +5,9 @@
 //! two reasons.
 //!
 //! **Milliseconds in a `BIGINT`, not `TIMESTAMPTZ`.** One column type, one
-//! comparison semantics and one sort order, whatever database is underneath —
-//! which is what lets a SQLite backend in a later crate behave identically
-//! rather than nearly identically. An application that wants a readable column
+//! comparison semantics and one sort order, whatever store is underneath —
+//! which is what lets another backend behave identically rather than nearly
+//! identically. An application that wants a readable column
 //! can add a generated one; the cache will not read it.
 //!
 //! **The caller's clock, not the database's.** `now()` inside the SQL would
@@ -96,7 +96,7 @@ impl Clock for ManualClock {
 
 /// The on-disk spelling of an instant: milliseconds since the Unix epoch.
 ///
-/// Public because a backend in another crate — the SQLite one — has to store
+/// Public because a backend in another crate has to store
 /// instants the same way to behave the same way, and a conversion each backend
 /// writes for itself is a conversion they can disagree about.
 pub fn to_millis(at: DateTime<Utc>) -> i64 {

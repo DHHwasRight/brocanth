@@ -76,11 +76,10 @@
 //!
 //! # No ORM, no driver, no core
 //!
-//! Compiled for [`Dialect::Postgres`] by default, because that is where
-//! brocanth keeps its queues, cache and blobs; [`Dialect::Sqlite`] is the
-//! smaller-setup target and is compiled with the same meaning rather than the
-//! same text. The dialect is an argument at every entry point so a call site
-//! says which one it meant.
+//! Compiled for [`Dialect::Postgres`]. Brocanth supports PostgreSQL only
+//! (2026-11-11): RLS and one database keep the framework simple. The dialect
+//! is still an argument at every entry point so a call site says which one it
+//! meant.
 //!
 //! This crate emits SQL text and a `Vec<Value>`. It does not depend on
 //! SeaORM, on `sqlx`, on a driver, or on `brocanth` itself — PLAN.md §8 says

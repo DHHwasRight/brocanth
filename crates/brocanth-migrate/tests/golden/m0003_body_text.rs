@@ -19,7 +19,7 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // alter column `post.body` (string null to text null)
-        // Check: SQLite cannot alter a column. On Postgres, check the data for the new type.
+        // Check: the existing data must convert to the new type.
         manager
             .alter_table(
                 Table::alter()
@@ -33,7 +33,7 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // alter column `post.body` (text null to string null)
-        // Check: SQLite cannot alter a column. On Postgres, check the data for the new type.
+        // Check: the existing data must convert to the new type.
         manager
             .alter_table(
                 Table::alter()

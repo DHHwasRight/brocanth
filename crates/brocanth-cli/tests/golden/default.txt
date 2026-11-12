@@ -2881,8 +2881,6 @@ impl Command for Settings {
 /target
 /.git
 /db
-*.sqlite
-*.sqlite-*
 /node_modules
 ===== .github/workflows/ci.yml =====
 # Every push and every pull request: formatting, lints, tests.

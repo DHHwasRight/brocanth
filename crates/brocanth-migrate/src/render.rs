@@ -87,9 +87,7 @@ fn check(change: &Change) -> Option<&'static str> {
         Change::DropColumn { .. } | Change::DropTable(_) => {
             Some("this deletes data. The inverse step does not restore the data.")
         }
-        Change::AlterColumn { .. } => {
-            Some("SQLite cannot alter a column. On Postgres, check the data for the new type.")
-        }
+        Change::AlterColumn { .. } => Some("the existing data must convert to the new type."),
         _ => None,
     }
 }

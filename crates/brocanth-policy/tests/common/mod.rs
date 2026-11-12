@@ -50,17 +50,18 @@ pub const MEMBERS_TEAM: Ident = Ident::must("team_id");
 pub const MEMBERS_USER: Ident = Ident::must("user_id");
 
 /// The schema the agreement tests create, so the SQL this crate generates runs
-/// against a table with the columns it names.
+/// against a table with the columns it names. `BIGINT`, because
+/// every integer binds as an `i64`.
 pub const SCHEMA: &str = "
     CREATE TABLE posts (
-        id        INTEGER PRIMARY KEY,
-        author_id INTEGER,
-        team_id   INTEGER,
+        id        BIGINT PRIMARY KEY,
+        author_id BIGINT,
+        team_id   BIGINT,
         status    TEXT,
-        score     INTEGER
+        score     BIGINT
     );
     CREATE TABLE team_members (
-        team_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL
+        team_id BIGINT NOT NULL,
+        user_id BIGINT NOT NULL
     );
 ";

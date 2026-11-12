@@ -35,7 +35,8 @@ Inside this workspace: `brocanth-jobs.workspace = true`.
 | `scaffold` | off | The `jobs` and `jobs-memory` modules for `brocanth create`. Only the CLI turns it on. |
 
 With no store, the build fails with a message that says which feature to
-turn on. The `sqlite` feature is gone: the engine has no SQLite adapter yet.
+turn on. Postgres is the only database (2026-11-11): RLS and one database
+keep the framework simple.
 
 ### As a module
 

@@ -62,13 +62,13 @@ pub enum Op {
     Ge,
     /// NULL-safe equality. Two-valued: `NULL` equals `NULL` and nothing else.
     ///
-    /// PostgreSQL spells it `IS NOT DISTINCT FROM`, SQLite `IS`. Use it when
+    /// PostgreSQL spells it `IS NOT DISTINCT FROM`. Use it when
     /// the author's answer to "what does absence mean" is "absence is a value
     /// like any other".
     Is,
     /// NULL-safe inequality. Two-valued, the negation of [`Op::Is`].
     ///
-    /// PostgreSQL's `IS DISTINCT FROM`, SQLite's `IS NOT`. This is the honest
+    /// PostgreSQL's `IS DISTINCT FROM`. This is the honest
     /// version of the operator PLAN.md §9's worked example turns into an
     /// access grant: PocketBase reaches for `COALESCE` because its dialect
     /// gave it nothing better, and ours did.

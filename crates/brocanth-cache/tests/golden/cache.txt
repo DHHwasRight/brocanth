@@ -2182,9 +2182,7 @@ use brocanth_cache::{CacheHandle, PgCache, Sweeper};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// The Postgres URL the cache lives in. Postgres and nothing else, on
-    /// purpose: a cache for a SQLite deployment is a separate crate behind the
-    /// same `Cache` trait.
+    /// The Postgres URL the cache lives in. Brocanth supports Postgres only.
     pub url: String,
     /// Create the unlogged cache table at startup if it is absent.
     pub migrate: bool,

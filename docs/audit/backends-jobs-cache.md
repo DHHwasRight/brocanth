@@ -3,6 +3,12 @@
 Repo state: `main` at `25e908a`, 2026-11-09. Read-only audit. No build was run.
 All paths are relative to `/Users/max/Documents/Dev/rust/brocanth`.
 
+> **Update 2026-11-11.** Postgres only (2026-11-11): RLS and one database
+> keep the framework simple. This answers D4 with "no". The SQLite store,
+> the `sqlite` features and every SQLite test path are gone. The SQLite rows,
+> recommendations 5 and 8 and the `jobs-sqlite` module below are historical:
+> they describe the code at `25e908a` and will not be built.
+
 **Short answer.** Max is right, but the code is not half-built. Each crate's
 documentation says that the missing backends are left out **on purpose**.
 The real gaps are these:
@@ -222,7 +228,7 @@ The data models also differ. Jobs keeps a `state` column. Queue derives the stat
 - **D1. Keep "no in-memory backend"?** Cache and jobs both refuse one on purpose (`brocanth-cache/tests/common/mod.rs:1-30`, `brocanth-jobs/src/lib.rs:30-32,158-167`). Auth, rate limit, analytics and queue ship one. Options: keep the refusal everywhere / allow a memory backend for tests only, gated by a conformance suite / allow a full dev backend.
 - **D2. One job system or two?** Choose 4a (queue becomes the engine), 4b (jobs absorbs tx and outbox) or 4c (keep both, add conformance). This decision blocks recommendations 4, 7 and 9, and also any SQS or Redis queue work.
 - **D3. Is Redis/Valkey in scope** as a first-party `brocanth-cache-redis` (and later a queue `Backend`)? Or is "the way out" left to users through the trait?
-- **D4. Is SQLite a target for generated projects?** If yes, `db` needs a dialect choice first. If no, think about whether to drop the `sqlite` feature in jobs, or at least move it out of the scaffold story, because nothing selects it today.
+- **D4. Is SQLite a target for generated projects?** **Answered 2026-11-11: no.** Postgres only: RLS and one database keep the framework simple. The original question: if yes, `db` needs a dialect choice first. If no, think about whether to drop the `sqlite` feature in jobs, or at least move it out of the scaffold story, because nothing selects it today.
 - **D5. Pool sharing as the default:** with `db` present, should `cache`/`jobs` reuse its pool and drop their own `url`? Or keep separate URLs so that a project can move the cache to another database?
 - **D6. The selection mechanism:** child modules per backend (recommended), or wait for enum options in `src/modules/` (which cannot change Cargo deps without generator support).
 
@@ -237,8 +243,9 @@ The data models also differ. Jobs keeps a `state` column. Queue derives the stat
 3. **Redis/Valkey: a first-party `brocanth-cache-redis` crate and a
    `cache-redis` module.** Jobs on Redis can come later, as a queue
    backend.
-4. **SQLite for generated projects: not now.** It needs `db` to have a
-   dialect choice first. The jobs `sqlite` feature stays a library option.
+4. **SQLite for generated projects: no.** Postgres only (2026-11-11): RLS
+   and one database keep the framework simple. The jobs `sqlite` feature is
+   gone.
 5. **Cache and jobs reuse the `db` pool when `db` is chosen**, and drop
    their own `url` setting then.
 6. **A project picks a backend through child modules** (`cache-redis`,

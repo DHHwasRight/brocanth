@@ -2,12 +2,15 @@
 //!
 //! The policy below opts in, so this file contains a generated `#[test]`
 //! named `__brocanth_policy_eval_post_policy::eval_agrees_with_the_query`.
-//! It runs every rule for every listed subject against a real SQLite
+//! It runs every rule for every listed subject against a real PostgreSQL
 //! database. The hand-written test after it calls the same harness with a
 //! policy whose two interpretations disagree, and asserts that the harness
 //! finds the disagreement: a harness that cannot fail proves nothing.
+//!
+//! Without `BROCANTH_TEST_DATABASE_URL`, each test prints `!! SKIPPED` and
+//! passes.
 
-mod sqlite;
+mod postgres;
 
 use brocanth_policy::agreement::policy_agrees;
 use brocanth_policy::{Dialect, EntityPred, Opaque, Policy, Pred, Truth};
@@ -36,14 +39,14 @@ brocanth_policy::policy! {
         delete: status in ["draft", "archived"] && author_id is not null,
 
         eval {
-            subjects: [
+            subjects: postgres::or_skip([
                 Visitor::default(),
                 Visitor { user_id: Some(1), admin: false },
                 Visitor { user_id: Some(2), admin: false },
                 Visitor { user_id: Some(0), admin: true },
-            ],
-            database: sqlite::posts,
-            dialect: Sqlite,
+            ]),
+            database: postgres::posts,
+            dialect: Postgres,
             cases: 48,
         }
     }
@@ -64,13 +67,19 @@ impl Policy for Liar {
 
 #[test]
 fn the_harness_finds_a_rule_whose_two_interpretations_disagree() {
-    let failure = policy_agrees(&Liar, &[()], Dialect::Sqlite, 8, sqlite::posts)
+    if !postgres::connected() {
+        return;
+    }
+    let failure = policy_agrees(&Liar, &[()], Dialect::Postgres, 8, postgres::posts)
         .expect_err("the evaluator says yes and the query says no");
     assert!(failure.contains("rule `list` for subject 0"), "{failure}");
 }
 
 #[test]
 fn the_harness_passes_the_generated_policy_on_its_own_too() {
+    if !postgres::connected() {
+        return;
+    }
     let subjects = [
         Visitor::default(),
         Visitor {
@@ -78,6 +87,12 @@ fn the_harness_passes_the_generated_policy_on_its_own_too() {
             admin: false,
         },
     ];
-    policy_agrees(&PostPolicy, &subjects, Dialect::Sqlite, 16, sqlite::posts)
-        .expect("the macro policy agrees with its SQL");
+    policy_agrees(
+        &PostPolicy,
+        &subjects,
+        Dialect::Postgres,
+        16,
+        postgres::posts,
+    )
+    .expect("the macro policy agrees with its SQL");
 }

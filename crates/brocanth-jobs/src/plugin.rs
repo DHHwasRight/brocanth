@@ -120,9 +120,8 @@ impl JobsConfig {
     /// Off by default, and it should stay off anywhere a human reviews
     /// migrations: §4.3 of the plan says the generator proposes and the
     /// developer commits. [`Queue::schema_sql`] hands out the statements for
-    /// that. This exists for a test harness and a single-file SQLite
-    /// deployment, where the alternative is a migration directory holding one
-    /// file nobody will ever edit.
+    /// that. This exists for a test harness, where the alternative is a
+    /// migration directory holding one file nobody will ever edit.
     #[must_use]
     pub fn migrating(mut self) -> Self {
         self.migrate = true;

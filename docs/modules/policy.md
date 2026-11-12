@@ -39,7 +39,7 @@ Section `[policy]`. Environment variable: `$<APP>_POLICY__<KEY>`. Flag: `--polic
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `dialect` | text | `"postgres"` | `--policy.dialect` | The SQL a condition compiles to: postgres or sqlite. |
+| `dialect` | text | `"postgres"` | `--policy.dialect` | The SQL a condition compiles to: postgres, the only dialect. |
 
 ## Read more
 

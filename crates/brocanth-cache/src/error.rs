@@ -22,8 +22,9 @@ pub enum CacheError {
     ///
     /// Boxed rather than typed as [`sqlx::Error`] on purpose. The error type
     /// has to be the same type whether or not the `postgres` feature is on,
-    /// because a SQLite backend in a later crate implements the same
-    /// [`Cache`](crate::Cache) trait and returns the same error, and an enum
+    /// because another backend (`MemoryCache`, or one in another crate)
+    /// implements the same [`Cache`](crate::Cache) trait and returns the same
+    /// error, and an enum
     /// whose variants change with a feature is an enum callers cannot match on.
     #[error("the cache backend: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),

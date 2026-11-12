@@ -730,8 +730,8 @@ stops, with a `help:` line, when the child model is not shown, when no
 column or more than one points back, or when two inlines name one child.
 
 The tests are in `crates/brocanth-admin/tests/inlines.rs` (the fixture)
-and `crates/brocanth-admin-model/tests/inlines.rs` (SQLite, and
-PostgreSQL when `BROCANTH_TEST_DATABASE_URL` is set).
+and `crates/brocanth-admin-model/tests/inlines.rs` (PostgreSQL, when
+`BROCANTH_TEST_DATABASE_URL` is set).
 
 ### How it works
 
@@ -815,7 +815,8 @@ integer with text). The fixture and `brocanth-admin-model` apply it.
 
 The PostgreSQL test found the same fault in `brocanth-admin-model`'s
 key lookup: it bound the key from the URL as text, so every edit form
-over PostgreSQL answered 500, and SQLite's type affinity hid it.
+over PostgreSQL answered 500, and a test database with loose column
+types hid it.
 `single_key` now binds an integer key as an integer.
 
 The alternative was to fold the filter into the row policy's condition.

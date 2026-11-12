@@ -1,6 +1,9 @@
 //! Fixtures: a known dataset from a file, checked against the entities and
 //! written through the model layer, inside the test harness's transaction.
 
+#[macro_use]
+mod support;
+
 #[path = "../fixtures/blog.rs"]
 mod blog;
 
@@ -18,7 +21,7 @@ fn fixtures() -> Fixtures {
 
 #[tokio::test]
 async fn a_fixture_loads_into_the_test_transaction_and_goes_away_with_it() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     {
         let txn = harness.begin().await.expect("begin");
         let loaded = fixtures().load("blog", &*txn).await.expect("load");
@@ -48,7 +51,7 @@ async fn a_fixture_loads_into_the_test_transaction_and_goes_away_with_it() {
 
 #[tokio::test]
 async fn an_unknown_column_is_located_and_nothing_is_written() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let text = r#"[
   { "model": "user", "fields": { "id": 1, "name": "Ada", "email": "a@example.com" } },
   { "model": "user", "fields": { "id": 2, "name": "Bob", "emial": "b@example.com" } }
@@ -128,7 +131,7 @@ async fn every_problem_in_the_file_is_reported() {
 
 #[tokio::test]
 async fn a_row_the_model_refuses_is_refused_here_too_and_the_file_is_not_half_loaded() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let txn = harness.begin().await.expect("begin");
     let text = r#"[
   { "model": "user", "fields": { "id": 1, "name": "Ada", "email": "a@example.com" } },
@@ -152,7 +155,7 @@ async fn a_row_the_model_refuses_is_refused_here_too_and_the_file_is_not_half_lo
 
 #[tokio::test]
 async fn a_missing_fixture_names_the_ones_that_exist() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let error = fixtures()
         .load("blgo", harness.conn())
         .await

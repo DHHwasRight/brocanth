@@ -52,11 +52,11 @@ call site reads `rules.dialect` from one place.
 
 | Key | Default | Flag | Variable |
 |---|---|---|---|
-| `dialect` | `sqlite` with `model`, else `postgres` | `--policy.dialect` | `$<APP>_POLICY__DIALECT` |
+| `dialect` | `postgres` | `--policy.dialect` | `$<APP>_POLICY__DIALECT` |
 
 With the `config` module, the key is `dialect` in `[policy]` in
-`config/<env>.toml`. Keep it in step with the database: a condition for
-the wrong dialect is valid SQL that the engine rejects.
+`config/<env>.toml`. Brocanth supports Postgres only, so `postgres` is
+the one legal value.
 
 ## Examples
 
@@ -175,13 +175,13 @@ use brocanth_policy::{Denied, Dialect, Pred, Value};
 
 let rule = Pred::eq(PostColumn::AuthorId, 7i64); // `PostPolicy.update(&who)` in an application
 
-// 1. The admission query: SELECT 1 FROM posts WHERE id = ? AND (<condition>) LIMIT 1.
-let admission = rule.admission::<Post>(Dialect::Sqlite, 42i64).unwrap();
+// 1. The admission query: SELECT 1 FROM posts WHERE id = $1 AND (<condition>) LIMIT 1.
+let admission = rule.admission::<Post>(Dialect::Postgres, 42i64).unwrap();
 let _sql = admission.query().sql(); // run it, and count the rows it returned
 
 // 2. Zero rows is NotAuthorised. The crate does not say whether the row was
 //    missing or forbidden: that difference is itself a disclosure.
-let refused = rule.admission::<Post>(Dialect::Sqlite, 42i64).unwrap().resolve(0);
+let refused = rule.admission::<Post>(Dialect::Postgres, 42i64).unwrap().resolve(0);
 assert!(matches!(refused, Err(Denied::NotAuthorised)));
 
 // 3. One row gives the witness. The write consumes it, and re-applies the
@@ -189,9 +189,9 @@ assert!(matches!(refused, Err(Denied::NotAuthorised)));
 //    and the write.
 let verified = admission.resolve(1).unwrap();
 let write = verified
-    .update(Dialect::Sqlite, [(PostColumn::Status, Value::Text("published".into()))])
+    .update(Dialect::Postgres, [(PostColumn::Status, Value::Text("published".into()))])
     .unwrap();
-assert!(write.query().sql().contains(r#""posts"."author_id" = ?"#));
+assert!(write.query().sql().contains(r#""posts"."author_id" = $3"#));
 
 // 4. Run the statement, then report what it changed. Zero rows means the row
 //    stopped matching after the check: an authorization failure, not a no-op.
@@ -233,10 +233,17 @@ assert!(closed.is_never());
 cargo test -p brocanth-policy
 ```
 
-No database and no environment variable. The agreement tests run the
-generated SQL against an in-memory SQLite (`sqlx` with `sqlite-bundled`,
+The agreement tests run the generated SQL against PostgreSQL (`sqlx`,
 a dev-dependency only), because the claim is that this crate's SQL and its
-evaluator agree, and only a real engine can answer that.
+evaluator agree, and only a real engine can answer that. Each test creates
+a schema of its own and drops it at the end. Without
+`BROCANTH_TEST_DATABASE_URL`, they print `!! SKIPPED` and pass; the
+snapshot, injection and witness tests need no database.
+
+```text
+BROCANTH_TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres \
+  cargo test -p brocanth-policy --features agreement-proptest
+```
 
 An application tests its policies at three levels:
 

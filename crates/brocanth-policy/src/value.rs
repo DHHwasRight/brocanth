@@ -42,7 +42,7 @@ use std::fmt;
 /// A value a predicate compares against, or writes.
 ///
 /// Deliberately small. This crate is an algebra over column names and bind
-/// values, so the set is the set SQLite stores plus a boolean, and anything
+/// values, so the set is null, boolean, integer, float, text and bytes, and anything
 /// richer — a UUID, a timestamp, a JSON document — is the caller's job to
 /// encode the way its schema already stores it. Widening this enum means
 /// taking an opinion about column types, which belongs to the model layer.
@@ -50,9 +50,8 @@ use std::fmt;
 pub enum Value {
     /// SQL `NULL`. Absence, not a value: see [`crate::Truth`].
     Null,
-    /// A boolean. PostgreSQL has a real `BOOLEAN` and binds one; SQLite has
-    /// no boolean type and binds an integer. Either way the adapter binds what
-    /// its driver binds, and this crate never writes one as SQL text.
+    /// A boolean. PostgreSQL has a real `BOOLEAN` and the adapter binds one.
+    /// This crate never writes one as SQL text.
     Bool(bool),
     /// A signed integer.
     Int(i64),

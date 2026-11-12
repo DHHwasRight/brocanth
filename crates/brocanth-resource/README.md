@@ -59,9 +59,10 @@ once you have made the change by hand.
 
 ### A resource, and a list filtered in the query
 
-One entity, one policy, a SQLite data source, and the five operations driven
-through `flow`. The data source puts `query.condition()` into its SQL. It
-never sees a row the policy refuses.
+One entity, one policy, a Postgres data source, and the five operations
+driven through `flow`. The data source puts `query.condition()` into its
+SQL. It never sees a row the policy refuses. The condition numbers its
+placeholders from `$1`, so the data source numbers its own after them.
 
 ```rust
 use brocanth_policy::{Column, Dialect, Value};
@@ -105,10 +106,11 @@ pub struct PostRow {
     pub title: String,
 }
 
-/// The data source. A real one holds a pool; this one is SQLite in memory.
+/// The data source. It holds a pool.
 pub struct Db {
-#     pool: sqlx::SqlitePool,
+#     pool: sqlx::PgPool,
 #     runtime: tokio::runtime::Runtime,
+#     schema: String,
     // ...
 }
 
@@ -123,11 +125,14 @@ impl ResourceData<Post> for Db {
 
     fn list(&self, query: &ListQuery<'_, PostColumn>) -> Result<Vec<PostRow>, DataError> {
         let sort = query.sort();
+        let next = query.condition().binds().len() + 1;
         let sql = format!(
-            "SELECT id, title FROM posts WHERE ({}) ORDER BY \"{}\" {} LIMIT ? OFFSET ?",
+            "SELECT id, title FROM posts WHERE ({}) ORDER BY \"{}\" {} LIMIT ${} OFFSET ${}",
             query.condition().sql(),
             sort.column.name(),
             sort.direction.as_sql(),
+            next,
+            next + 1,
         );
         let mut binds = query.condition().binds().to_vec();
         binds.push(Value::Int(query.limit() as i64));
@@ -137,11 +142,12 @@ impl ResourceData<Post> for Db {
 
     fn fetch(&self, query: &FetchQuery<'_, PostColumn>) -> Result<Option<PostRow>, DataError> {
         let sql = format!(
-            "SELECT id, title FROM posts WHERE id = ? AND ({})",
+            "SELECT id, title FROM posts WHERE id = ${} AND ({})",
+            query.condition().binds().len() + 1,
             query.condition().sql()
         );
-        let mut binds = vec![query.id().clone()];
-        binds.extend(query.condition().binds().iter().cloned());
+        let mut binds = query.condition().binds().to_vec();
+        binds.push(query.id().clone());
         Ok(self.run(&sql, binds)?.iter().map(post).next())
     }
 
@@ -150,17 +156,18 @@ impl ResourceData<Post> for Db {
         Ok(self.run(statement.sql(), statement.binds().to_vec())?.len())
     }
 
-    /// `UPDATE … WHERE id = ? AND <condition>`. Zero rows is a lost race, a 409.
+    /// `UPDATE … WHERE id = $n AND <condition>`. Zero rows is a lost race, a 409.
     fn write(&self, statement: &Statement) -> Result<u64, DataError> {
         self.execute(statement.sql(), statement.binds().to_vec())
     }
 
     fn insert(&self, values: &[(PostColumn, Value)]) -> Result<(Value, PostRow), DataError> {
         let names: Vec<&str> = values.iter().map(|(c, _)| c.name()).collect();
-        let holes = vec!["?"; values.len()].join(", ");
+        let holes: Vec<String> = (1..=values.len()).map(|n| format!("${n}")).collect();
         let sql = format!(
-            "INSERT INTO posts ({}) VALUES ({holes}) RETURNING id, title",
-            names.join(", ")
+            "INSERT INTO posts ({}) VALUES ({}) RETURNING id, title",
+            names.join(", "),
+            holes.join(", ")
         );
         let binds = values.iter().map(|(_, v)| v.clone()).collect();
         let row = post(&self.run(&sql, binds)?[0]);
@@ -168,11 +175,11 @@ impl ResourceData<Post> for Db {
     }
 }
 #
-# fn post(row: &sqlx::sqlite::SqliteRow) -> PostRow {
+# fn post(row: &sqlx::postgres::PgRow) -> PostRow {
 #     PostRow { id: row.get(0), title: row.get(1) }
 # }
 #
-# type Query = sqlx::query::Query<'static, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+# type Query = sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments>;
 #
 # fn bind(mut query: Query, binds: Vec<Value>) -> Query {
 #     for value in binds {
@@ -189,21 +196,29 @@ impl ResourceData<Post> for Db {
 # }
 #
 # impl Db {
-#     fn new() -> Self {
+#     /// A schema of its own, or `None` when no database is set.
+#     fn new() -> Option<Self> {
+#         use std::str::FromStr as _;
+#         let url = std::env::var("BROCANTH_TEST_DATABASE_URL").ok().filter(|u| !u.is_empty())?;
+#         let schema = format!("brocanth_resource_readme_{}", std::process::id());
 #         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-#         let pool = runtime.block_on(
-#             sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:"),
-#         ).unwrap();
-#         let db = Db { pool, runtime };
+#         let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+#             .unwrap()
+#             .options([("search_path", schema.as_str())]);
+#         let pool = runtime
+#             .block_on(sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(options))
+#             .unwrap();
+#         let db = Db { pool, runtime, schema };
+#         db.execute(&format!("CREATE SCHEMA \"{}\"", db.schema), vec![]).unwrap();
 #         db.execute(
-#             "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-#              author_id INTEGER, status TEXT NOT NULL DEFAULT 'draft', title TEXT)",
+#             "CREATE TABLE posts (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, \
+#              author_id BIGINT, status TEXT NOT NULL DEFAULT 'draft', title TEXT)",
 #             vec![],
 #         ).unwrap();
-#         db
+#         Some(db)
 #     }
 #
-#     fn run(&self, sql: &str, binds: Vec<Value>) -> Result<Vec<sqlx::sqlite::SqliteRow>, DataError> {
+#     fn run(&self, sql: &str, binds: Vec<Value>) -> Result<Vec<sqlx::postgres::PgRow>, DataError> {
 #         let query = bind(sqlx::query(AssertSqlSafe(sql.to_owned())), binds);
 #         self.runtime.block_on(query.fetch_all(&self.pool)).map_err(|e| DataError::backend(e.to_string()))
 #     }
@@ -214,6 +229,12 @@ impl ResourceData<Post> for Db {
 #             .block_on(query.execute(&self.pool))
 #             .map(|done| done.rows_affected())
 #             .map_err(|e| DataError::backend(e.to_string()))
+#     }
+# }
+#
+# impl Drop for Db {
+#     fn drop(&mut self) {
+#         let _ = self.execute(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema), vec![]);
 #     }
 # }
 
@@ -228,7 +249,7 @@ impl Resource for Posts {
     type Data = Db;
 
     const NAME: &'static str = "posts";
-    const DIALECT: Dialect = Dialect::Sqlite;
+    const DIALECT: Dialect = Dialect::Postgres;
 
     fn policy(&self) -> &PostPolicy {
         &PostPolicy
@@ -274,7 +295,8 @@ impl Resource for Posts {
     }
 }
 
-let posts = Posts { db: Db::new() };
+# let Some(db) = Db::new() else { return Ok(()) }; // No database: nothing to show.
+let posts = Posts { db };
 # posts.db.execute(
 #     "INSERT INTO posts (author_id, status, title) VALUES (7, 'published', 'Hello'), (8, 'draft', 'Secret')",
 #     vec![],
@@ -348,12 +370,16 @@ assert_eq!(outcome(Action::Update, &Failure::RaceLost).status, 409);
 cargo test -p brocanth-resource
 ```
 
-The tests need no environment variable. They run against an in-memory
-SQLite database through `sqlx`, because the claim under test is that the
-policy reaches the SQL. `tests/common/mod.rs` is the full fixture: an entity,
-a policy, a data source and a recording change sink. `tests/ui/` holds the
-compile-fail cases (a resource with no policy, or a policy for another
-entity), run by `tests/trybuild.rs`.
+The tests that need a database run against Postgres through `sqlx`, because
+the claim under test is that the policy reaches the SQL. Set
+`BROCANTH_TEST_DATABASE_URL` to run them. Each test creates its own schema
+and drops it at the end. Without the variable they print `!! SKIPPED` and
+pass, and the tests that send no query still run.
+
+`tests/common/mod.rs` is the full fixture: an entity, a policy, a data source
+and a recording change sink. `tests/ui/` holds the compile-fail cases (a
+resource with no policy, or a policy for another entity), run by
+`tests/trybuild.rs`.
 
 To test your own resource, drive `flow` with each subject, as the example
 above does, and check the status with `status::outcome`. To test the routes,

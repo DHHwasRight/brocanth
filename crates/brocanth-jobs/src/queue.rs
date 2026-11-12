@@ -212,11 +212,6 @@ impl Queue {
                  help: add `features = [\"postgres\"]` to its dependency in Cargo.toml"
                     .to_string(),
             )),
-            "sqlite" => Err(Error::Backend(
-                "brocanth-jobs runs on brocanth-queue, which has no SQLite backend yet\n\
-                 help: use a `postgres://` URL, or `Queue::memory()` for tests and development"
-                    .to_string(),
-            )),
             other => Err(Error::Backend(format!(
                 "`{other}` is not a database this queue knows; the URL must start \
                  with `postgres://`\n\

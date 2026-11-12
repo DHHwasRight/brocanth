@@ -13,7 +13,9 @@ use common::{row_ids, seed_eight, Posts, Visitor};
 
 #[test]
 fn the_policy_reaches_the_where_clause_rather_than_a_filter_afterwards() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing =
@@ -39,7 +41,9 @@ fn the_policy_reaches_the_where_clause_rather_than_a_filter_afterwards() {
 
 #[test]
 fn pages_do_not_overlap_and_the_total_is_the_filtered_count() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
     let who = Visitor::user(7);
 
@@ -81,7 +85,9 @@ fn listing_total(listing: &brocanth_resource::page::Listing<common::PostRow>) ->
 
 #[test]
 fn an_administrator_sees_everything_and_the_total_says_so() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing =
@@ -93,7 +99,9 @@ fn an_administrator_sees_everything_and_the_total_says_so() {
 
 #[test]
 fn an_anonymous_visitor_sees_only_what_is_published() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing =
@@ -105,7 +113,9 @@ fn an_anonymous_visitor_sees_only_what_is_published() {
 
 #[test]
 fn skip_total_skips_the_count_and_reports_no_number_at_all() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing = flow::list(
@@ -129,7 +139,9 @@ fn skip_total_skips_the_count_and_reports_no_number_at_all() {
 
 #[test]
 fn per_page_is_clamped_rather_than_refused() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing = flow::list(
@@ -149,7 +161,9 @@ fn per_page_is_clamped_rather_than_refused() {
 
 #[test]
 fn a_sort_the_resource_declares_changes_the_order_and_nothing_else() {
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let listing = flow::list(
@@ -169,7 +183,9 @@ fn a_list_rule_of_never_is_a_refusal_rather_than_an_empty_page() {
     // about the collection and the subject, decided without reading a row, so
     // it is said out loud as a 403. A rule that merely matches nothing is the
     // empty page above, and the two must not be confused.
-    let posts = Posts::new();
+    let Some(posts) = Posts::new() else {
+        return;
+    };
     seed_eight(&posts);
 
     let refused = flow::list(&posts, &Visitor::banned(), &PageRequest::new(), None);

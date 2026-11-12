@@ -1,5 +1,8 @@
 //! What `#[validates(..)]` generates, and what `no_hook` takes away.
 
+#[macro_use]
+mod support;
+
 use brocanth_model::prelude::*;
 use brocanth_model::testing::Harness;
 use sea_orm::{ConnectionTrait, PaginatorTrait, Schema};
@@ -68,7 +71,7 @@ async fn table<E: sea_orm::EntityTrait>(db: &impl ConnectionTrait, entity: E) {
 
 #[tokio::test]
 async fn a_hand_written_hook_can_still_enforce_validation() {
-    let harness = Harness::sqlite().await.expect("connect");
+    let harness = or_skip!(Harness::isolated());
     table(harness.conn(), guarded::Entity).await;
     let db = harness.begin().await.expect("begin");
 
@@ -112,7 +115,7 @@ async fn a_hand_written_hook_can_still_enforce_validation() {
 
 #[tokio::test]
 async fn no_hook_really_removes_the_enforcement_point() {
-    let harness = Harness::sqlite().await.expect("connect");
+    let harness = or_skip!(Harness::isolated());
     table(harness.conn(), unguarded::Entity).await;
     let db = harness.begin().await.expect("begin");
 

@@ -1,5 +1,5 @@
 //! The generator end to end: model source in, migration source out, and that
-//! source compiled and run against SQLite.
+//! source compiled and run against Postgres, in a schema of its own.
 //!
 //! The text is checked against `tests/golden/`; `BROCANTH_BLESS=1` rewrites
 //! it. The same files are `include!`d below, so a golden file that does not
@@ -83,19 +83,45 @@ mod m0001 {
 mod m0002 {
     include!("golden/m0002_renames.rs");
 }
-// Compiled, not run: SQLite cannot alter a column.
-#[allow(dead_code)]
 mod m0003 {
     include!("golden/m0003_body_text.rs");
 }
 
-#[tokio::test]
-async fn the_migrations_run_up_and_down_on_sqlite() {
-    use brocanth_model::sea_orm::Database;
-    use brocanth_model::sea_orm_migration::prelude::*;
+/// The data type of `table.column` in the current schema.
+async fn data_type(
+    db: &brocanth_model::sea_orm::DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> String {
+    use brocanth_model::sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
-    let db = Database::connect("sqlite::memory:").await.expect("sqlite");
-    let manager = SchemaManager::new(&db);
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT data_type::text AS t FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2",
+            [table.into(), column.into()],
+        ))
+        .await
+        .expect("information_schema.columns")
+        .expect("the column exists");
+    row.try_get::<String>("", "t").expect("data_type")
+}
+
+#[tokio::test]
+async fn the_migrations_run_up_and_down_on_postgres() {
+    use brocanth_model::sea_orm_migration::prelude::*;
+    use brocanth_model::testing::{skipped, Harness};
+
+    let Some(harness) = Harness::isolated().await.expect("connecting to Postgres") else {
+        skipped(
+            "no Postgres server; set BROCANTH_MODEL_TEST_POSTGRES or \
+             BROCANTH_TEST_DATABASE_URL to run this",
+        );
+        return;
+    };
+    let db = harness.conn();
+    let manager = SchemaManager::new(db);
     let has = |table: &'static str, column: &'static str| {
         let manager = &manager;
         async move { manager.has_column(table, column).await.unwrap() }
@@ -114,6 +140,12 @@ async fn the_migrations_run_up_and_down_on_sqlite() {
     assert!(!has("post", "title").await);
     assert!(has("post", "body").await);
     assert!(!has("post", "views").await);
+    assert_eq!(data_type(db, "post", "body").await, "character varying");
+
+    m0003::Migration.up(&manager).await.expect("alter up");
+    assert_eq!(data_type(db, "post", "body").await, "text");
+    m0003::Migration.down(&manager).await.expect("alter down");
+    assert_eq!(data_type(db, "post", "body").await, "character varying");
 
     m0002::Migration.down(&manager).await.expect("renames down");
     assert!(manager.has_table("user").await.unwrap());

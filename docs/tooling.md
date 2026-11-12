@@ -152,8 +152,7 @@ own client:
 | URL | Client | Notes |
 |---|---|---|
 | `postgres://` or `postgresql://` | `psql <url>` | The password goes in `PGPASSWORD`, not on the command line, where `ps` shows it |
-| `sqlite://<path>` | `sqlite3 <path>` | A relative path is read from the project root. A file that does not exist is refused, because `sqlite3` would create an empty one without a word |
-| `sqlite::memory:` | none | Refused: no other process can open an in-memory database |
+| any other scheme | none | Refused with `dbshell/scheme`: brocanth supports Postgres only |
 
 The alias is `dbconsole`, the Rails name.
 
@@ -216,7 +215,6 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file (the value is never printed) |
 | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
 | `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
-| `deploy/database` | error | `[model]`, `[cache]` or `[jobs] url` is in memory or under a temporary directory |
 | `deploy/csrf-off` | error | the project has `sessions` or `auth`, and no `Csrf` hook is registered |
 | `deploy/hooks-not-run` | error | a hook is registered, and nothing in `src/` serves through `brocanth_server::serve` or `Bridge` |
 | `deploy/hsts` | warning | nothing in `src/` sets `Strict-Transport-Security` |

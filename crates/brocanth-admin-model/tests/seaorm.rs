@@ -14,6 +14,10 @@
 //! That is worth stating in a test that fails to compile without it rather
 //! than burying in a doc comment, so these carry the derives and the real
 //! `#[validates]` rules side by side.
+//!
+//! Each test gets its own Postgres schema through `Harness::isolated`, and
+//! skips when no server is set (`BROCANTH_TEST_DATABASE_URL` or
+//! `BROCANTH_MODEL_TEST_POSTGRES`).
 
 use std::sync::Arc;
 
@@ -23,7 +27,7 @@ use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Principal, Submission};
 use brocanth_admin_model::admin_source;
 use brocanth_model::sea_orm::ConnectionTrait;
-use brocanth_model::testing::Harness;
+use brocanth_model::testing::{skipped, Harness};
 
 mod blog {
     pub mod user {
@@ -76,11 +80,11 @@ admin_source! {
 }
 
 /// The two tables, by hand. A migration crate would be a third dependency
-/// to prove something this file is not about.
+/// to prove something this file is not about. `user` is a reserved word on
+/// Postgres, so it is quoted here; sea-query quotes it in every query.
 const SCHEMA: [&str; 2] = [
-    "CREATE TABLE user (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
-     email TEXT NOT NULL)",
-    "CREATE TABLE post (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+    r#"CREATE TABLE "user" (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL)"#,
+    "CREATE TABLE post (id SERIAL PRIMARY KEY, title TEXT NOT NULL)",
 ];
 
 /// The descriptor the admin would build, written by hand so this file tests
@@ -98,8 +102,17 @@ fn user_model() -> ModelDescriptor {
     }
 }
 
-async fn source() -> (Models, Harness) {
-    let harness = Harness::sqlite().await.expect("connect");
+/// A database of its own, or `None` (and a skip line) when no server is set.
+async fn isolated() -> Option<Harness> {
+    let harness = Harness::isolated().await.expect("connect");
+    if harness.is_none() {
+        skipped("no server: set BROCANTH_TEST_DATABASE_URL");
+    }
+    harness
+}
+
+async fn source() -> Option<(Models, Harness)> {
+    let harness = isolated().await?;
     for statement in SCHEMA {
         harness
             .conn()
@@ -108,7 +121,7 @@ async fn source() -> (Models, Harness) {
             .expect("schema");
     }
     let models = Models::new(harness.conn().clone());
-    (models, harness)
+    Some((models, harness))
 }
 
 fn no_search() -> Search<'static> {
@@ -120,7 +133,9 @@ fn no_search() -> Search<'static> {
 
 #[tokio::test]
 async fn the_registry_reports_what_the_macro_was_given() {
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let entries: Vec<(String, String)> = models
         .registry()
         .into_iter()
@@ -142,7 +157,9 @@ async fn a_write_goes_through_the_active_model_so_validations_run() {
     // fixture's `user`, and the only way a bad address is refused here is
     // if the insert went through an `ActiveModel` and SeaORM called the
     // hook. A source that built SQL by hand would write the row.
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let model = user_model();
 
     let bad = models
@@ -168,7 +185,9 @@ async fn a_write_goes_through_the_active_model_so_validations_run() {
 
 #[tokio::test]
 async fn the_six_operations_round_trip() {
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let model = user_model();
 
     let key = models
@@ -229,7 +248,9 @@ async fn the_six_operations_round_trip() {
 
 #[tokio::test]
 async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let model = user_model();
     for (name, email) in [
         ("Ada Lovelace", "ada@x.com"),
@@ -247,9 +268,9 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
             .expect("insert");
     }
 
-    // Lower case against a capitalised row. A bare `LIKE` would find this
-    // on SQLite and nothing on Postgres, which is the shape of bug the
-    // `LOWER(CAST(...))` in `search_of` exists to avoid.
+    // Lower case against a capitalised row. A bare `LIKE` finds nothing
+    // here on Postgres, which is the bug the `LOWER(CAST(...))` in
+    // `search_of` exists to avoid.
     let columns = vec!["name".to_string()];
     let rows = models
         .list(ListRequest {
@@ -300,7 +321,9 @@ async fn search_is_case_insensitive_and_a_sort_name_never_reaches_sql() {
 
 #[tokio::test]
 async fn the_admin_renders_real_rows_through_it() {
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let model = user_model();
     models
         .insert(
@@ -342,7 +365,9 @@ async fn the_admin_renders_real_rows_through_it() {
 
 #[tokio::test]
 async fn a_module_path_the_macro_was_not_given_is_named() {
-    let (models, _h) = source().await;
+    let Some((models, _h)) = source().await else {
+        return;
+    };
     let mut model = user_model();
     model.module_path = "blog::comment".into();
     let out = models
@@ -360,7 +385,9 @@ admin_source! {
 
 #[tokio::test]
 async fn a_source_with_no_entities_is_a_source() {
-    let harness = Harness::sqlite().await.expect("connect");
+    let Some(harness) = isolated().await else {
+        return;
+    };
     let models = Nothing::new(harness.conn().clone());
     assert!(models.registry().is_empty());
 

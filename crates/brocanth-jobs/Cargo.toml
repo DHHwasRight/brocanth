@@ -112,8 +112,7 @@ brocanth-jobs = { path = ".", default-features = false, features = ["postgres", 
 # same conformance suite as Postgres. `brocanth check --deploy` reports a
 # project that ships it.
 #
-# The `sqlite` feature is gone: it was a second job system, and the engine
-# has no SQLite adapter yet (`brocanth-queue/docs/DECISIONS.md` §6.4).
+# Postgres only (2026-11-11): RLS and one database keep the framework simple.
 default = ["runtime", "postgres"]
 postgres = [
     "runtime",

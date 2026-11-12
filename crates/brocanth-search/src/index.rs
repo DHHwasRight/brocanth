@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use brocanth_policy::{Column, Condition, Dialect, Entity, Ident, Value};
+use brocanth_policy::{Column, Condition, Entity, Ident, Value};
 
 use crate::SearchError;
 
@@ -215,7 +215,6 @@ impl<E: Entity> Index<E> {
     ///
     /// # Errors
     ///
-    /// [`SearchError::Dialect`] when the condition was compiled for SQLite,
     /// [`SearchError::NoSource`] and [`SearchError::Compile`].
     pub fn query(
         &self,
@@ -224,9 +223,6 @@ impl<E: Entity> Index<E> {
         offset: u64,
         limit: u64,
     ) -> Result<SearchQuery, SearchError> {
-        if condition.dialect() != Dialect::Postgres {
-            return Err(SearchError::Dialect);
-        }
         let _ = self.vector()?;
         let table = E::TABLE.as_str();
         let language = self.language.as_str();

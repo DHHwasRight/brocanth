@@ -1,8 +1,17 @@
 //! The worked example, end to end, printing what it proves.
 //!
+//! It needs a Postgres server. It reads the URL from
+//! `BROCANTH_MODEL_TEST_POSTGRES`, `BROCANTH_TEST_DATABASE_URL` or
+//! `DATABASE_URL`, in that order, and works in a schema of its own that it
+//! drops at the end:
+//!
 //! ```sh
-//! cargo run -p brocanth-model --example blog
+//! DATABASE_URL=postgres://localhost/brocanth_example \
+//!   cargo run -p brocanth-model --example blog
 //! ```
+//!
+//! With no URL it says so and exits with success, so a build that runs every
+//! example does not fail on a machine with no server.
 
 #[path = "../fixtures/blog.rs"]
 mod blog;
@@ -22,22 +31,43 @@ fn heading(n: u8, text: &str) {
     println!("\n{n}. {text}\n{}", "-".repeat(60));
 }
 
+/// The tables of the current schema, which is the example's own.
 async fn tables(db: &impl ConnectionTrait) -> Vec<String> {
     let rows = db
         .query_all_raw(Statement::from_string(
             db.get_database_backend(),
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            "SELECT table_name::text AS name FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' \
+             ORDER BY table_name",
         ))
         .await
-        .expect("sqlite_master");
+        .expect("information_schema.tables");
     rows.iter()
         .map(|r| r.try_get::<String>("", "name").expect("name"))
-        .filter(|n| !n.starts_with("sqlite_") && n != "seaql_migrations")
+        .filter(|n| n != "seaql_migrations")
         .collect()
+}
+
+/// The server's URL, from the first variable that names one.
+fn database_url() -> Option<String> {
+    Harness::postgres_url().or_else(|| {
+        std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = database_url() else {
+        println!(
+            "No Postgres server, so nothing ran.\n\
+             help: set DATABASE_URL (or BROCANTH_TEST_DATABASE_URL) to a database \
+             this example may write to, then run it again."
+        );
+        return Ok(());
+    };
+
     let flagged: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&flagged);
     let probe = Probe::new(ProbeConfig {
@@ -47,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     });
 
-    let harness = Harness::sqlite_with(probe.clone()).await?;
+    let harness = Harness::postgres_isolated_with(&url, probe.clone()).await?;
 
     // -----------------------------------------------------------------------
     heading(1, "A migration, up and down");
@@ -112,17 +142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     heading(3, "A nested transaction producing a real SAVEPOINT");
     let before = user::Entity::find().count(&*db).await?;
-    let second_begin = db
-        .execute_raw(Statement::from_string(db.get_database_backend(), "BEGIN"))
-        .await;
-    println!(
-        "   plain BEGIN inside the open transaction: {}",
-        match &second_begin {
-            Err(e) => format!("refused ({e})"),
-            Ok(_) => "accepted — not a savepoint!".to_owned(),
-        }
-    );
-
     let inner = db.begin().await?;
     user::ActiveModel {
         name: Set("Discarded".to_owned()),
@@ -265,8 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   {module}");
     }
     let declared = ModelRegistry::new()
-        .with("user", user::Entity, DbBackend::Sqlite)
-        .with("post", post::Entity, DbBackend::Sqlite);
+        .with("user", user::Entity, DbBackend::Postgres)
+        .with("post", post::Entity, DbBackend::Postgres);
     for (name, info) in declared.models() {
         println!("\n   {name} -> table {:?}", info.table);
         for column in &info.columns {
@@ -287,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // -----------------------------------------------------------------------
     heading(10, "The schema-sync seam");
-    let plan = PlanOnly::new(DbBackend::Sqlite)
+    let plan = PlanOnly::new(DbBackend::Postgres)
         .with(user::Entity)
         .with(post::Entity)
         .plan();
