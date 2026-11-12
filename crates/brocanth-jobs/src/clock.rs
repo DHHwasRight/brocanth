@@ -1,20 +1,25 @@
 //! Time, as a value the queue holds rather than a function it calls.
 //!
-//! Every timestamp in this crate is **epoch milliseconds in UTC, read from the
-//! worker's clock**, and both decisions are deliberate.
+//! **The clock drives the recurring schedules, and nothing else.** A
+//! schedule's next run is **epoch milliseconds in UTC, read from this
+//! clock**, and both decisions are deliberate.
 //!
 //! **Milliseconds, not a database timestamp type.** Postgres would rather have
-//! `TIMESTAMPTZ`, but the queue also has an in-memory store, and the two must
-//! compare and sort the same way. So it is `BIGINT`, compared with `<=` and
-//! sorted as an integer in both. An application that wants a readable column
-//! can add a generated one; the queue will not read it.
+//! `TIMESTAMPTZ`, but the schedules also have an in-memory store, and the two
+//! must compare and sort the same way. So it is `BIGINT`, compared with `<=`
+//! and sorted as an integer in both.
 //!
-//! **The worker's clock, not the database's.** `now()` inside the SQL would
-//! remove clock skew between workers, which is a real cost and is paid here —
-//! run NTP. What it buys is worth more: the clock is a parameter, so a test can
-//! advance it by an hour without sleeping for an hour, and the retry-backoff
-//! and scheduled-job tests in this crate are exact rather than timing-dependent.
-//! Rails takes the same position with `Time.current`.
+//! **This clock, not the database's.** The clock is a parameter, so a test
+//! can advance it by an hour without sleeping for an hour, and the schedule
+//! tests in this crate are exact rather than timing-dependent. Rails takes
+//! the same position with `Time.current`.
+//!
+//! **Jobs do not use it.** A job's delay (`Enqueue::in_`, `Enqueue::at`), its
+//! retry backoff and [`Queue::inspect`](crate::Queue::inspect) read the system
+//! clock, and the engine turns a delay into an instant on the store's clock:
+//! Postgres with the server's `now()`. One source for all of them means a
+//! `ManualClock` cannot make a job's delay disagree with the store's, and it
+//! cannot make a retry test exact either: those wait real time.
 
 use std::sync::{Arc, Mutex};
 
