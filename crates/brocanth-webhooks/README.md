@@ -7,6 +7,11 @@ Webhooks for brocanth, in both directions.
   GitHub's), refuses a delivery outside the replay window, drops a
   duplicate by its idempotency key, and hands a typed event to the handler
   you wrote. It runs before the CSRF check, so no path is exempted.
+  A plain HMAC source (`Scheme::hmac_sha256`, `Scheme::github`) signs no
+  timestamp, so it has **no replay window**: only the idempotency key
+  stops a replay, for as long as the store keeps it. Keep its keys in
+  Postgres (`PgSeen`); the memory store forgets them at restart, and the
+  receiver logs a warning for such a source when it is built.
 - **Outgoing** (feature `out`): endpoints with their own secrets, one
   delivery row per event per endpoint, and a `brocanth-jobs` job per
   delivery. The queue retries with backoff; the row is the delivery log.
