@@ -42,6 +42,10 @@
 //!   to store;
 //! * the response sets no cookie;
 //! * the response's `Cache-Control` does not say `no-store` or `private`;
+//! * the response's `Vary` names only headers that are in the key: the host
+//!   and the rule's [`vary`](RouteRule::vary) headers. `Vary: *` and, for
+//!   example, `Vary: Cookie` (the CSRF middleware sends it) are never stored:
+//!   the key cannot tell those requests apart;
 //! * the stored form fits under [`Cache::max_value_bytes`].
 //!
 //! A handler opts one response out with `Cache-Control: private`, and adds
@@ -51,10 +55,23 @@
 //! # The key
 //!
 //! The method, the path, the query string (unless
-//! [`RouteRule::ignore_query`]) and the value of each header the rule
-//! [varies](RouteRule::vary) on. Every part is escaped, so a header value
-//! cannot impersonate another part. A key over
+//! [`RouteRule::ignore_query`], or only some parameters with
+//! [`RouteRule::query_params`]), the host the request names, and the value of
+//! each header the rule [varies](RouteRule::vary) on. Every part is escaped,
+//! so a header value cannot impersonate another part. A key over
 //! [`MAX_KEY_BYTES`] is not cached.
+//!
+//! The host is in the key, so an application that serves several hosts
+//! (tenant subdomains, one domain per locale) never serves one host's page
+//! on another. Put the proxy-headers middleware before this hook when a
+//! proxy rewrites `Host`.
+//!
+//! Every distinct query string is a distinct entry, so a loop over
+//! `/?x=<random>` writes one entry per request until the TTLs run out. A
+//! rule whose page reads one or two parameters names them with
+//! [`RouteRule::query_params`], and every other parameter then shares one
+//! entry. The default keeps the whole query string, because a page that
+//! paginates with `?page=2` must not serve page 1 from the cache.
 //!
 //! # Order
 //!
@@ -65,10 +82,17 @@
 //!
 //! # What it does about failure
 //!
-//! A cache error on lookup fails the request, for the reason [`crate::fetch`]
-//! gives. The store runs after the response is final, on a spawned task, and
-//! a failed store is a later miss. It needs a Tokio runtime; without one the
-//! hook stores nothing.
+//! A cache error on lookup is a miss that is not stored: the handler serves
+//! the page and the hook writes one warning to standard error. A route cache
+//! is an optimisation, and a Redis outage must not turn every cached page
+//! into a 500. ([`crate::fetch`] fails instead, because its caller can decide
+//! what to do; a page cannot.)
+//!
+//! The store runs after the response is final, on a spawned task, and a
+//! failed store is a later miss. It needs a Tokio runtime; without one the
+//! hook stores nothing. At most [`DEFAULT_MAX_PENDING_STORES`] stores run at
+//! once (see [`RouteCacheConfig::max_pending_stores`]); a response that finds
+//! them all busy is not stored.
 //!
 //! # What it does not do
 //!
@@ -76,6 +100,7 @@
 //! a thousand times. A page that cannot survive that wants
 //! [`CacheExt::fetch`](crate::CacheExt::fetch) inside its handler.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -104,6 +129,10 @@ pub const STATUS_HEADER: &str = "brocanth-cache";
 
 /// The default namespace for stored responses.
 pub const DEFAULT_NAMESPACE: &str = "routes";
+
+/// How many stores may run at once by default. A store holds a copy of the
+/// response, so this bounds the memory a burst of misses can pin.
+pub const DEFAULT_MAX_PENDING_STORES: usize = 64;
 
 /// The tag every stored response carries: `route:{path}`.
 ///
@@ -144,7 +173,15 @@ pub struct RouteRule {
     tags: Vec<Tag>,
     vary: Vec<HeaderName>,
     authenticated: bool,
-    query: bool,
+    query: Query,
+}
+
+/// What of the query string goes into the key.
+#[derive(Clone, Debug)]
+enum Query {
+    All,
+    None,
+    Only(Vec<String>),
 }
 
 impl RouteRule {
@@ -155,7 +192,7 @@ impl RouteRule {
             tags: Vec::new(),
             vary: Vec::new(),
             authenticated: false,
-            query: true,
+            query: Query::All,
         }
     }
 
@@ -200,7 +237,17 @@ impl RouteRule {
     /// share one entry.
     #[must_use]
     pub fn ignore_query(mut self) -> Self {
-        self.query = false;
+        self.query = Query::None;
+        self
+    }
+
+    /// Keys on these query parameters only, in the order the request gives
+    /// them. Every other parameter is left out, so `/?page=2&utm_source=x`
+    /// and `/?page=2` share one entry, and a random parameter cannot make a
+    /// new one.
+    #[must_use]
+    pub fn query_params(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.query = Query::Only(names.into_iter().map(Into::into).collect());
         self
     }
 }
@@ -212,6 +259,7 @@ pub struct RouteCacheConfig {
     namespace: Namespace,
     rules: Vec<RouteRule>,
     session_cookies: Option<Vec<String>>,
+    max_pending_stores: usize,
     request_order: Order,
     response_order: Order,
 }
@@ -225,6 +273,7 @@ impl RouteCacheConfig {
             namespace: Namespace::new(DEFAULT_NAMESPACE).expect("a valid namespace literal"),
             rules: Vec::new(),
             session_cookies: None,
+            max_pending_stores: DEFAULT_MAX_PENDING_STORES,
             request_order: Order::new(),
             response_order: Order::new(),
         }
@@ -252,6 +301,14 @@ impl RouteCacheConfig {
     #[must_use]
     pub fn session_cookies(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.session_cookies = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// How many stores may run at once. A response that finds them all busy
+    /// is served and not stored. [`DEFAULT_MAX_PENDING_STORES`] by default.
+    #[must_use]
+    pub fn max_pending_stores(mut self, max: usize) -> Self {
+        self.max_pending_stores = max;
         self
     }
 
@@ -288,6 +345,8 @@ struct Inner {
     namespace: Namespace,
     rules: Vec<RouteRule>,
     session_cookies: Option<Vec<String>>,
+    max_pending_stores: usize,
+    pending_stores: Arc<AtomicUsize>,
 }
 
 impl Plugin for RouteCache {
@@ -303,6 +362,8 @@ impl Plugin for RouteCache {
                 namespace: config.namespace,
                 rules: config.rules,
                 session_cookies: config.session_cookies,
+                max_pending_stores: config.max_pending_stores,
+                pending_stores: Arc::new(AtomicUsize::new(0)),
             }),
             request_order: config.request_order,
             response_order: config.response_order,
@@ -333,6 +394,28 @@ struct Pending {
     key: Key,
     ttl: Duration,
     tags: Vec<Tag>,
+    vary: Vec<HeaderName>,
+}
+
+/// One running store. Gives its place back when the store ends.
+struct StoreSlot(Arc<AtomicUsize>);
+
+impl StoreSlot {
+    /// A place among `max` running stores, or `None` when all are taken.
+    fn take(count: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(count.clone()))
+    }
+}
+
+impl Drop for StoreSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Inner {
@@ -365,11 +448,32 @@ impl Inner {
 fn key_text(rule: &RouteRule, request: &Request) -> String {
     let mut out = String::from("GET ");
     escape_into(&mut out, request.uri().path().as_bytes());
-    if rule.query {
-        if let Some(query) = request.uri().query() {
-            out.push('?');
-            escape_into(&mut out, query.as_bytes());
+    if let Some(query) = request.uri().query() {
+        match &rule.query {
+            Query::All => {
+                out.push('?');
+                escape_into(&mut out, query.as_bytes());
+            }
+            Query::None => {}
+            Query::Only(names) => {
+                let kept: Vec<&str> = query
+                    .split('&')
+                    .filter(|pair| {
+                        let name = pair.split('=').next().unwrap_or("");
+                        names.iter().any(|n| n == name)
+                    })
+                    .collect();
+                if !kept.is_empty() {
+                    out.push('?');
+                    escape_into(&mut out, kept.join("&").as_bytes());
+                }
+            }
         }
+    }
+    // The host, always: one host's page must not answer for another.
+    out.push_str(" | host=");
+    if let Some(host) = request_host(request) {
+        escape_into(&mut out, host.to_ascii_lowercase().as_bytes());
     }
     for name in &rule.vary {
         out.push_str(" | ");
@@ -383,6 +487,20 @@ fn key_text(rule: &RouteRule, request: &Request) -> String {
         }
     }
     out
+}
+
+/// The host the request names: the URI's authority (HTTP/2), else `Host`.
+fn request_host(request: &Request) -> Option<&str> {
+    request
+        .uri()
+        .authority()
+        .map(http::uri::Authority::as_str)
+        .or_else(|| {
+            request
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+        })
 }
 
 /// Appends `bytes`, with `%`, `|` and every byte that is not printable ASCII
@@ -435,12 +553,18 @@ impl AsyncRequestHook for Lookup {
                     ))
                 })?;
 
-            let stored = inner.cache.get(&key).await.map_err(|e| {
-                PluginError::new(format!(
-                    "route cache: {e}\n\
-                     help: check that the cache backend answers; its readiness check shows it"
-                ))
-            })?;
+            let stored = match inner.cache.get(&key).await {
+                Ok(stored) => stored,
+                Err(e) => {
+                    // A miss that is not stored: the handler serves the page.
+                    eprintln!(
+                        "warning: route cache: {e}; serving {} without the cache\n\
+                         help: check that the cache backend answers; its readiness check shows it",
+                        request.uri().path()
+                    );
+                    return Ok(Flow::Continue);
+                }
+            };
             if let Some(response) = stored.as_deref().and_then(decode) {
                 return Ok(Flow::respond(response));
             }
@@ -453,6 +577,7 @@ impl AsyncRequestHook for Lookup {
                 key,
                 ttl: rule.ttl,
                 tags,
+                vary: rule.vary.clone(),
             });
             Ok(Flow::Continue)
         })
@@ -465,12 +590,16 @@ impl AsyncRequestHook for Lookup {
 
 struct Store(Arc<Inner>);
 
-/// Whether a response may be stored, judged on its head alone.
-fn storable(head: &ResponseHead) -> bool {
+/// Whether a response may be stored, judged on its head alone. `vary` is
+/// the rule's: the request headers the key holds besides the host.
+fn storable(head: &ResponseHead, vary: &[HeaderName]) -> bool {
     if head.status != http::StatusCode::OK {
         return false;
     }
     if head.headers.contains_key(http::header::SET_COOKIE) {
+        return false;
+    }
+    if !vary_is_in_the_key(&head.headers, vary) {
         return false;
     }
     !head
@@ -481,6 +610,24 @@ fn storable(head: &ResponseHead) -> bool {
         .flat_map(|v| v.split(','))
         .map(|directive| directive.split('=').next().unwrap_or("").trim())
         .any(|d| d.eq_ignore_ascii_case("no-store") || d.eq_ignore_ascii_case("private"))
+}
+
+/// Whether every header the response's `Vary` names is in the key. A
+/// response that varies on anything else (`*`, `Cookie`) differs between
+/// requests that share one key, so it cannot be stored.
+fn vary_is_in_the_key(headers: &HeaderMap, vary: &[HeaderName]) -> bool {
+    headers.get_all(http::header::VARY).iter().all(|value| {
+        let Ok(text) = value.to_str() else {
+            return false;
+        };
+        text.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .all(|name| match HeaderName::from_bytes(name.as_bytes()) {
+                Ok(name) => name == http::header::HOST || vary.contains(&name),
+                Err(_) => false,
+            })
+    })
 }
 
 /// Removes [`TAGS_HEADER`] and answers the tags it named.
@@ -517,7 +664,10 @@ impl ResponseHook for Store {
         }
         // A stream is never stored, and neither is anything the head rules
         // out. `on_body` finds nothing pending and does nothing.
-        if body.is_streaming() || !storable(head) {
+        let head_ok = state
+            .get::<Pending>()
+            .is_some_and(|pending| storable(head, &pending.vary));
+        if body.is_streaming() || !head_ok {
             state.take::<Pending>();
             return Ok(());
         }
@@ -546,8 +696,14 @@ impl ResponseHook for Store {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return Ok(());
         };
+        // Every place taken: this response is not stored, rather than one
+        // more task holding one more copy of a response.
+        let Some(slot) = StoreSlot::take(&self.0.pending_stores, self.0.max_pending_stores) else {
+            return Ok(());
+        };
         let cache = self.0.cache.clone();
         runtime.spawn(async move {
+            let _slot = slot;
             // Best effort: the response has already gone, and a failed store
             // is a later miss.
             let _ = cache
@@ -699,6 +855,8 @@ mod tests {
                 RouteRule::prefix("/posts/", Duration::from_secs(1)),
             ],
             session_cookies,
+            max_pending_stores: 2,
+            pending_stores: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -731,8 +889,40 @@ mod tests {
         let keep = RouteRule::path("/", Duration::from_secs(1));
         let drop = keep.clone().ignore_query();
         let r = request("/?page=2", &[]);
-        assert_eq!(key_text(&keep, &r), "GET /?page=2");
-        assert_eq!(key_text(&drop, &r), "GET /");
+        assert_eq!(key_text(&keep, &r), "GET /?page=2 | host=");
+        assert_eq!(key_text(&drop, &r), "GET / | host=");
+    }
+
+    #[test]
+    fn only_the_named_query_params_are_in_the_key() {
+        let rule = RouteRule::path("/", Duration::from_secs(1)).query_params(["page"]);
+        assert_eq!(
+            key_text(&rule, &request("/?utm=1&page=2&x=9", &[])),
+            "GET /?page=2 | host="
+        );
+        assert_eq!(key_text(&rule, &request("/?x=9", &[])), "GET / | host=");
+    }
+
+    #[test]
+    fn the_host_is_in_the_key() {
+        let rule = RouteRule::path("/", Duration::from_secs(1));
+        let a = key_text(&rule, &request("/", &[("host", "a.example")]));
+        let b = key_text(&rule, &request("/", &[("host", "B.example")]));
+        assert_eq!(a, "GET / | host=a.example");
+        assert_eq!(b, "GET / | host=b.example");
+        // A host cannot borrow part of the path: the separator is escaped.
+        let c = key_text(&rule, &request("/x", &[("host", "a.example | host=")]));
+        assert!(c.contains("%7C"), "{c}");
+    }
+
+    #[test]
+    fn stores_beyond_the_bound_are_refused_until_one_ends() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let one = StoreSlot::take(&count, 2).expect("a first place");
+        let _two = StoreSlot::take(&count, 2).expect("a second place");
+        assert!(StoreSlot::take(&count, 2).is_none());
+        drop(one);
+        assert!(StoreSlot::take(&count, 2).is_some());
     }
 
     #[test]
@@ -752,19 +942,34 @@ mod tests {
 
     #[test]
     fn only_a_plain_200_without_cookies_or_private_directives_is_storable() {
-        assert!(storable(&head(200, &[("content-type", "text/html")])));
-        assert!(storable(&head(
-            200,
-            &[("cache-control", "public, max-age=60")]
-        )));
-        assert!(!storable(&head(404, &[])));
-        assert!(!storable(&head(302, &[])));
-        assert!(!storable(&head(200, &[("set-cookie", "a=b")])));
-        assert!(!storable(&head(200, &[("cache-control", "no-store")])));
-        assert!(!storable(&head(
-            200,
-            &[("cache-control", "max-age=0, Private")]
-        )));
+        assert!(storable(&head(200, &[("content-type", "text/html")]), &[]));
+        assert!(storable(
+            &head(200, &[("cache-control", "public, max-age=60")]),
+            &[]
+        ));
+        assert!(!storable(&head(404, &[]), &[]));
+        assert!(!storable(&head(302, &[]), &[]));
+        assert!(!storable(&head(200, &[("set-cookie", "a=b")]), &[]));
+        assert!(!storable(&head(200, &[("cache-control", "no-store")]), &[]));
+        assert!(!storable(
+            &head(200, &[("cache-control", "max-age=0, Private")]),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_response_that_varies_on_a_header_outside_the_key_is_not_storable() {
+        let lang = [http::header::ACCEPT_LANGUAGE];
+        let varies = head(200, &[("vary", "Accept-Language")]);
+        assert!(!storable(&varies, &[]), "the rule has no vary");
+        assert!(storable(&varies, &lang), "the rule varies on it");
+        assert!(!storable(&head(200, &[("vary", "Cookie")]), &lang));
+        assert!(!storable(&head(200, &[("vary", "*")]), &lang));
+        assert!(!storable(
+            &head(200, &[("vary", "accept-language, cookie")]),
+            &lang
+        ));
+        assert!(storable(&head(200, &[("vary", "Host")]), &[]));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! route cache over a real Postgres, are in `tests/tags.rs`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use brocanth::plugin_app::{App, AppBuilder};
 use brocanth::plugin_body::{Body, BodyStream, Chunk};
 use brocanth::plugin_hooks::{Begin, HookFamilies, Request, RequestState, Response};
 use brocanth_cache::route::{RouteCache, RouteCacheConfig, RouteRule, STATUS_HEADER, TAGS_HEADER};
-use brocanth_cache::{Cache, Key, Namespace, Result, Tag};
+use brocanth_cache::{Cache, CacheError, Key, Namespace, Result, Tag};
 
 // ---------------------------------------------------------------------------
 // The fake
@@ -25,9 +26,10 @@ use brocanth_cache::{Cache, Key, Namespace, Result, Tag};
 
 type Entries = HashMap<(String, String), (Vec<u8>, Vec<String>)>;
 
-/// A map with tags, and no expiry. Enough to watch the hooks.
+/// A map with tags, and no expiry. Enough to watch the hooks. The flag
+/// makes every read fail, as a cache that is down does.
 #[derive(Default)]
-struct Map(Mutex<Entries>);
+struct Map(Mutex<Entries>, AtomicBool);
 
 impl Map {
     fn len(&self) -> usize {
@@ -60,6 +62,9 @@ impl Cache for Map {
         Ok(())
     }
     async fn get(&self, key: &Key) -> Result<Option<Vec<u8>>> {
+        if self.1.load(Ordering::Relaxed) {
+            return Err(CacheError::backend(std::io::Error::other("down")));
+        }
         Ok(self.0.lock().unwrap().get(&id(key)).map(|(v, _)| v.clone()))
     }
     async fn set(&self, key: &Key, value: &[u8], ttl: Duration) -> Result<()> {
@@ -247,6 +252,46 @@ async fn an_error_a_cookie_or_a_private_response_is_not_stored() {
         r
     })
     .await;
+    settle().await;
+    assert_eq!(map.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_response_that_varies_on_a_header_outside_the_rule_is_not_stored() {
+    let map = Arc::new(Map::default());
+    let app = app_with(&map, |c| c.rule(RouteRule::path("/", MINUTE)));
+    let handler = Handler::default();
+
+    for _ in 0..2 {
+        let response = serve(&app, get("/"), &handler, || {
+            let mut r = page("bonjour");
+            r.headers_mut()
+                .insert("vary", "Accept-Language".parse().unwrap());
+            r
+        })
+        .await;
+        assert_eq!(status(&response), None);
+    }
+    settle().await;
+    assert_eq!(map.len(), 0);
+    assert_eq!(handler.runs(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cache_that_is_down_lets_the_handler_serve_the_page() {
+    let map = Arc::new(Map::default());
+    map.1.store(true, Ordering::Relaxed);
+    let app = app_with(&map, |c| c.rule(RouteRule::path("/", MINUTE)));
+    let handler = Handler::default();
+
+    let response = serve(&app, get("/"), &handler, || page("hello")).await;
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.body().buffered(), Some(&b"hello"[..]));
+    assert_eq!(
+        status(&response),
+        None,
+        "nothing to store after a failed read"
+    );
     settle().await;
     assert_eq!(map.len(), 0);
 }
