@@ -145,20 +145,21 @@ pub fn make(
     }
     let down = down(&new, &old)?;
     let sql = sql_file(&up, &down)?;
-    // `new_file` checks the name and stamps it, as `migrate new` does.
-    let path = brocanth_db::migrate::new_file(dir, name)?;
     let path = match format {
         Format::Sql => {
+            // `new_file` checks the name and stamps it, as `migrate new` does.
+            let path = brocanth_db::migrate::new_file(dir, name)?;
             write(&path, &sql)?;
             path
         }
         Format::SeaOrm => {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(name)
-                .to_string();
-            let _ = std::fs::remove_file(&path);
+            // The same stamp, and no `.sql` file to write and delete.
+            let stem = brocanth_db::migrate::stem(name)?;
+            std::fs::create_dir_all(dir).map_err(|source| RlsError::Io {
+                path: dir.to_path_buf(),
+                source,
+                help: "check that the migrations directory can be created",
+            })?;
             let rs = dir.join(format!("m{stem}.rs"));
             write(&rs, &seaorm_file(&format!("m{stem}"), &up, &down))?;
             rs

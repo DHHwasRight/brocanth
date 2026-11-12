@@ -129,7 +129,8 @@ pub fn main() -> ExitCode {
             vec![Diagnostic::new(
                 "cwd",
                 format!("cannot read the current directory: {e}"),
-            )]
+            )
+            .help("run the tool from a directory that exists and that you can read, inside the project")]
         })
         .and_then(|cwd| project_root(&cwd))
     {
@@ -282,13 +283,16 @@ fn make(
     snapshot_only: bool,
     report: &mut Report,
 ) -> Result<ExitCode, Vec<Diagnostic>> {
-    if !snake_case(name) {
+    if !brocanth_db::stamp::is_snake_case(name) {
         return Err(vec![Diagnostic::new(
             "name",
             format!(
                 "The name `{name}` is not snake case. Use lower-case letters, digits and `_`, \
                  and start with a letter."
             ),
+        )
+        .help(
+            "write the name in snake case, for example `migrate make add_posts`",
         )]);
     }
     let models = read_models(root)?;
@@ -299,7 +303,12 @@ fn make(
         Ok(text) => Schema::from_json(&text).map_err(|e| {
             vec![
                 Diagnostic::new("snapshot", format!("The snapshot cannot be read: {e}."))
-                    .at(relative(root, &snapshot)),
+                    .at(relative(root, &snapshot))
+                    .help(format!(
+                        "restore {MIGRATIONS}/{SNAPSHOT} from version control. If the \
+                         migrations already match the models, delete it and run \
+                         `migrate make <name> --snapshot-only` to write it again"
+                    )),
             ]
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Schema::default(),
@@ -324,7 +333,7 @@ fn make(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let stem = format!("m{}_{name}", utc_stamp());
+    let stem = format!("m{}_{name}", brocanth_db::stamp::now());
     let file = dir.join(format!("{stem}.rs"));
     if file.exists() {
         return Err(vec![Diagnostic::new(
@@ -333,6 +342,9 @@ fn make(
                 "The file {} exists. Use a different name.",
                 relative(root, &file)
             ),
+        )
+        .help(
+            "run `migrate make` again with another name, or wait one second",
         )]);
     }
     write(root, &file, &render(&stem, &changes))?;
@@ -447,11 +459,28 @@ fn diagnostics(problems: Vec<Problem>) -> Vec<Diagnostic> {
                      plus an add look the same"
                         .to_string(),
                 );
-                d.help = Some("run `migrate ids` first".to_string());
             }
+            d.help = Some(problem_help(&d.code).to_string());
             d
         })
         .collect()
+}
+
+/// What to do about a problem the scanner or the id stamper found.
+fn problem_help(code: &str) -> &'static str {
+    match code {
+        "no-id" => "run `migrate ids` first",
+        "duplicate-id" => "remove the copied `#[brocanth(id = ..)]` and run `migrate ids`",
+        "bad-id" => "remove the attribute and run `migrate ids` to write a new id",
+        "duplicate-table" => "give each model its own `table_name`, or delete the copy",
+        "no-column-type" => {
+            "give the field a type the scanner knows, or a `column_type` in `#[sea_orm(..)]`"
+        }
+        "shared-line" => "put the item on a line of its own, then run `migrate ids` again",
+        "parse" => "fix the Rust syntax at that place, then run the command again",
+        "attribute" => "write the attribute as `#[brocanth(id = \"..\")]`, with no other key",
+        _ => "fix the source at that place, then run the command again",
+    }
 }
 
 fn write(root: &Path, path: &Path, text: &str) -> Result<(), Vec<Diagnostic>> {
@@ -459,7 +488,9 @@ fn write(root: &Path, path: &Path, text: &str) -> Result<(), Vec<Diagnostic>> {
 }
 
 fn io_error(root: &Path, path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
-    vec![Diagnostic::new("io", format!("{e}")).at(relative(root, path))]
+    vec![Diagnostic::new("io", format!("{e}"))
+        .at(relative(root, path))
+        .help("check that the path exists and that you can read and write it, then run the command again")]
 }
 
 /// `path` from `root`, with `/`, for messages and file labels.
@@ -472,67 +503,22 @@ fn relative(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-fn snake_case(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// `YYYYMMDD_HHMMSS` in UTC, the stem SeaORM's own generator uses.
-fn utc_stamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    stamp_of(secs)
-}
-
-fn stamp_of(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rest = secs % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}{m:02}{d:02}_{:02}{:02}{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 to a date.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_stamp_is_utc_in_seaorms_shape() {
-        assert_eq!(stamp_of(0), "19700101_000000");
-        // 2026-10-31T14:05:09Z
-        assert_eq!(stamp_of(1_793_455_509), "20261031_140509");
-        // 2024-02-29T23:59:59Z, a leap day.
-        assert_eq!(stamp_of(1_709_251_199), "20240229_235959");
-    }
-
-    #[test]
-    fn a_name_is_snake_case() {
-        assert!(snake_case("rename_title"));
-        assert!(snake_case("add_posts2"));
-        assert!(!snake_case("RenameTitle"));
-        assert!(!snake_case("2fast"));
-        assert!(!snake_case("rename-title"));
-        assert!(!snake_case(""));
+    fn each_problem_has_a_help_line() {
+        let problems = ["no-id", "no-id", "parse", "duplicate-id", "something-new"]
+            .into_iter()
+            .map(|code| Problem {
+                code,
+                at: "src/models/post.rs:1:1".to_string(),
+                message: "m".to_string(),
+            })
+            .collect();
+        for d in diagnostics(problems) {
+            assert!(d.to_string().contains("\nhelp: "), "{d}");
+        }
     }
 }

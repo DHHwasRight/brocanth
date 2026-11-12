@@ -15,7 +15,15 @@
 //! Each migration runs in its own transaction, with its row in
 //! `brocanth_migrations`, so a failed statement leaves nothing behind. A
 //! Postgres advisory lock keeps two `migrate up` runs from applying the
-//! same file.
+//! same file. `down` undoes them in the order they were applied, the last
+//! one first.
+//!
+//! A run uses one connection of its own, taken out of the pool and closed
+//! at the end, so the advisory lock and the session settings below end
+//! with it. The run turns off `statement_timeout` and
+//! `default_transaction_read_only`, which an application pool can set, and
+//! sets `lock_timeout` ([`DEFAULT_LOCK_TIMEOUT`]): a migration that waits
+//! on a busy table fails, and does not queue every query behind it.
 //!
 //! Why not SeaORM's migrator: it needs Rust migrations compiled into the
 //! binary, and that is the `model` module's path (`docs/migrations.md`).
@@ -26,6 +34,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
@@ -37,6 +46,10 @@ pub const TABLE: &str = "brocanth_migrations";
 /// The key of the advisory lock `up` and `down` hold. Any fixed number
 /// works; this one is "brocanth" in ASCII.
 const LOCK: i64 = 0x6272_6f63_616e_7468;
+
+/// How long a statement of a migration waits for a table lock before it
+/// fails. [`Migrator::lock_timeout`] changes it.
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The line that separates the statements that apply a migration from the
 /// statements that undo it.
@@ -265,19 +278,30 @@ const TEMPLATE: &str = "-- Statements that apply this migration. They run in one
 /// [`MigrateError::NotSnakeCase`] for a bad name, [`MigrateError::Io`]
 /// when the file cannot be written or already exists.
 pub fn new_file(dir: &Path, name: &str) -> Result<PathBuf, MigrateError> {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    new_file_at(dir, name, secs)
+    new_file_at(dir, name, crate::stamp::now_secs())
+}
+
+/// `<UTC stamp>_<name>`: the stem [`new_file`] gives a file, and no file
+/// written. For a tool that writes another kind of migration with the same
+/// stamp.
+///
+/// # Errors
+/// [`MigrateError::NotSnakeCase`] for a bad name.
+pub fn stem(name: &str) -> Result<String, MigrateError> {
+    stem_at(name, crate::stamp::now_secs())
+}
+
+fn stem_at(name: &str, secs: u64) -> Result<String, MigrateError> {
+    if !crate::stamp::is_snake_case(name) {
+        return Err(MigrateError::NotSnakeCase(name.to_string()));
+    }
+    Ok(format!("{}_{name}", crate::stamp::at(secs)))
 }
 
 fn new_file_at(dir: &Path, name: &str, secs: u64) -> Result<PathBuf, MigrateError> {
-    if !snake_case(name) {
-        return Err(MigrateError::NotSnakeCase(name.to_string()));
-    }
+    let stem = stem_at(name, secs)?;
     std::fs::create_dir_all(dir).map_err(io(dir))?;
-    let path = dir.join(format!("{}_{name}.sql", stamp_of(secs)));
+    let path = dir.join(format!("{stem}.sql"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -287,52 +311,48 @@ fn new_file_at(dir: &Path, name: &str, secs: u64) -> Result<PathBuf, MigrateErro
     Ok(path)
 }
 
-fn snake_case(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// `YYYYMMDD_HHMMSS` in UTC: the stamp `brocanth-migrate` writes, so both
-/// kinds of migration sort the same way. Copied, not shared:
-/// `brocanth-migrate` links a Rust parser, and this crate must not.
-fn stamp_of(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rest = secs % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}{m:02}{d:02}_{:02}{:02}{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 to a date.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+/// The pending files that sort before the newest applied one, read from
+/// [`Migrator::status`]. `up` applies them after newer files. That is
+/// often a merge of two branches, and worth a warning.
+pub fn out_of_order(states: &[(String, State)]) -> Vec<String> {
+    let newest = states
+        .iter()
+        .filter(|(_, state)| *state == State::Applied)
+        .map(|(name, _)| name.as_str())
+        .max();
+    let Some(newest) = newest else {
+        return Vec::new();
+    };
+    states
+        .iter()
+        .filter(|(name, state)| *state == State::Pending && name.as_str() < newest)
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// The migrations on disk, applied to one database.
 pub struct Migrator<'a> {
     db: &'a Db,
     files: Vec<Migration>,
+    lock_timeout: Option<Duration>,
 }
 
 impl<'a> Migrator<'a> {
     /// The files, in name order, against `db`.
     pub fn new(db: &'a Db, mut files: Vec<Migration>) -> Self {
         files.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { db, files }
+        Self {
+            db,
+            files,
+            lock_timeout: Some(DEFAULT_LOCK_TIMEOUT),
+        }
+    }
+
+    /// How long a statement waits for a table lock before it fails.
+    /// Default [`DEFAULT_LOCK_TIMEOUT`]. `None` waits with no limit.
+    pub fn lock_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     /// Each migration and its state: every file, then each applied name
@@ -341,9 +361,11 @@ impl<'a> Migrator<'a> {
     /// # Errors
     /// [`MigrateError::Db`] when the table cannot be read or created.
     pub async fn status(&self) -> Result<Vec<(String, State)>, MigrateError> {
-        let mut conn = self.connection().await?;
-        let applied = applied(&mut conn).await?;
-        Ok(self.states(&applied))
+        self.session(async |conn| {
+            let applied = applied(conn).await?;
+            Ok(self.states(&applied))
+        })
+        .await
     }
 
     fn states(&self, applied: &[String]) -> Vec<(String, State)> {
@@ -374,11 +396,7 @@ impl<'a> Migrator<'a> {
     /// [`MigrateError::Failed`] for the first file that fails. The files
     /// before it stay applied.
     pub async fn up(&self) -> Result<Vec<String>, MigrateError> {
-        let mut conn = self.connection().await?;
-        lock(&mut conn).await?;
-        let result = self.up_on(&mut conn).await;
-        unlock(&mut conn).await;
-        result
+        self.session(async |conn| self.up_on(conn).await).await
     }
 
     async fn up_on(&self, conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
@@ -391,8 +409,9 @@ impl<'a> Migrator<'a> {
         Ok(done)
     }
 
-    /// Undoes the newest `n` applied migrations, newest first. Returns
-    /// their names.
+    /// Undoes the last `n` applied migrations, the last applied first.
+    /// Returns their names. The order is the order `up` applied them, not
+    /// the order of their names: a file merged in late is undone first.
     ///
     /// Checks all `n` before it undoes one: a missing file or a missing
     /// `-- down` statement stops it before any change.
@@ -401,11 +420,7 @@ impl<'a> Migrator<'a> {
     /// [`MigrateError::NoFile`], [`MigrateError::Irreversible`], or
     /// [`MigrateError::Failed`] for the first that fails.
     pub async fn down(&self, n: usize) -> Result<Vec<String>, MigrateError> {
-        let mut conn = self.connection().await?;
-        lock(&mut conn).await?;
-        let result = self.down_on(&mut conn, n).await;
-        unlock(&mut conn).await;
-        result
+        self.session(async |conn| self.down_on(conn, n).await).await
     }
 
     async fn down_on(
@@ -435,24 +450,58 @@ impl<'a> Migrator<'a> {
         Ok(done)
     }
 
-    async fn connection(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, MigrateError> {
-        let mut conn = self.db.pool().acquire().await.map_err(DbError::connect)?;
-        let create = format!(
-            "CREATE TABLE IF NOT EXISTS {TABLE} (\
+    /// Runs `f` on a connection of its own, under the advisory lock.
+    ///
+    /// The connection leaves the pool and closes at the end. So the lock
+    /// and the `SET`s end with its session, also when `f` fails or the
+    /// caller drops the future. A pooled connection keeps both for its next
+    /// user. The lock comes before `CREATE TABLE`: two concurrent
+    /// `CREATE TABLE IF NOT EXISTS` can both fail in the catalogue.
+    async fn session<T>(
+        &self,
+        f: impl AsyncFnOnce(&mut PgConnection) -> Result<T, MigrateError>,
+    ) -> Result<T, MigrateError> {
+        let mut conn = self
+            .db
+            .pool()
+            .acquire()
+            .await
+            .map_err(DbError::connect)?
+            .detach();
+        let result = async {
+            lock(&mut conn).await?;
+            self.prepare(&mut conn).await?;
+            f(&mut conn).await
+        }
+        .await;
+        let _ = conn.close().await;
+        result
+    }
+
+    /// The session settings of a run, and the table that records it.
+    async fn prepare(&self, conn: &mut PgConnection) -> Result<(), MigrateError> {
+        let lock_timeout = self
+            .lock_timeout
+            .map_or(0, |t| t.as_millis().clamp(1, i32::MAX as u128));
+        let setup = format!(
+            "SET statement_timeout = 0; \
+             SET default_transaction_read_only = off; \
+             SET lock_timeout = {lock_timeout}; \
+             CREATE TABLE IF NOT EXISTS {TABLE} (\
              name text PRIMARY KEY, \
              applied_at timestamptz NOT NULL DEFAULT now())"
         );
-        sqlx::raw_sql(AssertSqlSafe(create))
+        sqlx::raw_sql(AssertSqlSafe(setup))
             .execute(&mut *conn)
             .await
             .map_err(DbError::query)?;
-        Ok(conn)
+        Ok(())
     }
 }
 
-/// The applied names, in name order.
+/// The applied names, in the order they were applied.
 async fn applied(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
-    let select = format!("SELECT name FROM {TABLE} ORDER BY name");
+    let select = format!("SELECT name FROM {TABLE} ORDER BY applied_at, name");
     let names: Vec<String> = sqlx::query_scalar(AssertSqlSafe(select))
         .fetch_all(&mut *conn)
         .await
@@ -460,6 +509,8 @@ async fn applied(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
     Ok(names)
 }
 
+/// A session-level lock. It ends when [`Migrator::session`] closes the
+/// connection, so no unlock can be skipped.
 async fn lock(conn: &mut PgConnection) -> Result<(), MigrateError> {
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(LOCK)
@@ -467,14 +518,6 @@ async fn lock(conn: &mut PgConnection) -> Result<(), MigrateError> {
         .await
         .map_err(DbError::query)?;
     Ok(())
-}
-
-/// Best effort: the lock also ends with the connection.
-async fn unlock(conn: &mut PgConnection) {
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(LOCK)
-        .execute(&mut *conn)
-        .await;
 }
 
 enum Record {
@@ -536,10 +579,27 @@ mod tests {
     }
 
     #[test]
-    fn the_stamp_is_utc_and_sorts_by_time() {
-        assert_eq!(stamp_of(0), "19700101_000000");
-        // 2026-11-05 10:15:00 UTC.
-        assert_eq!(stamp_of(1_793_873_700), "20261105_101500");
+    fn the_stem_is_stamped_and_writes_no_file() {
+        assert_eq!(
+            stem_at("add_posts", 1_793_873_700).unwrap(),
+            "20261105_101500_add_posts"
+        );
+        assert!(matches!(
+            stem_at("Add", 0),
+            Err(MigrateError::NotSnakeCase(_))
+        ));
+    }
+
+    #[test]
+    fn a_pending_file_older_than_the_newest_applied_is_out_of_order() {
+        let states = [
+            ("20260101_000000_a".to_string(), State::Applied),
+            ("20260102_000000_b".to_string(), State::Pending),
+            ("20260103_000000_c".to_string(), State::Applied),
+            ("20260104_000000_d".to_string(), State::Pending),
+        ];
+        assert_eq!(out_of_order(&states), ["20260102_000000_b"]);
+        assert!(out_of_order(&states[1..2]).is_empty());
     }
 
     #[test]
