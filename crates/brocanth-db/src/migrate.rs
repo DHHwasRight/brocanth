@@ -483,18 +483,25 @@ impl<'a> Migrator<'a> {
         let lock_timeout = self
             .lock_timeout
             .map_or(0, |t| t.as_millis().clamp(1, i32::MAX as u128));
-        let setup = format!(
+        // Two round trips: statements sent together run in one implicit
+        // transaction, which starts read-only before the `SET` can change
+        // the default.
+        let session = format!(
             "SET statement_timeout = 0; \
              SET default_transaction_read_only = off; \
-             SET lock_timeout = {lock_timeout}; \
-             CREATE TABLE IF NOT EXISTS {TABLE} (\
+             SET lock_timeout = {lock_timeout}"
+        );
+        let create = format!(
+            "CREATE TABLE IF NOT EXISTS {TABLE} (\
              name text PRIMARY KEY, \
              applied_at timestamptz NOT NULL DEFAULT now())"
         );
-        sqlx::raw_sql(AssertSqlSafe(setup))
-            .execute(&mut *conn)
-            .await
-            .map_err(DbError::query)?;
+        for sql in [session, create] {
+            sqlx::raw_sql(AssertSqlSafe(sql))
+                .execute(&mut *conn)
+                .await
+                .map_err(DbError::query)?;
+        }
         Ok(())
     }
 }
