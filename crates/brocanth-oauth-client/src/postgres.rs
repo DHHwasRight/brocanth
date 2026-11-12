@@ -37,18 +37,32 @@ CREATE TABLE IF NOT EXISTS brocanth_oauth_tokens (
         Self { db }
     }
 
-    /// Runs [`PgTokenStore::SCHEMA`].
+    /// Runs [`PgTokenStore::SCHEMA`], under a transaction-level advisory
+    /// lock.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is not atomic: two replicas that start
+    /// together on a fresh database can both pass the check, and the second
+    /// fails on the system catalogue's unique index. The lock makes the
+    /// second wait, as `brocanth-auth`'s `PgStore::migrate` does.
     ///
     /// # Errors
     /// The database refused the statement.
     pub async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::query(Self::SCHEMA)
-            .execute(self.db.pool())
+        let mut tx = self.db.pool().begin().await.map_err(failed)?;
+        sqlx::query(MIGRATION_LOCK)
+            .execute(&mut *tx)
             .await
-            .map(drop)
-            .map_err(failed)
+            .map_err(failed)?;
+        sqlx::query(Self::SCHEMA)
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?;
+        tx.commit().await.map_err(failed)
     }
 }
+
+/// One key for this crate's tables, apart from `brocanth-auth`'s.
+const MIGRATION_LOCK: &str = "SELECT pg_advisory_xact_lock(7093854835689485417)";
 
 fn failed(e: sqlx::Error) -> StoreError {
     StoreError(e.to_string())

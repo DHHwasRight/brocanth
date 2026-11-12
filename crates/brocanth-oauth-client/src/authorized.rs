@@ -7,6 +7,10 @@
 //! one refresh and sends the request once more. A second 401 goes back to
 //! the caller. A request whose body is a stream cannot be sent twice, so it
 //! gets no retry.
+//!
+//! The token goes only to the provider's API hosts
+//! ([`crate::Provider::api_host`]), over https: a URL a user typed must not
+//! carry the token off to their server.
 
 use http::header::{HeaderValue, AUTHORIZATION};
 
@@ -65,12 +69,19 @@ impl Authorized {
     ///
     /// # Errors
     /// What [`OauthClient::token`] or [`OauthClient::app_token`] returns,
-    /// or [`Error::Http`] when the request does not build or send. A 4xx or
-    /// 5xx answer is not an error: it is the response.
+    /// [`Error::Config`] when the URL is not on one of the provider's API
+    /// hosts over https, or [`Error::Http`] when the request does not build
+    /// or send. A 4xx or 5xx answer is not an error: it is the response.
     pub async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, Error> {
         let request = request
             .build()
             .map_err(|e| Error::Http(e.without_url().to_string()))?;
+        let provider = match &self.who {
+            Who::Account { provider, .. } | Who::App { provider } => provider,
+        };
+        self.client
+            .provider(provider)?
+            .check_api_url(request.url(), self.client.allows_http())?;
         let again = request.try_clone();
         let token = self.token().await?;
         let response = self.execute(request, &token).await?;

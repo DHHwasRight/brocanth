@@ -139,6 +139,9 @@ pub struct Provider {
     pub scopes: Vec<String>,
     /// The scopes of the application's own token (client credentials).
     pub app_scopes: Vec<String>,
+    /// The hosts [`crate::Authorized`] sends this provider's token to: a
+    /// host here, or a subdomain of one. Empty sends it nowhere.
+    pub api_hosts: Vec<String>,
 }
 
 impl std::fmt::Debug for Provider {
@@ -151,6 +154,7 @@ impl std::fmt::Debug for Provider {
             .field("client_secret", &"<redacted>")
             .field("scopes", &self.scopes)
             .field("app_scopes", &self.app_scopes)
+            .field("api_hosts", &self.api_hosts)
             .finish()
     }
 }
@@ -172,6 +176,7 @@ impl Provider {
             client_secret: client_secret.into(),
             scopes: Vec::new(),
             app_scopes: Vec::new(),
+            api_hosts: Vec::new(),
         }
     }
 
@@ -184,6 +189,7 @@ impl Provider {
             client_id,
             client_secret,
         )
+        .api_host("api.github.com")
     }
 
     /// Google, with id `google`.
@@ -195,6 +201,7 @@ impl Provider {
             client_id,
             client_secret,
         )
+        .api_host("googleapis.com")
     }
 
     /// Microsoft (`common` tenant), with id `microsoft`.
@@ -206,6 +213,7 @@ impl Provider {
             client_id,
             client_secret,
         )
+        .api_host("graph.microsoft.com")
     }
 
     /// GitLab.com, with id `gitlab`.
@@ -217,6 +225,7 @@ impl Provider {
             client_id,
             client_secret,
         )
+        .api_host("gitlab.com")
     }
 
     /// The built-in provider with this id, or `None`.
@@ -239,6 +248,52 @@ impl Provider {
     pub fn scopes<S: Into<String>>(mut self, scopes: impl IntoIterator<Item = S>) -> Self {
         self.scopes = scopes.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Allows [`crate::Authorized`] to send this provider's token to
+    /// `host` and its subdomains: `api.github.com`, `googleapis.com`. A
+    /// built-in provider has its API host already; a custom one, or a
+    /// self-managed GitLab, adds its own.
+    #[must_use]
+    pub fn api_host(mut self, host: impl Into<String>) -> Self {
+        self.api_hosts.push(host.into().to_ascii_lowercase());
+        self
+    }
+
+    /// Whether the token of this provider may go to `url`: its host is an
+    /// API host or a subdomain of one, and its scheme is `https` (or
+    /// `http` when `allow_http` is on).
+    ///
+    /// # Errors
+    /// [`crate::Error::Config`], naming the host, with a `help:` line.
+    pub fn check_api_url(&self, url: &url::Url, allow_http: bool) -> Result<(), crate::Error> {
+        match url.scheme() {
+            "https" => {}
+            "http" if allow_http => {}
+            other => {
+                return Err(crate::Error::Config(format!(
+                    "`{}`'s token is not sent over {other}\n\
+                     help: call the API over https; only development may set `allow_http = true`",
+                    self.id
+                )))
+            }
+        }
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let allowed = self.api_hosts.iter().any(|api| {
+            host == *api
+                || host
+                    .strip_suffix(api.as_str())
+                    .is_some_and(|rest| rest.ends_with('.'))
+        });
+        if !allowed {
+            return Err(crate::Error::Config(format!(
+                "`{}`'s token is not sent to `{host}`: it is not one of the provider's API hosts\n\
+                 help: add `.api_host(\"{host}\")` to the provider if that host is its API; \
+                 never send the token to a URL a user typed",
+                self.id
+            )));
+        }
+        Ok(())
     }
 
     /// The scopes of the application's own token.

@@ -231,7 +231,13 @@ impl ConnectRoutes {
     /// The store failed, or the provider's token endpoint did. A refused
     /// flow is a page, not an error.
     pub async fn answer(&self, request: ConnectRequest<'_>) -> Result<ConnectAnswer, Error> {
-        let Some(rest) = request.path.strip_prefix(self.prefix.as_str()) else {
+        // The prefix is a whole segment: `/connectionsgithub` is not under
+        // `/connections`.
+        let Some(rest) = request
+            .path
+            .strip_prefix(self.prefix.as_str())
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        else {
             return Ok(ConnectAnswer::page(404, ConnectPage::NotFound));
         };
         let rest = rest.trim_matches('/');

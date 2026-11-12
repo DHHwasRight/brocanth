@@ -142,8 +142,14 @@ impl Module for OauthClient {
             "    crate::plugins::oauth_client::mount(routes, {})?;",
             module_ref("oauth-client", "mount_at")
         ));
-        s.at(Slot::PagesRoutes).line("/connections");
-        s.at(Slot::PagesRoutes).line("/connections/{*rest}");
+        // Expressions that read `mount_at`, as auth-oauth writes them, so a
+        // moved mount needs no edit in the route table test
+        // (docs/module-config.md §9).
+        let mount_at = module_ref("oauth-client", "mount_at");
+        s.at(Slot::PagesRoutes)
+            .line(format!("{mount_at}.to_string()"));
+        s.at(Slot::PagesRoutes)
+            .line(format!("{mount_at}.to_owned() + \"/{{*rest}}\""));
         if project.has("admin") {
             integration(s, "oauth-client", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
@@ -158,13 +164,14 @@ const CLIENT_AGENTS: &str = "\n\
     ## Connected accounts\n\
     \n\
     `src/plugins/oauth_client/mod.rs` mounts the connect pages at\n\
-    `/connections`. A Connect button is a form that posts to\n\
-    `/connections/<provider>`, never a link: a GET that starts a connection\n\
-    can be fired by any page on the web. Pass `return_to` only as a path on\n\
-    this site; anything else is dropped.\n\
+    `mount_at` (`src/modules/oauth_client.rs`, `/connections` unless\n\
+    changed). Below, `<mount_at>` is that path. A Connect button is a form\n\
+    that posts to `<mount_at>/<provider>`, never a link: a GET that\n\
+    starts a connection can be fired by any page on the web. Pass\n\
+    `return_to` only as a path on this site; anything else is dropped.\n\
     \n\
     When a call fails with `brocanth_oauth_client::Error::Reconnect`, the\n\
-    grant is gone: send the person to `/connections` to connect again. Do\n\
+    grant is gone: send the person to `<mount_at>` to connect again. Do\n\
     not retry it. The scopes are in `scopes()` in that file: ask for the\n\
     fewest the code needs.\n\
     \n\
@@ -229,7 +236,7 @@ fn settings(memory: bool) -> Vec<Setting> {
             "http://localhost:3000",
             "The scheme and host the providers send the browser back to.",
         )
-        .note("Register <base_url>/connections/<provider>/callback at each provider's console."),
+        .note("Register <base_url><mount_at>/<provider>/callback at each provider's console; mount_at is\nin src/modules/oauth_client.rs."),
         Setting::text(
             "key",
             "",
