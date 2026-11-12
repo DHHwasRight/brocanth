@@ -457,7 +457,13 @@ view wins over it.
 
 A replaced screen keeps the admin's checks. The layout still wraps it, a
 replaced form still posts to `ctx.action`, and the admin still checks the
-policy, the row rules and the CSRF field.
+policy and the row rules.
+
+The admin does not check a CSRF token itself. The `middleware-csrf` module
+does: its hook refuses a POST without the token, and the admin's mount puts
+the token into every form that posts, a replaced form too. Without that
+module, only the session cookie's `SameSite=Lax` keeps another site from
+posting to the admin, so `brocanth create` recommends it beside `admin`.
 
 ### Wrap a shipped screen
 

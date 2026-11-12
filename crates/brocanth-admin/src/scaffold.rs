@@ -81,6 +81,10 @@ impl Module for Backoffice {
             "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
+        .recommends(
+            "middleware-csrf",
+            "the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row",
+        )
         .option(Opt::text(
             "mount_at",
             "/admin",
