@@ -880,6 +880,10 @@ impl Dep {
 
 // -- what a module is told --------------------------------------------------
 
+/// The modules that embed static files. With any of them, `rsx` writes
+/// `src/assets.rs`. See [`Project::embeds_assets`].
+pub const ASSET_EMBEDDERS: [&str; 2] = ["rsx-tailwind", "rsx-htmx"];
+
 /// The answers, as a module may read them. Nothing here is writable: a module
 /// contributes through [`Scaffold`], so what it changed is in one place.
 pub struct Project<'a> {
@@ -910,6 +914,15 @@ impl<'a> Project<'a> {
             unknown: std::cell::RefCell::new(Vec::new()),
             asked: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Whether this project embeds static files, so `src/assets.rs` and
+    /// `crate::assets` exist. The modules in [`ASSET_EMBEDDERS`] ask for
+    /// them; `rsx` writes the file, and `static` exports what it holds.
+    /// One fact, stated here, so the two never disagree.
+    pub fn embeds_assets(&self) -> bool {
+        // `has` on each, and not `any`, so the manifest test sees each asked.
+        ASSET_EMBEDDERS.iter().filter(|key| self.has(key)).count() > 0
     }
 
     /// Whether another choice is part of this project.

@@ -78,6 +78,7 @@ brocanth-schema = { workspace = true, default-features = false, features = [
     "scaffold",
 ] }
 brocanth-storage = { workspace = true, features = ["scaffold"] }
+brocanth-static = { path = "../brocanth-static", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-webhooks = { path = "../brocanth-webhooks", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-oauth-client = { path = "../brocanth-oauth-client", version = "0.1.0", default-features = false, features = ["scaffold"] }
 # The backoffice. `default-features = false` keeps the `RouteSource` and the
