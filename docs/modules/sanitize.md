@@ -13,7 +13,7 @@ The wizard calls it: *Show HTML that users write, cleaned*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | none |
+| Adapts to | [`rsx`](rsx.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-sanitize` (feature `rsx` with [`rsx`](rsx.md)) |

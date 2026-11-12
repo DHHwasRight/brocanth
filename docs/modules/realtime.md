@@ -13,7 +13,7 @@ The wizard calls it: *A broadcast broker*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`realtime-sse`](realtime-sse.md), [`realtime-websocket`](realtime-websocket.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-realtime` |
