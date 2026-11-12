@@ -555,12 +555,18 @@ impl Loader {
         self
     }
 
-    /// The environment this loader resolves to.
+    /// The environment this loader resolves to. An empty or blank
+    /// `<APP>_ENV` counts as unset.
     pub fn resolved_env(&self) -> String {
         self.env
             .clone()
-            .or_else(|| (self.env_lookup)(&self.app.env_var_for_env()))
+            .or_else(|| self.lookup_set(&self.app.env_var_for_env()))
             .unwrap_or_else(|| DEFAULT_ENV.to_string())
+    }
+
+    /// A loader variable, or `None` when it is unset, empty or blank.
+    fn lookup_set(&self, var: &str) -> Option<String> {
+        (self.env_lookup)(var).filter(|v| !v.trim().is_empty())
     }
 
     /// The four file sources, highest precedence first, each spelled with the
@@ -626,7 +632,7 @@ impl Loader {
         let env = self.resolved_env();
         let app = self.app.as_str();
         let mut out: Vec<(PathBuf, Origin, Option<Format>)> = Vec::with_capacity(4);
-        if let Some(p) = (self.env_lookup)(&self.app.env_var_for_config()) {
+        if let Some(p) = self.lookup_set(&self.app.env_var_for_config()) {
             let path = PathBuf::from(p);
             let format = path
                 .extension()
@@ -745,15 +751,16 @@ impl Loader {
                     .and_then(Value::as_table_mut)
                     .expect("inserted above");
             }
-            let kind = if flag.text && !flag.raw.is_empty() {
-                ValueKind::String(flag.raw.clone())
+            let from = Provenance::flag(&flag.name);
+            let value = if flag.text && !flag.raw.is_empty() {
+                Value::new(ValueKind::String(flag.raw.clone()), from)
             } else {
-                crate::env::infer(&flag.raw)
+                Value::inferred(&flag.raw, from)
             };
             if table.get(key).is_some_and(|v| v.as_table().is_some()) {
                 return Err(wrong("another flag names keys under this one"));
             }
-            table.insert(key.clone(), Value::new(kind, Provenance::flag(&flag.name)));
+            table.insert(key.clone(), value);
         }
         Ok(Value::new(
             ValueKind::Table(root),
@@ -1217,6 +1224,19 @@ mod toml_tests {
             .env("test")
             .env_lookup(lookup(&[("MY_APP_ENV", "staging")]));
         assert_eq!(explicit.resolved_env(), "test");
+    }
+
+    #[test]
+    fn an_empty_env_or_config_variable_counts_as_unset() {
+        let loader = Loader::new("MyApp")
+            .root("/fake-root")
+            .cwd("/fake-cwd")
+            .env_lookup(lookup(&[("MY_APP_ENV", ""), ("MY_APP_CONFIG", "  ")]));
+        assert_eq!(loader.resolved_env(), DEFAULT_ENV);
+        assert!(loader
+            .candidates()
+            .iter()
+            .all(|s| s.origin != Origin::EnvVar));
     }
 
     #[test]
