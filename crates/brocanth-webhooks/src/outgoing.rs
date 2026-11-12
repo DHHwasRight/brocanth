@@ -112,7 +112,7 @@ impl Default for OutgoingConfig {
 }
 
 /// One endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// Its row id.
     pub id: i64,
@@ -127,6 +127,21 @@ pub struct Endpoint {
     pub active: bool,
     /// What it is for.
     pub description: String,
+}
+
+impl std::fmt::Debug for Endpoint {
+    /// Prints every field but the secret, as [`Scheme`](crate::Scheme)
+    /// does: a `{:?}` in a log line must not leak it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("id", &self.id)
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("events", &self.events)
+            .field("active", &self.active)
+            .field("description", &self.description)
+            .finish()
+    }
 }
 
 /// Where one delivery is.
@@ -484,7 +499,7 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
                 if answer.status().is_success() {
                     (status, None)
                 } else {
-                    let text = answer.text().await.unwrap_or_default();
+                    let text = head_of(answer).await;
                     (status, Some(format!("answered {status}: {}", clip(&text))))
                 }
             }
@@ -741,13 +756,18 @@ pub fn check_url(url: &str, allow_private: bool) -> Result<(), OutError> {
 
 /// The HTTP client every attempt uses: no redirect, a timeout, and
 /// [`PublicOnly`] as its resolver unless `allow_private` is on.
+///
+/// Unless `allow_private` is on, the client also ignores `HTTP_PROXY`,
+/// `HTTPS_PROXY` and `ALL_PROXY`. Through a proxy, the proxy resolves the
+/// endpoint's name, so [`PublicOnly`] never sees the address, and a name
+/// such as `internal.svc.cluster.local` would reach this network.
 fn client(config: &OutgoingConfig) -> Result<reqwest::Client, OutError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs.max(1)))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("brocanth-webhooks/", env!("CARGO_PKG_VERSION")));
     if !config.allow_private {
-        builder = builder.dns_resolver(PublicOnly);
+        builder = builder.dns_resolver(PublicOnly).no_proxy();
     }
     builder.build().map_err(|e| {
         OutError(format!(
@@ -810,6 +830,12 @@ fn is_private(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 // 100.64.0.0/10: carrier-grade NAT.
                 || a == 100 && (b & 0xc0) == 64
+                // 192.0.0.0/24: IETF protocol assignments.
+                || (a, b, v4.octets()[2]) == (192, 0, 0)
+                // 198.18.0.0/15: benchmarking, often routed inside a network.
+                || a == 198 && (b & 0xfe) == 18
+                // 240.0.0.0/4: reserved.
+                || a >= 240
         }
         IpAddr::V6(v6) => {
             let first = v6.segments()[0];
@@ -828,8 +854,31 @@ fn is_private(ip: IpAddr) -> bool {
                     && is_private(IpAddr::V4(std::net::Ipv4Addr::from_bits(
                         (v6.to_bits() & 0xffff_ffff) as u32,
                     ))))
+                // 6to4, 2002::/16: the IPv4 address is the next 32 bits.
+                || (first == 0x2002
+                    && is_private(IpAddr::V4(std::net::Ipv4Addr::from_bits(
+                        ((v6.to_bits() >> 80) & 0xffff_ffff) as u32,
+                    ))))
         }
     }
+}
+
+/// The most of an answer's body [`head_of`] reads. [`clip`] keeps 300
+/// bytes, and the endpoint's owner chooses how long the body is.
+const BODY_LIMIT: usize = 1024;
+
+/// The first [`BODY_LIMIT`] bytes of an answer's body, as text. The rest is
+/// never read: a large body costs one chunk, not its length.
+async fn head_of(mut answer: reqwest::Response) -> String {
+    let mut head = Vec::new();
+    while head.len() < BODY_LIMIT {
+        match answer.chunk().await {
+            Ok(Some(chunk)) => head.extend_from_slice(&chunk),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    head.truncate(BODY_LIMIT);
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 fn clip(text: &str) -> String {
@@ -1025,6 +1074,14 @@ mod tests {
             "http://[fc00::1]/",
             "http://[::]/",
             "http://[ff02::1]/",
+            // Special-purpose IPv4 ranges.
+            "http://192.0.0.1/",
+            "http://198.18.0.1/",
+            "http://198.19.255.254/",
+            "http://240.0.0.1/",
+            // 6to4 around a private IPv4: 2002:7f00:1:: is 127.0.0.1.
+            "http://[2002:7f00:1::]/",
+            "http://[2002:a00:1::1]/",
             // Names.
             "http://LOCALHOST/",
             "http://localhost./",
@@ -1042,6 +1099,8 @@ mod tests {
             "http://[2606:4700:4700::1111]/",
             "http://[::ffff:8.8.8.8]/",
             "http://[64:ff9b::808:808]/",
+            "http://[2002:808:808::]/",
+            "http://198.20.0.1/",
             "http://127.0.0.1@example.com/",
         ] {
             assert!(check_url(url, false).is_ok(), "{url} was refused");
@@ -1075,10 +1134,112 @@ mod tests {
         assert!(err.to_string().contains("no public address"), "{err}");
     }
 
+    /// The proxy variables are process-wide, and reqwest reads them when a
+    /// client is built: the tests that build a client take turns.
+    static PROXY_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A listener that counts the connections it accepts and answers each
+    /// with a 204.
+    async fn counting_listener() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        (port, accepted)
+    }
+
+    /// Through a proxy, the proxy resolves the endpoint's name and
+    /// `PublicOnly` never sees it. The strict client ignores the proxy
+    /// variables; the development client keeps them.
+    #[tokio::test]
+    async fn the_strict_client_ignores_the_proxy_variables() {
+        let _turn = PROXY_ENV.lock().await;
+        let (port, accepted) = counting_listener().await;
+        let proxy = format!("http://127.0.0.1:{port}");
+        std::env::set_var("HTTP_PROXY", &proxy);
+        std::env::set_var("http_proxy", &proxy);
+        let strict = client(&OutgoingConfig::default());
+        let open = client(&OutgoingConfig {
+            allow_private: true,
+            ..OutgoingConfig::default()
+        });
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("http_proxy");
+        let (strict, open) = (strict.unwrap(), open.unwrap());
+        // `.invalid` never resolves, so only a proxy could answer.
+        let url = "http://internal.invalid/hook";
+        assert!(strict.post(url).send().await.is_err());
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let answer = open.post(url).send().await.expect("through the proxy");
+        assert_eq!(answer.status().as_u16(), 204);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An endpoint that answers a 500 with an endless body costs one
+    /// kibibyte of memory, not the body.
+    #[tokio::test]
+    async fn a_long_answer_is_read_only_to_its_head() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = socket
+                .write_all(b"HTTP/1.1 500 X\r\ncontent-length: 104857600\r\n\r\n")
+                .await;
+            let chunk = vec![b'x'; 64 * 1024];
+            // 100 MiB promised; the reader stops long before.
+            for _ in 0..1600 {
+                if socket.write_all(&chunk).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let open = client(&OutgoingConfig {
+            allow_private: true,
+            ..OutgoingConfig::default()
+        })
+        .unwrap();
+        let answer = open
+            .post(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect("an answer");
+        let head = head_of(answer).await;
+        assert_eq!(head.len(), BODY_LIMIT);
+    }
+
+    #[test]
+    fn an_endpoint_never_prints_its_secret() {
+        let endpoint = Endpoint {
+            id: 1,
+            url: "https://example.com/hooks".to_string(),
+            secret: "whsec_c2VjcmV0IHNlY3JldCBzZWNyZXQ=".to_string(),
+            events: vec!["*".to_string()],
+            active: true,
+            description: String::new(),
+        };
+        let printed = format!("{endpoint:?}");
+        assert!(!printed.contains("whsec_"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
     /// The client of an `Outgoing` reaches a name on this machine only when
     /// `allow_private` is on: the resolver is wired into it.
     #[tokio::test]
     async fn the_client_does_not_connect_to_a_name_on_this_machine() {
+        let _turn = PROXY_ENV.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
