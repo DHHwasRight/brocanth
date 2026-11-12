@@ -1309,7 +1309,7 @@ pub fn render_with(
 ) -> Result<Response, Error> {
     let mut body = out_of_band.concat();
     body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
+    Ok(page_response(body))
 }
 
 /// One skipped layout's replacement chrome, rendered on its own.
@@ -1348,7 +1348,7 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    Ok(Response::ok(content.render_to_string()?))
+    Ok(page_response(content.render_to_string()?))
 }
 
 impl Ctx {
@@ -1359,6 +1359,12 @@ impl Ctx {
     pub fn partial_depth(&self) -> u32 {
         0
     }
+}
+
+/// A rendered page. Every load is the whole document, so it varies on
+/// nothing.
+fn page_response(body: String) -> Response {
+    Response::ok(body)
 }
 
 #[cfg(test)]
@@ -2370,17 +2376,16 @@ parse is a build failure on its own line rather than a 500.
 
 ## HTML from users
 
-HTML a user wrote reaches a template only as a
+HTML a user wrote reaches a page only as a
 `brocanth_sanitize::SafeHtml`. Make one with a policy:
 `brocanth_sanitize::comment(&row.body)` for a comment,
 `brocanth_sanitize::rich_text(&row.body)` for editor output, or a
 `Policy` built once in a `static` for anything else. Write it with
-`{! value }`.
+`{! value }`, and never write a `String` with `{! }`.
 
-Never write a `String` with `{! }`, and never widen a policy with
-`style`, `class`, `id`, an `on*` attribute or a `javascript:` URL.
-Store what the user wrote and clean it when the page renders, so a
-stricter policy also covers old rows.
+Never widen a policy with `style`, `class`, `id`, an `on*` attribute
+or a `javascript:` URL. Store what the user wrote and clean it when
+the page renders, so a stricter policy also covers old rows.
 
 ## Decisions that belong to the person
 
@@ -2406,7 +2411,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 0345dc1b92a7ab8f -->
+<!-- brocanth-digest: 8eba084d71653756 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -2434,6 +2439,6 @@ kind = ["renderer"]
 files = ["src/modules/sanitize.rs"]
 config = []
 crates = ["brocanth-sanitize"]
-adapted_to = []
+adapted_to = ["rsx"]
 
-# brocanth-digest: 4e8c33df98c1cc15
+# brocanth-digest: 273c4400830a1fb6
