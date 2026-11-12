@@ -175,9 +175,7 @@ impl Module for Auth {
 ///
 /// With one of them, accounts and sessions go to Postgres too: the
 /// generated plugin is `PgStore`, and the CLI turns on this crate's
-/// `postgres` feature. Without one, the project's database is the model
-/// layer's development SQLite file, or nothing, and the store stays
-/// `MemoryStore`.
+/// `postgres` feature. Without one, the store stays `MemoryStore`.
 pub const POSTGRES_WITH: &[&str] = &["jobs", "cache"];
 
 /// Whether this project's accounts live in Postgres. See [`POSTGRES_WITH`].

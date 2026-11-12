@@ -3952,7 +3952,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "policy.dialect",
-        help: "The SQL a condition compiles to: postgres or sqlite.",
+        help: "The SQL a condition compiles to: postgres, the only dialect.",
         flag: true,
         file: "src/modules/policy.rs",
         flags: crate::modules::policy::MODULE.flags,
@@ -5077,7 +5077,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b5b8c54a7c5b58f2
+// brocanth-digest: 14fba6323a605500
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -9857,11 +9857,9 @@ smtp_password = ""
 worker = true
 
 [policy]
-# The SQL a condition compiles to: postgres or sqlite.
-# This follows `[db] url`, the Postgres database the model reads. Move the
-# two together: `IS NOT DISTINCT FROM` and `IS NOT` mean the same thing and
-# only one of them parses, so a condition compiled for the wrong dialect is
-# valid SQL that the engine rejects at the worst possible moment.
+# The SQL a condition compiles to: postgres, the only dialect.
+# This follows `[db] url`, the Postgres database the model reads.
+# Brocanth supports Postgres only, so `postgres` is the one legal value.
 dialect = "postgres"
 
 [rate_limit]
@@ -10015,8 +10013,6 @@ impl Command for Settings {
 /target
 /.git
 /db
-*.sqlite
-*.sqlite-*
 /node_modules
 ===== .github/workflows/ci.yml =====
 # Every push and every pull request: formatting, lints, tests.
@@ -10828,7 +10824,7 @@ fn touch(path: &Path) -> anyhow::Result<()> {
 //! `dbshell` -- the database's own client, on this application's database.
 //!
 //! Reads `[db] url` the way the server does and replaces itself with `psql`
-//! or `sqlite3` on it. `--print` shows the command line; a password goes in
+//! on it. `--print` shows the command line; a password goes in
 //! `PGPASSWORD` and never on it. See `brocanth_db::shell`.
 //!
 //! Ordinary project code, like `serve`: rename it or delete it, and delete
@@ -10838,7 +10834,7 @@ use std::ffi::OsString;
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
-/// Open psql or sqlite3 on the database in `[db] url`
+/// Open psql on the database in `[db] url`
 #[cmd]
 #[derive(clap::Args)]
 pub struct Dbshell {
@@ -10848,7 +10844,7 @@ pub struct Dbshell {
     /// Print the command line instead of running it. The password is not printed
     #[arg(long)]
     print: bool,
-    /// Passed to psql or sqlite3 unchanged, after `--`
+    /// Passed to psql unchanged, after `--`
     #[arg(last = true, value_name = "CLIENT ARGS")]
     rest: Vec<OsString>,
 }
@@ -16874,7 +16870,7 @@ impl Policy for PostPolicy {
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres` or `sqlite`. A string here and an enum below: a config file
+    /// `postgres`, the only dialect. A string here and an enum below: a config file
     /// is text, and the translation is checked at startup where a typo can
     /// still be answered.
     pub dialect: String,
@@ -16927,11 +16923,10 @@ impl Plugin for Policies {
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let dialect = match self.settings.dialect.as_str() {
             "postgres" => Dialect::Postgres,
-            "sqlite" => Dialect::Sqlite,
             other => {
                 return Err(PluginError::new(format!(
                     "[policy] dialect is {other:?}, which is not a SQL dialect\n\
-                     help: set `dialect` under [policy] to postgres or sqlite"
+                     help: set `dialect` under [policy] to postgres"
                 )))
             }
         };

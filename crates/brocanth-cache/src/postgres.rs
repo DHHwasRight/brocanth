@@ -52,17 +52,16 @@ impl std::fmt::Debug for PgCache {
     }
 }
 
-/// A URL that is not `postgres://…` is an error that names the crate to look
-/// at, because a SQLite cache is a different crate, not a different URL.
+/// A URL that is not `postgres://…` is an error that says what to do, because
+/// brocanth supports Postgres only.
 fn postgres_url(url: &str) -> Result<()> {
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         return Ok(());
     }
     Err(CacheError::Config(format!(
-        "`{}` is not a Postgres URL. brocanth-cache is Postgres only on \
-         purpose; a cache for a SQLite deployment is a separate crate \
-         implementing the same `Cache` trait.\n\
-         help: use a `postgres://` URL, or implement `Cache` over the other store",
+        "`{}` is not a Postgres URL. brocanth-cache is Postgres only, as is \
+         brocanth.\n\
+         help: use a `postgres://` URL, or `MemoryCache` for tests and development",
         url.split(':').next().unwrap_or(url)
     )))
 }
@@ -71,9 +70,8 @@ impl PgCache {
     /// Opens a cache from a database URL.
     ///
     /// A URL that is not `postgres://…` or `postgresql://…` is an error here
-    /// rather than a connection failure later, and the message says which
-    /// crate to look at — because a SQLite cache is a different crate, not a
-    /// different URL.
+    /// rather than a connection failure later, and the message says what to
+    /// do.
     ///
     /// # Errors
     /// [`CacheError::Config`] for a URL this crate cannot use;
@@ -432,10 +430,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_url_for_another_database_says_which_crate_to_look_at() {
-        let error = PgCache::connect("sqlite://cache.db").await.unwrap_err();
+    async fn a_url_for_another_database_says_what_to_do() {
+        let error = PgCache::connect("mysql://localhost/cache")
+            .await
+            .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Postgres only"), "{message}");
-        assert!(message.contains("separate crate"), "{message}");
+        assert!(message.contains("help:"), "{message}");
     }
 }

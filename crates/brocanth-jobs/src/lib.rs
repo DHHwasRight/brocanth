@@ -122,8 +122,8 @@
 //!
 //! # On `apalis`
 //!
-//! `apalis` 1.0.0 was published on 2026-10-12, with `apalis-postgres`,
-//! `apalis-sqlite` and `apalis-redis` 1.0.0 the same morning — the first stable
+//! `apalis` 1.0.0 was published on 2026-10-12, with `apalis-postgres` and its
+//! other store adapters 1.0.0 the same morning — the first stable
 //! anchor the Rust job-queue story has had. It was evaluated seriously and not
 //! used. `apalis-postgres` gets the hard part right in a way worth copying, and
 //! this crate copies it: `FOR UPDATE SKIP LOCKED`, orphan reclaim keyed on a

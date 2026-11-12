@@ -230,7 +230,7 @@ These are commands of the generated project, and `brocanth <name>` hands
 them to the project's binary, like any project command:
 
 - `dbshell` (alias `dbconsole`) comes with `db` and `commands`. It opens
-  `psql` or `sqlite3` on `[db] url`; a Postgres password goes in
+  `psql` on `[db] url`; the password goes in
   `PGPASSWORD`, not on the command line.
 - `migrate` comes with `model`.
 - `settings` prints every configuration layer and the merged values.

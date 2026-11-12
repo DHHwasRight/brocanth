@@ -18,8 +18,7 @@ readme = "README.md"
 # * **No SQL driver.** §10 wants `LISTEN/NOTIFY`, and what this crate owns of
 #   that is the channel name, the payload and the 8000-byte limit. Opening the
 #   connection is the application's, behind the `Notifier` trait. A driver here
-#   would also re-open the `links = "sqlite3"` conflict `brocanth-policy`
-#   documents, for nothing.
+#   would add a dependency for nothing.
 # * **No renderer.** §10 wants a fragment rather than JSON and names `rsx` as
 #   the renderer. `FrameEmitter` is the seam; the default emitter is twenty
 #   lines and no dependency. An arrow from realtime to the renderer would make

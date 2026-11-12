@@ -3,7 +3,7 @@
 //! Django's `dbshell`, Rails' `dbconsole`. A generated project with `db`
 //! and `commands` has a `dbshell` command: it reads `[db] url` the way the
 //! application does, and calls [`run`], which replaces the process with
-//! `psql` or `sqlite3` on that database.
+//! `psql` on that database.
 //!
 //! It is a command of the project and not of the `brocanth` CLI because
 //! only the project knows how its configuration is read.
@@ -20,14 +20,14 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The client to run, worked out from a URL.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Client {
-    /// `psql` or `sqlite3`.
+    /// `psql`.
     pub program: &'static str,
-    /// The first argument: a URL without its password, or a file path.
+    /// The first argument: the URL without its password.
     pub target: String,
     /// The password, passed in `PGPASSWORD` and never on the command line,
     /// where `ps` would show it to every user of the machine.
@@ -37,7 +37,7 @@ pub struct Client {
 /// Why the client does not start, and what to do.
 #[derive(Debug)]
 pub struct ShellError {
-    /// The rule, such as `dbshell/memory`.
+    /// The rule, such as `dbshell/scheme`.
     pub id: &'static str,
     /// What is wrong.
     pub message: String,
@@ -74,11 +74,13 @@ impl std::error::Error for ShellError {}
 
 /// Opens the client on `url`, or prints its command line with `print`.
 ///
-/// `root` is the project root: a relative SQLite path is read from there.
+/// `root` is the project root. Postgres is the only database, so nothing
+/// reads it now; the generated `dbshell` command still passes it.
 /// `rest` goes to the client unchanged. On Unix this returns only on
 /// failure, because the process becomes the client.
 pub fn run(url: &str, root: &Path, print: bool, rest: &[OsString]) -> Result<(), ShellError> {
-    let client = client_for(url, root)?;
+    let _ = root;
+    let client = client_for(url)?;
     if print {
         println!("{}", command_line(&client, rest));
         return Ok(());
@@ -103,41 +105,8 @@ pub fn command_line(client: &Client, rest: &[OsString]) -> String {
     line
 }
 
-/// `psql` for a Postgres URL, `sqlite3` for a SQLite one.
-pub fn client_for(url: &str, root: &Path) -> Result<Client, ShellError> {
-    if let Some(rest) = url
-        .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))
-    {
-        let path = rest.split('?').next().unwrap_or(rest);
-        if path.is_empty() || path == ":memory:" || rest.contains("mode=memory") {
-            return Err(ShellError::new(
-                "dbshell/memory",
-                "the database is in memory, so no other process can open it",
-            )
-            .help("point the URL at a file, such as sqlite://db/development.sqlite?mode=rwc"));
-        }
-        let file = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            root.join(path)
-        };
-        if !file.is_file() {
-            // `sqlite3` would create an empty file here and open it without a
-            // word, which looks exactly like a database whose tables vanished.
-            return Err(ShellError::new(
-                "dbshell/no-file",
-                format!("the database file {} does not exist", file.display()),
-            )
-            .help("start the application or run its migrations once; that creates the file"));
-        }
-        return Ok(Client {
-            program: "sqlite3",
-            target: file.display().to_string(),
-            password: None,
-        });
-    }
-
+/// `psql` for a Postgres URL.
+pub fn client_for(url: &str) -> Result<Client, ShellError> {
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         let (target, password) = without_password(url);
         return Ok(Client {
@@ -152,7 +121,7 @@ pub fn client_for(url: &str, root: &Path) -> Result<Client, ShellError> {
         "dbshell/scheme",
         format!("dbshell has no client for a `{scheme}` URL"),
     )
-    .help("`[db] url` is a postgres:// URL; dbshell also opens a sqlite:// file"))
+    .help("set `[db] url` to a postgres:// URL"))
 }
 
 /// The URL with `user:password@` turned into `user@`, and the password.
@@ -208,12 +177,8 @@ fn shell_quote(text: &str) -> String {
 }
 
 fn not_found(client: &Client) -> ShellError {
-    let install = match client.program {
-        "psql" => {
-            "install the PostgreSQL client (`brew install libpq`, `apt install postgresql-client`)"
-        }
-        _ => "install SQLite's shell (`brew install sqlite`, `apt install sqlite3`)",
-    };
+    let install =
+        "install the PostgreSQL client (`brew install libpq`, `apt install postgresql-client`)";
     ShellError::new(
         "dbshell/no-client",
         format!("`{}` is not on PATH", client.program),
@@ -263,11 +228,8 @@ mod tests {
 
     #[test]
     fn a_postgres_password_leaves_the_command_line() {
-        let c = client_for(
-            "postgres://app:s%40cret@db.internal:5432/blog?sslmode=require",
-            Path::new("/"),
-        )
-        .unwrap();
+        let c =
+            client_for("postgres://app:s%40cret@db.internal:5432/blog?sslmode=require").unwrap();
         assert_eq!(c.program, "psql");
         assert_eq!(
             c.target,
@@ -281,34 +243,16 @@ mod tests {
 
     #[test]
     fn a_postgres_url_with_no_password_is_passed_as_it_is() {
-        let c = client_for("postgresql://localhost/dev", Path::new("/")).unwrap();
+        let c = client_for("postgresql://localhost/dev").unwrap();
         assert_eq!(c.target, "postgresql://localhost/dev");
         assert_eq!(c.password, None);
     }
 
     #[test]
-    fn a_relative_sqlite_path_is_read_from_the_project_root() {
-        let root = std::env::temp_dir().join(format!("brocanth-dbshell-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("db")).unwrap();
-        std::fs::write(root.join("db/dev.sqlite"), b"").unwrap();
-        let c = client_for("sqlite://db/dev.sqlite?mode=rwc", &root).unwrap();
-        assert_eq!(c.program, "sqlite3");
-        assert_eq!(c.target, root.join("db/dev.sqlite").display().to_string());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_missing_sqlite_file_is_refused_rather_than_created() {
-        let e = client_for("sqlite://db/absent.sqlite", Path::new("/nonexistent")).unwrap_err();
-        assert_eq!(e.id, "dbshell/no-file");
-        assert!(e.to_string().contains("help:"), "{e}");
-    }
-
-    #[test]
-    fn memory_and_unknown_schemes_say_why() {
-        let e = client_for("sqlite::memory:", Path::new("/")).unwrap_err();
-        assert_eq!(e.id, "dbshell/memory");
-        let e = client_for("mysql://localhost/x", Path::new("/")).unwrap_err();
+    fn an_unknown_scheme_says_why() {
+        let e = client_for("sqlite://db/dev.sqlite").unwrap_err();
+        assert_eq!(e.id, "dbshell/scheme");
+        let e = client_for("mysql://localhost/x").unwrap_err();
         assert_eq!(e.id, "dbshell/scheme");
         assert!(e.to_string().contains("help:"));
     }

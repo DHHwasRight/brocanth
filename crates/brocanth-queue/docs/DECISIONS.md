@@ -499,14 +499,11 @@ during a rolling deploy does not fail; the next `migrate` moves what it
 wrote. Drop them by hand when no old worker is left. A unique key that
 `queue_bulk` already holds is not moved twice.
 
-### 6.4 The `sqlite` feature
+### 6.4 One database
 
-It goes. Decision 4 kept it as a library option, but under decision 2 it
-would need a `brocanth-queue-sqlite` adapter that passes the conformance
-suite, and keeping the old SQLite store would be the second job system
-that decision 2 removes. No generated project can select SQLite today, and
-`db` has no dialect. The adapter is listed in 6.6 and comes with the `db`
-dialect choice.
+Postgres only (2026-11-11): RLS and one database keep the framework
+simple. The old second store is gone, and no second queue adapter is
+planned. The in-memory store stays, for tests and development.
 
 ### 6.5 The generated project
 
@@ -522,7 +519,6 @@ dialect choice.
 
 ### 6.6 What this part does not do
 
-- `brocanth-queue-sqlite` (6.4).
 - The outbox dead letter screen in `JobsPanel` (Part 5).
 - A cache sweep scheduled by jobs: it is the cache agent's side, and it
   only needs `Queue::recurring`.

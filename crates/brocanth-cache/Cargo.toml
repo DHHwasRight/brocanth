@@ -120,12 +120,11 @@ brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 
 [features]
-# `postgres` is the default and the only backend here. SQLite is the "smaller
-# setups, different crate" case, and this crate is shaped so that crate can
-# exist: build this one with `default-features = false, features = ["runtime"]`
-# and you get the trait,
+# `postgres` is the default and the only database backend: brocanth supports
+# Postgres only (2026-11-11). Build this crate with
+# `default-features = false, features = ["runtime"]` and you get the trait,
 # the key types, the error type, the clock and `fetch` — and no `sqlx`, no
-# driver, no pool. A SQLite backend is then a crate that depends on this one and
+# driver, no pool. Another store is then a crate that depends on this one and
 # implements `Cache`, exactly as an S3 backend is for `brocanth-storage`.
 #
 # So, unlike `brocanth-jobs`, there is no `compile_error!` when every backend

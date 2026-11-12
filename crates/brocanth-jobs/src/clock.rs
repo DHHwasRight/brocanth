@@ -4,13 +4,10 @@
 //! worker's clock**, and both decisions are deliberate.
 //!
 //! **Milliseconds, not a database timestamp type.** Postgres would rather have
-//! `TIMESTAMPTZ` and SQLite has no timestamp type at all, so storing a native
-//! type means two column types, two comparison semantics and two sort orders.
-//! The one failure this crate exists to prevent is "it worked on SQLite in
-//! development and behaved differently on Postgres", so `BIGINT` on both sides
-//! it is, compared with `<=` on both sides, sorted identically on both sides.
-//! An application that wants a readable column can add a generated one; the
-//! queue will not read it.
+//! `TIMESTAMPTZ`, but the queue also has an in-memory store, and the two must
+//! compare and sort the same way. So it is `BIGINT`, compared with `<=` and
+//! sorted as an integer in both. An application that wants a readable column
+//! can add a generated one; the queue will not read it.
 //!
 //! **The worker's clock, not the database's.** `now()` inside the SQL would
 //! remove clock skew between workers, which is a real cost and is paid here —

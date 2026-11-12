@@ -37,9 +37,6 @@
 //! }
 //! ```
 //!
-//! A driver in this crate would also re-open the `links = "sqlite3"` conflict
-//! that `brocanth-policy`'s manifest documents, for nothing.
-//!
 //! # The 8000-byte limit, and the pointer
 //!
 //! PostgreSQL's `NOTIFY_PAYLOAD_MAX_LENGTH` is `BLCKSZ - NAMEDATALEN - 128`,

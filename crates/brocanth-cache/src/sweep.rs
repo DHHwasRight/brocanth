@@ -50,8 +50,7 @@
 //!
 //! The operation is on the trait
 //! ([`Cache::purge_expired`](crate::Cache::purge_expired)) rather than on the
-//! Postgres type, so a later SQLite backend gets the same arrangement for
-//! free.
+//! Postgres type, so any other backend gets the same arrangement for free.
 //!
 //! # Other ways to drive it
 //!

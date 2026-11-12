@@ -1,10 +1,10 @@
 //! The test story for a Postgres-only crate, and the one rule it follows:
 //! **a test that did not run must say so.**
 //!
-//! `brocanth-jobs` can run its whole suite on SQLite, on a laptop, with no
-//! server. This crate cannot: its SQL is Postgres only. `MemoryCache` exists
-//! for tests and development, and it passes the conformance suite, but it
-//! runs none of the SQL these tests are about, so it does not replace them.
+//! This crate's SQL is Postgres only, so its SQL tests need a server.
+//! `MemoryCache` exists for tests and development, and it passes the
+//! conformance suite, but it runs none of the SQL these tests are about, so
+//! it does not replace them.
 //!
 //! So there are three ways this could have gone, and here is the one chosen and
 //! why the other two were not.
