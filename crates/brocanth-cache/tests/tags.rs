@@ -177,7 +177,11 @@ async fn the_sweep_removes_the_tags_of_entries_that_are_gone() {
         .await
         .unwrap();
     cache.delete(&deleted).await.unwrap();
-    assert_eq!(tag_rows(&cache, &ns).await, 3);
+    assert_eq!(
+        tag_rows(&cache, &ns).await,
+        2,
+        "a delete takes the entry's tag with it"
+    );
 
     clock.advance(chrono::Duration::seconds(2));
     brocanth_cache::sweep(&cache, 10_000, 10).await.unwrap();

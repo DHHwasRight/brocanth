@@ -341,12 +341,14 @@ impl Cache for PgCache {
         if tags.is_empty() {
             return Ok(0);
         }
+        let now = to_millis(self.clock.now());
         let tags: Vec<&str> = tags.iter().map(Tag::as_str).collect();
-        Ok(sqlx::query(sql::INVALIDATE_TAGS)
+        let removed: i64 = sqlx::query_scalar(sql::INVALIDATE_TAGS)
             .bind(&tags)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(removed.max(0) as u64)
     }
 
     async fn add(&self, key: &Key, value: &[u8], ttl: Duration) -> Result<bool> {
@@ -365,21 +367,24 @@ impl Cache for PgCache {
     }
 
     async fn delete(&self, key: &Key) -> Result<bool> {
-        let gone = sqlx::query(sql::DELETE)
+        let now = to_millis(self.clock.now());
+        let gone: i64 = sqlx::query_scalar(sql::DELETE)
             .bind(key.namespace().as_str())
             .bind(key.as_str())
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(gone > 0)
     }
 
     async fn clear(&self, namespace: &Namespace) -> Result<u64> {
-        Ok(sqlx::query(sql::CLEAR)
+        let now = to_millis(self.clock.now());
+        let removed: i64 = sqlx::query_scalar(sql::CLEAR)
             .bind(namespace.as_str())
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(removed.max(0) as u64)
     }
 
     async fn lease(&self, key: &Key, ttl: Duration) -> Result<bool> {

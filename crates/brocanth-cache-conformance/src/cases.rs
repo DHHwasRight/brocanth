@@ -87,6 +87,7 @@ pub(crate) fn all() -> Vec<Case> {
         case!(a_ttl_under_a_millisecond_is_accepted_and_soon_gone),
         case!(a_ttl_past_the_end_of_time_is_refused),
         case!(deleting_what_is_gone_is_not_an_error),
+        case!(delete_clear_and_invalidate_take_the_tags_with_them),
         case!(an_empty_value_is_a_value),
         case!(a_large_value_round_trips_byte_for_byte),
         case!(concurrent_writers_leave_one_whole_value),
@@ -891,14 +892,25 @@ async fn deleting_what_is_gone_is_not_an_error(cx: &Ctx) -> Result<(), String> {
         !step("delete", c.delete(&cx.key("gone", "never")).await)?,
         "delete of a key never written answers false"
     );
-    // Whether an expired entry counts as "there" is the backend's own
-    // business (Redis has already dropped it). It must not fail, and the
-    // key must stay a miss.
+    // An expired entry is a miss, so it is not "there": every backend
+    // answers false, as Redis does for a key it has already dropped.
     let expired = cx.key("gone", "expired");
     step("set", c.set(&expired, b"v", SHORT).await)?;
     tokio::time::sleep(PAST_SHORT).await;
-    step("delete of an expired entry", c.delete(&expired).await)?;
+    ensure!(
+        !step("delete of an expired entry", c.delete(&expired).await)?,
+        "delete of an expired entry answers false"
+    );
     same!(step("get", c.get(&expired).await)?, None, "still a miss");
+    let ns = cx.namespace("gone-expired");
+    step("set", c.set(&ns.key("a").unwrap(), b"v", SHORT).await)?;
+    step("set", c.set(&ns.key("b").unwrap(), b"v", MINUTE).await)?;
+    tokio::time::sleep(PAST_SHORT).await;
+    same!(
+        step("clear", c.clear(&ns).await)?,
+        1,
+        "clear counts only the live entries"
+    );
     ensure!(
         !step("delete again", c.delete(&expired).await)?,
         "a second delete answers false"
@@ -915,6 +927,60 @@ async fn deleting_what_is_gone_is_not_an_error(cx: &Ctx) -> Result<(), String> {
         0,
         "clear of a namespace never written"
     );
+    Ok(())
+}
+
+/// A removed entry leaves no tag behind. A later value under the same key is
+/// a new entry: an invalidation of the old tags must not reach it.
+async fn delete_clear_and_invalidate_take_the_tags_with_them(cx: &Ctx) -> Result<(), String> {
+    let c = &cx.cache;
+    let (old, other) = (cx.tag("left-old"), cx.tag("left-other"));
+
+    let deleted = cx.key("left", "deleted");
+    step(
+        "set_tagged",
+        c.set_tagged(&deleted, b"one", MINUTE, std::slice::from_ref(&old))
+            .await,
+    )?;
+    step("delete", c.delete(&deleted).await)?;
+    step("set", c.set(&deleted, b"two", MINUTE).await)?;
+
+    let ns = cx.namespace("left-cleared");
+    let cleared = ns.key("k").unwrap();
+    step(
+        "set_tagged",
+        c.set_tagged(&cleared, b"one", MINUTE, std::slice::from_ref(&old))
+            .await,
+    )?;
+    step("clear", c.clear(&ns).await)?;
+    step("set", c.set(&cleared, b"two", MINUTE).await)?;
+
+    // Invalidated through `other`: its `old` tag must go with it.
+    let invalidated = cx.key("left", "invalidated");
+    step(
+        "set_tagged",
+        c.set_tagged(&invalidated, b"one", MINUTE, &[old.clone(), other.clone()])
+            .await,
+    )?;
+    step("invalidate_tag", c.invalidate_tag(&other).await)?;
+    step("set", c.set(&invalidated, b"two", MINUTE).await)?;
+
+    same!(
+        step("invalidate_tag", c.invalidate_tag(&old).await)?,
+        0,
+        "a tag of a removed entry reaches nothing"
+    );
+    for (key, what) in [
+        (&deleted, "a deleted key"),
+        (&cleared, "a cleared key"),
+        (&invalidated, "an invalidated key"),
+    ] {
+        same!(
+            step("get", c.get(key).await)?,
+            Some(b"two".to_vec()),
+            "{what} stored again keeps its new value"
+        );
+    }
     Ok(())
 }
 

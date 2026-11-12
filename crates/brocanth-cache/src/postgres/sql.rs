@@ -196,6 +196,12 @@ pub(crate) const SET: &str = r#"
 /// the same row: a delete and an insert of one row in one statement would
 /// lose the insert to the conflict check.
 ///
+/// A tag row that is already there is updated, not left alone (`DO UPDATE`,
+/// not `DO NOTHING`). The update writes a new row version. A concurrent
+/// [`PURGE_ORPHAN_TAGS`] that chose the old version from a snapshot in which
+/// the entry was expired then waits, rechecks, and does not find its `ctid`,
+/// so it cannot delete the tag of the entry this statement revives.
+///
 /// An empty `$6` deletes every tag of the entry.
 pub(crate) const SET_TAGGED: &str = r#"
     WITH entry AS (
@@ -212,24 +218,39 @@ pub(crate) const SET_TAGGED: &str = r#"
     )
     INSERT INTO brocanth_cache_tags (tag, namespace, k)
     SELECT DISTINCT t, $1::text, $2::text FROM unnest($6::text[]) AS t
-    ON CONFLICT DO NOTHING
+    ON CONFLICT (tag, namespace, k) DO UPDATE SET k = EXCLUDED.k
 "#;
 
-/// Remove every entry carrying any of the tags in `$1`, and those tag rows.
+/// Remove every entry carrying any of the tags in `$1`, with every tag row of
+/// those entries. Answers how many of the removed entries were live at `$2`.
 ///
-/// The tag rows go first, in a CTE, and hand their entries to the outer
-/// delete. A primary-key range on `tag` finds them. The entries' other tag
-/// rows stay behind until [`PURGE_ORPHAN_TAGS`] finds them; they point at
-/// nothing, so they cost space and never a wrong answer.
+/// The matched tag rows go first, in a CTE, and hand their entries to the
+/// two deletes after it. The entries' other tag rows go too: a tag row left
+/// behind would remove a later value stored under the same key, which
+/// Postgres would do and the other backends would not. `rest` skips the tags
+/// in `$1`, which `tagged` already deletes, so no row is deleted twice.
 pub(crate) const INVALIDATE_TAGS: &str = r#"
     WITH tagged AS (
         DELETE FROM brocanth_cache_tags
         WHERE tag = ANY($1::text[])
         RETURNING namespace, k
+    ),
+    hit AS (
+        SELECT DISTINCT namespace, k FROM tagged
+    ),
+    gone AS (
+        DELETE FROM brocanth_cache c
+        USING hit
+        WHERE c.namespace = hit.namespace AND c.k = hit.k
+        RETURNING c.expires_at
+    ),
+    rest AS (
+        DELETE FROM brocanth_cache_tags x
+        USING hit
+        WHERE x.namespace = hit.namespace AND x.k = hit.k
+          AND NOT (x.tag = ANY($1::text[]))
     )
-    DELETE FROM brocanth_cache c
-    USING (SELECT DISTINCT namespace, k FROM tagged) t
-    WHERE c.namespace = t.namespace AND c.k = t.k
+    SELECT count(*) FILTER (WHERE expires_at > $2) AS removed FROM gone
 "#;
 
 /// Store only if nothing live is there. Returns a row when it stored.
@@ -281,17 +302,33 @@ pub(crate) const RELEASE_LEASE: &str = r#"
     WHERE namespace = $1 AND k = $2 AND value IS NULL
 "#;
 
-/// Remove one entry.
+/// Remove one entry and its tags. Answers how many live entries went (0 or
+/// 1): an expired entry is already a miss, so it does not count.
 pub(crate) const DELETE: &str = r#"
-    DELETE FROM brocanth_cache WHERE namespace = $1 AND k = $2
+    WITH gone AS (
+        DELETE FROM brocanth_cache WHERE namespace = $1 AND k = $2
+        RETURNING expires_at
+    ),
+    tags AS (
+        DELETE FROM brocanth_cache_tags WHERE namespace = $1 AND k = $2
+    )
+    SELECT count(*) FILTER (WHERE expires_at > $3) AS removed FROM gone
 "#;
 
-/// Remove a whole namespace.
+/// Remove a whole namespace and its tags. Answers how many live entries went.
 ///
 /// Equality on the leading column of the primary key, so an index range rather
 /// than the prefix match a single concatenated key column would have forced.
+/// The tag rows use `brocanth_cache_tags_entry`, which leads with `namespace`.
 pub(crate) const CLEAR: &str = r#"
-    DELETE FROM brocanth_cache WHERE namespace = $1
+    WITH gone AS (
+        DELETE FROM brocanth_cache WHERE namespace = $1
+        RETURNING expires_at
+    ),
+    tags AS (
+        DELETE FROM brocanth_cache_tags WHERE namespace = $1
+    )
+    SELECT count(*) FILTER (WHERE expires_at > $2) AS removed FROM gone
 "#;
 
 /// Remove up to `$2` expired entries.

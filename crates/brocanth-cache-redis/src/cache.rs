@@ -98,6 +98,23 @@ end
 return n
 ";
 
+/// `delete` and `clear`: delete entries with their tag lists and their
+/// place in every tag set, and count the entries that were there. A tag
+/// left behind would remove a later value stored under the same key.
+///
+/// KEYS: pairs of entry and its tag list. ARGV: tag-set prefix.
+const DROP: &str = r"
+local n = 0
+for i = 1, #KEYS, 2 do
+  n = n + redis.call('DEL', KEYS[i])
+  for _, t in ipairs(redis.call('SMEMBERS', KEYS[i + 1])) do
+    redis.call('SREM', ARGV[1] .. t, KEYS[i])
+  end
+  redis.call('DEL', KEYS[i + 1])
+end
+return n
+";
+
 /// `release_lease`: delete the key only while it is still a lease.
 ///
 /// KEYS: entry.
@@ -112,6 +129,7 @@ struct Scripts {
     set: Script,
     set_tagged: Script,
     invalidate: Script,
+    drop: Script,
     release: Script,
 }
 
@@ -215,6 +233,7 @@ impl RedisCache {
                 set: Script::new(SET),
                 set_tagged: Script::new(SET_TAGGED),
                 invalidate: Script::new(INVALIDATE),
+                drop: Script::new(DROP),
                 release: Script::new(RELEASE),
             }),
         })
@@ -302,6 +321,23 @@ impl RedisCache {
             self.list_prefix(),
             Self::tail(key.namespace(), key.as_str())
         )
+    }
+
+    /// Runs [`DROP`] on these entry keys, and answers how many were there.
+    async fn drop_entries(&self, entries: &[String]) -> Result<u64> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let entry_prefix = self.entry_prefix();
+        let list_prefix = self.list_prefix();
+        let mut conn = self.conn.clone();
+        let mut call = self.scripts.drop.arg(self.tag_prefix());
+        for entry in entries {
+            let tail = entry.strip_prefix(&entry_prefix).unwrap_or(entry);
+            call.key(entry).key(format!("{list_prefix}{tail}"));
+        }
+        let removed: i64 = call.invoke_async(&mut conn).await.map_err(backend)?;
+        Ok(removed.max(0) as u64)
     }
 
     fn check_size(&self, key: &Key, value: &[u8]) -> Result<()> {
@@ -435,43 +471,40 @@ impl Cache for RedisCache {
     }
 
     async fn delete(&self, key: &Key) -> Result<bool> {
-        let mut conn = self.conn.clone();
-        let removed: i64 = conn.del(self.entry(key)).await.map_err(backend)?;
-        Ok(removed > 0)
+        Ok(self.drop_entries(&[self.entry(key)]).await? > 0)
     }
 
     async fn clear(&self, namespace: &Namespace) -> Result<u64> {
-        let pattern = format!(
-            "{}{}",
-            glob_escape(&self.entry_prefix()),
-            glob_escape(&Self::tail(namespace, "*")).replace("\\*", "*")
-        );
-        let mut conn = self.conn.clone();
-        let mut cursor: u64 = 0;
-        let mut removed: u64 = 0;
-        loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(SCAN_COUNT)
-                .query_async(&mut conn)
-                .await
-                .map_err(backend)?;
-            if !keys.is_empty() {
-                let gone: i64 = redis::cmd("UNLINK")
-                    .arg(&keys)
+        let tail = glob_escape(&Self::tail(namespace, "*")).replace("\\*", "*");
+        // The entries first, then the tag lists that outlived their entry.
+        // A tag list left behind would tag a later value at the same key.
+        let mut removed = 0;
+        for prefix in [self.entry_prefix(), self.list_prefix()] {
+            let pattern = format!("{}{tail}", glob_escape(&prefix));
+            let mut conn = self.conn.clone();
+            let mut cursor: u64 = 0;
+            loop {
+                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(SCAN_COUNT)
                     .query_async(&mut conn)
                     .await
                     .map_err(backend)?;
-                removed += gone.max(0) as u64;
+                let entries: Vec<String> = keys
+                    .iter()
+                    .map(|k| format!("{}{}", self.entry_prefix(), &k[prefix.len()..]))
+                    .collect();
+                removed += self.drop_entries(&entries).await?;
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
             }
-            if next == 0 {
-                return Ok(removed);
-            }
-            cursor = next;
         }
+        Ok(removed)
     }
 
     async fn lease(&self, key: &Key, ttl: Duration) -> Result<bool> {
