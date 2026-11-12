@@ -7,8 +7,8 @@ predicate algebra by hand first (`brocanth-resource`, `brocanth-realtime`,
 The macro adds no meaning. It expands to the `Column`, `Entity` and `Policy`
 impls that an application writes by hand today. `crates/brocanth-policy-macros/tests/equivalence.rs`
 proves it: for every subject and every rule, the macro policy and the
-hand-written policy give the same `Pred`, the same SQL and the same binds in
-both dialects, and the same field mask.
+hand-written policy give the same `Pred`, the same SQL and the same binds,
+and the same field mask.
 
 ## Turn it on
 
@@ -215,7 +215,7 @@ pub policy PostPolicy(who: &Visitor) for Post {
     eval {
         subjects: [Visitor::anonymous(), Visitor::user(1), Visitor::admin()],
         database: test_db::posts,   // fn(&[MapRow<PostColumn>]) -> impl Oracle<Post>
-        dialect: Postgres,
+        dialect: Postgres,          // optional: Postgres is the only one
         cases: 64,                  // optional, default 64
     }
 }

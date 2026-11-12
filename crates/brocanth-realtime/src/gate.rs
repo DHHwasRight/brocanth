@@ -123,6 +123,10 @@ impl Gate {
                                  will not open a connection to answer",
                     },
                     Err(EvalError::Opaque { reason }) => Verdict::Undecidable { reason },
+                    Err(EvalError::Collation) => Verdict::Undecidable {
+                        reason: "the policy orders text, and the order depends on the \
+                                 column's collation, which a row does not carry",
+                    },
                 }),
             },
         }

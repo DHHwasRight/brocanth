@@ -572,7 +572,7 @@ fn parse_eval(input: ParseStream, rule: &Ident) -> syn::Result<EvalClause> {
             other => {
                 return Err(syn::Error::new(
                     field.span(),
-                    format!("`{other}` is not an `eval` field\nhelp: use `subjects`, `database`, `dialect` and optionally `cases`"),
+                    format!("`{other}` is not an `eval` field\nhelp: use `subjects`, `database`, and optionally `dialect` and `cases`"),
                 ))
             }
         }
@@ -588,7 +588,7 @@ fn parse_eval(input: ParseStream, rule: &Ident) -> syn::Result<EvalClause> {
         database: database.ok_or_else(|| {
             missing("database", "name a function `fn(&[MapRow<Column>]) -> impl Oracle<Entity>` that returns a database with exactly these rows")
         })?,
-        dialect: dialect.ok_or_else(|| missing("dialect", "write `dialect: Postgres`"))?,
+        dialect: dialect.unwrap_or_else(|| Ident::new("Postgres", rule.span())),
         cases,
     })
 }

@@ -145,7 +145,7 @@ pub policy PostPolicy(who: &Visitor) for Post {
     eval {
         subjects: [Visitor::anonymous(), Visitor::user(1)],
         database: test_db::posts,   // fn(&[MapRow<PostColumn>]) -> impl Oracle<Post>
-        dialect: Postgres,
+        dialect: Postgres,          // optional: Postgres is the only one
         cases: 64,                  // optional, default 64
     }
 }

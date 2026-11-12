@@ -231,8 +231,9 @@ impl Assumed {
 /// Checks an identifier: not empty, at most 63 bytes, no NUL and no
 /// control character. `what` names it in the message: `role`, `table`.
 ///
-/// The one checker for identifiers this workspace writes into SQL;
-/// `brocanth-rls` calls it too.
+/// The checker for the identifiers this crate and `brocanth-rls` write
+/// into SQL. `brocanth-policy` has its own `const` checker (`Ident::new`),
+/// stricter, with the same 63-byte limit.
 ///
 /// # Errors
 /// [`DbError::Config`] naming the problem, with a `help:` line.

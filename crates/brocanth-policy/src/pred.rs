@@ -177,6 +177,11 @@ pub struct Opaque<C: Column> {
     pub reason: &'static str,
     /// The SQL, with `?` for each value. Dialect placeholder renumbering is
     /// [`crate::sql`]'s job, so a fragment writes `?` and only `?`.
+    ///
+    /// Every `?` is a placeholder, so the jsonb operators `?`, `?|` and
+    /// `?&` cannot be written here: use `jsonb_exists`,
+    /// `jsonb_exists_any` and `jsonb_exists_all` instead. A fragment may not
+    /// hold `--`, `/*` or `;`: it is one expression inside parentheses.
     pub sql: &'static str,
     /// The values, in the order the placeholders appear.
     pub binds: Vec<Value>,

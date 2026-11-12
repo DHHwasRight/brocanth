@@ -21,9 +21,9 @@ your code runs them.
    paginator that filters after the load shows wrong totals and short
    pages.
 2. **A write consumes `Verified`.** Get it from `admission(..).resolve(rows)`,
-   then call `update`, `delete` or `release` on it. Each method takes the
-   witness by value. `Write::applied(0)` is `Denied::RaceLost`, not
-   success.
+   then call `update` (with the subject's `writable` mask), `delete` or
+   `release` on it. Each method takes the witness by value.
+   `Write::applied(0)` is `Denied::RaceLost`, not success.
 
 ## Getting started
 
@@ -171,9 +171,10 @@ assert_eq!(condition.sql(), "FALSE");
 #     const TABLE: Ident = Ident::must("posts");
 #     const PRIMARY_KEY: Self::Column = PostColumn::Id;
 # }
-use brocanth_policy::{Denied, Dialect, Pred, Value};
+use brocanth_policy::{Denied, Dialect, FieldMask, Pred, Value};
 
 let rule = Pred::eq(PostColumn::AuthorId, 7i64); // `PostPolicy.update(&who)` in an application
+let mask = FieldMask::only([PostColumn::Status]); // `PostPolicy.writable(&who)`
 
 // 1. The admission query: SELECT 1 FROM posts WHERE id = $1 AND (<condition>) LIMIT 1.
 let admission = rule.admission::<Post>(Dialect::Postgres, 42i64).unwrap();
@@ -186,10 +187,16 @@ assert!(matches!(refused, Err(Denied::NotAuthorised)));
 
 // 3. One row gives the witness. The write consumes it, and re-applies the
 //    condition inside the UPDATE, so the row cannot change between the check
-//    and the write.
+//    and the write. The mask refuses a column the subject may not write:
+//    the condition reads the row as stored, so it cannot refuse a change of
+//    owner. A refused update gives the witness back (`into_verified()`).
 let verified = admission.resolve(1).unwrap();
-let write = verified
-    .update(Dialect::Postgres, [(PostColumn::Status, Value::Text("published".into()))])
+let refused = verified
+    .update(Dialect::Postgres, &mask, [(PostColumn::AuthorId, Value::Int(8))])
+    .unwrap_err();
+let write = refused
+    .into_verified()
+    .update(Dialect::Postgres, &mask, [(PostColumn::Status, Value::Text("published".into()))])
     .unwrap();
 assert!(write.query().sql().contains(r#""posts"."author_id" = $3"#));
 
@@ -198,10 +205,14 @@ assert!(write.query().sql().contains(r#""posts"."author_id" = $3"#));
 assert!(matches!(write.applied(0), Err(Denied::RaceLost)));
 ```
 
-`Verified` has no public constructor and is not `Clone`. A witness that
-is dropped unused fails a `debug_assert!` in a debug build. Call
-`release()` when the write is not a statement this crate builds; it gives
-back the id and the condition that must still guard it.
+`Verified` is not `Clone`, and only `Admission::resolve` makes one. It is
+not proof that the admission query ran: `resolve` trusts the row count it
+is given. The guard is the condition the witness carries into the write,
+which the `UPDATE` or `DELETE` re-applies. A witness that is dropped unused
+fails a `debug_assert!` in a debug build. Call `release()` when the write
+is not a statement this crate builds; it gives back the id and the
+condition, and the caller is then responsible for applying that
+condition.
 
 ### Inspect a rule
 

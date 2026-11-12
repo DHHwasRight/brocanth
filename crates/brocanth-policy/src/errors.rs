@@ -11,7 +11,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CompileError {
     /// A table or column name was the empty string.
-    #[error("an identifier was empty")]
+    #[error("an identifier was empty\nhelp: name the table or column in the entity's `TABLE` or `Column::name`")]
     EmptyIdentifier,
 
     /// A name was not `[A-Za-z_][A-Za-z0-9_]*`.
@@ -20,7 +20,7 @@ pub enum CompileError {
     /// quoting — and it is still rejected, because a name that *needs* the
     /// quoting to be safe is a name that arrived from somewhere it should not
     /// have. See [`crate::Ident`].
-    #[error("`{name}` is not a bare SQL identifier")]
+    #[error("`{name}` is not a bare SQL identifier\nhelp: use letters, digits and `_`, start with a letter or `_`, and keep it to 63 bytes")]
     BadIdentifier {
         /// The offending name.
         name: &'static str,
@@ -31,7 +31,7 @@ pub enum CompileError {
     ///
     /// Caught here rather than by the database, because the database would
     /// report it against a statement nobody wrote by hand.
-    #[error("opaque fragment `{sql}` has {placeholders} placeholder(s) but {binds} bind(s)")]
+    #[error("opaque fragment `{sql}` has {placeholders} placeholder(s) but {binds} bind(s)\nhelp: give the fragment one value per `?`")]
     PlaceholderMismatch {
         /// The fragment.
         sql: &'static str,
@@ -47,7 +47,7 @@ pub enum CompileError {
     /// A fragment writes `?` and only `?`. Dialect placeholder syntax is
     /// [`crate::sql`]'s job, and a fragment that writes `$1` itself would
     /// break the moment the dialect changed.
-    #[error("opaque fragment `{sql}` must use `?` placeholders, not `$n`")]
+    #[error("opaque fragment `{sql}` must use `?` placeholders, not `$n`\nhelp: write `?` for each value; the compiler numbers the placeholders")]
     PlaceholderSyntax {
         /// The fragment.
         sql: &'static str,
@@ -61,31 +61,28 @@ pub enum CompileError {
     /// that count wrong. Forbidding literals outright is both the simpler rule
     /// and the one that keeps "a value is never SQL text" true inside the
     /// escape hatch too.
-    #[error("opaque fragment `{sql}` contains a quote; every value must bind")]
+    #[error("opaque fragment `{sql}` contains a quote; every value must bind\nhelp: replace each literal with `?` and pass the value in the fragment's binds")]
     LiteralInFragment {
         /// The fragment.
         sql: &'static str,
     },
 
-    /// A condition checked for one dialect was about to be written into a
-    /// statement for another.
+    /// An [`crate::Opaque`] fragment contained `--`, `/*` or `;`.
     ///
-    /// A witness proved something against one engine's semantics. Re-targeting
-    /// it silently would change `IS` into `IS NOT DISTINCT FROM` under a proof
-    /// that never saw it, so the conversion is refused rather than performed.
-    #[error("the condition was checked for {checked:?} and the write is for {writing:?}")]
-    DialectMismatch {
-        /// The dialect the condition was compiled and checked for.
-        checked: crate::Dialect,
-        /// The dialect the write asked for.
-        writing: crate::Dialect,
+    /// A fragment is one expression, written inside parentheses. A comment
+    /// would swallow the closing parenthesis, and a `;` would end the
+    /// statement.
+    #[error("opaque fragment `{sql}` contains `--`, `/*` or `;`\nhelp: write one SQL expression with no comment and no `;`")]
+    NotAnExpression {
+        /// The fragment.
+        sql: &'static str,
     },
 
     /// An `UPDATE` with nothing to set.
     ///
     /// `UPDATE t SET WHERE …` is a syntax error, and a write with no
     /// assignments is a caller bug rather than a no-op worth hiding.
-    #[error("an update must set at least one column")]
+    #[error("an update must set at least one column\nhelp: skip the write when the form changed nothing, or pass at least one assignment")]
     EmptyUpdate,
 }
 
@@ -101,7 +98,7 @@ pub enum EvalError {
     /// `EXISTS (SELECT 1 FROM team_members …)` is answerable by a database and
     /// not by a row you already hold. Compile the predicate instead, or hold
     /// the membership in a column.
-    #[error("`{table}` membership cannot be decided from one row")]
+    #[error("`{table}` membership cannot be decided from one row\nhelp: compile the predicate with condition() instead of eval()")]
     NeedsDatabase {
         /// The related table the predicate reaches into.
         table: &'static str,
@@ -113,11 +110,19 @@ pub enum EvalError {
     /// An opaque fragment is SQL this crate does not understand. Supplying
     /// `Opaque::with_eval` is what makes it evaluable; omitting it is a
     /// deliberate choice to be `condition()`-only.
-    #[error("opaque fragment ({reason}) has no in-memory evaluator")]
+    #[error("opaque fragment ({reason}) has no in-memory evaluator\nhelp: give the fragment `Opaque::with_eval`, or compile the predicate with condition() instead of eval()")]
     Opaque {
         /// The reason the fragment's author recorded.
         reason: &'static str,
     },
+
+    /// The predicate orders two texts with `<`, `<=`, `>` or `>=`.
+    ///
+    /// PostgreSQL orders text by the column's collation, and one row does not
+    /// carry it. Byte order agrees with the database only under `C`, so the
+    /// answer is refused rather than guessed.
+    #[error("a text comparison with `<`, `<=`, `>` or `>=` depends on the column's collation\nhelp: compile the predicate with condition() instead of eval()")]
+    Collation,
 }
 
 /// Authorisation refused.
@@ -139,4 +144,19 @@ pub enum Denied {
     /// failure, not a no-op**, and it is the TOCTOU window closing on someone.
     #[error("the row stopped matching the condition between the check and the write")]
     RaceLost,
+}
+
+/// Why [`crate::Verified::update`] refused to build a write.
+///
+/// [`crate::verified::Refused`] carries it with the witness, so the caller
+/// can try again.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum UpdateError {
+    /// An assigned column is outside the subject's field mask.
+    #[error(transparent)]
+    Mask(#[from] crate::mask::MaskViolation),
+
+    /// The statement could not be compiled.
+    #[error(transparent)]
+    Compile(#[from] CompileError),
 }

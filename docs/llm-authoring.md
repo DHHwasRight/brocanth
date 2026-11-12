@@ -162,8 +162,9 @@ if policy.is_allowed(&user, &post) { update(post); }
 
 // This. `Verified` has no public constructor, is not Clone, and `update`
 // takes it by value, so the check cannot be skipped, reused, or dropped.
+// `update` takes the field mask too, and refuses a column outside it.
 let verified = admission.resolve(rows)?;
-let write = verified.update(dialect, changes)?;
+let write = verified.update(dialect, &policy.writable(&user), changes)?;
 ```
 
 ## What can still go wrong

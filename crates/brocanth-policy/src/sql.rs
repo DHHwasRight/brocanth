@@ -116,7 +116,10 @@ impl Dialect {
 /// carry. That struct is `Copy`, so it carries an `Option<&Condition>` rather
 /// than the value — one field, one borrow, and the admin keeps its pagination
 /// because the predicate is in the `WHERE` clause where §9 says it belongs.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Debug` prints the SQL and the number of binds, never their values: a
+/// `?condition` in a log line must not carry an id or a token.
+#[derive(Clone, PartialEq)]
 pub struct Condition {
     sql: String,
     binds: Vec<Value>,
@@ -150,7 +153,11 @@ impl Condition {
 }
 
 /// A complete statement and its binds.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Debug` prints the SQL and the number of binds, never their values: an
+/// assigned value can be a token or a password hash, and a `?write` in a
+/// tracing field would send it to the logs.
+#[derive(Clone, PartialEq)]
 pub struct Query {
     sql: String,
     binds: Vec<Value>,
@@ -179,6 +186,26 @@ impl Query {
     /// The dialect this was compiled for.
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+}
+
+impl std::fmt::Debug for Condition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Condition")
+            .field("sql", &self.sql)
+            .field("binds", &self.binds.len())
+            .field("dialect", &self.dialect)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Query {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Query")
+            .field("sql", &self.sql)
+            .field("binds", &self.binds.len())
+            .field("dialect", &self.dialect)
+            .finish()
     }
 }
 
@@ -397,6 +424,11 @@ fn write_opaque<C: Column>(
     }
     if fragment.sql.contains('$') {
         return Err(CompileError::PlaceholderSyntax { sql: fragment.sql });
+    }
+    // The fragment goes inside `(`…`)`: a `--` would comment out the
+    // closing parenthesis, and a `;` would end the statement.
+    if fragment.sql.contains("--") || fragment.sql.contains("/*") || fragment.sql.contains(';') {
+        return Err(CompileError::NotAnExpression { sql: fragment.sql });
     }
     let placeholders = fragment.sql.matches('?').count();
     if placeholders != fragment.binds.len() {

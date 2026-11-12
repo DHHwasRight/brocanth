@@ -178,7 +178,7 @@ impl<C: Column> Pred<C> {
         match self {
             Pred::Always => Ok(Truth::True),
             Pred::Never => Ok(Truth::False),
-            Pred::Cmp { column, op, value } => Ok(compare(&row.get(*column), *op, value)),
+            Pred::Cmp { column, op, value } => compare(&row.get(*column), *op, value),
             Pred::In {
                 column,
                 values,
@@ -224,16 +224,25 @@ impl<C: Column> Pred<C> {
 }
 
 /// One comparison, in SQL's semantics.
-fn compare(lhs: &Value, op: Op, rhs: &Value) -> Truth {
+///
+/// `<`, `<=`, `>` and `>=` between two texts are refused: PostgreSQL orders
+/// text by the column's collation (`en_US`: `'a' < 'B'`), and one row does
+/// not say which collation that is. Byte order would agree only under `C`.
+fn compare(lhs: &Value, op: Op, rhs: &Value) -> Result<Truth, EvalError> {
     if op.is_null_safe() {
         let same = null_safe_eq(lhs, rhs);
-        return Truth::from(if op == Op::Is { same } else { !same });
+        return Ok(Truth::from(if op == Op::Is { same } else { !same }));
     }
     if lhs.is_null() || rhs.is_null() {
-        return Truth::Unknown;
+        return Ok(Truth::Unknown);
+    }
+    if matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
+        && matches!((lhs, rhs), (Value::Text(_), Value::Text(_)))
+    {
+        return Err(EvalError::Collation);
     }
     let ordering = order(lhs, rhs);
-    Truth::from(match op {
+    Ok(Truth::from(match op {
         Op::Eq => ordering == std::cmp::Ordering::Equal,
         Op::Ne => ordering != std::cmp::Ordering::Equal,
         Op::Lt => ordering == std::cmp::Ordering::Less,
@@ -241,7 +250,7 @@ fn compare(lhs: &Value, op: Op, rhs: &Value) -> Truth {
         Op::Gt => ordering == std::cmp::Ordering::Greater,
         Op::Ge => ordering != std::cmp::Ordering::Less,
         Op::Is | Op::IsNot => unreachable!("handled above"),
-    })
+    }))
 }
 
 fn null_safe_eq(lhs: &Value, rhs: &Value) -> bool {
@@ -280,17 +289,19 @@ fn in_set(lhs: &Value, values: &[Value]) -> Truth {
 /// Ordering between two non-`NULL` values: integers and reals compare
 /// numerically with each other, then text, then blobs.
 ///
+/// NaN orders as PostgreSQL orders it: equal to NaN, greater than every
+/// number.
+///
 /// The order across types is arbitrary but total. A policy that compares a
 /// text column to an integer gets a type error from PostgreSQL, and
 /// [`crate::agreement`] is how you find that out rather than this function.
 /// Comparing like with like has no such question.
 fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
     match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+        (Value::Float(a), Value::Float(b)) => float_order(*a, *b),
+        (Value::Int(a), Value::Float(b)) => float_order(*a as f64, *b),
+        (Value::Float(a), Value::Int(b)) => float_order(*a, *b as f64),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
         // A boolean against a number compares as 0 or 1.
@@ -298,6 +309,18 @@ fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
         (Value::Bool(a), other) => order(&Value::Int(i64::from(*a)), other),
         (other, Value::Bool(b)) => order(other, &Value::Int(i64::from(*b))),
         _ => class(lhs).cmp(&class(rhs)),
+    }
+}
+
+/// PostgreSQL's `float8` order: NaN equals NaN and is greater than every
+/// other value, and `-0` equals `0`.
+fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
     }
 }
 

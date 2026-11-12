@@ -108,6 +108,47 @@ fn a_comparison_against_null_admits_nobody() {
 }
 
 #[test]
+fn a_membership_filtered_on_null_with_a_plain_equality_admits_nobody() {
+    // `members.user_id = NULL` matches no link row, so the audience is empty.
+    // Keying it on NULL would file subscribers under a key no row reaches.
+    let absent: Option<i64> = None;
+    let eq_null = Membership::new(C::TeamId, MEMBERS, MEMBERS_TEAM)
+        .filter_by(MEMBERS_USER, Op::Eq, Bound::or_null(absent))
+        .expect("null is a value here")
+        .into_pred();
+    assert_eq!(eq_null.audience(), Ok(Audience::NoOne));
+
+    // `IS NULL` matches the link rows with no user: a real key.
+    let is_null = Membership::new(C::TeamId, MEMBERS, MEMBERS_TEAM)
+        .filter_by(MEMBERS_USER, Op::Is, Bound::or_null(absent))
+        .expect("null is a value here")
+        .into_pred();
+    assert_eq!(
+        is_null.audience(),
+        Ok(Audience::Membership {
+            local: C::TeamId,
+            table: MEMBERS,
+            foreign: MEMBERS_TEAM,
+            filter: vec![(MEMBERS_USER, Value::Null)],
+        })
+    );
+}
+
+#[test]
+fn a_null_in_a_set_keys_nobody() {
+    // `author_id IN (7, NULL)` admits author 7 and nobody else: `= NULL` is
+    // unknown.
+    let pred = Pred::one_of(C::AuthorId, [Value::Int(7), Value::Null]);
+    assert_eq!(
+        pred.audience(),
+        Ok(Audience::AnyOf(vec![Audience::Keyed {
+            column: C::AuthorId,
+            value: Value::Int(7)
+        }]))
+    );
+}
+
+#[test]
 fn what_cannot_be_inverted_says_why() {
     // Each of these falls back to per-subscriber evaluation, which is correct
     // and slow. The reason is what tells an operator which policy costs them.

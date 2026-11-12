@@ -104,21 +104,13 @@ impl From<&Query> for Statement {
 ///
 /// # Errors
 ///
-/// [`CompileError::DialectMismatch`] when the condition was compiled for
-/// another dialect, and [`CompileError::BadIdentifier`] when a column name is
-/// not a bare SQL identifier.
+/// [`CompileError::BadIdentifier`] when a column name is not a bare SQL
+/// identifier.
 pub fn create_admission<E: Entity>(
     dialect: Dialect,
     condition: &Condition,
     row: &[(E::Column, Value)],
 ) -> Result<Statement, CompileError> {
-    if condition.dialect() != dialect {
-        return Err(CompileError::DialectMismatch {
-            checked: condition.dialect(),
-            writing: dialect,
-        });
-    }
-
     let mut cte = String::new();
     let mut values: Vec<Value> = Vec::with_capacity(E::Column::ALL.len());
     // The CTE continues the condition's numbering.

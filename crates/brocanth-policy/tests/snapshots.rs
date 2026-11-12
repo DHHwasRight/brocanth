@@ -7,7 +7,7 @@
 
 mod common;
 
-use brocanth_policy::{Bound, Dialect, Membership, Op, Opaque, Pred, Value};
+use brocanth_policy::{Bound, Dialect, FieldMask, Membership, Op, Opaque, Pred, Value};
 use common::{Post, PostColumn as C, MEMBERS, MEMBERS_TEAM, MEMBERS_USER};
 
 const PG: Dialect = Dialect::Postgres;
@@ -176,7 +176,11 @@ fn write_statements_carry_the_condition() {
         .resolve(1)
         .expect("one row");
     let write = verified
-        .update(PG, [(C::Status, Value::Text("published".into()))])
+        .update(
+            PG,
+            &FieldMask::all(),
+            [(C::Status, Value::Text("published".into()))],
+        )
         .expect("compiles");
     assert_eq!(
         write.query().sql(),
@@ -215,7 +219,11 @@ fn postgres_renumbers_a_spliced_condition() {
         .resolve(1)
         .expect("one row");
     let write = verified
-        .update(PG, [(C::Status, Value::Text("x".into()))])
+        .update(
+            PG,
+            &FieldMask::all(),
+            [(C::Status, Value::Text("x".into()))],
+        )
         .expect("compiles");
     assert_eq!(
         write.query().sql(),
