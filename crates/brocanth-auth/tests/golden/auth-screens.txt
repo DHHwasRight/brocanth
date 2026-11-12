@@ -1957,6 +1957,15 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "auth.totp_key_env",
+        help: "The name of the variable that holds the key sealing TOTP secrets.",
+        flag: true,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "auth.cookie_name",
         help: "The session cookie's name.",
         flag: true,
@@ -2387,6 +2396,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.signing_key_env",
             format!("{:?}", auth.signing_key_env),
         ),
+        ("auth.totp_key_env", format!("{:?}", auth.totp_key_env)),
         ("auth.cookie_name", format!("{:?}", auth.cookie_name)),
         ("auth.secure", format!("{:?}", auth.secure)),
         ("auth.idle_timeout", format!("{:?}", auth.idle_timeout)),
@@ -2513,7 +2523,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 32839b37176ad7e5
+// brocanth-digest: a7dfae9bf1451c39
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2616,6 +2626,7 @@ pub mod auth {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         SigningKeyEnv,
+        TotpKeyEnv,
         CookieName,
         Secure,
         IdleTimeout,
@@ -2627,6 +2638,7 @@ pub mod auth {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::SigningKeyEnv => "auth.signing_key_env",
+                Key::TotpKeyEnv => "auth.totp_key_env",
                 Key::CookieName => "auth.cookie_name",
                 Key::Secure => "auth.secure",
                 Key::IdleTimeout => "auth.idle_timeout",
@@ -2866,7 +2878,7 @@ pub mod flash {
     }
 }
 
-// brocanth-digest: a2c7d5629d3ed09f
+// brocanth-digest: d9d438984eca2072
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -3196,6 +3208,13 @@ secure = true
 #
 #   export MY_BLOG_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
 signing_key_env = "MY_BLOG_SESSION_KEY"
+# The name of the variable that holds the key sealing TOTP secrets.
+# Not the key. 32 bytes, base64url, and not the signing key: that one is
+# rotated to sign everybody out. Unset, TOTP secrets are stored plain;
+# set it before anybody turns on two-step sign-in.
+#
+#   export MY_BLOG_TOTP_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
+totp_key_env = "MY_BLOG_TOTP_KEY"
 # The session cookie's name.
 # Development, over plain HTTP on localhost. In production this is
 # "__Host-session" with secure = true, and the two move together: a
@@ -4188,6 +4207,9 @@ pub struct Settings {
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
+    /// The *name* of the environment variable holding the key that seals
+    /// TOTP secrets at rest. Unset, they are stored plain.
+    pub totp_key_env: String,
     /// The session cookie's name. `__Host-` in production: it is the only
     /// prefix a browser enforces, and what it enforces is `Secure`, a path of
     /// `/` and no `Domain` -- so a subdomain takeover cannot set a session
@@ -4206,6 +4228,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             signing_key_env: "MY_BLOG_SESSION_KEY".to_string(),
+            totp_key_env: "MY_BLOG_TOTP_KEY".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
             idle_timeout: 8 * 60 * 60,
@@ -4320,6 +4343,10 @@ impl Plugin for Auth {
             })
             .map_err(|e| PluginError::new(format!("[auth] {e}")))?,
         );
+        // TOTP secrets sealed at rest, when the variable holds a key.
+        if let Some(services) = self.services.take() {
+            self.services = Some(sealing_totp(services, &self.settings.totp_key_env)?);
+        }
         // In the services too, for a plugin that reads the accounts at
         // startup, such as `superuser`.
         if let Some(services) = &self.services {
@@ -4335,6 +4362,19 @@ impl Plugin for Auth {
             cx.insert(services.clone());
         }
     }
+}
+
+/// The services with TOTP secrets sealed at rest, when `var` holds a key.
+/// Unset, the secrets are stored plain: set it before anybody enrols.
+fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> {
+    let Ok(raw) = std::env::var(var) else {
+        return Ok(services);
+    };
+    let key = brocanth_auth::SecretKey::parse(&raw)
+        .map_err(|e| PluginError::new(format!("[auth] ${var}: {e}")))?;
+    services
+        .with_totp_key(key)
+        .map_err(|e| PluginError::new(format!("[auth] {e}")))
 }
 ===== src/plugins/auth_screens/mod.rs =====
 //! The account screens' plugin, and what every screen under

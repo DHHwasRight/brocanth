@@ -638,7 +638,7 @@ impl<S: AuthStore, C: Clock> Sessions<S, C> {
     ///
     /// # Errors
     /// Returns [`AuthError::NoSession`] when the session is gone,
-    /// [`AuthError::Impersonated`] when an operator opened it — one of the five
+    /// [`AuthError::Impersonated`] when an operator opened it — one of the six
     /// in [`crate::impersonation::Restricted`] — and
     /// [`AuthError::Misconfigured`] when the proof names a different account.
     pub async fn elevate(

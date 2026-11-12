@@ -445,6 +445,21 @@ fn settings(project: &Project) -> Vec<Setting> {
              \x20 export {var}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
         )),
     );
+    let totp = totp_env_var(project);
+    out.push(
+        Setting::text(
+            "totp_key_env",
+            &totp,
+            "The name of the variable that holds the key sealing TOTP secrets.",
+        )
+        .note(format!(
+            "Not the key. 32 bytes, base64url, and not the signing key: that one is\n\
+             rotated to sign everybody out. Unset, TOTP secrets are stored plain;\n\
+             set it before anybody turns on two-step sign-in.\n\
+             \n\
+             \x20 export {totp}=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+        )),
+    );
     out.push(
         Setting::text("cookie_name", "session", "The session cookie's name.").note(
             "Development, over plain HTTP on localhost. In production this is\n\
@@ -481,6 +496,11 @@ fn settings(project: &Project) -> Vec<Setting> {
 /// `MY_BLOG_SESSION_KEY`, from the same convention `src/app.rs` states for
 /// every other variable this binary reads: one prefix, derived once, whatever
 /// spelling the project name arrived in.
+/// The environment variable the generated project reads its TOTP key from.
+fn totp_env_var(project: &Project) -> String {
+    format!("{}_TOTP_KEY", project.ident().to_uppercase())
+}
+
 fn env_var(project: &Project) -> String {
     format!("{}_SESSION_KEY", project.ident().to_uppercase())
 }
@@ -488,6 +508,7 @@ fn env_var(project: &Project) -> String {
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "auth");
     let var = env_var(project);
+    let totp = totp_env_var(project);
     format!(
         r##"//! Accounts and sessions, as this application registers them.
 //!
@@ -651,6 +672,9 @@ pub struct Settings {{
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
+    /// The *name* of the environment variable holding the key that seals
+    /// TOTP secrets at rest. Unset, they are stored plain.
+    pub totp_key_env: String,
     /// The session cookie's name. `__Host-` in production: it is the only
     /// prefix a browser enforces, and what it enforces is `Secure`, a path of
     /// `/` and no `Domain` -- so a subdomain takeover cannot set a session
@@ -669,6 +693,7 @@ impl Default for Settings {{
     fn default() -> Self {{
         Self {{
             signing_key_env: "{var}".to_string(),
+            totp_key_env: "{totp}".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
             idle_timeout: 8 * 60 * 60,
@@ -783,6 +808,10 @@ impl Plugin for Auth {{
             }})
             .map_err(|e| PluginError::new(format!("[auth] {{e}}")))?,
         );
+        // TOTP secrets sealed at rest, when the variable holds a key.
+        if let Some(services) = self.services.take() {{
+            self.services = Some(sealing_totp(services, &self.settings.totp_key_env)?);
+        }}
         // In the services too, for a plugin that reads the accounts at
         // startup, such as `superuser`.
         if let Some(services) = &self.services {{
@@ -798,6 +827,19 @@ impl Plugin for Auth {{
             cx.insert(services.clone());
         }}
     }}
+}}
+
+/// The services with TOTP secrets sealed at rest, when `var` holds a key.
+/// Unset, the secrets are stored plain: set it before anybody enrols.
+fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> {{
+    let Ok(raw) = std::env::var(var) else {{
+        return Ok(services);
+    }};
+    let key = brocanth_auth::SecretKey::parse(&raw)
+        .map_err(|e| PluginError::new(format!("[auth] ${{var}}: {{e}}")))?;
+    services
+        .with_totp_key(key)
+        .map_err(|e| PluginError::new(format!("[auth] {{e}}")))
 }}
 "##
     )

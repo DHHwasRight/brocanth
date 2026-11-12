@@ -1,4 +1,4 @@
-//! Impersonation: both identities on the row, and the five things an operator
+//! Impersonation: both identities on the row, and the six things an operator
 //! wearing somebody's face cannot do.
 
 mod common;
