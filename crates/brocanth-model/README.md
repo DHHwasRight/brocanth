@@ -3,8 +3,8 @@
 The model layer of brocanth, on SeaORM 2.0.4. It adds what an ORM does not
 supply: declarative validations, an eager load that counts parents, hook-safe
 bulk writes, N+1 detection, dirty tracking, a test harness that never commits,
-change publishing and fixtures. Postgres is the default driver. SQLite is the
-smaller target, for one machine with no database server. Use this crate when
+change publishing and fixtures. Postgres is the only database (2026-11-11):
+RLS and one database keep the framework simple. Use this crate when
 your application stores rows. Do not use it for an application that stores
 nothing: without it, no SQL driver is in the lock file. To write migrations
 from the models, see `brocanth-migrate`.
@@ -21,16 +21,10 @@ Features:
 | Feature | Default | Adds |
 |---|---|---|
 | `postgres` | on | the Postgres driver |
-| `sqlite` | off | the SQLite driver |
 | `plugin` | off | `brocanth_model::plugin`, the ORM end of the core's model seam (links `brocanth`) |
 | `db` | off | `brocanth_model::Orm`: SeaORM over the pool a `brocanth_db::Db` opened (turns on `postgres`) |
 
-A build needs one driver. A build with neither fails with a `compile_error!`.
-For SQLite alone:
-
-```toml
-brocanth-model = { git = "https://github.com/DHHwasRight/brocanth", branch = "main", default-features = false, features = ["sqlite"] }
-```
+A build without `postgres` fails with a `compile_error!`.
 
 This crate has no `scaffold` feature. The `model` module lives in the CLI
 (`crates/brocanth-cli/src/modules/model.rs`). It needs the `db` module:
@@ -96,7 +90,7 @@ pub struct Model {
 # use brocanth_model::testing::Harness;
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let harness = Harness::sqlite().await?;
+# let Some(harness) = Harness::isolated().await? else { return Ok(()) }; // no server: nothing to show
 # let schema = sea_orm::Schema::new(harness.conn().get_database_backend());
 # harness.conn().execute(&schema.create_table_from_entity(user::Entity)).await?;
 # let db = harness.begin().await?;
@@ -160,7 +154,7 @@ use brocanth_model::EagerStrategy;
 # use brocanth_model::testing::Harness;
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let harness = Harness::sqlite().await?;
+# let Some(harness) = Harness::isolated().await? else { return Ok(()) }; // no server: nothing to show
 # let schema = sea_orm::Schema::new(harness.conn().get_database_backend());
 # harness.conn().execute(&schema.create_table_from_entity(user::Entity)).await?;
 # harness.conn().execute(&schema.create_table_from_entity(post::Entity)).await?;
@@ -267,33 +261,36 @@ assert!(refused.is_err()); // "archived" fails the inclusion rule
 cargo test -p brocanth-model
 ```
 
-The suite runs on in-memory SQLite with no server. The crate depends on
-itself as a dev-dependency with `sqlite` and `plugin` on, so a test build
-always has the SQLite harness.
-
-The Postgres tests skip, and say so on stderr, when no database is set. To run
-them:
+With no server, the tests that need no database run, and the database tests
+skip and say so on stderr. To run them all:
 
 ```sh
 BROCANTH_TEST_DATABASE_URL=postgres://localhost/brocanth_test cargo test -p brocanth-model
 ```
 
 `BROCANTH_MODEL_TEST_POSTGRES` overrides `BROCANTH_TEST_DATABASE_URL` for this
-crate only. The worked example runs end to end and prints what it proves:
+crate only. Most tests get a schema of their own; `tests/postgres.rs` shares
+one migrated schema and keeps the tests apart with a transaction.
+
+The worked example runs end to end and prints what it proves. It reads the
+same two variables, then `DATABASE_URL`, and works in a schema that it drops
+at the end. With no URL it prints a line and exits:
 
 ```sh
-cargo run -p brocanth-model --example blog
+DATABASE_URL=postgres://localhost/brocanth_example cargo run -p brocanth-model --example blog
 ```
 
 ### Testing an application that uses this crate
 
 Use `brocanth_model::testing::Harness`:
 
-- `Harness::sqlite()` or `Harness::migrated::<Migrator>()` gives an empty
-  in-memory database per test.
-- `Harness::postgres_migrated_from_env::<Migrator>()` reads the same two
-  variables, migrates once under an advisory lock, and returns `None` with no
-  server. Call `testing::skipped(..)` then, so the skip is visible.
+- `Harness::isolated()` or `Harness::isolated_migrated::<Migrator>()` gives
+  each test an empty schema of its own. The schema is dropped when the
+  harness drops.
+- `Harness::postgres_migrated_from_env::<Migrator>()` migrates one shared
+  schema once, under an advisory lock.
+- Both read the same two variables and return `None` with no server. Call
+  `testing::skipped(..)` then, so the skip is visible.
 - `harness.begin()` returns a `TestTransaction`. It has no `commit`, so a
   test's rows never leak into the next test.
 - `Fixtures` loads a known dataset from a JSON file through the model hooks.

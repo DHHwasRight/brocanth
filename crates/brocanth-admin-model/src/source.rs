@@ -17,22 +17,22 @@ use std::str::FromStr;
 /// `WHERE` for the admin's row policy.
 ///
 /// The condition is `brocanth-policy`'s SQL text and bind list, spliced in
-/// with `Expr::cust_with_values`. sea-query reads the placeholders the
-/// dialect uses — `?` for SQLite, `$n` for PostgreSQL — and numbers them
-/// into the statement it builds, so the condition's own numbering survives
-/// whatever binds come before it. Every value stays a bind: nothing from the
-/// condition's values reaches the text.
+/// with `Expr::cust_with_values`. sea-query reads the `$n` placeholders
+/// and numbers them into the statement it builds, so the condition's own
+/// numbering survives whatever binds come before it. Every value stays a
+/// bind: nothing from the condition's values reaches the text.
 ///
-/// A condition compiled for another dialect is refused rather than run,
-/// because `IS NOT DISTINCT FROM` on SQLite and `?` on PostgreSQL are both
-/// syntax errors at best.
+/// A condition that does not match the connection's backend is refused
+/// rather than run. `Dialect` has one variant, `Postgres`, but `DbBackend`
+/// has others, so a connection to MySQL still gets a clear error and not a
+/// syntax error.
 pub fn scope_of(scope: Scope<'_>, backend: DbBackend) -> Result<Condition, DataError> {
     let Some(condition) = scope.condition() else {
         return Ok(Condition::all());
     };
     let matches = matches!(
         (condition.dialect(), backend),
-        (Dialect::Postgres, DbBackend::Postgres) | (Dialect::Sqlite, DbBackend::Sqlite)
+        (Dialect::Postgres, DbBackend::Postgres)
     );
     if !matches {
         return Err(DataError::backend(format!(
@@ -76,13 +76,9 @@ pub fn columns_of<E: EntityTrait>(name: &str) -> Result<E::Column, DataError> {
 /// `LOWER(CAST(col AS TEXT)) LIKE '%term%'`, and every part of that is
 /// load-bearing.
 ///
-/// Not `ILIKE`: SeaORM's own documentation marks it "Postgres Only", and it
-/// is a syntax error on SQLite, which the same admin runs over.
-///
-/// Not a bare `LIKE` either: it is case-sensitive on Postgres, so searching
-/// "ada" would not find "Ada Lovelace" in production while passing every
-/// test on SQLite, where `LIKE` is case-insensitive for ASCII. That is the
-/// worst shape a bug can have.
+/// Not a bare `LIKE`: it is case-sensitive on Postgres, so searching "ada"
+/// would not find "Ada Lovelace". `LOWER` on both sides makes the match
+/// case-insensitive.
 ///
 /// The cast is because a searchable column need not be text. `LOWER` of an
 /// integer is an error on Postgres, and the admin lets you search an id.
@@ -212,7 +208,7 @@ where
 ///
 /// The key arrives as text, from a URL. It binds as an integer when the
 /// column is one: PostgreSQL has no `integer = text` operator, so a text
-/// bind fails there, while SQLite's type affinity hides the difference.
+/// bind fails.
 pub fn single_key<E: EntityTrait>(
     key: &brocanth_admin::model::PrimaryKey,
     table: &str,
@@ -327,10 +323,7 @@ where
 /// transaction: the row is read with `WHERE id = ? AND <condition>` and
 /// `FOR UPDATE`, and the `ActiveModel` writes it before the transaction
 /// ends. On PostgreSQL the lock holds the row until the commit, so no other
-/// transaction can make it stop matching in between. SQLite has no row
-/// lock (sea-query drops the clause) and serialises writers instead; a
-/// writer that commits between the read and the write fails this
-/// transaction, it does not slip past it.
+/// transaction can make it stop matching in between.
 ///
 /// Loaded first, so the `ActiveModel` carries its primary key and SeaORM
 /// issues an `UPDATE` rather than an `INSERT`.

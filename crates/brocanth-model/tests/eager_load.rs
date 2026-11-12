@@ -3,6 +3,9 @@
 //! The first test here proves the naive path is wrong. It is written first on
 //! purpose: a silent wrong answer deserves a test that would have caught it.
 
+#[macro_use]
+mod support;
+
 #[path = "../fixtures/blog.rs"]
 mod blog;
 
@@ -19,7 +22,7 @@ use sea_orm::QuerySelect;
 /// users, not ten. No error, no warning. The wrong number.
 #[tokio::test]
 async fn the_naive_limited_eager_load_returns_the_wrong_number_of_parents() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 10, 3).await.expect("seed");
 
@@ -46,7 +49,7 @@ async fn the_naive_limited_eager_load_returns_the_wrong_number_of_parents() {
 /// What brocanth does instead.
 #[tokio::test]
 async fn a_limited_eager_load_returns_the_right_number_of_parents() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 10, 3).await.expect("seed");
 
@@ -66,11 +69,11 @@ async fn a_limited_eager_load_returns_the_right_number_of_parents() {
 
 /// An offset is the same bug with a different name, so it takes the same path.
 ///
-/// SQLite will not accept a bare `OFFSET`, so the executed half of this test
-/// pages properly; the bare case is checked on the strategy alone.
+/// The executed half pages with a limit and an offset. `postgres.rs` runs the
+/// bare `OFFSET`.
 #[tokio::test]
 async fn an_offset_eager_load_also_takes_the_two_query_path() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 5, 2).await.expect("seed");
 
@@ -94,7 +97,7 @@ async fn an_offset_eager_load_also_takes_the_two_query_path() {
 #[tokio::test]
 async fn an_unbounded_eager_load_is_one_query() {
     let probe = Probe::default();
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 4, 3).await.expect("seed");
@@ -122,7 +125,7 @@ async fn an_unbounded_eager_load_is_one_query() {
 #[tokio::test]
 async fn a_limited_eager_load_is_two_queries_not_n_plus_one() {
     let probe = Probe::default();
-    let harness = Harness::sqlite_with(probe.clone()).await.expect("connect");
+    let harness = or_skip!(Harness::isolated_with(probe.clone()));
     harness.migrate::<Migrator>().await.expect("migrate");
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 10, 3).await.expect("seed");
@@ -144,7 +147,7 @@ async fn a_limited_eager_load_is_two_queries_not_n_plus_one() {
 /// A relation nobody loaded is loud, not quiet.
 #[tokio::test]
 async fn an_unloaded_relation_refuses_to_be_read() {
-    let harness = Harness::migrated::<Migrator>().await.expect("migrate");
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     blog::seed::blog(&*db, 2, 1).await.expect("seed");
 

@@ -9,6 +9,9 @@
 //! arriving in a realtime subscriber's mailbox -- because two tests that each
 //! stop at the seam would both pass with the seam unplugged.
 
+#[macro_use]
+mod support;
+
 #[path = "../fixtures/blog.rs"]
 mod blog;
 
@@ -87,12 +90,6 @@ impl<S: ChangeSink> ChangeSink for Counting<S> {
     }
 }
 
-async fn migrated() -> Harness {
-    let harness = Harness::sqlite().await.expect("connect");
-    harness.migrate::<Migrator>().await.expect("migrate");
-    harness
-}
-
 fn an_author() -> user::ActiveModel {
     user::ActiveModel {
         name: Set("Ada".to_owned()),
@@ -118,7 +115,7 @@ fn a_post(user_id: i32, slug: &str) -> post::ActiveModel {
 
 #[tokio::test]
 async fn an_insert_publishes_one_created_change_naming_the_table_and_the_row() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -138,7 +135,7 @@ async fn an_insert_publishes_one_created_change_naming_the_table_and_the_row() {
 
 #[tokio::test]
 async fn an_update_publishes_the_columns_it_wrote() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -168,7 +165,7 @@ async fn an_update_publishes_the_columns_it_wrote() {
 
 #[tokio::test]
 async fn a_delete_publishes_once_and_names_the_row_it_removed() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -194,7 +191,7 @@ async fn a_delete_publishes_once_and_names_the_row_it_removed() {
 
 #[tokio::test]
 async fn a_write_that_was_refused_publishes_nothing() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -216,7 +213,7 @@ async fn a_write_that_was_refused_publishes_nothing() {
 
 #[tokio::test]
 async fn a_rollback_publishes_nothing_and_a_commit_publishes_everything() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -255,7 +252,7 @@ async fn a_rollback_publishes_nothing_and_a_commit_publishes_everything() {
 
 #[tokio::test]
 async fn a_guard_that_is_dropped_publishes_nothing() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
     let sink = Recorder::default();
 
@@ -279,7 +276,7 @@ async fn a_guard_that_is_dropped_publishes_nothing() {
 
 #[tokio::test]
 async fn an_application_that_installed_no_sink_never_builds_a_change() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     // What an application with no subscriber holds. `wants` is `false`, so
@@ -307,7 +304,7 @@ async fn an_application_that_installed_no_sink_never_builds_a_change() {
 
 #[tokio::test]
 async fn a_row_written_through_the_orm_reaches_a_realtime_subscriber() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let broker = Broker::new();
@@ -353,7 +350,7 @@ async fn a_row_written_through_the_orm_reaches_a_realtime_subscriber() {
 
 #[tokio::test]
 async fn one_write_reaches_every_installed_sink() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let audit = Arc::new(Recorder::default());
@@ -432,7 +429,7 @@ mod seam {
 
     #[tokio::test]
     async fn a_model_hook_hears_the_write_through_the_core() {
-        let harness = migrated().await;
+        let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
         let db = harness.begin().await.expect("begin");
 
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -470,7 +467,7 @@ mod seam {
         const { assert!(!<NoHooks as HookFamilies>::MODEL) };
         const { assert!(<OnModel as HookFamilies>::MODEL) };
 
-        let harness = migrated().await;
+        let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
         let db = harness.begin().await.expect("begin");
 
         // An application with no hooking plugin keeps `H = NoHooks`.
@@ -487,7 +484,7 @@ mod seam {
 
     #[tokio::test]
     async fn two_applications_in_one_process_publish_to_their_own_hooks() {
-        let harness = migrated().await;
+        let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
         let db = harness.begin().await.expect("begin");
 
         let first_log = Arc::new(Mutex::new(Vec::new()));
@@ -517,7 +514,7 @@ mod seam {
 // worth one direct test rather than only its consequences.
 #[tokio::test]
 async fn the_row_id_of_a_stored_row_is_its_primary_key() {
-    let harness = migrated().await;
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
     let db = harness.begin().await.expect("begin");
 
     let author = an_author().insert_checked(&*db).await.expect("insert");

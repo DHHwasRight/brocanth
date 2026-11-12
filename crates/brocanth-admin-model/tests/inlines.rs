@@ -1,9 +1,10 @@
 //! Inlines on a real database: a user's posts on the user's form, with the
 //! post's row policy asked per child row.
 //!
-//! SQLite always. PostgreSQL too when `BROCANTH_TEST_DATABASE_URL` (or
-//! `BROCANTH_MODEL_TEST_POSTGRES`) names a server: the test makes a schema
-//! of its own there and drops it at the end.
+//! PostgreSQL, when `BROCANTH_TEST_DATABASE_URL` (or
+//! `BROCANTH_MODEL_TEST_POSTGRES`) names a server: each test gets a schema
+//! of its own through `Harness::isolated`, dropped at the end. With no
+//! server, each test prints a skip line and returns.
 //!
 //! The policy: anybody may list posts, a post may be changed or deleted
 //! while it is a draft, and a post may be added.
@@ -20,7 +21,7 @@ use brocanth_admin::row_policy::Dialect;
 use brocanth_admin::{AdminConfig, AdminPlugin, AdminResource, AdminSetup, Discovery, Inline};
 use brocanth_admin_model::admin_source;
 use brocanth_model::sea_orm::{ConnectionTrait, DatabaseConnection};
-use brocanth_model::testing::Harness;
+use brocanth_model::testing::{skipped, Harness};
 use brocanth_test::TestClient;
 
 mod blog {
@@ -96,42 +97,35 @@ brocanth_policy::policy! {
     }
 }
 
-/// One resource pair per dialect: the dialect is a constant of the type.
-macro_rules! resources {
-    ($person:ident, $post:ident, $dialect:expr) => {
-        struct $person;
-        impl AdminResource for $person {
-            type Entity = Person;
-            type Subject = ();
-            type Policy = PersonRules;
-            const MODEL: &'static str = "person";
-            const DIALECT: Dialect = $dialect;
-            fn policy(&self) -> &PersonRules {
-                &PersonRules
-            }
-            fn subject<'a>(&self, _: &brocanth_admin::Principal<'a>) -> Option<&'a ()> {
-                Some(&())
-            }
-        }
-        struct $post;
-        impl AdminResource for $post {
-            type Entity = Post;
-            type Subject = ();
-            type Policy = PostRules;
-            const MODEL: &'static str = "post";
-            const DIALECT: Dialect = $dialect;
-            fn policy(&self) -> &PostRules {
-                &PostRules
-            }
-            fn subject<'a>(&self, _: &brocanth_admin::Principal<'a>) -> Option<&'a ()> {
-                Some(&())
-            }
-        }
-    };
+struct People;
+impl AdminResource for People {
+    type Entity = Person;
+    type Subject = ();
+    type Policy = PersonRules;
+    const MODEL: &'static str = "person";
+    const DIALECT: Dialect = Dialect::Postgres;
+    fn policy(&self) -> &PersonRules {
+        &PersonRules
+    }
+    fn subject<'a>(&self, _: &brocanth_admin::Principal<'a>) -> Option<&'a ()> {
+        Some(&())
+    }
 }
 
-resources!(SqlitePeople, SqlitePosts, Dialect::Sqlite);
-resources!(PgPeople, PgPosts, Dialect::Postgres);
+struct Posts;
+impl AdminResource for Posts {
+    type Entity = Post;
+    type Subject = ();
+    type Policy = PostRules;
+    const MODEL: &'static str = "post";
+    const DIALECT: Dialect = Dialect::Postgres;
+    fn policy(&self) -> &PostRules {
+        &PostRules
+    }
+    fn subject<'a>(&self, _: &brocanth_admin::Principal<'a>) -> Option<&'a ()> {
+        Some(&())
+    }
+}
 
 fn client(config: AdminConfig, data: Arc<dyn AdminData>) -> TestClient<Base, NoHooks> {
     let config = config
@@ -257,49 +251,15 @@ async fn inline_rows_obey_the_child_policy(
     );
 }
 
-const SQLITE: [&str; 2] = [
-    "CREATE TABLE person (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-    "CREATE TABLE post (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, \
-     title TEXT NOT NULL, status TEXT NOT NULL)",
-];
-
-#[tokio::test]
-async fn sqlite_inline_rows_obey_the_child_policy() {
-    let harness = Harness::sqlite().await.expect("connect");
-    seed(harness.conn(), &SQLITE).await;
-    let data: Arc<dyn AdminData> = Arc::new(Models::new(harness.conn().clone()));
-    let config = AdminConfig::new()
-        .resource(SqlitePeople)
-        .resource(SqlitePosts);
-    inline_rows_obey_the_child_policy(harness.conn(), client(config, data)).await;
-}
-
 /// A PostgreSQL schema of the test's own, seeded, with the sequences moved
-/// past the seeded ids. `None` when no server is named.
+/// past the seeded ids. `None` (and a skip line) when no server is named.
 ///
-/// Returns the connection that owns the schema, to drop it at the end, and
-/// the connection whose search path is the schema.
-async fn postgres_schema(name: &str, extra: &[&str]) -> Option<(Harness, Harness, String)> {
-    let Some(url) = Harness::postgres_url() else {
-        brocanth_model::testing::skipped("no BROCANTH_TEST_DATABASE_URL");
+/// The schema is dropped when the harness drops.
+async fn database(extra: &[&str]) -> Option<Harness> {
+    let Some(harness) = Harness::isolated().await.expect("connect") else {
+        skipped("no server: set BROCANTH_TEST_DATABASE_URL");
         return None;
     };
-    // A schema of this test's own, named in the connection's search path,
-    // so nothing here touches a shared table.
-    let schema = format!("{name}_{}", std::process::id());
-    let admin = Harness::postgres(&url).await.expect("connect");
-    admin
-        .conn()
-        .execute_unprepared(&format!(
-            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
-        ))
-        .await
-        .expect("schema");
-    let separator = if url.contains('?') { '&' } else { '?' };
-    let scoped = format!("{url}{separator}options=-csearch_path%3D{schema}");
-    let harness = Harness::postgres(&scoped)
-        .await
-        .expect("connect in the schema");
     let mut tables = vec![
         "CREATE TABLE person (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
         "CREATE TABLE post (id SERIAL PRIMARY KEY, author_id INTEGER NOT NULL, \
@@ -317,26 +277,17 @@ async fn postgres_schema(name: &str, extra: &[&str]) -> Option<(Harness, Harness
             .await
             .expect("sequence");
     }
-    Some((admin, harness, schema))
-}
-
-async fn drop_schema(admin: &Harness, schema: &str) {
-    admin
-        .conn()
-        .execute_unprepared(&format!("DROP SCHEMA {schema} CASCADE"))
-        .await
-        .expect("drop the schema");
+    Some(harness)
 }
 
 #[tokio::test]
-async fn postgres_inline_rows_obey_the_child_policy() {
-    let Some((admin, harness, schema)) = postgres_schema("admin_inline", &[]).await else {
+async fn inline_rows_obey_the_child_policy_on_postgres() {
+    let Some(harness) = database(&[]).await else {
         return;
     };
     let data: Arc<dyn AdminData> = Arc::new(Models::new(harness.conn().clone()));
-    let config = AdminConfig::new().resource(PgPeople).resource(PgPosts);
+    let config = AdminConfig::new().resource(People).resource(Posts);
     inline_rows_obey_the_child_policy(harness.conn(), client(config, data)).await;
-    drop_schema(&admin, &schema).await;
 }
 
 /// The name of person 1.
@@ -351,19 +302,14 @@ async fn person_name(conn: &DatabaseConnection) -> String {
 }
 
 #[tokio::test]
-async fn postgres_a_refused_child_row_undoes_the_parent_and_the_rows_before_it() {
+async fn a_refused_child_row_undoes_the_parent_and_the_rows_before_it() {
     // A unique title: the database refuses the third write of the save.
-    let Some((admin, harness, schema)) = postgres_schema(
-        "admin_inline_atomic",
-        &["CREATE UNIQUE INDEX post_title ON post (title)"],
-    )
-    .await
-    else {
+    let Some(harness) = database(&["CREATE UNIQUE INDEX post_title ON post (title)"]).await else {
         return;
     };
     let conn = harness.conn();
     let data: Arc<dyn AdminData> = Arc::new(Models::new(conn.clone()));
-    let config = AdminConfig::new().resource(PgPeople).resource(PgPosts);
+    let config = AdminConfig::new().resource(People).resource(Posts);
     let client = client(config, data);
     let before = posts(conn).await;
 
@@ -409,5 +355,4 @@ async fn postgres_a_refused_child_row_undoes_the_parent_and_the_rows_before_it()
     let now = posts(conn).await;
     assert_eq!(now[0].2, "Draft, changed");
     assert_eq!(now.len(), 4);
-    drop_schema(&admin, &schema).await;
 }

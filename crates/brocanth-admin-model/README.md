@@ -75,18 +75,19 @@ admin_source! {
 
 # #[tokio::main(flavor = "multi_thread")]
 # async fn main() {
-// An in-memory SQLite database. An application passes its own connection.
-let harness = Harness::sqlite().await.unwrap();
+// A Postgres schema of its own, for this example. An application passes
+// its own connection.
+# // No test server: nothing to show.
+let Some(harness) = Harness::isolated().await.unwrap() else { return };
+// `user` is a reserved word on Postgres. SeaORM quotes it; raw SQL must too.
 harness
     .conn()
-    .execute_unprepared(
-        "CREATE TABLE user (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-    )
+    .execute_unprepared(r#"CREATE TABLE "user" (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"#)
     .await
     .unwrap();
 harness
     .conn()
-    .execute_unprepared("INSERT INTO user (name) VALUES ('Ada Lovelace')")
+    .execute_unprepared(r#"INSERT INTO "user" (name) VALUES ('Ada Lovelace')"#)
     .await
     .unwrap();
 
@@ -141,14 +142,19 @@ through the `ActiveModel`. Zero rows changed is a failure, not a success.
 cargo test -p brocanth-admin-model
 ```
 
-The tests need no environment variable. They run against an in-memory
-SQLite database through `brocanth_model::testing::Harness::sqlite`.
+The database tests run on Postgres. Set `BROCANTH_TEST_DATABASE_URL` (or
+`BROCANTH_MODEL_TEST_POSTGRES`). Each test gets a schema of its own through
+`brocanth_model::testing::Harness::isolated`, and the schema is dropped at
+the end. With no server, each database test prints a skip line and returns.
 
 - `tests/seaorm.rs`: the six operations, and a write that goes through the
   `ActiveModel`, so a `#[validates]` rule refuses a bad row.
 - `tests/policy.rs`: row policies on a real database. It drives the admin
   through the router with `brocanth_test::TestClient`, so the plugin and
   the principal hook are on the path.
+- `tests/inlines.rs`: a parent's form with its child rows, each child row
+  checked against its own policy, and one save that is kept whole or not
+  at all.
 
 An application tests its admin the same way: build the app with
 `AdminPlugin`, send requests with `TestClient`, and assert on the status

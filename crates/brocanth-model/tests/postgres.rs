@@ -1,9 +1,15 @@
-//! The same guarantees, on Postgres, which is the backend this crate is built
-//! for.
+//! The same guarantees, on the shared schema.
 //!
-//! Compiled only with `--features postgres` (the default), and skipped at run
-//! time unless `BROCANTH_MODEL_TEST_POSTGRES` or `BROCANTH_TEST_DATABASE_URL`
-//! names a database:
+//! `blog.rs` and `eager_load.rs` give each test a schema of its own
+//! ([`Harness::isolated`]). The tests here share one migrated schema
+//! ([`Harness::postgres_migrated`]) and keep apart through the rolling-back
+//! transaction of [`Harness::begin`], which is the shape most application
+//! tests use. They cover the migration DDL, the uniqueness lookup,
+//! savepoints, the two-query eager loader, the bulk-write path and the
+//! probe's metric callback.
+//!
+//! They skip at run time unless `BROCANTH_MODEL_TEST_POSTGRES` or
+//! `BROCANTH_TEST_DATABASE_URL` names a database:
 //!
 //! ```sh
 //! BROCANTH_MODEL_TEST_POSTGRES=postgres://localhost/brocanth_model_test \
@@ -14,14 +20,6 @@
 //! has to pass on a laptop with no server running. Every skip prints a line
 //! that says so: a Postgres test that passes because there was no Postgres is
 //! worse than no test at all.
-//!
-//! The honest statement of the cost, since Postgres is now the default
-//! feature: the suite that runs unattended is `blog.rs` and `eager_load.rs` on
-//! SQLite, so the *default* build is the less-tested one until a server is
-//! there. These tests are what closes the gap, and they cover the places where
-//! the two dialects can actually differ — the migration DDL, the uniqueness
-//! lookup, savepoints, the two-query eager loader, the bulk-write path and the
-//! probe's metric callback — rather than re-running assertions about pure Rust.
 
 #![cfg(feature = "postgres")]
 
@@ -233,14 +231,13 @@ async fn uniqueness_does_not_collide_a_record_with_itself_on_postgres() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Savepoints, where the two dialects disagree about how to prove it
+// 3. Savepoints
 // ---------------------------------------------------------------------------
 
-/// On SQLite the proof is that a second `BEGIN` is an error, so the nested
-/// `begin()` cannot have issued one. **Postgres answers a second `BEGIN` with
-/// a warning and carries on**, so that proof does not transfer and the
-/// behaviour has to be checked from the other side: rolling the inner
-/// transaction back keeps the outer one's row, which only a savepoint does.
+/// **Postgres answers a second `BEGIN` with a warning and carries on**, so an
+/// error on `BEGIN` proves nothing. The behaviour is checked from the other
+/// side: rolling the inner transaction back keeps the outer one's row, which
+/// only a savepoint does.
 #[tokio::test]
 async fn a_nested_transaction_is_a_real_savepoint_on_postgres() {
     let harness = or_skip!(harness().await);
@@ -299,10 +296,9 @@ async fn a_nested_transaction_is_a_real_savepoint_on_postgres() {
     );
 }
 
-/// Postgres rolls back DDL, so a test can build and discard a table. SQLite
-/// cannot be relied on for this, which is why [`Harness::sqlite`] hands out a
-/// private database instead and why the Postgres harness migrates under an
-/// advisory lock rather than per test.
+/// Postgres rolls back DDL, so a test can build and discard a table inside
+/// its transaction. This is also why the shared harness can migrate under an
+/// advisory lock: a migration that fails halfway leaves nothing behind.
 #[tokio::test]
 async fn ddl_inside_the_test_transaction_rolls_back_too() {
     let harness = or_skip!(harness().await);
@@ -358,8 +354,7 @@ async fn a_limited_eager_load_returns_the_right_parents_and_costs_two_queries() 
     assert!(!report.has_n_plus_one());
 }
 
-/// SQLite will not accept an `OFFSET` with no `LIMIT`, so the SQLite suite can
-/// only check the chosen strategy. Postgres will, so here the query runs.
+/// An `OFFSET` with no `LIMIT` takes the two-query path too, and runs.
 #[tokio::test]
 async fn a_bare_offset_eager_load_runs_on_postgres() {
     let harness = or_skip!(harness().await);

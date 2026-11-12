@@ -2,10 +2,14 @@
 //! router.
 //!
 //! PLAN.md §12 item 9. The claim is that the policy's condition reaches the
-//! SQL, so the tests run against SQLite through SeaORM rather than against
-//! the in-memory fixture, which refuses a condition outright. They drive the
-//! admin with `brocanth-test`'s client, so the router, the plugin and the
-//! principal hook are on the path, as they are in production.
+//! SQL, so the tests run against PostgreSQL through SeaORM rather than
+//! against the in-memory fixture, which refuses a condition outright. They
+//! drive the admin with `brocanth-test`'s client, so the router, the plugin
+//! and the principal hook are on the path, as they are in production.
+//!
+//! Each test gets a schema of its own through `Harness::isolated`. With no
+//! server (`BROCANTH_TEST_DATABASE_URL` or `BROCANTH_MODEL_TEST_POSTGRES`),
+//! each test prints a skip line and returns.
 //!
 //! One policy, written the way an application would:
 //!
@@ -29,8 +33,8 @@ use brocanth_admin::policy::{policy_fn, Principal};
 use brocanth_admin::row_policy::{Dialect, Policy};
 use brocanth_admin::{AdminConfig, AdminPlugin, AdminResource, AdminSetup, Discovery};
 use brocanth_admin_model::{admin_source, async_trait};
-use brocanth_model::sea_orm::{ConnectionTrait, DatabaseConnection};
-use brocanth_model::testing::Harness;
+use brocanth_model::sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use brocanth_model::testing::{skipped, Harness};
 use brocanth_test::TestClient;
 
 mod blog {
@@ -59,7 +63,7 @@ admin_source! {
     "blog::post" => blog::post::Entity,
 }
 
-const SCHEMA: &str = "CREATE TABLE post (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+const SCHEMA: &str = "CREATE TABLE post (id SERIAL PRIMARY KEY, \
      author_id INTEGER NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL)";
 
 // ---------------------------------------------------------------------------
@@ -117,7 +121,7 @@ impl AdminResource for Posts {
     type Policy = PostRules;
 
     const MODEL: &'static str = "post";
-    const DIALECT: Dialect = Dialect::Sqlite;
+    const DIALECT: Dialect = Dialect::Postgres;
 
     fn policy(&self) -> &PostRules {
         &PostRules
@@ -137,22 +141,32 @@ const ROOT: Staff = Staff {
     superuser: true,
 };
 
-async fn database() -> Harness {
-    let harness = Harness::sqlite().await.expect("connect");
+/// A schema of the test's own with the table in it, or `None` (and a skip
+/// line) when no server is named. The schema is dropped with the harness.
+async fn database() -> Option<Harness> {
+    let Some(harness) = Harness::isolated().await.expect("connect") else {
+        skipped("no server: set BROCANTH_TEST_DATABASE_URL");
+        return None;
+    };
     harness
         .conn()
         .execute_unprepared(SCHEMA)
         .await
         .expect("schema");
-    harness
+    Some(harness)
 }
 
 async fn post(conn: &DatabaseConnection, author: i64, title: &str, status: &str) -> i64 {
     let sql = format!(
-        "INSERT INTO post (author_id, title, status) VALUES ({author}, '{title}', '{status}')"
+        "INSERT INTO post (author_id, title, status) VALUES ({author}, '{title}', '{status}') \
+         RETURNING id"
     );
-    let done = conn.execute_unprepared(&sql).await.expect("insert");
-    i64::try_from(done.last_insert_id()).expect("an id")
+    let row = conn
+        .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
+        .await
+        .expect("insert")
+        .expect("the new row");
+    i64::from(row.try_get::<i32>("", "id").expect("an id"))
 }
 
 async fn column(conn: &DatabaseConnection, id: i64, name: &str) -> String {
@@ -221,7 +235,9 @@ fn ids_on(html: &brocanth_test::html::Html) -> Vec<i64> {
 
 #[tokio::test]
 async fn the_list_is_filtered_in_the_query_and_its_totals_match_its_pages() {
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     // Interleaved, so a paginator that filtered after reading would get
     // pages of mixed size and a total of twelve.
     let mut own = Vec::new();
@@ -267,7 +283,9 @@ async fn the_list_is_filtered_in_the_query_and_its_totals_match_its_pages() {
 
 #[tokio::test]
 async fn a_forbidden_row_is_not_found_on_every_screen_that_reads_one() {
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let mine = post(db.conn(), 1, "mine", "draft").await;
     let theirs = post(db.conn(), 2, "not yours", "draft").await;
     let ada = client(Arc::new(Models::new(db.conn().clone())), ADA);
@@ -387,7 +405,9 @@ impl AdminData for Racing {
 
 #[tokio::test]
 async fn a_guarded_update_that_changes_no_row_is_a_conflict_and_writes_nothing() {
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let id = post(db.conn(), 1, "draft title", "draft").await;
 
     // Without the race, the same request succeeds.
@@ -419,14 +439,16 @@ async fn the_source_reports_zero_rows_for_a_write_the_scope_refuses() {
     // The same guarantee one layer down, without the admin: a scope that
     // does not match the row is zero rows, for an update and for a delete,
     // never an error that reads as success and never a write.
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let id = post(db.conn(), 2, "theirs", "draft").await;
     let models = Models::new(db.conn().clone());
     let model = descriptor(&models);
     let key = PrimaryKey::single("id", id);
     let condition = PostRules
         .update(&ADA)
-        .condition::<Post>(Dialect::Sqlite)
+        .condition::<Post>(Dialect::Postgres)
         .expect("compiles");
 
     let changed = models
@@ -445,14 +467,22 @@ async fn the_source_reports_zero_rows_for_a_write_the_scope_refuses() {
         .expect("delete");
     assert_eq!(removed, 0);
     assert_eq!(column(db.conn(), id, "title").await, "theirs");
+}
 
-    // And a condition for the wrong dialect is refused, not run.
-    let postgres = PostRules
+#[test]
+fn a_condition_for_another_backend_is_refused_not_run() {
+    // `Dialect` has one variant, but `DbBackend` has others. A Postgres
+    // condition on a MySQL connection is an error, not a query.
+    let condition = PostRules
         .update(&ADA)
         .condition::<Post>(Dialect::Postgres)
         .expect("compiles");
-    let refused = models.fetch(&model, &key, Scope::Where(&postgres)).await;
+    let refused = brocanth_admin_model::scope_of(Scope::Where(&condition), DbBackend::MySql);
     assert!(matches!(refused, Err(DataError::Backend(_))), "{refused:?}");
+    assert!(
+        brocanth_admin_model::scope_of(Scope::Where(&condition), DbBackend::Postgres).is_ok(),
+        "and the matching backend takes it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +491,9 @@ async fn the_source_reports_zero_rows_for_a_write_the_scope_refuses() {
 
 #[tokio::test]
 async fn the_form_offers_only_writable_fields_and_a_post_with_another_is_refused() {
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let id = post(db.conn(), 1, "a draft", "draft").await;
     let ada = client(Arc::new(Models::new(db.conn().clone())), ADA);
 
@@ -516,7 +548,9 @@ async fn the_form_offers_only_writable_fields_and_a_post_with_another_is_refused
 
 #[tokio::test]
 async fn the_author_is_set_on_create_and_never_changed_by_an_update() {
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let root = client(Arc::new(Models::new(db.conn().clone())), ROOT);
 
     // The create form takes the author: `writable_on_create`.
@@ -560,7 +594,9 @@ async fn the_author_is_set_on_create_and_never_changed_by_an_update() {
 async fn a_rule_that_is_never_is_forbidden_without_reading_a_row() {
     // A staff member's `Policy::create` is `Never`: 403 on the form and on
     // the POST, and no "add" link on the list.
-    let db = database().await;
+    let Some(db) = database().await else {
+        return;
+    };
     let ada = client(Arc::new(Models::new(db.conn().clone())), ADA);
     ada.get_async("/admin/post/new").await.assert_status(403);
     ada.post_async("/admin/post", &[("title", "new")])

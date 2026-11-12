@@ -2,10 +2,9 @@
 //!
 //! The brocanth model layer.
 //!
-//! SeaORM 2.0.4 is the ORM, and **Postgres is the base**. The `postgres`
-//! feature is the default; the `sqlite` feature is the smaller target, kept
-//! for a single-machine deployment that wants no server. One of the two must
-//! be on, and a build that turns both on links two drivers.
+//! SeaORM 2.0.4 is the ORM, and **Postgres is the only database**
+//! (2026-11-11): RLS and one database keep the framework simple. The
+//! `postgres` feature is the default and must be on.
 //!
 //! This crate is the six things a Rails-shaped framework needs that an ORM
 //! does not supply:
@@ -88,11 +87,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(not(any(feature = "postgres", feature = "sqlite")))]
+#[cfg(not(feature = "postgres"))]
 compile_error!(
-    "brocanth-model needs a database driver. Enable the `postgres` feature \
-     (the default) or the `sqlite` feature. The driver is a feature on \
-     `sea-orm` itself, so this crate cannot pick one for you after the fact."
+    "brocanth-model needs the Postgres driver. Enable the `postgres` feature \
+     (the default). The driver is a feature on `sea-orm` itself, so this crate \
+     cannot pick it for you after the fact."
 );
 
 pub mod bulk;

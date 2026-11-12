@@ -115,7 +115,7 @@ use crate::policy::Principal;
 ///     type Subject = Staff;
 ///     type Policy = OwnPosts;
 ///     const MODEL: &'static str = "post";
-///     const DIALECT: Dialect = Dialect::Sqlite;
+///     const DIALECT: Dialect = Dialect::Postgres;
 ///     fn policy(&self) -> &OwnPosts { &OwnPosts }
 /// }
 ///

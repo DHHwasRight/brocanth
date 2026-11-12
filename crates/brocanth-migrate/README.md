@@ -186,7 +186,9 @@ the `migrate` tool (this crate's `brocanth-migrate` binary) over a project
 on disk. `tests/migrations.rs`
 diffs `tests/fixtures/v1.rs` against `v2.rs`, checks the text against
 `tests/golden/`, then compiles the golden files and runs them up and down on
-in-memory SQLite through `brocanth-model`. After a deliberate change to the
+Postgres through `brocanth-model`, in a schema of their own. That half skips
+when neither `BROCANTH_MODEL_TEST_POSTGRES` nor `BROCANTH_TEST_DATABASE_URL`
+names a database. After a deliberate change to the
 generator, rewrite the golden files and read the diff before you commit it:
 
 ```sh
@@ -200,7 +202,7 @@ An application tests its migrations through its own binary
 ## More
 
 - `docs/migrations.md`: the ids, the commands, the diff table, and what the
-  generator does not do (foreign keys, indexes, defaults, SQLite alters).
+  generator does not do (foreign keys, indexes, defaults).
 - `PLAN.md` §11: stable field identity.
 - `src/tool.rs`: the `migrate` tool. `src/migrator.rs`: the
   `migrations/mod.rs` list and its digest.
