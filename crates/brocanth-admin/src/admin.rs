@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::actions::{ActionCx, BulkAction, Run, Selected, MAX_SELECTED};
 use crate::config::{AdminConfig, ModelAdmin};
 use crate::data::{
-    AdminData, AdminTransaction, DataError, Equals, ListRequest, Search, SharedData,
+    AdminData, AdminTransaction, DataError, Equals, FieldErrors, ListRequest, Search, SharedData,
 };
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
@@ -749,7 +749,7 @@ impl Admin {
             return Ok(refused);
         }
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
         self.lock(principal, entry, Write::Create, &mut form);
@@ -785,12 +785,21 @@ impl Admin {
             return Ok(refused);
         }
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
         self.lock(principal, entry, Write::Create, &mut form);
         form.accept(submission);
-        let valid = form.validate();
+        let mut valid = form.validate();
+        if valid {
+            let refused = self
+                .refused_targets(principal, entry, None, &form.values())
+                .await?;
+            if !refused.is_empty() {
+                form.reject(&refused);
+                valid = false;
+            }
+        }
         let mut built = match self
             .inlines(principal, entry, None, Some(submission))
             .await?
@@ -865,7 +874,7 @@ impl Admin {
             return self.missing(principal);
         };
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[&row])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
         self.lock(principal, entry, Write::Update, &mut form);
@@ -921,12 +930,21 @@ impl Admin {
             return self.missing(principal);
         };
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[&row])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
         self.lock(principal, entry, Write::Update, &mut form);
         form.accept(submission);
-        let valid = form.validate();
+        let mut valid = form.validate();
+        if valid {
+            let refused = self
+                .refused_targets(principal, entry, Some(&row), &form.values())
+                .await?;
+            if !refused.is_empty() {
+                form.reject(&refused);
+                valid = false;
+            }
+        }
         let mut built = match self
             .inlines(principal, entry, Some(&row), Some(submission))
             .await?
@@ -1715,37 +1733,6 @@ impl Admin {
                     Request::new(Action::Create, &child.descriptor.key),
                 )
                 && self.creates(principal, child);
-            let choices = self
-                .choices(principal, &child.admin, &child.descriptor)
-                .await?;
-            let names: Vec<String> = match inline.fields.is_empty() {
-                true => child
-                    .admin
-                    .form_for(&child.descriptor)
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .filter(|name| name != fk)
-                    .collect(),
-                false => inline
-                    .fields
-                    .iter()
-                    .filter(|name| *name != fk)
-                    .cloned()
-                    .collect(),
-            };
-            let build = |row: Option<&Row>| {
-                let write = if row.is_some() {
-                    Write::Update
-                } else {
-                    Write::Create
-                };
-                let mut form = Form::build(&child.descriptor, &child.admin, row, &choices);
-                form.fields.retain(|f| names.contains(&f.name));
-                form.fields
-                    .sort_by_key(|f| names.iter().position(|n| *n == f.name));
-                self.lock(principal, child, write, &mut form);
-                form
-            };
 
             // The existing children, read under the child's list rule with
             // the parent's key in the query.
@@ -1784,6 +1771,39 @@ impl Admin {
                 rows.truncate(inline.max);
                 existing = rows;
             }
+
+            let current: Vec<&Row> = existing.iter().collect();
+            let choices = self
+                .choices(principal, &child.admin, &child.descriptor, &current)
+                .await?;
+            let names: Vec<String> = match inline.fields.is_empty() {
+                true => child
+                    .admin
+                    .form_for(&child.descriptor)
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .filter(|name| name != fk)
+                    .collect(),
+                false => inline
+                    .fields
+                    .iter()
+                    .filter(|name| *name != fk)
+                    .cloned()
+                    .collect(),
+            };
+            let build = |row: Option<&Row>| {
+                let write = if row.is_some() {
+                    Write::Update
+                } else {
+                    Write::Create
+                };
+                let mut form = Form::build(&child.descriptor, &child.admin, row, &choices);
+                form.fields.retain(|f| names.contains(&f.name));
+                form.fields
+                    .sort_by_key(|f| names.iter().position(|n| *n == f.name));
+                self.lock(principal, child, write, &mut form);
+                form
+            };
 
             let mut rows: Vec<InlineRow> = Vec::new();
             let mut befores: Vec<Option<(PrimaryKey, Row)>> = Vec::new();
@@ -1892,6 +1912,13 @@ impl Admin {
                         if !changed(&before, &values) {
                             continue;
                         }
+                        let refused = self
+                            .refused_targets(principal, child, Some(&before), &values)
+                            .await?;
+                        if !refused.is_empty() {
+                            rows[at].form.reject(&refused);
+                            continue;
+                        }
                         match self
                             .admit(
                                 principal,
@@ -1935,7 +1962,16 @@ impl Admin {
                         }
                         let mut form = build(None);
                         form.accept(&row.fields);
-                        let valid = form.validate();
+                        let mut valid = form.validate();
+                        if valid {
+                            let refused = self
+                                .refused_targets(principal, child, None, &form.values())
+                                .await?;
+                            if !refused.is_empty() {
+                                form.reject(&refused);
+                                valid = false;
+                            }
+                        }
                         let at = rows.len();
                         if valid {
                             ops.push(Op::Insert {
@@ -2187,12 +2223,20 @@ impl Admin {
     /// a configuration decision, and the data layer has no idea.
     ///
     /// The options are read under the **target** model's list rule, so a
-    /// picker never offers a record this person may not list.
+    /// picker never offers a record this person may not list. They are in
+    /// key order, so the first `choices_shown` are the same on every form.
+    ///
+    /// The value each row in `current` holds is always an option, past the
+    /// limit too: a picker without it would select another record, or
+    /// none, and a save of an unrelated field would change the relation.
+    /// Its label is read under the target's view rule; a target this
+    /// person may not view shows its stored value.
     async fn choices(
         &self,
         principal: Principal<'_>,
         admin: &ModelAdmin,
         descriptor: &ModelDescriptor,
+        current: &[&Row],
     ) -> Result<Vec<(String, Vec<Choice>)>, AdminError> {
         let mut out = Vec::new();
         for column in admin.form_for(descriptor) {
@@ -2207,6 +2251,10 @@ impl Admin {
                 continue;
             };
             let limit = target.admin.choices_shown();
+            let sort = crate::query::Sort {
+                column: relation.target_column.clone(),
+                direction: Direction::Ascending,
+            };
             let rows = self
                 .data
                 .list(ListRequest {
@@ -2217,12 +2265,12 @@ impl Admin {
                         term: "",
                         columns: &[],
                     },
-                    sort: None,
+                    sort: Some(&sort),
                     filter: None,
                     scope,
                 })
                 .await?;
-            let choices = rows
+            let mut choices: Vec<Choice> = rows
                 .iter()
                 .filter_map(|row| {
                     let value = row.get(&relation.target_column)?;
@@ -2232,9 +2280,108 @@ impl Admin {
                     ))
                 })
                 .collect();
+            let mut missing: Vec<String> = Vec::new();
+            for row in current {
+                let Some(value) = row.get(&column.name).filter(|v| !v.is_null()) else {
+                    continue;
+                };
+                let text = value.as_input();
+                if !choices.iter().any(|c| c.value == text) && !missing.contains(&text) {
+                    missing.push(text);
+                }
+            }
+            if !missing.is_empty() {
+                let view = self.gate(principal, target, RowAction::View)?;
+                let found = match view.scope() {
+                    Some(scope) => {
+                        self.data
+                            .fetch_many(
+                                &target.descriptor,
+                                &relation.target_column,
+                                &missing,
+                                scope,
+                            )
+                            .await?
+                    }
+                    None => Vec::new(),
+                };
+                for text in missing {
+                    let label = found
+                        .iter()
+                        .find(|row| {
+                            row.get(&relation.target_column)
+                                .is_some_and(|v| v.as_input() == text)
+                        })
+                        .map_or_else(
+                            || text.clone(),
+                            |row| target.admin.label_for(&target.descriptor, row),
+                        );
+                    choices.push(Choice::new(text, label));
+                }
+            }
             out.push((column.name.clone(), choices));
         }
         Ok(out)
+    }
+
+    /// The foreign-key values of a write that point at a record this person
+    /// may not pick, as field errors.
+    ///
+    /// The picker offers only rows the target's list rule admits, but a
+    /// POST can send any value. Each submitted value is read under that
+    /// same rule, and one it does not find is refused beside its field. A
+    /// value the row already held is kept without a read: changing another
+    /// field must not fail because the current target is hidden.
+    async fn refused_targets(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+        before: Option<&Row>,
+        values: &[(String, Value)],
+    ) -> Result<FieldErrors, AdminError> {
+        let mut errors = FieldErrors::new();
+        for (name, value) in values {
+            if value.is_null() {
+                continue;
+            }
+            let Some(column) = entry.descriptor.column(name) else {
+                continue;
+            };
+            let Some(relation) = entry.admin.relation_for(column) else {
+                continue;
+            };
+            let Some(target) = self.entry(&relation.target) else {
+                continue;
+            };
+            let text = value.as_input();
+            let held = before
+                .and_then(|row| row.get(name))
+                .is_some_and(|stored| stored.as_input() == text);
+            if held {
+                continue;
+            }
+            let gate = self.gate(principal, target, RowAction::List)?;
+            if matches!(gate, Gate::Unscoped) {
+                continue;
+            }
+            let found = match gate.scope() {
+                Some(scope) => !self
+                    .data
+                    .fetch_many(
+                        &target.descriptor,
+                        &relation.target_column,
+                        std::slice::from_ref(&text),
+                        scope,
+                    )
+                    .await?
+                    .is_empty(),
+                None => false,
+            };
+            if !found {
+                errors.add(name.clone(), "is not a record you may choose");
+            }
+        }
+        Ok(errors)
     }
 
     /// Resolves every foreign key appearing in `rows` to a label.

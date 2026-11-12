@@ -608,3 +608,147 @@ async fn a_rule_that_is_never_is_forbidden_without_reading_a_row() {
         .html()
         .assert_no_link_to("/admin/post/new");
 }
+
+// ---------------------------------------------------------------------------
+// A foreign key: a posted value is read under the target's list rule
+// ---------------------------------------------------------------------------
+
+mod notes {
+    pub mod comment {
+        use brocanth_model::prelude::*;
+        use serde::{Deserialize, Serialize};
+
+        #[sea_orm::model]
+        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+        #[sea_orm(table_name = "comment")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: i32,
+            pub post_id: i32,
+            pub body: String,
+        }
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+}
+
+admin_source! {
+    /// Posts, and comments that point at them.
+    pub struct WithComments;
+    "blog::post" => blog::post::Entity,
+    "blog::comment" => notes::comment::Entity,
+}
+
+brocanth_policy::policy! {
+    #[model(notes::comment::Model)]
+    entity Comment in "comment" {
+        #[key] id: i32,
+        post_id: i32,
+        body: String,
+    }
+
+    policy CommentRules(who: &Staff) for Comment {
+        list: always,
+        view: always,
+        create: always,
+        update: always,
+        delete: always,
+        writable: except [id],
+        writable_on_create: except [id],
+    }
+}
+
+struct Comments;
+
+impl AdminResource for Comments {
+    type Entity = Comment;
+    type Subject = Staff;
+    type Policy = CommentRules;
+
+    const MODEL: &'static str = "comment";
+    const DIALECT: Dialect = Dialect::Postgres;
+
+    fn policy(&self) -> &CommentRules {
+        &CommentRules
+    }
+}
+
+fn commenting(data: Arc<dyn AdminData>, who: Staff) -> TestClient<Base, NoHooks> {
+    let config = AdminConfig::new()
+        .discovering(Discovery::new().under("blog"))
+        .with_policy(policy_fn(|who: &Principal<'_>, _| {
+            who.downcast::<Staff>().is_some()
+        }))
+        .model("comment", |m| m.foreign_key("post_id", "post", "id"))
+        .resource(Posts)
+        .resource(Comments);
+    let setup = AdminSetup::new(data, config).principal(|_: &Request, state: &RequestState| {
+        state
+            .get::<Staff>()
+            .map_or_else(Principal::anonymous, |s| Principal::new(s))
+    });
+    let mut app = AppBuilder::new()
+        .plugin(AdminPlugin::new(setup))
+        .build()
+        .expect("an application");
+    app.mount_routes::<AdminPlugin>("/admin")
+        .expect("the admin mounts");
+    TestClient::new(app).seeding(move |state: &mut RequestState| {
+        state.insert(who);
+    })
+}
+
+#[tokio::test]
+async fn a_posted_foreign_key_the_target_rule_hides_is_refused_beside_its_field() {
+    let Some(db) = database().await else {
+        return;
+    };
+    db.conn()
+        .execute_unprepared(
+            "CREATE TABLE comment (id SERIAL PRIMARY KEY, post_id INTEGER NOT NULL, \
+             body TEXT NOT NULL)",
+        )
+        .await
+        .expect("schema");
+    let hers = post(db.conn(), ADA.id, "hers", "draft").await;
+    let hidden = post(db.conn(), ROOT.id, "not hers", "draft").await;
+    let ada = commenting(Arc::new(WithComments::new(db.conn().clone())), ADA);
+
+    // The picker does not offer the hidden post, and a POST of it is refused.
+    let form = ada.get_async("/admin/comment/new").await.html();
+    let offered: Vec<String> = form
+        .within("select", "name", "post_id")
+        .tags("option")
+        .iter()
+        .filter_map(|o| o.attr("value").map(str::to_string))
+        .collect();
+    assert!(!offered.contains(&hidden.to_string()), "{offered:?}");
+    let refused = ada
+        .post_async(
+            "/admin/comment",
+            &[("post_id", &hidden.to_string()), ("body", "sneaky")],
+        )
+        .await;
+    refused.assert_status(422);
+    refused.html().assert_text("is not a record you may choose");
+
+    // The same form with her own post is written.
+    ada.post_async(
+        "/admin/comment",
+        &[("post_id", &hers.to_string()), ("body", "fine")],
+    )
+    .await
+    .assert_status(303);
+    let count = db
+        .conn()
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT count(*)::int AS n FROM comment".to_string(),
+        ))
+        .await
+        .expect("count")
+        .expect("a row")
+        .try_get::<i32>("", "n")
+        .expect("n");
+    assert_eq!(count, 1, "only the allowed comment was written");
+}
