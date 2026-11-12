@@ -386,3 +386,84 @@ async fn table_exists(db: &Db) -> bool {
         .expect("a query")
         .is_some()
 }
+
+#[tokio::test]
+async fn a_purge_another_replica_is_running_skips() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    sandbox
+        .store
+        .append(&[entry(100, "post", "1", Kind::Created, Vec::new())])
+        .await
+        .unwrap();
+    // Another session holds this table's purge lock.
+    let mut other = sandbox.db.pool().acquire().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_lock(hashtextextended(current_schema() || '.brocanth_audit', 0))",
+    )
+    .execute(&mut *other)
+    .await
+    .unwrap();
+    assert_eq!(sandbox.store.purge(200).await.unwrap(), 0, "skipped");
+    sqlx::query(
+        "SELECT pg_advisory_unlock(hashtextextended(current_schema() || '.brocanth_audit', 0))",
+    )
+    .execute(&mut *other)
+    .await
+    .unwrap();
+    drop(other);
+    assert_eq!(
+        sandbox.store.purge(200).await.unwrap(),
+        1,
+        "and runs once free"
+    );
+    sandbox.drop().await;
+}
+
+#[tokio::test]
+async fn each_query_shape_reads_its_rows_and_pages_back() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    let entries: Vec<Entry> = [("post", "1"), ("post", "2"), ("post", "1"), ("user", "1")]
+        .iter()
+        .map(|(t, r)| entry(100, t, r, Kind::Updated, Vec::new()))
+        .collect();
+    sandbox.store.append(&entries).await.unwrap();
+    let all = sandbox.store.find(&Query::recent()).await.unwrap();
+    assert_eq!(all.len(), 4);
+    let table = Query {
+        table: Some("post".into()),
+        ..Query::default()
+    };
+    assert_eq!(sandbox.store.find(&table).await.unwrap().len(), 3);
+    let row = sandbox.store.find(&Query::row("post", "1")).await.unwrap();
+    assert_eq!(row.len(), 2);
+    let older = sandbox
+        .store
+        .find(&Query::row("post", "1").before(row[0].id))
+        .await
+        .unwrap();
+    assert_eq!(older.len(), 1);
+    assert_eq!(older[0].id, row[1].id);
+    sandbox.drop().await;
+}
+
+#[tokio::test]
+async fn replicas_that_migrate_at_once_all_succeed() {
+    let Some(sandbox) = Sandbox::bare().await else {
+        return;
+    };
+    let runs: Vec<_> = (0..4)
+        .map(|_| {
+            let store = sandbox.store.clone();
+            tokio::spawn(async move { store.migrate().await })
+        })
+        .collect();
+    for run in runs {
+        run.await.unwrap().expect("each migration succeeds");
+    }
+    assert!(table_exists(&sandbox.db).await);
+    sandbox.drop().await;
+}

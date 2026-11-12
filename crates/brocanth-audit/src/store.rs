@@ -117,13 +117,27 @@ pub trait AuditStore: Send + Sync {
     /// Removes every entry made before `before` (seconds since 1970), and
     /// says how many.
     async fn purge(&self, before: i64) -> Result<u64, StoreError>;
+
+    /// Whether the entries survive a restart. `true` by default;
+    /// [`MemoryStore`] says `false`, and the History tab says so.
+    fn is_durable(&self) -> bool {
+        true
+    }
 }
 
 /// Entries in memory, lost at restart. For a test, and for a project that
 /// registered the plugin without a database.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
-    entries: Mutex<Vec<Entry>>,
+    entries: Mutex<Held>,
+}
+
+/// The entries, and the id the next one gets. A counter of its own, so an
+/// id is never given twice, also after a purge empties the store.
+#[derive(Debug, Default)]
+struct Held {
+    entries: Vec<Entry>,
+    last_id: i64,
 }
 
 impl MemoryStore {
@@ -134,15 +148,15 @@ impl MemoryStore {
 
     /// How many entries it holds.
     pub fn len(&self) -> usize {
-        self.entries().len()
+        self.held().entries.len()
     }
 
     /// Whether it holds none.
     pub fn is_empty(&self) -> bool {
-        self.entries().is_empty()
+        self.held().entries.is_empty()
     }
 
-    fn entries(&self) -> std::sync::MutexGuard<'_, Vec<Entry>> {
+    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -150,10 +164,11 @@ impl MemoryStore {
 #[async_trait]
 impl AuditStore for MemoryStore {
     async fn append(&self, entries: &[Entry]) -> Result<(), StoreError> {
-        let mut held = self.entries();
-        let first = held.last().map_or(1, |e| e.id + 1);
-        for (id, entry) in (first..).zip(entries) {
-            held.push(Entry {
+        let mut held = self.held();
+        for entry in entries {
+            held.last_id += 1;
+            let id = held.last_id;
+            held.entries.push(Entry {
                 id,
                 ..entry.clone()
             });
@@ -163,7 +178,8 @@ impl AuditStore for MemoryStore {
 
     async fn find(&self, query: &Query) -> Result<Vec<Entry>, StoreError> {
         Ok(self
-            .entries()
+            .held()
+            .entries
             .iter()
             .rev()
             .filter(|e| query.matches(e))
@@ -172,10 +188,31 @@ impl AuditStore for MemoryStore {
             .collect())
     }
 
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     async fn purge(&self, before: i64) -> Result<u64, StoreError> {
-        let mut held = self.entries();
-        let was = held.len();
-        held.retain(|e| e.at >= before);
-        Ok((was - held.len()) as u64)
+        let mut held = self.held();
+        let was = held.entries.len();
+        held.entries.retain(|e| e.at >= before);
+        Ok((was - held.entries.len()) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brocanth_events::RowChange;
+
+    #[tokio::test]
+    async fn an_id_is_never_given_twice_also_after_a_purge_empties_the_store() {
+        let store = MemoryStore::new();
+        let entry = Entry::from_change(&RowChange::created("post", 1_i64), None, 10);
+        store.append(&[entry.clone(), entry.clone()]).await.unwrap();
+        assert_eq!(store.purge(100).await.unwrap(), 2);
+        store.append(&[entry]).await.unwrap();
+        let found = store.find(&Query::recent()).await.unwrap();
+        assert_eq!(found[0].id, 3, "the next id, not the first again");
     }
 }

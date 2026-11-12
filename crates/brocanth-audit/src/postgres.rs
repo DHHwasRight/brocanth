@@ -19,6 +19,20 @@ pub struct PgStore {
     db: Db,
 }
 
+/// The advisory lock key of the migration and of the purge, so one replica
+/// runs each at a time: a hash of the table's schema and name. An advisory
+/// lock is database-wide, and two schemas each hold a table of their own.
+const LOCK: &str = "hashtextextended(current_schema() || '.brocanth_audit', 0)";
+
+/// Rows one purge statement deletes. A purge loops until a statement
+/// deletes fewer, so no statement holds a long lock on the table.
+const PURGE_BATCH: i64 = 10_000;
+
+/// Each query shape, with a fixed `WHERE`, so a generic plan of a prepared
+/// statement still uses the `(table_name, row_key, id)` index.
+const SELECT: &str = "SELECT id, at, actor, source, table_name, row_key, label, kind, \
+                      field_names, field_before, field_after FROM brocanth_audit";
+
 impl PgStore {
     /// The table and its two indexes, idempotent.
     ///
@@ -50,22 +64,32 @@ CREATE INDEX IF NOT EXISTS brocanth_audit_at
         PgStore { db }
     }
 
-    /// Runs [`PgStore::SCHEMA`].
+    /// Runs [`PgStore::SCHEMA`], in one transaction under an advisory
+    /// lock: replicas that start together run it one after the other, and
+    /// the second finds the table made. Without the lock two concurrent
+    /// `CREATE TABLE IF NOT EXISTS` can both try to create the row type.
     ///
     /// # Errors
     /// The database refused a statement.
     pub async fn migrate(&self) -> Result<(), StoreError> {
+        let mut tx = self.db.pool().begin().await.map_err(failed)?;
+        sqlx::query(AssertSqlSafe(format!(
+            "SELECT pg_advisory_xact_lock({LOCK})"
+        )))
+        .execute(&mut *tx)
+        .await
+        .map_err(failed)?;
         for statement in Self::SCHEMA
             .split(';')
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
             sqlx::query(AssertSqlSafe(statement.to_string()))
-                .execute(self.db.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(failed)?;
         }
-        Ok(())
+        tx.commit().await.map_err(failed)
     }
 }
 
@@ -124,32 +148,79 @@ impl AuditStore for PgStore {
     }
 
     async fn find(&self, query: &Query) -> Result<Vec<Entry>, StoreError> {
-        let row = query.table.as_ref().and(query.row.as_deref());
-        let rows: Vec<Row> = sqlx::query_as(
-            "SELECT id, at, actor, source, table_name, row_key, label, kind, \
-             field_names, field_before, field_after FROM brocanth_audit \
-             WHERE ($1::text IS NULL OR table_name = $1) \
-             AND ($2::text IS NULL OR row_key = $2) \
-             AND ($3::bigint IS NULL OR id < $3) \
-             ORDER BY id DESC LIMIT $4",
-        )
-        .bind(query.table.as_deref())
-        .bind(row)
-        .bind(query.before)
-        .bind(i64::try_from(query.capped()).unwrap_or(50))
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(failed)?;
+        // `id < before` with no cursor is `id < i64::MAX`: every row, and
+        // the same statement text for the first page and the next.
+        let before = query.before.unwrap_or(i64::MAX);
+        let limit = i64::try_from(query.capped()).unwrap_or(50);
+        let sql = match (&query.table, &query.row) {
+            (Some(_), Some(_)) => format!(
+                "{SELECT} WHERE table_name = $1 AND row_key = $2 AND id < $3 \
+                 ORDER BY id DESC LIMIT $4"
+            ),
+            (Some(_), None) => {
+                format!("{SELECT} WHERE table_name = $1 AND id < $2 ORDER BY id DESC LIMIT $3")
+            }
+            (None, _) => format!("{SELECT} WHERE id < $1 ORDER BY id DESC LIMIT $2"),
+        };
+        let mut select = sqlx::query_as::<_, Row>(AssertSqlSafe(sql));
+        if let Some(table) = &query.table {
+            select = select.bind(table);
+            if let Some(row) = &query.row {
+                select = select.bind(row);
+            }
+        }
+        let rows = select
+            .bind(before)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(failed)?;
         Ok(rows.into_iter().map(entry).collect())
     }
 
+    /// Deletes in batches of [`PURGE_BATCH`], under an advisory lock that
+    /// one replica holds: another replica that purges at the same time
+    /// skips, and deletes nothing.
     async fn purge(&self, before: i64) -> Result<u64, StoreError> {
-        sqlx::query("DELETE FROM brocanth_audit WHERE at < $1")
+        let mut conn = self.db.pool().acquire().await.map_err(failed)?;
+        let (locked,): (bool,) = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT pg_try_advisory_lock({LOCK})"
+        )))
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(failed)?;
+        if !locked {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        let outcome = loop {
+            let done = sqlx::query(
+                "DELETE FROM brocanth_audit WHERE id IN \
+                 (SELECT id FROM brocanth_audit WHERE at < $1 ORDER BY id LIMIT $2)",
+            )
             .bind(before)
-            .execute(self.db.pool())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(failed)
+            .bind(PURGE_BATCH)
+            .execute(&mut *conn)
+            .await;
+            match done {
+                Ok(done) => {
+                    removed += done.rows_affected();
+                    if done.rows_affected() < PURGE_BATCH as u64 {
+                        break Ok(removed);
+                    }
+                }
+                Err(e) => break Err(failed(e)),
+            }
+        };
+        let unlocked = sqlx::query(AssertSqlSafe(format!("SELECT pg_advisory_unlock({LOCK})")))
+            .execute(&mut *conn)
+            .await;
+        if unlocked.is_err() {
+            // The lock is held by this session: close it rather than give
+            // a locked connection back to the pool.
+            conn.detach();
+        }
+        outcome
     }
 }
 
