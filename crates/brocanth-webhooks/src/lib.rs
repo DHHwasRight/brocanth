@@ -41,7 +41,7 @@ pub mod scaffold;
 #[cfg(feature = "runtime")]
 pub use incoming::{Answer, Delivery, Handler, Incoming, Receiver, Rejection};
 #[cfg(feature = "runtime")]
-pub use seen::{MemorySeen, Seen, SeenError};
+pub use seen::{Claim, MemorySeen, Seen, SeenError};
 #[cfg(feature = "runtime")]
 pub use sign::{Refused, Scheme, SecretError, Verified};
 

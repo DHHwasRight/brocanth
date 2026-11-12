@@ -33,6 +33,11 @@ getrandom = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
+# Why a delivery was refused, and what a handler's error said, go to the
+# log, not to the sender. `tracing` is in the workspace already (sqlx emits
+# through it), and `brocanth-observe` collects it.
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
+
 # The idempotency store is a trait object behind an `Arc`.
 async-trait = { version = "0.1", optional = true }
 tokio = { version = "1", default-features = false, features = [
@@ -92,6 +97,7 @@ runtime = [
     "dep:serde_json",
     "dep:async-trait",
     "dep:tokio",
+    "dep:tracing",
 ]
 # The idempotency keys in Postgres.
 postgres = ["runtime", "dep:brocanth-db"]

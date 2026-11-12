@@ -15,7 +15,7 @@ use brocanth_db::sqlx::{self, PgPool};
 use brocanth_db::Db;
 use brocanth_jobs::Worker;
 use brocanth_webhooks::outgoing::{Deliver, QUEUE};
-use brocanth_webhooks::{Outgoing, OutgoingConfig, PgSeen, Scheme, Seen};
+use brocanth_webhooks::{Claim, Outgoing, OutgoingConfig, PgSeen, Scheme, Seen};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -97,17 +97,35 @@ async fn two_instances_share_the_keys_and_a_release_frees_one() {
     a.migrate().await.expect("migrate");
     a.migrate().await.expect("migrate twice");
     let keep = Duration::from_secs(60);
-    assert!(a.claim("stripe", "evt_1", keep).await.unwrap());
-    assert!(
-        !b.claim("stripe", "evt_1", keep).await.unwrap(),
-        "b sees a's key"
+    assert_eq!(a.claim("stripe", "evt_1", keep).await, Ok(Claim::New));
+    assert_eq!(
+        b.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::Running),
+        "b sees a's key, still running"
     );
-    assert!(
-        b.claim("github", "evt_1", keep).await.unwrap(),
+    assert_eq!(
+        b.claim("github", "evt_1", keep).await,
+        Ok(Claim::New),
         "keys are per source"
     );
     a.release("stripe", "evt_1").await.unwrap();
-    assert!(b.claim("stripe", "evt_1", keep).await.unwrap(), "released");
+    assert_eq!(
+        b.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::New),
+        "released"
+    );
+    b.confirm("stripe", "evt_1", keep).await.unwrap();
+    assert_eq!(
+        a.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::Done),
+        "confirmed"
+    );
+    // A keep far past the range of an interval is clamped, not refused.
+    assert_eq!(
+        a.claim("huge", "evt_1", Duration::MAX).await,
+        Ok(Claim::New)
+    );
+    a.confirm("huge", "evt_1", Duration::MAX).await.unwrap();
     scope.drop_schema().await;
 }
 

@@ -29,17 +29,25 @@ this order:
 2. Refuse a body larger than `max_bytes` (`413`).
 3. Check the signature with the source's `Scheme`, and refuse a signed
    timestamp outside the replay window, `tolerance` seconds (`401`). The
-   comparison takes constant time.
+   comparison takes constant time. The sender reads a fixed body; the
+   reason goes to the log.
 4. Decode the body into the handler's event type (`400`).
-5. Claim the idempotency key. A key that already ran gets `200` and
-   `already received`, and the handler does not run.
-6. Run the handler. `Err` gives the key back and answers the rejection's
-   status, `500` by default, so the sender's retry runs it again.
+5. Claim the idempotency key for a five-minute lease. A key that already
+   ran gets `200` and `already received`, and the handler does not run. A
+   copy that arrives while the first still runs gets `409`, so the sender
+   retries it later.
+6. Run the handler. `Ok` keeps the key for `keep`, a week. `Err` gives the
+   key back and answers the rejection's status, `500` by default, so the
+   sender's retry runs it again. A panic or a dropped request gives the
+   key back too. A `?` on any error answers `500` with a fixed body and
+   logs the error.
 
 Schemes: `Scheme::standard` (Standard Webhooks, svix, and what
 `webhooks-out` sends), `Scheme::stripe`, `Scheme::github` and
 `Scheme::hmac_sha256` (one header with a hex MAC of the body). A scheme with
-no timestamp has no replay window; only the idempotency key stops a replay.
+no timestamp has no replay window; only the idempotency key stops a replay,
+and only while the store keeps it. Without `db` the keys are in memory and
+a restart forgets them, so the receiver logs a warning for such a source.
 That key comes from signed bytes only, so with `Scheme::github` and
 `Scheme::hmac_sha256` it is the body's: GitHub's `x-github-delivery` header
 is not signed, and a replay could change it.
