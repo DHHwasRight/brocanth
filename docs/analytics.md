@@ -76,12 +76,16 @@ visitor = first 8 bytes of SHA-256(salt of the day ‖ prehash)   at write time
 - The salt is 32 random bytes from the OS (`getrandom`), one per UTC day,
   kept in `brocanth_analytics_salts`. It is in the database, not in memory,
   so several instances behind one load balancer count a visitor once.
-- Once a day, the flusher deletes every salt of an earlier day. From then
-  on, nobody can recompute yesterday's hashes from an address to test a
-  guess. The hashes become anonymous numbers.
-- Within one day the hash is still pseudonymous: whoever holds the salt and
-  guesses an address and a user agent can check the guess. That window is
-  the price of counting a visitor once a day.
+- Once a day, the flusher deletes every salt of a day before yesterday.
+  From then on, nobody can recompute those hashes from an address to test
+  a guess. The hashes become anonymous numbers. Yesterday's salt stays one
+  more day. Reason: another instance may still flush views of yesterday
+  from its buffer, and a salt made again for that day would count those
+  visitors twice.
+- While its salt exists, a day's hash is still pseudonymous: whoever holds
+  the salt and guesses an address and a user agent can check the guess.
+  That window, at most two days, is the price of counting a visitor once a
+  day.
 
 **One person on two days is two visitors.** The hash cannot link days, so
 "visitors over 30 days" is the sum of daily visitors. Plausible documents
@@ -302,8 +306,8 @@ audience-measurement tool from consent:
   module therefore relies on an audience-measurement exemption, such as the
   CNIL's, and not on "no cookie means no rule". Other regulators may read
   the exemption differently or not have one.
-- **Within a day, the hash is pseudonymous personal data under the GDPR**,
-  because the salt still exists. The legal basis for that day is the site
+- **Until its salt is deleted, the hash is pseudonymous personal data under
+  the GDPR**, because the salt still exists. The legal basis for that day is the site
   owner's choice, usually legitimate interest, with the transparency that
   requires.
 - **The URL is the developer's.** The path and the allowed query parameters

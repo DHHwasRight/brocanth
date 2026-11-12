@@ -1,4 +1,4 @@
-//! [`PgStore`]: page views in two tables of the application's own database.
+//! [`PgStore`]: page views in three tables of the application's own database.
 //!
 //! Plain SQL through the pool the `db` module opened, not sea-query: the
 //! batch insert is one `INSERT … SELECT FROM UNNEST(…)` with one array per
@@ -19,11 +19,14 @@ pub struct PgStore {
 }
 
 impl PgStore {
-    /// The two tables and their index, idempotent.
+    /// The three tables and their indexes, idempotent.
     ///
     /// `day` is a `date` and the only time on a row. `visitor` is the daily
     /// hash; it is not a key and joins nothing. The salts table holds one
-    /// row per day and is emptied of every day before today, once a day.
+    /// row per day and is emptied of every day before yesterday, once a
+    /// day. The sites table names each site with a row, so the admin panel
+    /// does not scan the views to list them. The index on `day` serves the
+    /// retention sweep.
     pub const SCHEMA: &'static str = "\
 CREATE TABLE IF NOT EXISTS brocanth_analytics_salts (
     day  date  PRIMARY KEY,
@@ -44,7 +47,19 @@ CREATE TABLE IF NOT EXISTS brocanth_analytics_views (
 );
 CREATE INDEX IF NOT EXISTS brocanth_analytics_views_site_day
     ON brocanth_analytics_views (site, day);
+CREATE INDEX IF NOT EXISTS brocanth_analytics_views_day
+    ON brocanth_analytics_views (day);
+CREATE TABLE IF NOT EXISTS brocanth_analytics_sites (
+    site text PRIMARY KEY
+);
+INSERT INTO brocanth_analytics_sites (site)
+    SELECT DISTINCT site FROM brocanth_analytics_views
+    ON CONFLICT (site) DO NOTHING;
 ";
+
+    /// The most rows one statement of the retention sweep deletes, so a
+    /// first sweep over years of rows holds no long lock.
+    pub const SWEEP_BATCH: i64 = 10_000;
 
     /// A store over `db`. Creates nothing: see [`PgStore::migrate`].
     pub fn new(db: Db) -> Self {
@@ -68,11 +83,32 @@ CREATE INDEX IF NOT EXISTS brocanth_analytics_views_site_day
         }
         Ok(())
     }
+
+    /// Takes the sweep's advisory lock until `tx` ends. `false` when another
+    /// replica holds it.
+    async fn try_sweep_lock(
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    ) -> Result<bool, StoreError> {
+        let (locked,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(SWEEP_LOCK)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(failed)?;
+        Ok(locked)
+    }
 }
 
 fn failed(e: sqlx::Error) -> StoreError {
-    StoreError::new(format!("analytics store: {e}"))
+    StoreError::new(format!(
+        "analytics store: {e}\n\
+         help: check `[db] url`, and that the tables exist: with `migrate = false`, \
+         run `brocanth_analytics::PgStore::SCHEMA` in a migration"
+    ))
 }
+
+/// The key of the advisory lock the retention sweep takes, so one replica
+/// sweeps and the others skip. `brocanth` as eight ASCII bytes.
+const SWEEP_LOCK: i64 = 0x6272_6f63_616e_7468;
 
 /// `day` is stored as a `date` and travels as days since 1970, so this
 /// crate needs no date library: `DATE '1970-01-01' + n` and
@@ -101,11 +137,19 @@ impl Store for PgStore {
         .fetch_one(self.db.pool())
         .await
         .map_err(failed)?;
-        <[u8; 32]>::try_from(salt.as_slice())
-            .map_err(|_| StoreError::new("analytics store: a salt is not 32 bytes"))
+        <[u8; 32]>::try_from(salt.as_slice()).map_err(|_| {
+            StoreError::new(
+                "analytics store: a salt is not 32 bytes\n\
+                 help: delete that day's row from brocanth_analytics_salts; \
+                 the next write makes a new salt",
+            )
+        })
     }
 
     async fn write(&self, views: &[View]) -> Result<(), StoreError> {
+        // One transaction for every chunk: a failure writes nothing, so the
+        // recorder puts the whole batch back without a double count.
+        let mut tx = self.db.pool().begin().await.map_err(failed)?;
         for chunk in views.chunks(1_000) {
             let col = |f: fn(&View) -> String| chunk.iter().map(f).collect::<Vec<String>>();
             sqlx::query(AssertSqlSafe(format!(
@@ -126,36 +170,72 @@ impl Store for PgStore {
             .bind(col(|v| v.os.clone()))
             .bind(col(|v| v.device.clone()))
             .bind(col(|v| v.country.clone()))
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(failed)?;
         }
-        Ok(())
+        let mut sites: Vec<String> = views.iter().map(|v| v.site.clone()).collect();
+        sites.sort();
+        sites.dedup();
+        sqlx::query(
+            "INSERT INTO brocanth_analytics_sites (site) SELECT * FROM UNNEST($1::text[]) \
+             ON CONFLICT (site) DO NOTHING",
+        )
+        .bind(sites)
+        .execute(&mut *tx)
+        .await
+        .map_err(failed)?;
+        tx.commit().await.map_err(failed)
     }
 
     async fn forget(&self, today: Day, keep_from: Option<Day>) -> Result<(), StoreError> {
+        // One replica sweeps at a time; the others skip, because the one
+        // that holds the lock deletes the same rows.
+        let mut tx = self.db.pool().begin().await.map_err(failed)?;
+        if !Self::try_sweep_lock(&mut tx).await? {
+            return Ok(());
+        }
+        // Yesterday's salt stays one more day: another replica may still
+        // flush views of yesterday, and a salt made again for that day
+        // would count those visitors twice.
         sqlx::query(AssertSqlSafe(format!(
             "DELETE FROM brocanth_analytics_salts WHERE day < {EPOCH} + $1"
         )))
-        .bind(today.0)
-        .execute(self.db.pool())
+        .bind(today.minus(1).0)
+        .execute(&mut *tx)
         .await
         .map_err(failed)?;
-        if let Some(keep_from) = keep_from {
-            sqlx::query(AssertSqlSafe(format!(
-                "DELETE FROM brocanth_analytics_views WHERE day < {EPOCH} + $1"
+        tx.commit().await.map_err(failed)?;
+        let Some(keep_from) = keep_from else {
+            return Ok(());
+        };
+        // In bounded batches, each in its own transaction, so the first
+        // sweep over years of rows holds no long lock.
+        loop {
+            let mut tx = self.db.pool().begin().await.map_err(failed)?;
+            if !Self::try_sweep_lock(&mut tx).await? {
+                return Ok(());
+            }
+            let deleted = sqlx::query(AssertSqlSafe(format!(
+                "DELETE FROM brocanth_analytics_views WHERE id IN \
+                 (SELECT id FROM brocanth_analytics_views WHERE day < {EPOCH} + $1 LIMIT $2)"
             )))
             .bind(keep_from.0)
-            .execute(self.db.pool())
+            .bind(Self::SWEEP_BATCH)
+            .execute(&mut *tx)
             .await
-            .map_err(failed)?;
+            .map_err(failed)?
+            .rows_affected();
+            tx.commit().await.map_err(failed)?;
+            if deleted < Self::SWEEP_BATCH.unsigned_abs() {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     async fn sites(&self) -> Result<Vec<String>, StoreError> {
         let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT DISTINCT site FROM brocanth_analytics_views ORDER BY site")
+            sqlx::query_as("SELECT site FROM brocanth_analytics_sites ORDER BY site")
                 .fetch_all(self.db.pool())
                 .await
                 .map_err(failed)?;
