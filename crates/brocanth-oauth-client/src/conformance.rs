@@ -92,7 +92,7 @@ pub async fn run<S: TokenStore>(store: &S) {
         if page.is_empty() {
             break;
         }
-        offset += page.len();
+        offset += page.len() as u32;
         all.extend(page);
     }
     let ours: Vec<(String, String)> = all
@@ -108,6 +108,11 @@ pub async fn run<S: TokenStore>(store: &S) {
             (bob.clone(), "github".to_string()),
         ],
         "list orders by account then provider, and limit/offset page it"
+    );
+    assert_eq!(
+        store.count().await.unwrap(),
+        all.len() as u64,
+        "count is the number of rows list pages through"
     );
 
     // Delete says whether there was a row, and leaves the others.

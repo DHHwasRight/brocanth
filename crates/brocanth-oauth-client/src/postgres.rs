@@ -172,12 +172,12 @@ impl TokenStore for PgTokenStore {
             .map_err(failed)
     }
 
-    async fn list(&self, limit: usize, offset: usize) -> Result<Vec<Connection>, StoreError> {
+    async fn list(&self, limit: u32, offset: u32) -> Result<Vec<Connection>, StoreError> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {LISTED} FROM brocanth_oauth_tokens ORDER BY account, provider LIMIT $1 OFFSET $2"
         )))
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
         .fetch_all(self.db.pool())
         .await
         .map_err(failed)?;
@@ -185,5 +185,13 @@ impl TokenStore for PgTokenStore {
             .map(connection)
             .collect::<Result<_, _>>()
             .map_err(failed)
+    }
+
+    async fn count(&self) -> Result<u64, StoreError> {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM brocanth_oauth_tokens")
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(failed)?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 }

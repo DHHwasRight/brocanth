@@ -736,12 +736,16 @@ impl OauthClient {
     ///
     /// # Errors
     /// [`Error::Store`].
-    pub async fn all_connections(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<Connection>, Error> {
+    pub async fn all_connections(&self, limit: u32, offset: u32) -> Result<Vec<Connection>, Error> {
         Ok(self.inner.store.list(limit, offset).await?)
+    }
+
+    /// How many connections there are.
+    ///
+    /// # Errors
+    /// [`Error::Store`].
+    pub async fn count_connections(&self) -> Result<u64, Error> {
+        Ok(self.inner.store.count().await?)
     }
 
     /// Revokes the grant at the provider when it has an RFC 7009 endpoint,
