@@ -313,3 +313,23 @@ fn two_row_policies_for_one_model_are_refused_at_startup() {
             .resource(rows::Named::<0>),
     );
 }
+
+#[test]
+fn try_new_returns_a_configuration_error_with_a_help_line() {
+    let refused = Admin::try_new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .resource(rows::Named::<2>),
+    );
+    let Err(error) = refused else {
+        panic!("a row policy for a model the admin does not hold is refused");
+    };
+    assert!(
+        matches!(error, brocanth_admin::AdminError::Config(_)),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    assert!(text.contains("no model with that key"), "{text}");
+    assert!(text.contains("\nhelp: "), "{text}");
+}

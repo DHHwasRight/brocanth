@@ -58,6 +58,12 @@ pub enum AdminError {
     /// resource and the model describe different tables.
     #[error("admin row policy does not match its model: {0}")]
     Mask(MaskViolation),
+    /// The configuration cannot build an admin: a row policy for a model the
+    /// admin does not show, two pages with one key, an inline with no
+    /// column. Found by [`Admin::try_new`], before any request. The message
+    /// ends with a `help:` line.
+    #[error("the admin's configuration is not valid: {0}")]
+    Config(String),
 }
 
 /// What a screen produced.
@@ -287,7 +293,27 @@ impl Admin {
     /// Discovery runs once, here: the entity registry is read out of the
     /// binary and cannot change while the process runs, so reading it per
     /// request would buy nothing.
-    pub fn new(data: SharedData, mut config: AdminConfig) -> Admin {
+    ///
+    /// # Panics
+    ///
+    /// The configuration is not valid; the message says what and ends with
+    /// a `help:` line. [`Admin::try_new`] returns the error instead.
+    pub fn new(data: SharedData, config: AdminConfig) -> Admin {
+        match Admin::try_new(data, config) {
+            Ok(admin) => admin,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// [`Admin::new`], with a configuration error returned rather than
+    /// raised. A server builds its admin with this at startup, so a
+    /// mistake stops the start and not every request.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError::Config`], with a `help:` line.
+    pub fn try_new(data: SharedData, mut config: AdminConfig) -> Result<Admin, AdminError> {
+        let invalid = |message: String| Err(AdminError::Config(message));
         let descriptors = discover(data.registry(), &config.discovery);
         let mut configured = config.take_models();
         let resources = config.take_resources();
@@ -299,21 +325,28 @@ impl Admin {
         for (index, resource) in resources.iter().enumerate() {
             let model = resource.model();
             let Some(descriptor) = descriptors.iter().find(|d| d.key == model) else {
-                panic!(
+                return invalid(format!(
                     "the admin has a row policy for `{model}`, but the data source holds no \
-                     model with that key, or discovery left it out"
-                );
+                     model with that key, or discovery left it out\nhelp: set \
+                     `AdminResource::MODEL` to a model key the admin shows, or check \
+                     `AdminConfig::discovering`"
+                ));
             };
             if descriptor.table != resource.table() {
-                panic!(
+                return invalid(format!(
                     "the admin's row policy for `{model}` is written for table `{}`, but the \
-                     model's table is `{}`",
+                     model's table is `{}`\nhelp: write the policy's `entity … in \"{}\"` for \
+                     the model's own table",
                     resource.table(),
+                    descriptor.table,
                     descriptor.table
-                );
+                ));
             }
             if resources[..index].iter().any(|r| r.model() == model) {
-                panic!("the admin has two row policies for `{model}`");
+                return invalid(format!(
+                    "the admin has two row policies for `{model}`\nhelp: register one \
+                     `AdminConfig::resource` per model"
+                ));
             }
         }
         let entries: Vec<Entry> = descriptors
@@ -340,12 +373,13 @@ impl Admin {
             for action in entry.admin.own_actions() {
                 for column in action.columns() {
                     if entry.descriptor.column(column).is_none() {
-                        panic!(
+                        return invalid(format!(
                             "the admin action `{}` on `{}` sets `{column}`, which is not a column \
-                             of that model",
+                             of that model\nhelp: name a column of `{}` in the action",
                             action.key(),
+                            entry.descriptor.key,
                             entry.descriptor.key
-                        );
+                        ));
                     }
                 }
             }
@@ -355,16 +389,16 @@ impl Admin {
         for entry in &entries {
             let pages = entry.admin.pages();
             for (index, page) in pages.iter().enumerate() {
-                check_page(&entry.descriptor.key, page);
+                check_page(&entry.descriptor.key, page).map_err(AdminError::Config)?;
                 if pages[..index]
                     .iter()
                     .any(|other| other.record == page.record && other.key == page.key)
                 {
-                    panic!(
+                    return invalid(format!(
                         "the admin has two pages called `{}` under `{}`.\nhelp: give each page \
                          its own key",
                         page.key, entry.descriptor.key
-                    );
+                    ));
                 }
             }
         }
@@ -372,31 +406,26 @@ impl Admin {
         // Resolved now, so a misspelt model or an ambiguous column stops the
         // build of the admin and not the first edit form.
         let mut entries = entries;
-        let resolved: Vec<Vec<(String, String)>> = entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .admin
-                    .inlines()
+        let mut resolved: Vec<Vec<(String, String)>> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let inlines = entry.admin.inlines();
+            let mut columns = Vec::with_capacity(inlines.len());
+            for (index, inline) in inlines.iter().enumerate() {
+                if inlines[..index]
                     .iter()
-                    .enumerate()
-                    .map(|(index, inline)| {
-                        if entry.admin.inlines()[..index]
-                            .iter()
-                            .any(|other| other.model == inline.model)
-                        {
-                            panic!(
-                                "the admin has two inlines of `{}` on `{}`.\nhelp: keep one: an \
-                                 inline's rows post under the child model's key, so two would \
-                                 collide",
-                                inline.model, entry.descriptor.key
-                            );
-                        }
-                        resolve_inline(&entries, entry, inline)
-                    })
-                    .collect()
-            })
-            .collect();
+                    .any(|other| other.model == inline.model)
+                {
+                    return invalid(format!(
+                        "the admin has two inlines of `{}` on `{}`.\nhelp: keep one: an \
+                         inline's rows post under the child model's key, so two would \
+                         collide",
+                        inline.model, entry.descriptor.key
+                    ));
+                }
+                columns.push(resolve_inline(&entries, entry, inline).map_err(AdminError::Config)?);
+            }
+            resolved.push(columns);
+        }
         for (entry, columns) in entries.iter_mut().zip(resolved) {
             for (inline, (fk, parent_column)) in entry.admin.inlines_mut().iter_mut().zip(columns) {
                 inline.fk = Some(fk);
@@ -411,13 +440,13 @@ impl Admin {
         // wrong screen. Two modules claiming one path is an error that
         // names both, and a panel shadowing a model is the same mistake.
         if let Some((panel, model)) = collision(&panels, &entries) {
-            panic!(
+            return invalid(format!(
                 "the admin has a panel and a model both called `{panel}`: the panel would \
-                 shadow the model at the same URL. Rename the panel, or hide the model with \
-                 `Discovery::without`. (model discovered as `{model}`)"
-            );
+                 shadow the model at the same URL (model discovered as `{model}`)\nhelp: \
+                 rename the panel, or hide the model with `Discovery::without`"
+            ));
         }
-        Admin {
+        Ok(Admin {
             unscoped_rows,
             data,
             header: config.header.unwrap_or_else(|| config.title.clone()),
@@ -435,7 +464,7 @@ impl Admin {
             actions,
             journal,
             record_links,
-        }
+        })
     }
 
     /// The keys of every panel the admin shows.
@@ -3149,39 +3178,44 @@ struct PageRoute<'a> {
 
 /// Refuses a page key that is empty, holds a slash, or is a segment the
 /// admin's own screens use at that place.
-fn check_page(model: &str, page: &crate::config::ModelPage) {
+fn check_page(model: &str, page: &crate::config::ModelPage) -> Result<(), String> {
     let key = page.key.as_str();
     let (method, reserved): (&str, &[&str]) = match page.record {
         false => ("page", &["new", "actions"]),
         true => ("record_page", &["edit", "delete"]),
     };
     if key.is_empty() || key.contains('/') {
-        panic!(
+        return Err(format!(
             "the admin's page `{key}` under `{model}` is not one path segment.\nhelp: give \
              `ModelAdmin::{method}` a key with no slash, such as `report`"
-        );
+        ));
     }
     if reserved.contains(&key) {
-        panic!(
+        return Err(format!(
             "the admin's page `{key}` under `{model}` takes a path the admin uses.\nhelp: \
              `ModelAdmin::{method}` cannot use {}; choose another key",
             reserved.join(" or ")
-        );
+        ));
     }
+    Ok(())
 }
 
 /// The child column an inline reads and the parent column it holds.
 ///
-/// Panics with a `help:` line when the child is not shown or no single
+/// An error with a `help:` line when the child is not shown or no single
 /// column points at the parent.
-fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String, String) {
+fn resolve_inline(
+    entries: &[Entry],
+    parent: &Entry,
+    inline: &Inline,
+) -> Result<(String, String), String> {
     let parent_key = &parent.descriptor.key;
     let Some(child) = entries.iter().find(|e| e.descriptor.key == inline.model) else {
-        panic!(
+        return Err(format!(
             "the admin's inline `{}` on `{parent_key}` names no model the admin shows.\nhelp: \
              use the key of a discovered model that is not hidden",
             inline.model
-        );
+        ));
     };
     let points_here = |column: &ColumnDescriptor| {
         child
@@ -3193,12 +3227,12 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
     match &inline.fk {
         Some(name) => {
             let Some(column) = child.descriptor.column(name) else {
-                panic!(
+                return Err(format!(
                     "the admin's inline `{}` on `{parent_key}` names `{name}`, which is not a \
                      column of `{}`.\nhelp: name the column of `{}` that holds the `{parent_key}` \
                      key",
                     inline.model, inline.model, inline.model
-                );
+                ));
             };
             // A column the schema does not relate holds the parent's one
             // key column.
@@ -3212,14 +3246,14 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
                 }
             });
             let Some(parent_column) = parent_column else {
-                panic!(
+                return Err(format!(
                     "the admin's inline `{}` on `{parent_key}` reads `{name}`, which points at \
                      another model.\nhelp: name the column of `{}` that holds the `{parent_key}` \
                      key",
                     inline.model, inline.model
-                );
+                ));
             };
-            (name.clone(), parent_column)
+            Ok((name.clone(), parent_column))
         }
         None => {
             let found: Vec<(String, String)> = child
@@ -3231,18 +3265,18 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
                 })
                 .collect();
             match found.as_slice() {
-                [one] => one.clone(),
-                [] => panic!(
+                [one] => Ok(one.clone()),
+                [] => Err(format!(
                     "the admin's inline `{}` on `{parent_key}` found no column of `{}` that \
                      points at `{parent_key}`.\nhelp: name it with `Inline::fk`, or declare the \
                      relation with `ModelAdmin::foreign_key`",
                     inline.model, inline.model
-                ),
-                _ => panic!(
+                )),
+                _ => Err(format!(
                     "the admin's inline `{}` on `{parent_key}` found more than one column of `{}` \
                      that points at `{parent_key}`.\nhelp: name the one to use with `Inline::fk`",
                     inline.model, inline.model
-                ),
+                )),
             }
         }
     }
