@@ -175,6 +175,15 @@ impl SigningKey {
     /// Public because [`crate::oauth::FlowState`] seals itself with the same
     /// key: one key, one signer, one place to audit. It is not a general
     /// signing service — do not sign application data with the session key.
+    ///
+    /// One key signs four kinds of message, so each kind but the session id
+    /// starts with its own tag: `auth-proof.` (a pending sign-in),
+    /// `oauth-flow.` (a provider flow) and `oauth-link.` (a pending link).
+    /// A session id is base64url and has no `.`, so it never equals a
+    /// tagged message, and no tagged message equals another kind. Safety
+    /// rests on the tags, not on JSON shapes that happen to differ. The
+    /// login-alert network digest is the one other use: three or six bytes,
+    /// stored in a table and never presented by a client.
     pub fn sign_message(&self, message: &[u8]) -> Vec<u8> {
         let mut mac = <HmacSha256 as KeyInit>::new_from_slice(self.0.as_ref())
             .expect("HMAC accepts a key of any length");

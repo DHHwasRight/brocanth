@@ -138,6 +138,7 @@ use crate::identity::AccountId;
 use crate::impersonation::AccountHolder;
 use crate::random::{b64, ct_eq, unb64};
 use crate::recovery::{self, RecoveryCodes};
+use crate::secret_key::{self, SecretKey};
 use crate::session::SigningKey;
 use crate::storage::{MfaStore, TotpSecretRecord};
 use crate::totp::{Totp, TotpSecret};
@@ -481,7 +482,7 @@ impl Verified {
         })
         .expect("a proof always serialises");
         let encoded = b64(&payload);
-        let tag = key.sign_message(encoded.as_bytes());
+        let tag = key.sign_message(&proof_message(&encoded));
         format!("{encoded}.{}", b64(&tag))
     }
 
@@ -496,7 +497,7 @@ impl Verified {
     pub fn unseal(key: &SigningKey, now: UnixTime, sealed: &str) -> Option<Self> {
         let (encoded, tag) = sealed.rsplit_once('.')?;
         let presented = unb64(tag).ok()?;
-        let expected = key.sign_message(encoded.as_bytes());
+        let expected = key.sign_message(&proof_message(encoded));
         // Constant time, for the same reason the session cookie is.
         if !ct_eq(&presented, &expected) {
             return None;
@@ -510,6 +511,14 @@ impl Verified {
             kinds: payload.kinds,
         })
     }
+}
+
+/// The signed message of a sealed proof: its own tag, then the payload. See
+/// [`SigningKey::sign_message`] for the tags.
+fn proof_message(encoded: &str) -> Vec<u8> {
+    let mut message = b"auth-proof.".to_vec();
+    message.extend_from_slice(encoded.as_bytes());
+    message
 }
 
 /// What an account could prove, as the store answered it.
@@ -862,6 +871,8 @@ pub struct Mfa<S: MfaStore, C: Clock> {
     /// enrolled, so that "no second factor" costs what "wrong code" costs.
     /// [`crate::password::Passwords`] keeps a dummy hash for the same reason.
     dummy: TotpSecret,
+    /// Seals TOTP secrets at rest, when set. See [`crate::secret_key`].
+    seal: Option<SecretKey>,
 }
 
 impl<S: MfaStore, C: Clock> Mfa<S, C> {
@@ -878,7 +889,30 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
             policy: FactorPolicy::recommended(),
             recovery_code_count: recovery::CODES_PER_SET,
             dummy: TotpSecret::generate()?,
+            seal: None,
         })
+    }
+
+    /// Seals every TOTP secret this service writes with `key`, and opens
+    /// sealed ones with it. A plain secret written before still works.
+    #[must_use]
+    pub fn sealing_secrets_with(mut self, key: SecretKey) -> Self {
+        self.seal = Some(key);
+        self
+    }
+
+    /// The secret a stored row holds, opened when it is sealed.
+    fn stored_secret(&self, account: &AccountId, stored: &[u8]) -> Result<TotpSecret, AuthError> {
+        if !secret_key::is_sealed(stored) {
+            return Ok(TotpSecret::from_bytes(stored.to_vec()));
+        }
+        let key = self.seal.as_ref().ok_or_else(|| {
+            AuthError::misconfigured(
+                "a TOTP secret is sealed and no second-factor key is set\n\
+                 help: give Mfa the key it was sealed with (Mfa::sealing_secrets_with)",
+            )
+        })?;
+        Ok(TotpSecret::from_bytes(key.open_totp(account, stored)?))
     }
 
     /// Replaces the TOTP parameters. Read [`Totp::custom`] first.
@@ -1028,11 +1062,15 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
             return Err(AuthError::AlreadyEnrolled);
         }
         let secret = TotpSecret::generate()?;
+        let stored = match &self.seal {
+            Some(key) => key.seal_totp(who.account(), secret.as_bytes())?,
+            None => secret.as_bytes().to_vec(),
+        };
         self.store
             .put_totp_secret(
                 who.account(),
                 TotpSecretRecord {
-                    secret: secret.as_bytes().to_vec(),
+                    secret: stored,
                     created_at: self.clock.now(),
                     confirmed_at: None,
                     last_step: 0,
@@ -1076,7 +1114,7 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         if record.confirmed_at.is_some() {
             return Err(AuthError::AlreadyEnrolled);
         }
-        let secret = TotpSecret::from_bytes(record.secret);
+        let secret = self.stored_secret(account, &record.secret)?;
         let step = self
             .totp
             .matching_step(&secret, presented, self.clock.now())
@@ -1169,7 +1207,8 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         let enrolled = record
             .as_ref()
             .filter(|r| r.confirmed_at.is_some())
-            .map(|r| TotpSecret::from_bytes(r.secret.clone()));
+            .map(|r| self.stored_secret(account, &r.secret))
+            .transpose()?;
         let secret = enrolled.as_ref().unwrap_or(&self.dummy);
 
         let step = self.totp.matching_step(secret, presented, self.clock.now());
@@ -1262,6 +1301,26 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sealed_proof_is_signed_under_its_own_tag() {
+        let key = SigningKey::from_bytes([9; 32]);
+        let proof = Verified::minted(AccountId::new("ada"), FactorSet::of([FactorKind::Password]));
+        let sealed = proof.seal(&key, 100, 60);
+        let (encoded, tag) = sealed.rsplit_once('.').unwrap();
+        // The signature is over the tagged message, not the bare payload, so
+        // it verifies as no other kind of message under the same key.
+        assert_eq!(
+            crate::random::unb64(tag).unwrap(),
+            key.sign_message(&proof_message(encoded))
+        );
+        assert_ne!(
+            crate::random::unb64(tag).unwrap(),
+            key.sign_message(encoded.as_bytes())
+        );
+        assert!(Verified::unseal(&key, 100, &sealed).is_some());
+        assert!(crate::oauth::FlowState::unseal(&key, &sealed).is_err());
+    }
 
     #[test]
     fn a_set_round_trips_through_its_names() {

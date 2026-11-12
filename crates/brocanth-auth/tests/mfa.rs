@@ -544,3 +544,34 @@ async fn wrong_second_factor_codes_are_capped_per_account() {
         .await
         .expect("the recovery code was not spent while refused");
 }
+
+#[tokio::test]
+async fn a_sealed_totp_secret_is_not_in_the_store_and_still_signs_in() {
+    use brocanth_auth::SecretKey;
+
+    let f = Fixture::new();
+    let account = an_account(&f).await;
+    let key = SecretKey::from_bytes([7; 32]);
+    let mfa = f.mfa().sealing_secrets_with(key.clone());
+    let who = AccountHolder::without_a_session(account.clone());
+    let enrolment = mfa
+        .begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .unwrap();
+    let stored = f.store.totp_secret(&account).await.unwrap().unwrap().secret;
+    assert_ne!(stored, enrolment.secret.as_bytes(), "sealed at rest");
+    let code = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+    mfa.confirm_totp_enrolment(&who, &code).await.unwrap();
+    f.clock.advance(30);
+    let next = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+
+    // Without the key, a sealed secret is an error that says what to set.
+    let err = f.mfa().verify_totp(&account, &next).await.unwrap_err();
+    assert!(err.to_string().contains("help:"), "{err}");
+    // With it, the code signs in.
+    f.mfa()
+        .sealing_secrets_with(key)
+        .verify_totp(&account, &next)
+        .await
+        .expect("the sealed secret opens");
+}

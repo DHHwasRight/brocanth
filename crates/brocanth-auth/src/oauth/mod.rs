@@ -210,10 +210,13 @@ impl FlowState {
     }
 }
 
-fn sign(key: &SigningKey, message: &[u8]) -> Vec<u8> {
+fn sign(key: &SigningKey, payload: &[u8]) -> Vec<u8> {
     // `SigningKey::sign` is private to the session module on purpose: one key,
-    // one signer. This goes through the same code.
-    key.sign_message(message)
+    // one signer. This goes through the same code, under its own tag (see
+    // `SigningKey::sign_message`).
+    let mut message = b"oauth-flow.".to_vec();
+    message.extend_from_slice(payload);
+    key.sign_message(&message)
 }
 
 /// Where to send the browser, and what to keep until it comes back.

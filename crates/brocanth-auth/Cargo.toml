@@ -57,6 +57,12 @@ subtle = { version = "2.6", optional = true }
 # The OS CSPRNG, directly. Session ids, state, nonce, PKCE verifiers and
 # single-use tokens are all "give me N unpredictable bytes" and nothing else.
 getrandom = { version = "0.4", optional = true }
+# TOTP secrets sealed at rest (`src/secret_key.rs`). XChaCha20-Poly1305,
+# the version `brocanth-oauth-client` seals tokens with, so one AEAD in the
+# tree.
+chacha20poly1305 = { version = "0.11", default-features = false, features = [
+    "alloc",
+], optional = true }
 
 # --- plumbing ---------------------------------------------------------------
 base64 = { version = "0.23", optional = true }
@@ -210,6 +216,7 @@ runtime = [
     "dep:sha1",
     "dep:subtle",
     "dep:getrandom",
+    "dep:chacha20poly1305",
     "dep:base64",
     "dep:http",
     "dep:serde",
