@@ -168,45 +168,88 @@ recreate (drop then create).
 
 | Node | Alter in place | Recreate |
 |---|---|---|
-| Role | `ALTER ROLE … WITH [NO]INHERIT [NO]CREATEDB [NO]CREATEROLE`; membership `GRANT`/`REVOKE` | never |
-| Function | body or volatility: `CREATE OR REPLACE` | arguments or return type |
-| Table | `ENABLE`/`DISABLE`, `FORCE`/`NO FORCE` | never |
-| Grant | `REVOKE ALL`, then `GRANT` | never |
+| Role | one `ALTER ROLE … [NO]INHERIT`, `[NO]CREATEDB` or `[NO]CREATEROLE` per attribute that differs in the database; membership `GRANT`/`REVOKE` | never |
+| Function | body, volatility or `SECURITY DEFINER`: `CREATE OR REPLACE`; `EXECUTE` grants: `REVOKE` the removed, `GRANT` the added | arguments or return type |
+| Table | `FORCE`/`NO FORCE` (a table that stays keeps `ENABLE`) | never |
+| Grant | `REVOKE` the removed privileges, `GRANT` the added ones | never |
 | Policy | `ALTER POLICY … TO … USING … WITH CHECK …` | `AS` or `FOR` changed, the table changed, or `USING`/`WITH CHECK` removed (`ALTER POLICY` cannot clear one) |
 
 A recreate spreads to the nodes that depend on it: `DROP FUNCTION` fails
 while a policy calls the function, so those policies are recreated too.
+A drop spreads the same way. Drops run before alters, so a policy that
+named a dropped role, or called a dropped function, is recreated: its drop
+runs before the drop of what it needed. A role is never recreated; its
+membership of a dropped role ends with the `DROP ROLE`.
 
 Output order: every drop (old graph, reverse topological order), then every
 create and alter (new graph, topological order).
 
 The `-- down` part is not the inverse of each step. It is the diff from the
-new snapshot to the old one, so it follows the same rules and the same
-order.
+new snapshot to the old one (`down`), so it follows the same rules and the
+same order, with one exception: it drops no role (see below).
 
 A rename is a drop and a create. drizzle-kit asks whether a pair is a
 rename. Here a policy holds no data, so a drop plus a create loses nothing,
-and the migration runs in one transaction, so no request sees the gap. A
+and the migration runs in one transaction, so no request sees the gap:
+`brocanth-db`'s migrator runs each file in one, and the SeaORM file says
+`use_transaction() -> Some(true)`. A
 role rename would lose grants made outside this crate; rename a role by
 hand.
 
 ### Roles are cluster-wide
 
 `CREATE ROLE` is not per database. Two databases on one server, or a
-re-created test database, meet a role that exists. So a role is created
-with `DO $rls$ … IF NOT EXISTS (SELECT FROM pg_roles …) THEN CREATE ROLE …`
-and dropped with `DROP ROLE IF EXISTS`. A role that still owns objects or
-holds privileges outside the schema fails to drop: Postgres names them.
+re-created test database, meet a role that exists. So a role is made in a
+`DO $rls$ … $rls$` block:
+
+- Missing: `CREATE ROLE … NOLOGIN`, with only the attributes that differ
+  from the `CREATE ROLE` defaults (`NOINHERIT`, `CREATEDB`, `CREATEROLE`).
+- Present: the migration fails, with a `help:` line, when the role has
+  `SUPERUSER` or `BYPASSRLS`: either bypasses every policy, so adopting it
+  would make the policies a lie. Otherwise each attribute that differs is
+  altered, one `ALTER ROLE` each. An attribute that matches is not
+  touched, so it needs no privilege.
+
+Removing a role from the schema drops it in the up part only when
+`pg_shdepend` shows nothing on the server depends on it; otherwise the
+role stays, with a notice. The `-- down` part never drops a role: another
+database on the server, or the next deploy, may use it. A role left
+behind is adopted by the next up part.
+
+#### The privileges the migration role needs
+
+The migration does not need a superuser:
+
+- `CREATEROLE`, to create a managed role.
+- `ADMIN OPTION` on each managed role it did not create, to alter it or
+  grant it. On Postgres 16, the creator of a role gets it.
+- For `member` (`GRANT role TO login`): from Postgres 16, `ADMIN OPTION`
+  on the granted role, which its creator has; before 16, `CREATEROLE`.
+- `CREATEDB` only to set or clear `CREATEDB` on a role.
+- Ownership of each table (or membership of its owner), for `ENABLE`,
+  `FORCE` and `CREATE POLICY`, and `CREATE` on the schema of a function.
+
+A refused `ALTER ROLE` fails with a `help:` line that names these.
 
 `BYPASSRLS` and `SUPERUSER` are not offered. A superuser bypasses every
 policy, `FORCE` included. Do not connect the application as a superuser.
+
+#### `SECURITY DEFINER`
+
+`Function::security_definer(&["app"])` writes
+`SET search_path = "app", pg_temp`: `pg_temp` last, so a caller's
+temporary table cannot stand in for a table the body reads. `EXECUTE` is
+revoked from `PUBLIC` and granted to the roles `grant_execute` names. A
+policy that calls the function for a role without the grant is refused.
 
 ### Where the file goes
 
 The `db` module's SQL migrations (`docs/migrations.md` §7):
 `migrations/<YYYYMMDD_HHMMSS>_<name>.sql`, the up statements, a `-- down`
 line, the down statements. `migrate up` applies it in one transaction like
-any other file. With `model`, `rls make` writes a SeaORM migration file,
+any other file. The SeaORM migrator also runs each migration in one
+transaction on Postgres; the file `rls make` writes asks for it
+explicitly. With `model`, `rls make` writes a SeaORM migration file,
 `migrations/m<UTC>_<name>.rs`, that runs the same SQL, and prints the
 `migrate sync` step that lists it.
 
@@ -235,14 +278,16 @@ SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
 
 - **Per transaction.** `SET LOCAL` and `set_config(…, true)` end at
   `COMMIT` or `ROLLBACK`. The pool hands the connection to the next request
-  with the login role and no value. A request that does not assume a
-  principal gets the login role, and the policy sees `NULL`.
+  with the login role and no value. A request that does not assume an
+  identity gets the login role, and the policy sees `NULL`.
 - **The value is a bind parameter.** The role name cannot be one (`SET`
   takes no parameter), so it is a quoted identifier and checked as one.
 - **`NULLIF(…, '')`.** After a `set_config` in an earlier transaction on the
   same connection, `current_setting(key, true)` returns `''`, not `NULL`.
   `''::bigint` is an error. `NULLIF` turns both into `NULL`, and
-  `tenant_id = NULL` admits no row.
+  `tenant_id = NULL` admits no row. That holds for `eq` and the other
+  comparisons. `is` (`IS NOT DISTINCT FROM`) would admit every row whose
+  column is `NULL`, so a schema refuses `is` on a setting.
 - **Not on `Db`.** A statement on the pool runs in its own implicit
   transaction, so a setting would end with it. The principal exists only on
   a `Tx`.

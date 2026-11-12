@@ -82,6 +82,12 @@ pub fn seaorm_file(name: &str, up: &Plan, down: &Plan) -> String {
          \n\
          #[async_trait::async_trait]\n\
          impl MigrationTrait for Migration {{\n\
+         \x20   /// One transaction, so no request sees a table between a\n\
+         \x20   /// dropped policy and its new one.\n\
+         \x20   fn use_transaction(&self) -> Option<bool> {{\n\
+         \x20       Some(true)\n\
+         \x20   }}\n\
+         \n\
          \x20   async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {{\n\
          \x20       manager.get_connection().execute_unprepared(UP).await?;\n\
          \x20       Ok(())\n\
