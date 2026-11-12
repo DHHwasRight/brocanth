@@ -232,7 +232,7 @@ pub use error::{Error, Result};
 #[cfg(feature = "runtime")]
 pub use events::{EventFn, JobEvent, JobEvents, Silent};
 #[cfg(feature = "runtime")]
-pub use job::{FailureKind, Job, JobContext, JobFailure, JobId};
+pub use job::{FailureKind, Job, JobContext, JobFailure, JobId, WorkerState};
 #[cfg(feature = "runtime")]
 pub use panic_hook::capture_backtraces;
 #[cfg(feature = "runtime")]

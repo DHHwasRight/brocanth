@@ -137,15 +137,78 @@ pub use brocanth_queue::JobId;
 #[derive(Clone, Debug)]
 pub struct JobContext {
     pub(crate) inner: brocanth_queue::JobContext,
+    pub(crate) state: WorkerState,
+}
+
+/// Values a worker hands every job it runs, one per type.
+///
+/// A job is decoded from a row, so it holds no handle on the application:
+/// no client, no pool, no mailer. The plugin that starts the worker gives
+/// them here, with [`WorkerBuilder::state`](crate::WorkerBuilder::state),
+/// and the job reads them with [`JobContext::state`]. Two applications in
+/// one process each give their own worker their own values; a `static`
+/// would let the first one win for both.
+#[derive(Clone, Default)]
+pub struct WorkerState {
+    values: std::sync::Arc<
+        std::collections::HashMap<
+            std::any::TypeId,
+            std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        >,
+    >,
+}
+
+impl WorkerState {
+    /// The same values, with `value` added. A second value of one type
+    /// replaces the first.
+    #[must_use]
+    pub fn with<T: Send + Sync + 'static>(self, value: T) -> Self {
+        let mut values = (*self.values).clone();
+        values.insert(std::any::TypeId::of::<T>(), std::sync::Arc::new(value));
+        Self {
+            values: std::sync::Arc::new(values),
+        }
+    }
+
+    /// The value of type `T`, when one was given.
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.values
+            .get(&std::any::TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
+    }
+}
+
+impl fmt::Debug for WorkerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkerState")
+            .field("values", &self.values.len())
+            .finish()
+    }
 }
 
 impl JobContext {
     /// A context for a job run outside a worker, as a test of a job's body
-    /// does. It is never asked to stop.
+    /// does. It is never asked to stop, and holds no state: add some with
+    /// [`JobContext::with_state`].
     pub fn detached(id: JobId, name: &str, queue: &str, attempt: u32, max_attempts: u32) -> Self {
         Self {
             inner: brocanth_queue::JobContext::detached(id, name, queue, attempt, max_attempts),
+            state: WorkerState::default(),
         }
+    }
+
+    /// The same context, with `value` in its state. For a test that runs a
+    /// job's body by hand.
+    #[must_use]
+    pub fn with_state<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.state = self.state.with(value);
+        self
+    }
+
+    /// The value of type `T` the worker was given with
+    /// [`WorkerBuilder::state`](crate::WorkerBuilder::state).
+    pub fn state<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.get::<T>()
     }
 
     /// The job's id.
