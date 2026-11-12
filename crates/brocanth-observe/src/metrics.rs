@@ -16,7 +16,7 @@
 //! with [`Metrics::on_scrape`]: the refresh runs when Prometheus asks, under
 //! the check timeout, and not on a timer nobody reads.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -50,6 +50,12 @@ type Refresh = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 pub struct Metrics {
     registry: Mutex<Registry>,
     refreshers: Mutex<Vec<Refresh>>,
+    /// Held while the refreshers run, so scrapes that arrive together
+    /// share one run.
+    refreshing: tokio::sync::Mutex<()>,
+    /// How many runs finished. A scrape that waited for a run to finish
+    /// uses it and does not start another.
+    refreshed: AtomicU64,
     pub(crate) http: HttpMetrics,
 }
 
@@ -75,6 +81,8 @@ impl Metrics {
         Self {
             registry: Mutex::new(registry),
             refreshers: Mutex::new(Vec::new()),
+            refreshing: tokio::sync::Mutex::new(()),
+            refreshed: AtomicU64::new(0),
             http,
         }
     }
@@ -111,7 +119,20 @@ impl Metrics {
     }
 
     /// Runs the refreshers, then writes every series as OpenMetrics text.
+    ///
+    /// Scrapes that arrive while a run is in flight wait for it and share
+    /// it: a slow refresher runs once, not once per scrape.
     pub async fn render(&self, timeout: Duration) -> String {
+        let before = self.refreshed.load(Ordering::SeqCst);
+        let _running = self.refreshing.lock().await;
+        if self.refreshed.load(Ordering::SeqCst) == before {
+            self.refresh(timeout).await;
+            self.refreshed.fetch_add(1, Ordering::SeqCst);
+        }
+        self.encode()
+    }
+
+    async fn refresh(&self, timeout: Duration) {
         let refreshers = self
             .refreshers
             .lock()
@@ -128,7 +149,6 @@ impl Metrics {
                 tracing::warn!(target: "brocanth::metrics", "a metrics refresh timed out: {elapsed}");
             }
         }
-        self.encode()
     }
 
     /// Writes every series as they are now, without refreshing.
@@ -216,7 +236,7 @@ pub(crate) fn authorized(header: Option<&str>, token: &str) -> bool {
     let Some(given) = header.and_then(|h| h.strip_prefix("Bearer ")) else {
         return false;
     };
-    let (a, b) = (given.trim().as_bytes(), token.as_bytes());
+    let (a, b) = (given.trim().as_bytes(), token.trim().as_bytes());
     if a.len() != b.len() {
         return false;
     }
@@ -240,6 +260,36 @@ mod tests {
         assert!(!authorized(Some("Bearer s3cre"), "s3cret"));
         assert!(!authorized(Some("s3cret"), "s3cret"));
         assert!(!authorized(None, "s3cret"));
+        // A token read from a secret file often ends with a newline.
+        assert!(authorized(Some("Bearer s3cret"), "s3cret\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scrapes_that_arrive_together_share_one_refresh() {
+        let metrics = Arc::new(Metrics::new());
+        let runs = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&runs);
+        metrics.on_scrape(move || {
+            let counted = Arc::clone(&counted);
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let scrapes: Vec<_> = (0..8)
+            .map(|_| {
+                let metrics = Arc::clone(&metrics);
+                tokio::spawn(async move { metrics.render(Duration::from_secs(1)).await })
+            })
+            .collect();
+        for scrape in scrapes {
+            scrape.await.unwrap();
+        }
+        let shared = runs.load(Ordering::SeqCst);
+        assert!(shared <= 2, "{shared} runs for 8 scrapes");
+        // A scrape after that runs again.
+        metrics.render(Duration::from_secs(1)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), shared + 1);
     }
 
     #[test]
