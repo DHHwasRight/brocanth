@@ -42,6 +42,7 @@
 //! | `-12`, `0`, `9000` | integer |
 //! | `1.5`, `2e3` | float |
 //! | `"true"` (with the quotes) | the string `true` |
+//! | `007`, `123456`, `true` read by a `String` field | the text as written |
 //! | nothing: `MY_APP_X__Y=` | empty: `None` for an `Option`, `""` for a string |
 //! | anything else | string |
 //!
@@ -186,7 +187,7 @@ impl Node {
     fn finish(self, parent: &Provenance) -> Result<Value, EnvError> {
         if let Some((var, raw)) = self.leaf {
             let from = Provenance::env(&var);
-            return Ok(Value::new(infer(&raw), from));
+            return Ok(Value::inferred(&raw, from));
         }
 
         // Every child name is a number: this level is an array.
@@ -282,6 +283,28 @@ mod tests {
 
     fn build(pairs: &[(&str, &str)]) -> Value {
         layer(&AppName::new("my_app"), &vars(pairs)).unwrap().0
+    }
+
+    #[test]
+    fn a_string_field_reads_a_digit_only_value_as_written() {
+        #[derive(serde::Deserialize)]
+        struct Sms {
+            code: String,
+            pin: String,
+            retries: u32,
+            on: String,
+        }
+        let v = build(&[
+            ("MY_APP_SMS__CODE", "007"),
+            ("MY_APP_SMS__PIN", "123456"),
+            ("MY_APP_SMS__RETRIES", "3"),
+            ("MY_APP_SMS__ON", "true"),
+        ]);
+        let sms: Sms = crate::from_value(v.at("sms").unwrap().clone()).unwrap();
+        assert_eq!(sms.code, "007");
+        assert_eq!(sms.pin, "123456");
+        assert_eq!(sms.retries, 3);
+        assert_eq!(sms.on, "true");
     }
 
     #[test]
