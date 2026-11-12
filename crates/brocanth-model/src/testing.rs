@@ -244,23 +244,8 @@ impl Harness {
     /// "pg_type_typname_nsp_index"` — two `CREATE TABLE`s for the same name,
     /// racing in the catalogue. That failure is the reason this method exists.
     pub async fn migrate_once<M: MigratorTrait>(&self) -> Result<(), DbErr> {
-        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-
-        // The eight ASCII bytes of `brocmodl`, read as a big-endian `i64`, so
-        // the row in `pg_locks` can be read back as text and identified.
-        // `brocanth-jobs`, `brocanth-storage` and `brocanth-cache` key their
-        // own migration locks the same way, each on its own word.
-        const LOCK: i64 = 0x6272_6f63_6d6f_646c; // "brocmodl"
-
-        let txn = self.conn.begin().await?;
-        txn.execute_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "SELECT pg_advisory_xact_lock($1)",
-            [LOCK.into()],
-        ))
-        .await?;
-        M::up(&txn, None).await?;
-        txn.commit().await
+        // The lock `migrate up` takes, so a test and a command serialise too.
+        crate::migrating::locked(&self.conn, None, async |txn| M::up(txn, None).await).await
     }
 }
 

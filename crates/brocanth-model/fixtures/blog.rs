@@ -58,9 +58,9 @@ pub mod post {
     }
 }
 
-/// Hand-written migrations. The plan keeps them hand-written until
-/// `schema-sync` stabilises, so this is what a generated file would look like
-/// after a developer read it and committed it.
+/// Migrations written by hand for this fixture. In an application,
+/// `migrate make` writes them from a diff of the models, and a developer
+/// reads, edits and commits what it wrote.
 pub mod migration {
     use brocanth_model::sea_orm_migration::prelude::*;
 

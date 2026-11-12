@@ -69,6 +69,24 @@ impl Orm {
         self.0
     }
 
+    /// Runs `f` in a transaction that holds the migration lock, with
+    /// [`crate::migrating::DEFAULT_LOCK_TIMEOUT`]. A generated
+    /// `migrate up` and `migrate down` call this, so two runs at one moment
+    /// do not apply one migration twice. See [`crate::migrating::locked`].
+    ///
+    /// ```ignore
+    /// orm.migrate_locked(async |txn| Migrator::up(txn, None).await).await?;
+    /// ```
+    ///
+    /// # Errors
+    /// The error of `f`, or a [`DbErr`] from `BEGIN`, the lock or `COMMIT`.
+    pub async fn migrate_locked<T>(
+        &self,
+        f: impl AsyncFnOnce(&DatabaseTransaction) -> Result<T, DbErr>,
+    ) -> Result<T, DbErr> {
+        crate::migrating::locked(&self.0, Some(crate::migrating::DEFAULT_LOCK_TIMEOUT), f).await
+    }
+
     /// A SeaORM transaction as `identity`, for a table under Postgres
     /// row-level security (`docs/rls.md`). The transaction runs
     /// `SET LOCAL ROLE` and `set_config('brocanth.<key>', $value, true)`

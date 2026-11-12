@@ -32,8 +32,9 @@
 //!    against the entities and written through their hooks (Django D27).
 //!
 //! Plus [`registry`], which enumerates the models in a binary, and
-//! [`schema_sync`], which is the single adapter standing between brocanth and
-//! SeaORM's semver-exempt `schema-sync`.
+//! [`migrating`], which applies migrations under a lock. `migrate make`
+//! (`brocanth-migrate`) writes the migrations from a diff of two snapshots
+//! of the models; SeaORM's semver-exempt `schema-sync` is not used.
 //!
 //! With the `db` feature, `Orm` is SeaORM over the pool a `brocanth_db::Db`
 //! opened, so the ORM and sea-query statements share one pool (`orm`).
@@ -100,6 +101,7 @@ pub mod deferred;
 pub mod eager;
 pub mod errors;
 pub mod fixtures;
+pub mod migrating;
 #[cfg(feature = "db")]
 pub mod orm;
 #[cfg(feature = "plugin")]
@@ -107,7 +109,6 @@ pub mod plugin;
 pub mod prelude;
 pub mod probe;
 pub mod registry;
-pub mod schema_sync;
 pub mod testing;
 pub mod validation;
 pub mod validators;
