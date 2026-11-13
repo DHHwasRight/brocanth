@@ -87,6 +87,7 @@
 //! # }
 //! ```
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub use crate::routing_codegen::{generate_helpers, CodegenError, RouteHelper};
@@ -94,7 +95,7 @@ pub use crate::routing_middleware::{Layer, MiddlewareStack, Next, Scope};
 pub use crate::routing_middleware_async::{
     AsyncLayer, AsyncMiddlewareStack, AsyncNext, AsyncTerminal,
 };
-pub use crate::routing_params::{ParamError, ParamErrorKind, Params};
+pub use crate::routing_params::{percent_decode, ParamError, ParamErrorKind, Params};
 pub use crate::routing_path::{
     encode_catch_all, encode_segment, module_path_for_file, route_for_file, ParamKind, ParamSpec,
     PathError, RouteTemplate, TemplateError,
@@ -154,7 +155,14 @@ impl<H> Router<H> {
     /// verbs it allows.
     #[must_use]
     pub fn at<'r, 'p>(&'r self, path: &'p str) -> Option<RouteMatch<'r, 'p, H>> {
-        self.engine.search(path).map(|inner| RouteMatch { inner })
+        self.engine.search(path).map(|inner| {
+            let decoded = inner
+                .parameters()
+                .iter()
+                .map(|(name, value)| (*name, percent_decode(value)))
+                .collect();
+            RouteMatch { inner, decoded }
+        })
     }
 
     /// Match a path and a verb.
@@ -222,6 +230,9 @@ impl<H> core::fmt::Debug for Router<H> {
 /// and cannot outlive the request.
 pub struct RouteMatch<'r, 'p, H> {
     inner: wayfind::Match<'r, 'p, Route<H>>,
+    /// The captures, percent-decoded once. Matching ran on the raw path, so
+    /// `%2F` stays inside its segment; the handler reads it as `/`.
+    decoded: Vec<(&'r str, Cow<'p, str>)>,
 }
 
 impl<'r, 'p, H> RouteMatch<'r, 'p, H> {
@@ -237,10 +248,14 @@ impl<'r, 'p, H> RouteMatch<'r, 'p, H> {
         &self.inner.data().template
     }
 
-    /// The captured parameters.
+    /// The captured parameters, percent-decoded.
+    ///
+    /// The route matched on the path as it arrived; each value is then
+    /// decoded once, so a value the URL helpers encoded reads back as the
+    /// value they were given.
     #[must_use]
     pub fn params(&self) -> Params<'_> {
-        Params::new(self.inner.parameters())
+        Params::decoded(&self.decoded)
     }
 
     /// The handler for `verb`.
@@ -339,18 +354,21 @@ impl<'r, H> Dispatch<'r, '_, H> {
 #[non_exhaustive]
 pub enum BuildError {
     /// A template does not parse.
-    #[error("invalid template")]
+    #[error("invalid template: {0}")]
     Template(#[from] TemplateError),
 
     /// A page file does not name a route.
-    #[error("invalid page path")]
+    #[error("invalid page path: {0}")]
     Path(#[from] PathError),
 
     /// The same template and verb were registered twice.
     ///
     /// Silently overwriting would make the live handler depend on scan
     /// order, so this is an error.
-    #[error("`{template}` already has a {verb} handler")]
+    #[error(
+        "`{template}` already has a {verb} handler\n\
+         help: remove one of the two registrations, or register the second under another path"
+    )]
     DuplicateHandler {
         /// The template that was registered twice.
         template: String,
@@ -359,7 +377,10 @@ pub enum BuildError {
     },
 
     /// Two templates cannot coexist in the trie.
-    #[error("`{template}` conflicts with `{existing}`")]
+    #[error(
+        "`{template}` conflicts with `{existing}`\n\
+         help: rename a parameter or a literal so the two paths differ at the same segment"
+    )]
     Conflict {
         /// The template being inserted.
         template: String,
@@ -368,7 +389,10 @@ pub enum BuildError {
     },
 
     /// The matcher rejected a template for some other reason.
-    #[error("the matcher rejected `{template}`: {reason}")]
+    #[error(
+        "the matcher rejected `{template}`: {reason}\n\
+         help: write the path with `/` segments, `{{name}}` parameters and a last `{{*rest}}`"
+    )]
     Engine {
         /// The rejected template.
         template: String,

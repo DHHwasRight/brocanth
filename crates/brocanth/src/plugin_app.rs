@@ -74,12 +74,14 @@ pub enum BuildError {
 
     #[error(
         "two plugin instances are registered as `{name}`; instance names must be unique because \
-         a name is how the application and every other plugin refer to one instance"
+         a name is how the application and every other plugin refer to one instance\n\
+         help: register the second one under another name, such as `{name}_2`"
     )]
     DuplicateInstance { name: String },
 
     #[error(
-        "`{pattern}` mounts middleware `{name}`, which no registered plugin offers{}; offered: {}",
+        "`{pattern}` mounts middleware `{name}`, which no registered plugin offers{}; offered: {}\n\
+         help: mount one of the offered names, or register the plugin that offers `{name}`",
         crate::plugin_app::mount_hint(.suggestion),
         if .offered.is_empty() { "nothing".to_string() } else { .offered.join(", ") }
     )]
@@ -92,26 +94,26 @@ pub enum BuildError {
 
     #[error(
         "`{instance}` ({plugin}) installs hooks, and `plugin(..)` does not install them. \
-         Register it with `plugin_hooking(..)`: that is the call that widens the \
-         application's hook-family record, and the record is what decides whether the hot \
-         path contains a hook at all"
+         The record is what decides whether the hot path contains a hook at all, and \
+         `plugin_hooking(..)` is the call that widens it\n\
+         help: register `{instance}` with `plugin_hooking(..)`"
     )]
     HooksNotInstalled { instance: String, plugin: String },
 
     #[error(
         "`{instance}` ({plugin}) was registered with `plugin_hooking(..)` but leaves \
-         `const INSTALLS_HOOKS` at its default of `false`. Set it to `true` in its \
-         `impl Plugin`, so that registering it with plain `plugin(..)` one day fails the \
-         build instead of silently dropping its hooks"
+         `const INSTALLS_HOOKS` at its default of `false`, so registering it with plain \
+         `plugin(..)` one day would drop its hooks with no error\n\
+         help: set `const INSTALLS_HOOKS: bool = true;` in the `impl Plugin` of {plugin}"
     )]
     HooksNotDeclared { instance: String, plugin: String },
 
     #[error(
         "`{instance}` registered the {family} hook `{hook}`, and its `HookSource::Families` \
          does not name `{marker}`. The record is what decides whether that chain survives \
-         compilation, so the hook would be sorted, stored, and never run. Write \
-         `type Families = {marker};`, or `Both<{marker}, ..>` beside the families it \
-         already names"
+         compilation, so the hook would be sorted, stored, and never run\n\
+         help: write `type Families = {marker};`, or `Both<{marker}, ..>` beside the \
+         families it already names"
     )]
     FamilyNotDeclared {
         instance: String,
@@ -148,6 +150,20 @@ pub enum BuildError {
         name: &'static str,
         suggestion: Option<String>,
         registered: Vec<String>,
+    },
+
+    /// `hooks_off` names a hook its plugin lists in
+    /// [`HookSource::REQUIRED`](crate::plugin_hooks::HookSource::REQUIRED):
+    /// a hook the plugin is not safe without, such as a CSRF check.
+    #[error(
+        "`hooks_off` turns off `{instance}.{name}`, and `{plugin}` marks that hook as required\n\
+         help: remove \"{name}\" from `hooks_off(\"{instance}\", ..)`; to drop it anyway, \
+         remove the `{instance}` plugin"
+    )]
+    HooksOffRequired {
+        instance: &'static str,
+        name: &'static str,
+        plugin: String,
     },
 
     /// A required `after` or `before` names a hook that `hooks_off` turned
@@ -335,12 +351,14 @@ type HookInstaller = fn(&dyn Any, &mut HookRegistrar<'_>) -> Result<(), PluginEr
 struct Installer {
     install: HookInstaller,
     declared: &'static [&'static str],
+    required: &'static [&'static str],
 }
 
 fn installer_of<P: HookSource>() -> Option<Installer> {
     Some(Installer {
         install: install_hooks_of::<P>,
         declared: P::HOOKS,
+        required: P::REQUIRED,
     })
 }
 
@@ -829,6 +847,14 @@ impl<E, H> AppBuilder<E, H> {
             // lists it, so a report still says the file turned it off.
             if let Some(off) = off {
                 let declared = reg.installer.map_or(&[][..], |i| i.declared);
+                let required = reg.installer.map_or(&[][..], |i| i.required);
+                if let Some(&name) = off.names.iter().find(|name| required.contains(name)) {
+                    return Err(BuildError::HooksOffRequired {
+                        instance: off.instance,
+                        name,
+                        plugin,
+                    });
+                }
                 for &name in &off.names {
                     if seen.iter().any(|s| s == name) {
                         continue;

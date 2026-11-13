@@ -54,8 +54,11 @@ impl ScopePattern {
     /// # Errors
     ///
     /// Returns [`TemplateError`] on the same grounds as
-    /// [`crate::routing::RouteTemplate::parse`], plus a catch-all that is
-    /// not the last segment.
+    /// [`crate::routing::RouteTemplate::parse`], plus
+    /// [`TemplateError::ScopeCatchAllNotLast`] for a catch-all that is not
+    /// the last segment and [`TemplateError::ScopePartialSegment`] for a
+    /// parameter that is only part of a segment: a scope compares whole
+    /// segments, so `{name}.txt` would match only the literal text.
     pub fn parse(pattern: &str) -> Result<Self, TemplateError> {
         let template = crate::routing_path::RouteTemplate::parse(pattern)?;
         let body = template.pattern().trim_end_matches('/');
@@ -70,14 +73,20 @@ impl ScopePattern {
                     if let Some(inner) = part.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
                         if let Some(name) = inner.strip_prefix('*') {
                             if !is_last {
-                                return Err(TemplateError::InvalidParamName {
-                                    name: format!("*{name}"),
+                                return Err(TemplateError::ScopeCatchAllNotLast {
+                                    pattern: pattern.to_owned(),
+                                    name: name.to_owned(),
                                 });
                             }
                             Segment::CatchAll
                         } else {
                             Segment::Dynamic
                         }
+                    } else if part.contains(['{', '}']) {
+                        return Err(TemplateError::ScopePartialSegment {
+                            pattern: pattern.to_owned(),
+                            segment: (*part).to_owned(),
+                        });
                     } else {
                         Segment::Literal((*part).to_owned())
                     };
@@ -137,5 +146,36 @@ impl ScopePattern {
 impl fmt::Display for ScopePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_parameter_inside_a_segment_is_refused_and_not_matched_as_text() {
+        let err = ScopePattern::parse("/files/{name}.txt").unwrap_err();
+        assert!(
+            matches!(err, TemplateError::ScopePartialSegment { ref segment, .. } if segment == "{name}.txt"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("\nhelp: "), "{err}");
+    }
+
+    #[test]
+    fn a_catch_all_before_the_end_has_its_own_error() {
+        let err = ScopePattern::parse("/a/{*rest}/b").unwrap_err();
+        assert!(
+            matches!(err, TemplateError::ScopeCatchAllNotLast { ref name, .. } if name == "rest"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("\nhelp: "), "{err}");
+    }
+
+    #[test]
+    fn whole_segment_parameters_still_parse() {
+        let scope = ScopePattern::parse("/files/{name}/{*rest}").expect("parses");
+        assert!(scope.matches("/files/a.txt/x/y"));
     }
 }

@@ -448,8 +448,8 @@ pub trait RouteSource<E>: Plugin {
 #[derive(Debug, Error)]
 pub enum RouteError {
     #[error(
-        "`{first}` and `{second}` both mount `{verb} {path}`; a path answers to one handler, \
-         so one of the two mounts needs a different prefix or a filter"
+        "`{first}` and `{second}` both mount `{verb} {path}`; a path answers to one handler\n\
+         help: give one of the two mounts a different prefix or a filter"
     )]
     Conflict {
         path: String,
@@ -460,7 +460,8 @@ pub enum RouteError {
 
     #[error(
         "two routes are named `{name}`, one from `{first}` and one from `{second}`; a route \
-         name is what a link is written against, so it has to be unique"
+         name is what a link is written against, so it has to be unique\n\
+         help: rename the route in one of the two, or mount one of them under a prefix"
     )]
     DuplicateName {
         name: String,
@@ -468,7 +469,11 @@ pub enum RouteError {
         second: String,
     },
 
-    #[error("`{plugin}` contributes `{name}` at `{path}`, which is not a valid path: {reason}")]
+    #[error(
+        "`{plugin}` contributes `{name}` at `{path}`, which is not a valid path: {reason}\n\
+         help: correct the path `{plugin}` is given, such as its `mount_at`; a path starts \
+         with `/` and names parameters as `{{name}}`"
+    )]
     BadPath {
         plugin: String,
         name: String,
@@ -477,7 +482,8 @@ pub enum RouteError {
     },
 
     #[error(
-        "no registered plugin instance is `{plugin}`{}; registered: {}",
+        "no registered plugin instance is `{plugin}`{}; registered: {}\n\
+         help: name a registered instance, or register `{plugin}` first",
         crate::plugin_routes::route_hint(.suggestion),
         if .registered.is_empty() { "nothing".to_string() } else { .registered.join(", ") }
     )]

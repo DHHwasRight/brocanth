@@ -917,6 +917,14 @@ fn framework_settings(built: &mut Built) {
             "Seconds a stop waits for open requests, then for the plugins.",
         ),
     );
+    built.setting(
+        "server",
+        Setting::integer(
+            "max_body_bytes",
+            2 * 1024 * 1024,
+            "The most bytes of one request body the server reads; a larger body is a 413.",
+        ),
+    );
     built.settings_type("server", "crate::plugins::ServerSettings");
 }
 
@@ -2079,6 +2087,12 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// `begin_async` and not `begin`: it runs a hook that waits as well as\n\
          /// one that does not. With no hook that waits, it is ready on its first\n\
          /// poll.\n\
+         ///\n\
+         /// A panic in a request hook, the chain or the page is a 500, and the\n\
+         /// response hooks still see it: a logger that never saw the 500 would\n\
+         /// not be a logger. Without the net the panic unwinds into the\n\
+         /// server's connection task and the client gets a closed socket with\n\
+         /// no status. The net catches nothing under `panic = \"abort\"`.\n\
          pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {\n\
         \x20   let Ok(mut request) = brocanth_server::bridge::to_core(request) else {\n\
         \x20       // The path and the query do not make a URI. The table was not\n\
@@ -2086,9 +2100,20 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20       return brocanth_server::Response::text(400, \"Bad Request\");\n\
         \x20   };\n\
         \x20   let mut state = RequestState::new();\n\
-        \x20   let outcome = match app.core.begin_async(&mut request, &mut state).await {\n\
-        \x20       Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),\n\
-        \x20       Begin::Answered(outcome) => outcome,\n\
+        \x20   let caught = brocanth_server::bridge::catch_unwind(std::panic::AssertUnwindSafe(async {\n\
+        \x20       match app.core.begin_async(&mut request, &mut state).await {\n\
+        \x20           Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),\n\
+        \x20           Begin::Answered(outcome) => outcome,\n\
+        \x20       }\n\
+        \x20   }))\n\
+        \x20   .await;\n\
+        \x20   let outcome = match caught {\n\
+        \x20       Ok(outcome) => outcome,\n\
+        \x20       Err(payload) => {\n\
+        \x20           let message = brocanth_server::bridge::panic_message(&*payload);\n\
+        \x20           plugins::say!(error, \"a request panicked: {message}\"; %message);\n\
+        \x20           Ok(sent(Response::new(500, \"Internal Server Error\")))\n\
+        \x20       }\n\
         \x20   };\n\
         \x20   let response = app.core.finish(&mut request, &mut state, outcome);\n\
         \x20   brocanth_server::bridge::from_core(response)\n\
@@ -2277,6 +2302,7 @@ async fn run(
     let server = brocanth_server::Server::bind(addr)
         .await
         .map_err(|e| e.to_string())?
+        .max_body(plugins::max_body()?)
         .with_streams(app.core.streams().clone());
     let bound = server.local_addr().map_err(|e| e.to_string())?;
     let stopper = server.stopper();
@@ -4366,12 +4392,16 @@ const SERVER_SETTINGS: &str = r#"/// `[server]`: the settings the framework read
 pub struct ServerSettings {
     /// Seconds a stop waits for open requests, then for the plugins.
     pub shutdown_grace_secs: u64,
+    /// The most bytes of one request body the server reads; a larger body
+    /// is a 413.
+    pub max_body_bytes: u64,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+            max_body_bytes: brocanth_server::DEFAULT_MAX_BODY as u64,
         }
     }
 }
@@ -4402,6 +4432,28 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
             )
         })
 }
+
+/// `[server] max_body_bytes` from the files, the environment and the flags,
+/// or [`DEFAULT_MAX_BODY`](brocanth_server::DEFAULT_MAX_BODY) when none sets it.
+pub fn max_body() -> Result<usize, String> {
+    let config = config()?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("max_body_bytes"))
+    else {
+        return Ok(brocanth_server::DEFAULT_MAX_BODY);
+    };
+    value
+        .as_integer()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .or_else(|| value.as_str().and_then(|bytes| bytes.trim().parse().ok()))
+        .ok_or_else(|| {
+            format!(
+                "`[server] max_body_bytes` is {}, and it must be a whole number of bytes\nhelp: set it to a whole number of bytes, such as 2097152",
+                value.display()
+            )
+        })
+}
 "#;
 
 /// `plugins::shutdown_grace` without it.
@@ -4410,6 +4462,18 @@ const GRACE_PLAIN: &str = r#"/// `[server] shutdown_grace_secs` from the environ
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
     let server = server_settings(&given()?)?;
     Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
+}
+
+/// `[server] max_body_bytes` from the environment and the flags, or
+/// [`DEFAULT_MAX_BODY`](brocanth_server::DEFAULT_MAX_BODY) when neither sets it.
+pub fn max_body() -> Result<usize, String> {
+    let server = server_settings(&given()?)?;
+    usize::try_from(server.max_body_bytes).map_err(|_| {
+        format!(
+            "`[server] max_body_bytes` is {}, more than this machine can address\nhelp: set it to a whole number of bytes, such as 2097152",
+            server.max_body_bytes
+        )
+    })
 }
 "#;
 
@@ -5387,7 +5451,10 @@ fn config_toml(a: &Answers, built: &Built) -> String {
          [server]\n\
          # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the\n\
          # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.\n\
-         shutdown_grace_secs = 25\n",
+         shutdown_grace_secs = 25\n\
+         # The most bytes of one request body the server reads. A larger body is a\n\
+         # 413 and never reaches a page. Raise it for a route that takes uploads.\n\
+         max_body_bytes = 2097152\n",
         upper = a.ident().to_uppercase(),
         ident = a.ident(),
         env = DEFAULT_ENV,
@@ -5934,9 +6001,9 @@ mod tests {
             let lint = &["clippy", "--all-targets", "--", "-D", "warnings"][..];
             let has_db = picks.contains(&"db");
             let streams = if has_db {
-                &["test", "--", "pages::ticks", "pages::pinged"][..]
+                &["test", "--", "pages::ticks", "pages::boom", "pages::pinged"][..]
             } else {
-                &["test", "--", "pages::ticks"][..]
+                &["test", "--", "pages::ticks", "pages::boom"][..]
             };
             // A project with `db` and no config file reads `[db]` from the
             // environment: the same closed port and short timeout.
@@ -5962,6 +6029,8 @@ mod tests {
                     };
                     let ticks = localized(STREAM_PAGE, "/ticks");
                     std::fs::write(root.join("src/pages/ticks.rs"), ticks).unwrap();
+                    let boom = localized(PANIC_PAGE, "/boom");
+                    std::fs::write(root.join("src/pages/boom.rs"), boom).unwrap();
                     if has_db {
                         let pinged = localized(DB_PAGE, "/pinged");
                         std::fs::write(root.join("src/pages/pinged.rs"), pinged).unwrap();
@@ -6034,6 +6103,33 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let before = ctx.path.clone();
     tokio::task::yield_now().await;
     Ok(format!("{before} {}", ctx.path))
+}
+"#;
+
+    /// A page that panics, and a test that the application answers 500 for
+    /// it: the panic does not reach the server's connection task.
+    const PANIC_PAGE: &str = r#"//! `/boom`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    if ctx.path.starts_with('/') {
+        panic!("the page broke");
+    }
+    Ok("never")
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn a_page_that_panics_is_a_500() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/boom")).await;
+        assert_eq!(response.status, 500);
+    }
 }
 "#;
 

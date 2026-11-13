@@ -419,3 +419,50 @@ fn hook_names_lists_what_a_plugin_registers_in_order() {
     let names = brocanth::plugin_hooks::hook_names(&Counter::new((Rec::default(), false))).unwrap();
     assert_eq!(names, ["count"]);
 }
+
+/// Instance `csrf`, with one hook, `check`, that it marks as required.
+struct Csrf(Rec);
+
+impl Plugin for Csrf {
+    type Config = Rec;
+    type Provides = NoContext;
+    const NAME: &'static str = "csrf";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new(rec: Rec) -> Self {
+        Self(rec)
+    }
+}
+
+impl HookSource for Csrf {
+    type Families = OnRequest;
+    const REQUIRED: &'static [&'static str] = &["check"];
+
+    fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        r.request(
+            "check",
+            Order::new(),
+            Step {
+                rec: self.0.clone(),
+                id: "csrf.check",
+            },
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn a_required_hook_cannot_be_turned_off() {
+    let err = AppBuilder::new()
+        .plugin_hooking(Csrf::new(Rec::default()))
+        .hooks_off("csrf", ["check"])
+        .build()
+        .err()
+        .expect("the build refuses");
+    assert!(
+        matches!(err, BuildError::HooksOffRequired { name: "check", .. }),
+        "{err}"
+    );
+    let text = err.to_string();
+    assert!(text.contains("\nhelp: "), "{text}");
+}
