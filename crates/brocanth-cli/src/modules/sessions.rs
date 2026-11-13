@@ -1,4 +1,10 @@
-//! `sessions` -- a cookie, and a `Session` on the context.
+//! `sessions` -- a cookie name on the context, and an empty `session` layer.
+//!
+//! A seam, not a session: the layer passes every request through, and
+//! nothing reads or writes the cookie. Signed sessions, sign-in and
+//! sign-out are `auth` (`brocanth-auth`), which signs its own cookie. The
+//! manifest and the generated file say so, so nobody picks this for
+//! accounts.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
@@ -14,14 +20,17 @@ impl Module for Sessions {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "sessions",
-            "a cookie, and a `Session` the context hands a handler",
+            "a cookie name on the context and an empty `session` layer to build on; no session store, for sign-in pick `auth`",
         )
         .category(Category::Middleware)
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .asked_in("doors", "A signed cookie, and a session on the context")
+        .asked_in(
+            "doors",
+            "A session seam to build on (no store; signed sessions are `auth`)",
+        )
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
@@ -60,6 +69,7 @@ impl Module for Sessions {
             .line(r#"            setup.router().mount("/users/{*rest}", "session");"#);
         s.at(Slot::PluginsLayers)
             .line(r#"        "session" => Some(sessions::layer),"#);
+        s.at(Slot::AgentsSections).block(AGENTS.to_string());
         s.at(Slot::AppContext).block(
             "    let session: &crate::plugins::sessions::Session = cx.extract();\n\
             \x20   let cookie = &session.cookie;\n\
@@ -69,10 +79,27 @@ impl Module for Sessions {
     }
 }
 
+/// What the generated `AGENTS.md` says, so an agent does not take the seam
+/// for a session.
+const AGENTS: &str = "\n\
+    ## Sessions seam\n\
+    \n\
+    `src/plugins/sessions/mod.rs` is a seam, not a session. Its `layer`\n\
+    passes every request through; nothing reads, signs or writes the\n\
+    cookie, and `Session` holds only the cookie's name. For accounts,\n\
+    sign-in and a signed session cookie, use the `auth` module\n\
+    (`brocanth-auth`): `auth.sessions()` on the context. Do not build a\n\
+    second session beside it.\n";
+
 pub(crate) fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "sessions");
     format!(
-        r##"//! Cookie sessions, and the one value they put on the context.
+        r##"//! A sessions seam: a cookie name on the context and an empty layer.
+//!
+//! **This is not a session.** The `session` layer passes every request
+//! through, and nothing reads, signs or writes the cookie. Signed sessions
+//! with sign-in and sign-out are the `auth` module (`brocanth-auth`):
+//! `brocanth add auth`. Build here only a session that is not an account.
 
 use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};

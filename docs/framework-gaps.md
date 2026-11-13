@@ -361,7 +361,7 @@ what was read.
 | `brocanth-jobs` | ~7,000 | ~70 | — | `jobs` |
 | `brocanth-cache` | — | yes | — | `cache` |
 | `brocanth-realtime` | — | yes | events (as a sink) | `realtime` |
-| `brocanth-auth` | 8,875 | 146 | 2 | **no** |
+| `brocanth-auth` | 8,875 | 146 | 2 | `auth`, `auth-screens`, `auth-oauth`, `auth-lockout`, `superuser`, `roles` |
 | `brocanth-openapi` | 5,873 | 72 | **0** | **no** |
 | `brocanth-schema` | 4,832 | 61 | **0** | **no** |
 | `brocanth-storage` | 2,944 | 70 | 2 | **no** |
@@ -415,7 +415,7 @@ means it is not yet a feature.
 | Actions / typed RPC from a form (A16, N12) | **no** | the gap dp-swap's missing `dp-post` names |
 | Middleware (A18, N6, D16) | **yes** | `MiddlewareStack`, mounted at a pattern the application picks |
 | Endpoints returning a Response (A19) | **yes** | `pages!` handlers |
-| Sessions (A17, D11) | **yes** | the `sessions` module, cookie-backed |
+| Sessions (A17, D11) | **yes, through `auth`** | `brocanth-auth`'s `Sessions`: a signed cookie, idle and absolute expiry, elevation, impersonation. The `sessions` module is a seam with an empty layer, not a session store |
 | Route caching with tags (A15) | **yes** | `brocanth_cache::route::RouteCache`: GET responses, a vary set, rule and handler tags, `invalidate_tag`. See `docs/cache.md` |
 | Streaming / Suspense (N9) | **no, and blocked** | `Response` is `http::Response<Vec<u8>>` |
 | ORM, lazy queries, N+1 help (D1, D4) | **yes** | `brocanth-model`, `Probe` detects N+1 |
@@ -425,7 +425,7 @@ means it is not yet a feature.
 | Admin with list/filter/search/ordering (D8) | **yes** | `brocanth-admin`, plus `Panel` for tabs no model owns |
 | Per-collection rules applied in the admin (P7; PLAN.md §12 item 9) | **yes, except create** | `AdminConfig::resource`: the list and its count filter in the query, a record is a guarded select, a write is guarded by the condition it was checked against (zero rows is `409`), and forms take only the columns of the mask (`Policy::writable_on_create` on a create, `Policy::writable` on an update). A model with no resource is `403`. A create rule other than `Always` or `Never` is refused, not decided |
 | Admin auto-discovery (D9) | **partial** | discovery reads the entity registry; entities are named once in `admin_source!` |
-| Auth: hashing, login, permissions (D10) | **yes, unwired** | `brocanth-auth`, 8,875 lines, not on the menu |
+| Auth: hashing, login, permissions (D10) | **yes** | `brocanth-auth`, on the menu as `auth` (accounts and sessions), `auth-screens` (the pages), `auth-oauth` (provider sign-in), `auth-lockout`, `superuser` and `roles` |
 | CSRF (D12) | **yes** | `brocanth_middleware::Csrf`, a double-submit cookie, registered by `middleware-csrf` and run on every request of a generated project; `CsrfToken::stamp_forms` puts the field in the admin's forms |
 | Class-based CRUD views (D14) | **yes, unwired** | `brocanth-resource`, nothing depends on it |
 | Named routes, `reverse()` (D15) | **better** | route helpers are generated and checked by the compiler |
