@@ -991,7 +991,10 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // has never heard of and says nothing about toolchains.
         (
             "rust-toolchain.toml".to_string(),
-            "[toolchain]\nchannel = \"1.98\"\n".to_string(),
+            format!(
+                "[toolchain]\nchannel = \"{}\"\n",
+                brocanth_scaffold::RUST_VERSION
+            ),
         ),
         // And again for mise, which the rest of this ecosystem pins with and
         // whose shim does not read rust-toolchain.toml. Two files because two
@@ -1048,8 +1051,10 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // cargo is the build tool; hooking one into the other conflates them.
         // The ways in are `brocanth <command>` from anywhere inside the
         // project, and the built binary itself.
+        // `serve.rs` is the `commands` module's own file; `mod.rs` is
+        // written here because it lists every module's command, and only
+        // the finished build knows them all.
         files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(&built)));
-        files.push(("src/commands/serve.rs".to_string(), SERVE_RS.to_string()));
         if has_settings(&built) {
             files.push((
                 "src/commands/settings.rs".to_string(),
@@ -1179,12 +1184,12 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
          \n\
          [project]\n\
          name = {name:?}\n\
-         title = {title:?}\n\
+         title = {title}\n\
          \n\
          [modules]\n\
          enabled = [{enabled}]\n",
         name = a.name,
-        title = a.title,
+        title = brocanth_scaffold::toml_string(&a.title),
         enabled = a
             .picks
             .iter()
@@ -1369,20 +1374,6 @@ fn agents_md(a: &Answers, built: &Built) -> String {
     // the house style is. Each module writes its own (`rsx` its views).
     let sections: String = built.slot(Slot::AgentsSections).collect();
 
-    let commands = if a.has("commands") {
-        let mut out = String::from(
-            "\n## Tasks\n\nA command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
-             `src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,\n\
-             below the line that starts `// Your commands`. `brocanth add` rewrites the\n\
-             lines above it and keeps yours. The command becomes a subcommand\n\
-             automatically — registration happens at link time.\n\n\
-             ```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n",
-        );
-        out.push_str("```\n");
-        out
-    } else {
-        String::new()
-    };
 
     // The modules are the person's decisions. An agent that adds one in
     // silence made a choice that was not its own, so the brief says so,
@@ -1467,7 +1458,6 @@ fn agents_md(a: &Answers, built: &Built) -> String {
          what makes a half-written body on an error impossible rather than\n\
          unlikely.\n\
          {sections}\
-         {commands}\
          {decisions}\
          \n\
          ## House style\n\
@@ -1493,7 +1483,6 @@ fn agents_md(a: &Answers, built: &Built) -> String {
             .join("\n"),
         absent = absent,
         sections = sections,
-        commands = commands,
         decisions = decisions,
     )
 }
@@ -1529,7 +1518,6 @@ fn commands_mod_rs(built: &Built) -> String {
         // A slot line arrives with its newline; the sort and the writer
         // below both want it without one.
         .map(|line| line.trim_end().to_string())
-        .chain(std::iter::once("pub mod serve;".to_string()))
         .chain(has_settings(built).then(|| "pub mod settings;".to_string()))
         .collect();
     lines.sort();
@@ -2670,34 +2658,6 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
     )
 }
 
-/// `src/commands/serve.rs`: the one command a new project gets.
-///
-/// Written into the project rather than built into the framework, because the
-/// command line is the project's and tuning it should not mean forking
-/// anything.
-const SERVE_RS: &str = r#"//! `serve` -- the one command the scaffold wrote.
-//!
-//! It is ordinary project code: rename it, give it more flags, or delete it.
-//! The framework does not own this command line.
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Serve the application over HTTP.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Serve {
-    /// Address to bind.
-    #[arg(long, default_value_t = crate::app::default_addr())]
-    pub addr: String,
-}
-
-impl Command for Serve {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
-    }
-}
-"#;
-
 fn mise_toml(built: &Built, commands: bool) -> String {
     // With `commands` the binary is a command line, and one given no
     // subcommand prints its help: the server is `serve`, as in the
@@ -2707,7 +2667,9 @@ fn mise_toml(built: &Built, commands: bool) -> String {
     } else {
         "cargo run"
     };
-    let mut out = MISE_TOML.replace("@SERVE@", serve);
+    let mut out = MISE_TOML
+        .replace("@SERVE@", serve)
+        .replace("@RUST_VERSION@", brocanth_scaffold::RUST_VERSION);
     // The tasks the modules asked for. The slot was declared with the rest
     // and never read, so `rsx-tailwind` wrote its two here by hand and a
     // module from anywhere else had nowhere to write one at all.
@@ -2721,7 +2683,7 @@ fn mise_toml(built: &Built, commands: bool) -> String {
 const MISE_TOML: &str = r#"[tools]
 # Must match the toolchain brocanth's proc-macro artifacts were built with:
 # they are not compatible across patch releases.
-rust = "1.98"
+rust = "@RUST_VERSION@"
 
 # Named for what it does, and not `run`: `run` is one of mise's own
 # subcommands, so a task called that is only reachable as `mise run run`.
@@ -3528,6 +3490,39 @@ fn mounted(
 ) -> Result<(), ::brocanth::routing::BuildError> {
 ";
 
+/// `pages::mounted_routes`, for a project that mounts routes: `mounted` run
+/// on an empty table, so `routes` lists what the server serves.
+const MOUNTED_ROUTES: &str = "\
+/// Every route `mounted` adds, as `(verb, pattern)`, for the `routes`
+/// command. It runs `mounted` on an empty table, so the list is the one the
+/// server serves and not a second record of it.
+pub fn mounted_routes() -> Result<Vec<(String, String)>, ::brocanth::routing::BuildError> {
+    let mut routes = ::brocanth::routing::Router::builder();
+    mounted(&mut routes)?;
+    let table = routes.build()?;
+    Ok(table
+        .routes()
+        .iter()
+        .flat_map(|(template, allow)| {
+            allow
+                .iter()
+                .map(move |verb| (verb.as_str().to_string(), template.pattern().to_string()))
+        })
+        .collect())
+}
+
+";
+
+/// `pages::mounted_routes`, for a project that mounts nothing.
+const MOUNTED_ROUTES_NONE: &str = "\
+/// Every route a module mounts, for the `routes` command. No module in this
+/// project mounts one; a module that does replaces this function.
+pub fn mounted_routes() -> Result<Vec<(String, String)>, ::brocanth::routing::BuildError> {
+    Ok(Vec::new())
+}
+
+";
+
 /// The header over the generated `Installed` alias.
 ///
 /// A const rather than a `\n\`-continued literal: that form keeps this
@@ -3575,6 +3570,19 @@ fn pages_mod_rs(a: &Answers, built: &Built) -> String {
             out.push_str(line);
         }
         out.push_str("    Ok(())\n}\n\n");
+    }
+    // What `routes` lists beside the pages. Written with `commands`, which
+    // is the only reader, and in both shapes so `routes.rs` is one text.
+    if a.has("commands") {
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out.push('\n');
+        out.push_str(if built.slot_is_empty(Slot::RouterMounts) {
+            MOUNTED_ROUTES_NONE
+        } else {
+            MOUNTED_ROUTES
+        });
     }
 
     // What the chosen modules add to the pages: another `impl Ctx`, a
@@ -5382,7 +5390,7 @@ fn config_toml(a: &Answers, built: &Built) -> String {
          # environment; without it, {env}.\n\
          \n\
          [app]\n\
-         name = {title:?}\n\
+         name = {title}\n\
          \n\
          [server]\n\
          # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the\n\
@@ -5391,7 +5399,7 @@ fn config_toml(a: &Answers, built: &Built) -> String {
         upper = a.ident().to_uppercase(),
         ident = a.ident(),
         env = DEFAULT_ENV,
-        title = a.title,
+        title = brocanth_scaffold::toml_string(&a.title),
     );
     for section in built.slot(Slot::ConfigSections) {
         out.push_str(section);

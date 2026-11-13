@@ -74,6 +74,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default. A step that needs more asks for it in its own job.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -92,11 +96,20 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
-    env:
-      # The tests that need Postgres read this; without it they skip.
-      BROCANTH_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 "#,
         );
+        if project.has("db") {
+            // `[db] url`, as the config loader reads it from the
+            // environment. A test that loads the configuration the way
+            // the server does opens this database.
+            out.push_str(&format!(
+                "    env:\n      \
+                 # `[db] url` for the config loader, so a test that loads the\n      \
+                 # configuration as the server does reaches this service.\n      \
+                 {}_DB__URL: postgres://postgres:postgres@localhost:5432/postgres\n",
+                project.ident().to_uppercase()
+            ));
+        }
     }
     out.push_str(
         r#"    steps:
@@ -142,4 +155,27 @@ jobs:
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn written(on: &[&str]) -> String {
+        let known = crate::modules::keys();
+        workflow(&Project::new("my-blog", "My Blog", on, &known))
+    }
+
+    #[test]
+    fn the_workflow_token_is_read_only() {
+        assert!(written(&[]).contains("permissions:\n  contents: read\n"));
+    }
+
+    #[test]
+    fn the_database_url_is_the_variable_the_config_loader_reads() {
+        let out = written(&["db"]);
+        assert!(out.contains("MY_BLOG_DB__URL: postgres://"), "{out}");
+        assert!(!out.contains("BROCANTH_TEST_DATABASE_URL"), "{out}");
+        assert!(!written(&[]).contains("postgres"));
+    }
 }

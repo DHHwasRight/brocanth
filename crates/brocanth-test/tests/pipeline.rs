@@ -329,3 +329,176 @@ fn yield_once() -> impl Future<Output = ()> {
 
     YieldOnce(false)
 }
+
+// ---------------------------------------------------------------------------
+// Streams, redirects and cookies
+// ---------------------------------------------------------------------------
+
+/// A stream that waits for the test to put a chunk in, and wakes whoever
+/// polled it. On a current-thread runtime that waker belongs to the runtime,
+/// and the thread that would have to unpark is the one polling.
+#[derive(Clone, Default)]
+struct Feed(Arc<Mutex<FeedSlot>>);
+
+#[derive(Default)]
+struct FeedSlot {
+    chunk: Option<Vec<u8>>,
+    waker: Option<std::task::Waker>,
+    sent: bool,
+}
+
+impl brocanth::plugin_body::BodyStream for Feed {
+    fn poll_chunk(&mut self, cx: &mut Context<'_>) -> brocanth::plugin_body::Chunk {
+        let mut slot = self.0.lock().expect("not poisoned");
+        if let Some(chunk) = slot.chunk.take() {
+            slot.sent = true;
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+        if slot.sent {
+            return Poll::Ready(None);
+        }
+        slot.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Ends with an error after one chunk.
+struct Broken(bool);
+
+impl brocanth::plugin_body::BodyStream for Broken {
+    fn poll_chunk(&mut self, _cx: &mut Context<'_>) -> brocanth::plugin_body::Chunk {
+        if self.0 {
+            return Poll::Ready(Some(Err(brocanth::plugin_body::StreamError::new(
+                "the database went away",
+            ))));
+        }
+        self.0 = true;
+        Poll::Ready(Some(Ok(b"<p>half".to_vec())))
+    }
+}
+
+fn streaming(stream: impl brocanth::plugin_body::BodyStream) -> Response {
+    Response::new(Body::from(brocanth::plugin_body::Streaming::new(stream)))
+}
+
+fn found(location: &'static str, cookie: Option<&'static str>) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = http::StatusCode::FOUND;
+    response
+        .headers_mut()
+        .insert("location", http::HeaderValue::from_static(location));
+    if let Some(cookie) = cookie {
+        response
+            .headers_mut()
+            .insert("set-cookie", http::HeaderValue::from_static(cookie));
+    }
+    response
+}
+
+fn table(feed: &Feed) -> TestClient<Base, impl HookFamilies, Handler<Base>> {
+    let feed = feed.clone();
+    let mut builder = Router::<Handler<Base>>::builder();
+    builder
+        .route(
+            "/feed",
+            Verb::Get,
+            Box::new(move |_cx: &mut RouteCx<'_, Base>| Ok(streaming(feed.clone()))),
+        )
+        .expect("a template");
+    builder
+        .route(
+            "/broken",
+            Verb::Get,
+            Box::new(|_cx: &mut RouteCx<'_, Base>| Ok(streaming(Broken(false)))),
+        )
+        .expect("a template");
+    builder
+        .route(
+            "/account/login",
+            Verb::Post,
+            Box::new(|_cx: &mut RouteCx<'_, Base>| {
+                Ok(found(
+                    "dashboard?tab=1",
+                    Some("session=abc; Path=/; HttpOnly"),
+                ))
+            }),
+        )
+        .expect("a template");
+    builder
+        .route(
+            "/account/dashboard",
+            Verb::Get,
+            Box::new(|cx: &mut RouteCx<'_, Base>| {
+                let cookie = cx
+                    .request()
+                    .headers()
+                    .get("cookie")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("none")
+                    .to_string();
+                let query = cx.request().uri().query().unwrap_or("").to_string();
+                Ok(html(200, &format!("<p>cookie {cookie} query {query}</p>")))
+            }),
+        )
+        .expect("a template");
+    builder
+        .route(
+            "/away",
+            Verb::Get,
+            Box::new(|_cx: &mut RouteCx<'_, Base>| {
+                Ok(found("https://elsewhere.example/away", None))
+            }),
+        )
+        .expect("a template");
+    let app = AppBuilder::new().build().expect("an application");
+    TestClient::serving(app, builder.build().expect("a table"))
+}
+
+#[test]
+fn send_async_awaits_a_stream_instead_of_parking_the_thread() {
+    // A waker that unparks nothing, as a current-thread runtime's is from
+    // the point of view of a parked thread. Parking here would hang.
+    let feed = Feed::default();
+    let client = table(&feed);
+    let mut future = std::pin::pin!(client.get_async("/feed"));
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    assert!(future.as_mut().poll(&mut cx).is_pending());
+
+    let waker = {
+        let mut slot = feed.0.lock().expect("not poisoned");
+        slot.chunk = Some(b"<p>tick</p>".to_vec());
+        slot.waker.take().expect("the stream left a waker")
+    };
+    waker.wake();
+    let Poll::Ready(page) = future.as_mut().poll(&mut cx) else {
+        panic!("the stream had its chunk and its end");
+    };
+    page.html().assert_text("tick");
+}
+
+#[test]
+fn a_stream_that_fails_is_an_error_and_not_a_short_body() {
+    let page = table(&Feed::default()).get("/broken");
+    let error = page.body_error().expect("the stream failed");
+    assert!(error.contains("the database went away"), "{error}");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        page.assert_contains("half");
+    }));
+    assert!(refused.is_err(), "a prefix passed an assertion");
+}
+
+#[test]
+fn a_followed_redirect_resolves_the_location_and_carries_the_cookie() {
+    let page = table(&Feed::default()).send(TestRequest::post("/account/login").following());
+    page.assert_ok();
+    assert_eq!(page.redirect_chain(), ["/account/dashboard?tab=1"]);
+    page.html()
+        .assert_text("cookie session=abc query tab=1");
+}
+
+#[test]
+fn a_redirect_to_another_host_is_not_dispatched_locally() {
+    let page = table(&Feed::default()).send(TestRequest::get("/away").following());
+    page.assert_redirects("https://elsewhere.example/away");
+    assert!(page.redirect_chain().is_empty());
+}

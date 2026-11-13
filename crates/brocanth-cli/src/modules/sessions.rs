@@ -1,4 +1,10 @@
-//! `sessions` -- a cookie, and a `Session` on the context.
+//! `sessions` -- a placeholder: the cookie's name, and a `Session` on the
+//! context.
+//!
+//! It holds no state and signs nothing. The `session` layer passes the
+//! request through. Every text a user reads -- the chooser, the manifest,
+//! the offer -- says so, because a module called "sessions" that promised
+//! a signed cookie would be trusted to keep a login.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold, Setting, Slot};
@@ -14,14 +20,17 @@ impl Module for Sessions {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "sessions",
-            "a cookie, and a `Session` the context hands a handler",
+            "a placeholder: the cookie's name on the context; no session state, no signature",
         )
         .category(Category::Middleware)
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .asked_in("doors", "A signed cookie, and a session on the context")
+        .asked_in(
+            "doors",
+            "A session placeholder: the cookie's name only, no state, no signing",
+        )
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
@@ -72,7 +81,11 @@ impl Module for Sessions {
 pub(crate) fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "sessions");
     format!(
-        r##"//! Cookie sessions, and the one value they put on the context.
+        r##"//! A session placeholder: the cookie's name, on the context.
+//!
+//! Nothing here keeps state or signs a cookie, and the `session` layer
+//! passes every request through. Write the store and the signature before
+//! anything trusts a session: a login, a cart, a CSRF token.
 
 use brocanth::plugin_api::{{Lifecycle, MiddlewareCatalog, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ContextItem, ProvidesContext}};
@@ -145,7 +158,7 @@ impl Plugin for Sessions {{
     fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {{
         catalog.offer(
             "session",
-            "reads the cookie and puts a Session on the context",
+            "placeholder: passes the request through; reads and signs no cookie yet",
         );
         Ok(())
     }}
@@ -164,9 +177,9 @@ impl Plugin for Sessions {{
     }}
 }}
 
-/// The layer `session` mounts. Reading the cookie off the request and writing
-/// `Set-Cookie` on the way out both need the request type that arrives with the
-/// HTTP server; the seam is here and it is already the right shape.
+/// The layer `session` mounts. It does nothing yet: it passes the request
+/// through. Reading the cookie off the request, checking its signature and
+/// writing `Set-Cookie` on the way out go here; the seam is the right shape.
 ///
 /// A layer may wait, which is what a session store wants: the lookup is
 /// awaited here and holds no thread.

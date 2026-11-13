@@ -42,10 +42,10 @@ use std::sync::Arc;
 
 use brocanth::plugin_app::App;
 use brocanth::plugin_hooks::{Begin, HandlerError, HookFamilies, Request, RequestState, Response};
-use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx, RoutePlan};
-use brocanth::routing::{Allow, Dispatch, Router, Verb};
+use brocanth::plugin_routes::{route, AnyHandler, Handler, RouteCx, RoutePlan, Routed};
+use brocanth::routing::Router;
 
-use crate::request::TestRequest;
+use crate::request::{resolve, CookieJar, TestRequest};
 use crate::response::TestResponse;
 use crate::rt::block_on;
 
@@ -286,12 +286,21 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
     ///
     /// When a followed redirect carries no `location`, or when the chain is
     /// longer than [`TestClient::following_at_most`].
+    ///
+    /// # Following
+    ///
+    /// Each `location` is resolved against the target that answered, so
+    /// `edit` and `?page=2` work. A location on another host ends the chain:
+    /// the redirect itself is the response. Each hop's `set-cookie` reaches
+    /// the next hop, in a jar that lives for this one call.
     pub fn send(&self, request: TestRequest) -> TestResponse {
         let mut chain = Vec::new();
+        let mut jar = CookieJar::from_request(&request);
         let mut current = request;
         loop {
             let response = self.once(&current);
-            match self.next_hop(&current, &response, &chain) {
+            jar.update(response.headers());
+            match self.next_hop(&current, &response, &chain, &jar) {
                 None => return response.with_chain(chain),
                 Some(next) => {
                     chain.push(next.target().to_string());
@@ -330,10 +339,12 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
     /// As [`TestClient::send`].
     pub async fn send_async(&self, request: TestRequest) -> TestResponse {
         let mut chain = Vec::new();
+        let mut jar = CookieJar::from_request(&request);
         let mut current = request;
         loop {
             let response = self.once_async(&current).await;
-            match self.next_hop(&current, &response, &chain) {
+            jar.update(response.headers());
+            match self.next_hop(&current, &response, &chain, &jar) {
                 None => return response.with_chain(chain),
                 Some(next) => {
                     chain.push(next.target().to_string());
@@ -355,21 +366,18 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
             // `core` is `&mut` for the hooks that rewrite it; dispatch only
             // reads, and `RouteCx` borrows it shared.
             let read: &Request = core;
-            let Some(verb) = Verb::from_http(read.method()) else {
-                return Ok(plain(501, "Not Implemented"));
-            };
-            match self.router.dispatch(verb, read.uri().path()) {
-                Dispatch::Found { handler, matched } => {
+            // The core's `route` owns the 501, the 405 and the 404, the same
+            // function the server's bridge calls. Built here and not returned
+            // early, so the response hooks and `after_dispatch` see them.
+            match route(&self.router, read) {
+                Routed::Found { handler, matched } => {
                     let params = matched.params();
                     // After the hooks: a provider may read what they wrote.
                     let context = self.app.context_for(read, &*state);
                     let mut cx = RouteCx::new(read, &params, &context, state);
                     handler.run(plan, &mut cx)
                 }
-                // Built here and not returned early, so the response hooks
-                // and `after_dispatch` see them like any other response.
-                Dispatch::MethodNotAllowed { allow, .. } => Ok(method_not_allowed(allow)),
-                Dispatch::NotFound => Ok(plain(404, "Not Found")),
+                Routed::Answer(response) => Ok(response),
             }
         });
 
@@ -390,24 +398,20 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
             Begin::Answered(outcome) => outcome,
             Begin::Dispatch => {
                 let read: &Request = &core;
-                match Verb::from_http(read.method()) {
-                    None => Ok(plain(501, "Not Implemented")),
-                    Some(verb) => match self.router.dispatch(verb, read.uri().path()) {
-                        Dispatch::Found { handler, matched } => {
-                            let params = matched.params();
-                            // After the hooks: a provider may read what they wrote.
-                            let context = self.app.context_for(read, &state);
-                            let mut cx = RouteCx::new(read, &params, &context, &mut state);
-                            handler.run_async(plan, &mut cx).await
-                        }
-                        Dispatch::MethodNotAllowed { allow, .. } => Ok(method_not_allowed(allow)),
-                        Dispatch::NotFound => Ok(plain(404, "Not Found")),
-                    },
+                match route(&self.router, read) {
+                    Routed::Found { handler, matched } => {
+                        let params = matched.params();
+                        // After the hooks: a provider may read what they wrote.
+                        let context = self.app.context_for(read, &state);
+                        let mut cx = RouteCx::new(read, &params, &context, &mut state);
+                        handler.run_async(plan, &mut cx).await
+                    }
+                    Routed::Answer(response) => Ok(response),
                 }
             }
         };
 
-        TestResponse::from_core(self.app.finish(&mut core, &mut state, outcome))
+        TestResponse::from_core_async(self.app.finish(&mut core, &mut state, outcome)).await
     }
 
     /// A fresh request state, with whatever
@@ -426,6 +430,7 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
         request: &TestRequest,
         response: &TestResponse,
         chain: &[String],
+        jar: &CookieJar,
     ) -> Option<TestRequest> {
         if !request.follows() || !response.is_redirect() {
             return None;
@@ -444,32 +449,20 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
             chain.len(),
             chain.join(" -> ")
         );
+        // Resolved against the target that answered, as a browser does. A
+        // location on another host is not followed: this client serves one
+        // application, and sending an absolute URL for another site to the
+        // local path of the same name tests something no browser does.
+        let host = request.header_value("host").or_else(|| {
+            self.headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+                .map(|(_, value)| value.as_str())
+        });
+        let target = resolve(request.target(), location, host)?;
         // 307 and 308 keep the verb and the body; every other redirect a
         // browser follows with a GET.
-        Some(request.redirected_to(location, matches!(response.status(), 307 | 308)))
+        let next = request.redirected_to(&target, matches!(response.status(), 307 | 308));
+        Some(next.with_cookies(jar))
     }
-}
-
-/// A response with a status, a plain-text body and nothing else.
-fn plain(status: u16, body: &'static str) -> Response {
-    http::Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(brocanth::plugin_body::Body::from(body.as_bytes().to_vec()))
-        .expect("a response this crate wrote")
-}
-
-/// 405, carrying the verbs the path does answer.
-///
-/// The same answer `brocanth-server` gives, so a test that asserts on a 405
-/// is asserting on what a browser would get.
-fn method_not_allowed(allow: Allow) -> Response {
-    http::Response::builder()
-        .status(405)
-        .header("content-type", "text/plain; charset=utf-8")
-        .header("allow", allow.header_value())
-        .body(brocanth::plugin_body::Body::from(
-            b"Method Not Allowed".to_vec(),
-        ))
-        .expect("a response this crate wrote")
 }

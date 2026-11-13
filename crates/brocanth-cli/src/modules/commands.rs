@@ -83,9 +83,9 @@ const TABLE_WITH_SHAPES: &str = r##"/// The header, and one row per route.
 /// Five columns, because this project has `input`: `described()` read every
 /// handler's signature while the crate compiled, so what a route takes and
 /// gives is known here and worth a column.
-fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
+fn table() -> anyhow::Result<(Vec<&'static str>, Vec<Vec<String>>)> {
     let described = crate::pages::described();
-    let rows = crate::pages::handlers()
+    let mut rows: Vec<Vec<String>> = crate::pages::handlers()
         .iter()
         .map(|(verb, pattern, handler)| {
             let shape = described
@@ -108,7 +108,10 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
             ]
         })
         .collect();
-    (vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows)
+    for (verb, pattern) in crate::pages::mounted_routes()? {
+        rows.push(vec![verb, pattern, MOUNTED.to_string(), "-".into(), "-".into()]);
+    }
+    Ok((vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows))
 }"##;
 
 /// `table`, where it does not.
@@ -118,8 +121,8 @@ const TABLE: &str = r##"/// The header, and one row per route.
 /// answers it. What each one takes and gives would be a fourth and a fifth,
 /// and they arrive with the `input` module -- without it nothing in this
 /// project has read a handler's signature.
-fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
-    let rows = crate::pages::handlers()
+fn table() -> anyhow::Result<(Vec<&'static str>, Vec<Vec<String>>)> {
+    let mut rows: Vec<Vec<String>> = crate::pages::handlers()
         .iter()
         .map(|(verb, pattern, handler)| {
             vec![
@@ -129,7 +132,10 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
             ]
         })
         .collect();
-    (vec!["VERB", "PATTERN", "HANDLER"], rows)
+    for (verb, pattern) in crate::pages::mounted_routes()? {
+        rows.push(vec![verb, pattern, MOUNTED.to_string()]);
+    }
+    Ok((vec!["VERB", "PATTERN", "HANDLER"], rows))
 }"##;
 
 /// Everything around the two halves that differ.
@@ -147,10 +153,10 @@ const ROUTES_RS: &str = r##"//! Every route this application answers.
 //! `routes signup` is the one page and `routes POST` is every route that
 //! writes.
 //!
-//! These are the pages. A plugin that mounts its own routes through a
-//! `RouteSource` would not be in the list, and nothing this project has
-//! mounts one -- so today the two are the same table. Say so here if that
-//! stops being true.
+//! The routes a module mounts (an admin, an API under `/api`) follow the
+//! pages, from `crate::pages::mounted_routes()`. That runs the same
+//! `mounted` the server runs, so the list cannot fall behind either. Their
+//! handler column reads `(mounted)`: the module owns the function.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
@@ -164,7 +170,7 @@ pub struct Routes {
 
 impl Command for Routes {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        let (header, mut rows) = table();
+        let (header, mut rows) = table()?;
         if let Some(filter) = &self.filter {
             rows.retain(|row| row.iter().any(|cell| cell.contains(filter)));
         }
@@ -193,6 +199,9 @@ impl Command for Routes {
         Ok(())
     }
 }
+
+/// The handler column of a route a module mounted.
+const MOUNTED: &str = "(mounted)";
 
 /// One line, every cell padded to its column but the last.
 ///
@@ -233,6 +242,10 @@ mod tests {
         let out = written(&["commands"]);
         assert!(out.contains("format!(\"pages::{handler}\")"), "{out}");
         assert!(out.contains("crate::pages::handlers()"), "{out}");
+        // The mounted routes are listed too, and the doc no longer says
+        // there are none.
+        assert!(out.contains("crate::pages::mounted_routes()?"), "{out}");
+        assert!(!out.contains("nothing this project has"), "{out}");
     }
 
     #[test]

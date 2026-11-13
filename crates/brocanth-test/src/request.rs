@@ -148,6 +148,24 @@ impl TestRequest {
         next
     }
 
+    /// The first value of a header this request carries, case-insensitively.
+    pub(crate) fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The same request with its `cookie` header replaced by `jar`.
+    pub(crate) fn with_cookies(mut self, jar: &CookieJar) -> Self {
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
+        if let Some(value) = jar.header() {
+            self.headers.push(("cookie".to_string(), value));
+        }
+        self
+    }
+
     /// This request as the core's own type, under the client's headers.
     ///
     /// # Panics
@@ -164,6 +182,156 @@ impl TestRequest {
         builder
             .body(self.body.clone())
             .unwrap_or_else(|e| panic!("`{} {}` is not a request: {e}", self.verb, self.target))
+    }
+}
+
+/// Where a `location` points, as a target this client can send, resolved
+/// against the target that answered.
+///
+/// `None` when the location names a scheme and a host that are not `host`:
+/// another site, which a test client cannot visit. A fragment is dropped,
+/// because a browser never sends it.
+pub(crate) fn resolve(base: &str, location: &str, host: Option<&str>) -> Option<String> {
+    let location = location.split('#').next().unwrap_or_default();
+    let rest = if let Some(after) = location
+        .strip_prefix("http://")
+        .or_else(|| location.strip_prefix("https://"))
+        .or_else(|| location.strip_prefix("//"))
+    {
+        let (authority, path) = match after.find(['/', '?']) {
+            Some(at) => after.split_at(at),
+            None => (after, "/"),
+        };
+        if host.is_none_or(|host| !host.eq_ignore_ascii_case(authority)) {
+            return None;
+        }
+        return Some(if path.starts_with('?') {
+            format!("/{path}")
+        } else {
+            path.to_string()
+        });
+    } else {
+        location
+    };
+    let base_path = base.split(['?', '#']).next().unwrap_or("/");
+    if rest.is_empty() {
+        return Some(base.to_string());
+    }
+    if rest.starts_with('?') {
+        return Some(format!("{base_path}{rest}"));
+    }
+    let (path, query) = match rest.find('?') {
+        Some(at) => rest.split_at(at),
+        None => (rest, ""),
+    };
+    let joined = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        // Relative: replace the last segment of the base path.
+        let dir = &base_path[..=base_path.rfind('/').unwrap_or(0)];
+        let dir = if dir.is_empty() { "/" } else { dir };
+        format!("{dir}{path}")
+    };
+    Some(format!("{}{query}", normalise(&joined)))
+}
+
+/// `.` and `..` segments removed, as RFC 3986 section 5.2.4 does.
+fn normalise(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (index, segment) in segments.iter().enumerate() {
+        let last = index + 1 == segments.len();
+        match *segment {
+            "." => {
+                if last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                out.pop();
+                if last {
+                    out.push("");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// The cookies one followed request has collected, hop by hop.
+///
+/// A browser keeps the `set-cookie` of a redirect and sends it to the next
+/// hop; a login that sets a session and redirects to the dashboard needs
+/// that. This jar is per [`send`](crate::TestClient::send): nothing carries
+/// over to the next request. It reads only a cookie's name and value, and
+/// drops one whose `Max-Age` is zero or less.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct CookieJar {
+    cookies: Vec<(String, String)>,
+}
+
+impl CookieJar {
+    /// The cookies the request already carries.
+    pub(crate) fn from_request(request: &TestRequest) -> Self {
+        let mut jar = Self::default();
+        for (name, value) in &request.headers {
+            if !name.eq_ignore_ascii_case("cookie") {
+                continue;
+            }
+            for pair in value.split(';') {
+                if let Some((key, value)) = pair.trim().split_once('=') {
+                    jar.set(key.trim(), value.trim());
+                }
+            }
+        }
+        jar
+    }
+
+    /// Takes every `set-cookie` in a response.
+    pub(crate) fn update(&mut self, headers: &[(String, String)]) {
+        for (name, value) in headers {
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                continue;
+            }
+            let mut parts = value.split(';');
+            let Some((key, val)) = parts.next().and_then(|pair| pair.split_once('=')) else {
+                continue;
+            };
+            let expired = parts.any(|attribute| {
+                attribute.trim().split_once('=').is_some_and(|(k, v)| {
+                    k.trim().eq_ignore_ascii_case("max-age")
+                        && v.trim().parse::<i64>().is_ok_and(|age| age <= 0)
+                })
+            });
+            let key = key.trim();
+            if expired {
+                self.cookies.retain(|(name, _)| name != key);
+            } else {
+                self.set(key, val.trim());
+            }
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        match self.cookies.iter_mut().find(|(name, _)| name == key) {
+            Some(slot) => slot.1 = value.to_string(),
+            None => self.cookies.push((key.to_string(), value.to_string())),
+        }
+    }
+
+    /// The `cookie` header value, or `None` when the jar is empty.
+    pub(crate) fn header(&self) -> Option<String> {
+        if self.cookies.is_empty() {
+            return None;
+        }
+        Some(
+            self.cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 }
 
@@ -224,6 +392,37 @@ mod tests {
         let built = TestRequest::get("/admin/jobs?page=2").build(&[]);
         assert_eq!(built.uri().path(), "/admin/jobs");
         assert_eq!(built.uri().query(), Some("page=2"));
+    }
+
+    #[test]
+    fn a_location_is_resolved_against_the_target_that_answered() {
+        assert_eq!(resolve("/posts/7", "/x", None).as_deref(), Some("/x"));
+        assert_eq!(resolve("/posts/7", "edit", None).as_deref(), Some("/posts/edit"));
+        assert_eq!(resolve("/posts/7/", "edit", None).as_deref(), Some("/posts/7/edit"));
+        assert_eq!(resolve("/posts/7?a=1", "?page=2", None).as_deref(), Some("/posts/7?page=2"));
+        assert_eq!(resolve("/a/b/c", "../d?q=1#top", None).as_deref(), Some("/a/d?q=1"));
+        assert_eq!(
+            resolve("/", "https://app.test/admin?x=1", Some("app.test")).as_deref(),
+            Some("/admin?x=1")
+        );
+    }
+
+    #[test]
+    fn a_location_on_another_host_is_not_followed() {
+        assert_eq!(resolve("/", "https://elsewhere.example/admin", None), None);
+        assert_eq!(resolve("/", "//elsewhere.example/admin", Some("app.test")), None);
+    }
+
+    #[test]
+    fn the_jar_keeps_set_cookie_and_drops_an_expired_one() {
+        let mut jar = CookieJar::from_request(&TestRequest::get("/").header("cookie", "a=1"));
+        jar.update(&[
+            ("set-cookie".into(), "session=abc; Path=/; HttpOnly".into()),
+            ("Set-Cookie".into(), "a=; Max-Age=0".into()),
+        ]);
+        assert_eq!(jar.header().as_deref(), Some("session=abc"));
+        let next = TestRequest::get("/").header("cookie", "old=1").with_cookies(&jar);
+        assert_eq!(next.header_value("cookie"), Some("session=abc"));
     }
 
     #[test]
