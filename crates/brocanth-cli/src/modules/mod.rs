@@ -55,7 +55,6 @@ pub mod docker;
 mod docs_check;
 pub mod jt;
 pub mod logging;
-pub mod model;
 pub mod rsx;
 pub mod sessions;
 pub mod static_site;
@@ -88,7 +87,8 @@ pub const ALL: &[&dyn Module] = &[
     // The pool, from the crate that is the pool. Before `model`, which is
     // the ORM over the same connections.
     &brocanth_db::scaffold::Database,
-    &model::Model,
+    // The ORM, from the crate that is the ORM.
+    &brocanth_model::scaffold::Model,
     // From `brocanth-cache` itself, which is the point: a module can live in
     // the crate it scaffolds, and joining the menu is still one line here.
     &brocanth_cache::scaffold::Cache,

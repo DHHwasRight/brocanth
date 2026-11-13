@@ -1,4 +1,11 @@
-//! `model` -- SeaORM, validations and migrations, over the `db` pool.
+//! `model` -- what `brocanth create` writes when somebody asks for the ORM.
+//!
+//! The module is here and not in the CLI because what it writes is a
+//! statement about this crate: `Orm::from_db`, `Orm::migrate_locked`, the
+//! plugin seam and the registry. Those move when this crate moves.
+//!
+//! Compiled only under the `scaffold` feature, which is off. The CLI takes
+//! it with no default features, so it links none of the ORM.
 
 use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
@@ -62,7 +69,7 @@ impl Module for Model {
         // The list the `migrate` tool keeps, and the tool. The tool is a
         // second binary so the server never links a Rust parser: it reads
         // `src/models/` as text, writes source, and is for development.
-        s.file(crate::owned::MIGRATOR, migrator_file());
+        s.file(MIGRATOR, migrator_file());
         s.file("src/bin/migrate.rs", MIGRATE_BIN);
         s.binary("migrate", "src/bin/migrate.rs");
         // The command that applies the list, and runs the tool for `ids`,
@@ -116,7 +123,7 @@ impl Ctx {
 }
 "#;
 
-pub(crate) fn plugin_rs(project: &Project) -> String {
+fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "model");
     // An empty struct has nothing to default by hand, so `Default` joins the
     // derive: one attribute, as rustfmt would merge two.
@@ -199,17 +206,23 @@ impl Plugin for Model {{
     )
 }
 
+/// Where the list of migrations goes, from the project root.
+pub const MIGRATOR: &str = "migrations/mod.rs";
+
 /// `migrations/mod.rs` as `create` writes it: stamped, and listing nothing.
 ///
 /// The `migrate` tool (`brocanth_migrate::migrator`) writes every later
 /// list, and must write these same bytes for an empty one, or it would read
-/// this file as edited. `crates/brocanth-migrate/tests/golden/migrator-empty.rs`
-/// pins them, and a test on each side compares with it.
-pub(crate) fn migrator_file() -> String {
-    crate::owned::stamp(crate::owned::MIGRATOR, EMPTY_MIGRATOR)
+/// this file as edited. A test here compares the two directly: this crate
+/// has `brocanth-migrate` as a dev-dependency, and the CLI links neither.
+pub fn migrator_file() -> String {
+    EMPTY_MIGRATOR.to_string()
 }
 
-const EMPTY_MIGRATOR: &str = "//! The migrations in this directory, oldest first.
+const EMPTY_MIGRATOR: &str = "//! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
+//! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
+//!
+//! The migrations in this directory, oldest first.
 //!
 //! A file name starts with its UTC time, so the order of the names is the
 //! order the migrations were written. `src/commands/migrate.rs` applies this
@@ -226,6 +239,8 @@ impl MigratorTrait for Migrator {
         vec![]
     }
 }
+
+// brocanth-digest: ce7abb4673e08591
 ";
 
 /// `src/bin/migrate.rs`: the `migrate` tool, a development binary.
@@ -534,7 +549,8 @@ mod tests {
     fn the_empty_list_is_the_one_the_migrate_tool_writes() {
         assert_eq!(
             super::migrator_file(),
-            include_str!("../../../brocanth-migrate/tests/golden/migrator-empty.rs")
+            brocanth_migrate::migrator::migrator_file(&[])
         );
+        assert_eq!(super::MIGRATOR, brocanth_migrate::migrator::MIGRATOR);
     }
 }

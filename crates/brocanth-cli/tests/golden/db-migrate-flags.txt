@@ -2392,7 +2392,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -2419,6 +2419,16 @@ impl Command for Migrate {
             println!("wrote {}", path.display());
             return Ok(());
         }
+        // With no directory, `up` would apply nothing and say all is
+        // applied: in a release image that forgot to copy it, a lie.
+        if matches!(self.action, Action::Up | Action::Down { .. }) && !dir.is_dir() {
+            anyhow::bail!(
+                "{} has no migrations/ directory, so there is nothing to apply or roll back\n\
+                 help: run this command from the project root, or copy migrations/ next to \
+                 the binary in the image",
+                ctx.root().display()
+            );
+        }
         let files = migrate::read_dir(dir)?;
         let config = database()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2437,6 +2447,14 @@ impl Command for Migrate {
 async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
     match action {
         Action::Up => {
+            let late = migrate::out_of_order(&migrator.status().await?);
+            if !late.is_empty() {
+                eprintln!(
+                    "warning: {} sorts before the newest applied migration, and is applied \
+                     after it. `migrate down` undoes it first.",
+                    late.join(", ")
+                );
+            }
             let applied = migrator.up().await?;
             if applied.is_empty() {
                 println!("Nothing to apply: each migration is applied.");
@@ -2611,7 +2629,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. The default is a
+    /// local development database; set the variable for `db.url` everywhere else.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2630,8 +2649,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2662,7 +2682,7 @@ impl Default for Settings {
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -2904,7 +2924,8 @@ DROP TABLE posts;
 ```
 
 `migrate up` applies each pending file in name order, each in one
-transaction. `migrate down [N]` runs the `-- down` part of the newest N.
+transaction. `migrate down [N]` runs the `-- down` part of the last N
+applied, the last applied first.
 `migrate status` lists each file. Do not edit a file that is applied: write
 a new one.
 
@@ -2995,7 +3016,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 45fc3cd226ef486e -->
+<!-- brocanth-digest: 35211b9966cf1d3b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

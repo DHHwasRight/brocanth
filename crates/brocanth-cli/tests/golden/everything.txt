@@ -2151,9 +2151,6 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
 
@@ -2220,10 +2217,7 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::flags::Flags>("flags")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::auth_oauth::AuthOauth>("auth_oauth")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
+            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
 
         // -- file routes ---------------------------------------------------
@@ -2275,9 +2269,6 @@ macro_rules! register {
             .plugin_hooking_from_config::<crate::plugins::webhooks_in::WebhooksIn>("webhooks_in")
             .map_err(|e| e.to_string())?;
         let builder = builder
-            .plugin_from_config::<crate::plugins::oauth_client::OauthClientPlugin>("oauth_client")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
 
@@ -2296,6 +2287,12 @@ macro_rules! register {
         );
         let builder = builder
             .plugin_from_config::<crate::plugins::mail::MailPlugin>("mail")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::auth_oauth::AuthOauth>("auth_oauth")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::policy::Policies>("policy")
@@ -2324,6 +2321,9 @@ macro_rules! register {
         );
         let builder = builder
             .plugin_from_config::<crate::plugins::webhooks_out::WebhooksOut>("webhooks_out")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::oauth_client::OauthClientPlugin>("oauth_client")
             .map_err(|e| e.to_string())?;
 
         // -- brocanth-errors: error pages and reporters --------------------
@@ -2399,8 +2399,7 @@ type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
 type WithMeta = After<crate::plugins::meta::Meta, WithI18n>;
 type WithObservability = After<crate::plugins::observability::Observe, WithMeta>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
-type WithAuth = After<crate::plugins::auth::Auth, WithDb>;
-type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
+type WithStorage = After<crate::plugins::storage::Files, WithDb>;
 type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
 type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
@@ -2411,19 +2410,20 @@ type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithModel>;
 type WithFlags = After<crate::plugins::flags::Flags, WithJobs>;
-type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithFlags>;
-type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
-type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithSuperuser>;
+type WithAuth = After<crate::plugins::auth::Auth, WithFlags>;
+type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithAuth>;
 type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithStorageRoutes>;
 type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithMiddlewareSecurityHeaders>;
-type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithWebhooksIn>;
-type WithCache = After<crate::plugins::cache::Cache, WithOauthClient>;
+type WithCache = After<crate::plugins::cache::Cache, WithWebhooksIn>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithCache>;
 type WithMail = After<crate::plugins::mail::MailPlugin, WithAudit>;
-type WithPolicy = After<crate::plugins::policy::Policies, WithMail>;
+type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithMail>;
+type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithSuperuser>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithPolicy>;
 type WithWebhooksOut = After<crate::plugins::webhooks_out::WebhooksOut, WithMiddlewareRateLimit>;
-type WithErrors = After<brocanth_errors::Errors, WithWebhooksOut>;
+type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithWebhooksOut>;
+type WithErrors = After<brocanth_errors::Errors, WithOauthClient>;
 type WithMiddlewareConditionalGet = After<brocanth_middleware::ConditionalGet, WithErrors>;
 type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareConditionalGet>;
 type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFlash>;
@@ -2481,15 +2481,6 @@ macro_rules! announce {
         let db: &brocanth_db::Db = cx.extract();
         let connections = db.pool().size();
         crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
-        let auth: &crate::plugins::auth::Services = cx.extract();
-        let cookie = &auth.sessions().config().cookie_name;
-        let providers = auth.providers().len();
-        crate::plugins::say!(
-            info,
-            "auth: session cookie {cookie}, {providers} provider(s)";
-            %cookie,
-            providers
-        );
         let files: &plugins::storage::FileStore = cx.extract();
         let ttl = files.tokens.ttl();
         crate::plugins::say!(info, "storage: ready, download links last {ttl}s"; ttl);
@@ -2499,6 +2490,15 @@ macro_rules! announce {
         let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
         let max_clients = realtime.broker.config().max_clients;
         crate::plugins::say!(info, "realtime: up to {max_clients} clients"; max_clients);
+        let auth: &crate::plugins::auth::Services = cx.extract();
+        let cookie = &auth.sessions().config().cookie_name;
+        let providers = auth.providers().len();
+        crate::plugins::say!(
+            info,
+            "auth: session cookie {cookie}, {providers} provider(s)";
+            %cookie,
+            providers
+        );
         let rules: &crate::plugins::policy::Rules = cx.extract();
         let dialect = &rules.dialect;
         crate::plugins::say!(info, "policy: compiling for {dialect:?}"; ?dialect);
@@ -2618,26 +2618,26 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
             crate::plugins::flags::ALL,
         ));
     }
+    // The change history: a tab, a link on every record, every admin write.
+    if crate::modules::audit::MODULE.integrate.admin {
+        config = brocanth_audit::admin::install(config);
+    }
     // Superusers pass every check; a role holder passes what its roles grant.
     if crate::modules::superuser::MODULE.integrate.admin {
         config = config.with_policy(brocanth_auth::admin::StaffPolicy);
+    }
+    // The outgoing deliveries, with a Send again button, as a tab.
+    if crate::modules::webhooks_out::MODULE.integrate.admin {
+        config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::installed());
     }
     // Every connection, without its tokens, with a Revoke button, as a tab.
     if crate::modules::oauth_client::MODULE.integrate.admin {
         config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::installed());
     }
-    // The change history: a tab, a link on every record, every admin write.
-    if crate::modules::audit::MODULE.integrate.admin {
-        config = brocanth_audit::admin::install(config);
-    }
     // Roles: a superuser defines them and gives them to accounts.
     if crate::modules::roles::MODULE.integrate.admin {
         let roles = brocanth_auth::admin::RolesPanel::late(crate::plugins::superuser::store());
         config = config.panel(roles);
-    }
-    // The outgoing deliveries, with a Send again button, as a tab.
-    if crate::modules::webhooks_out::MODULE.integrate.admin {
-        config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::installed());
     }
     config
 }
@@ -3116,60 +3116,6 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
-        path: "auth.url",
-        help: "The Postgres database for accounts and sessions.",
-        flag: false,
-        file: "src/modules/auth.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth.signing_key_env",
-        help: "The name of the variable that holds the session signing key.",
-        flag: true,
-        file: "src/modules/auth.rs",
-        flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth.cookie_name",
-        help: "The session cookie's name.",
-        flag: true,
-        file: "src/modules/auth.rs",
-        flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/auth.rs",
-        flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "auth.idle_timeout",
-        help: "Seconds of inactivity before a session is dead.",
-        flag: true,
-        file: "src/modules/auth.rs",
-        flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "auth.absolute_timeout",
-        help: "Seconds from creation before a session is dead, however much it was used.",
-        flag: true,
-        file: "src/modules/auth.rs",
-        flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "storage.root",
         help: "Where uploads are stored.",
         flag: true,
@@ -3440,121 +3386,49 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "auth_oauth.base_url",
-        help: "The scheme and host the providers send the browser back to.",
+        path: "auth.signing_key_env",
+        help: "The name of the variable that holds the session signing key.",
         flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: true,
     },
     Setting {
-        path: "auth_oauth.after_sign_in",
-        help: "Where a person goes after a sign-in or a link.",
+        path: "auth.cookie_name",
+        help: "The session cookie's name.",
         flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: true,
     },
     Setting {
-        path: "auth_oauth.sign_in_page",
-        help: "Your password sign-in page, for a person who must sign in before a link. Empty means none.",
+        path: "auth.secure",
+        help: "Send the cookie over HTTPS only.",
         flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
         none_as: None,
-        text: true,
+        text: false,
     },
     Setting {
-        path: "auth_oauth.github_client_id",
-        help: "The client id of the GitHub OAuth app. Empty means none.",
+        path: "auth.idle_timeout",
+        help: "Seconds of inactivity before a session is dead.",
         flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
         none_as: None,
-        text: true,
+        text: false,
     },
     Setting {
-        path: "auth_oauth.github_client_secret",
-        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/auth_oauth.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.google_client_id",
-        help: "The client id of the Google OAuth client. Empty means none.",
+        path: "auth.absolute_timeout",
+        help: "Seconds from creation before a session is dead, however much it was used.",
         flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
         none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.google_client_secret",
-        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/auth_oauth.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.microsoft_client_id",
-        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
-        flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.microsoft_client_secret",
-        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/auth_oauth.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.gitlab_client_id",
-        help: "The application id of the GitLab application. Empty means none.",
-        flag: true,
-        file: "src/modules/auth_oauth.rs",
-        flags: crate::modules::auth_oauth::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "auth_oauth.gitlab_client_secret",
-        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/auth_oauth.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "superuser.email",
-        help: "The address of the superuser the server makes at start. Empty means none.",
-        flag: true,
-        file: "src/modules/superuser.rs",
-        flags: crate::modules::superuser::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "superuser.password_env",
-        help: "The name of the variable that holds that superuser's password.",
-        flag: true,
-        file: "src/modules/superuser.rs",
-        flags: crate::modules::superuser::MODULE.flags,
-        none_as: None,
-        text: true,
+        text: false,
     },
     Setting {
         path: "storage_routes.max_bytes",
@@ -3728,105 +3602,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "oauth_client.base_url",
-        help: "The scheme and host the providers send the browser back to.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.key",
-        help: "The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/oauth_client.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.allow_http",
-        help: "Accept http:// provider URLs. Development only, for a local fake provider.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "oauth_client.github_client_id",
-        help: "The client id of the GitHub OAuth app. Empty means none.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.github_client_secret",
-        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/oauth_client.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.google_client_id",
-        help: "The client id of the Google OAuth client. Empty means none.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.google_client_secret",
-        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/oauth_client.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.microsoft_client_id",
-        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.microsoft_client_secret",
-        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/oauth_client.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.gitlab_client_id",
-        help: "The application id of the GitLab application. Empty means none.",
-        flag: true,
-        file: "src/modules/oauth_client.rs",
-        flags: crate::modules::oauth_client::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "oauth_client.gitlab_client_secret",
-        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
-        flag: false,
-        file: "src/modules/oauth_client.rs",
-        flags: Flags::Off,
-        none_as: None,
-        text: true,
-    },
-    Setting {
         path: "cache.url",
         help: "The Redis or Valkey URL the cache lives in.",
         flag: false,
@@ -3953,6 +3728,123 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "auth_oauth.base_url",
+        help: "The scheme and host the providers send the browser back to.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.after_sign_in",
+        help: "Where a person goes after a sign-in or a link.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.sign_in_page",
+        help: "Your password sign-in page, for a person who must sign in before a link. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.github_client_id",
+        help: "The client id of the GitHub OAuth app. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.github_client_secret",
+        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.google_client_id",
+        help: "The client id of the Google OAuth client. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.google_client_secret",
+        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.microsoft_client_id",
+        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.microsoft_client_secret",
+        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.gitlab_client_id",
+        help: "The application id of the GitLab application. Empty means none.",
+        flag: true,
+        file: "src/modules/auth_oauth.rs",
+        flags: crate::modules::auth_oauth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "auth_oauth.gitlab_client_secret",
+        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/auth_oauth.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "superuser.email",
+        help: "The address of the superuser the server makes at start. Empty means none.",
+        flag: true,
+        file: "src/modules/superuser.rs",
+        flags: crate::modules::superuser::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "superuser.password_env",
+        help: "The name of the variable that holds that superuser's password.",
+        flag: true,
+        file: "src/modules/superuser.rs",
+        flags: crate::modules::superuser::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "policy.dialect",
         help: "The SQL a condition compiles to: postgres, the only dialect.",
         flag: true,
@@ -4032,6 +3924,105 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::webhooks_out::MODULE.flags,
         none_as: None,
         text: false,
+    },
+    Setting {
+        path: "oauth_client.base_url",
+        help: "The scheme and host the providers send the browser back to.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.key",
+        help: "The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.allow_http",
+        help: "Accept http:// provider URLs. Development only, for a local fake provider.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "oauth_client.github_client_id",
+        help: "The client id of the GitHub OAuth app. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.github_client_secret",
+        help: "The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.google_client_id",
+        help: "The client id of the Google OAuth client. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.google_client_secret",
+        help: "The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.microsoft_client_id",
+        help: "The application (client) id of the Microsoft Entra app. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.microsoft_client_secret",
+        help: "The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.gitlab_client_id",
+        help: "The application id of the GitLab application. Empty means none.",
+        flag: true,
+        file: "src/modules/oauth_client.rs",
+        flags: crate::modules::oauth_client::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "oauth_client.gitlab_client_secret",
+        help: "The secret of the GitLab application. No flag: it is a secret. Empty means none.",
+        flag: false,
+        file: "src/modules/oauth_client.rs",
+        flags: Flags::Off,
+        none_as: None,
+        text: true,
     },
     Setting {
         path: "errors.details",
@@ -4485,7 +4476,6 @@ fn defaults() -> Vec<(&'static str, String)> {
     let meta = crate::plugins::meta::Settings::default();
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
-    let auth = crate::plugins::auth::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
     let openapi = crate::plugins::openapi::Settings::default();
@@ -4496,18 +4486,19 @@ fn defaults() -> Vec<(&'static str, String)> {
     let analytics = brocanth_analytics::AnalyticsConfig::default();
     let jobs = crate::plugins::jobs::Settings::default();
     let flags = brocanth_flags::FlagsConfig::default();
-    let auth_oauth = crate::plugins::auth_oauth::Settings::default();
-    let superuser = crate::plugins::superuser::Settings::default();
+    let auth = crate::plugins::auth::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let webhooks_in = crate::plugins::webhooks_in::Settings::default();
-    let oauth_client = crate::plugins::oauth_client::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let audit = brocanth_audit::AuditConfig::default();
     let mail = crate::plugins::mail::Settings::default();
+    let auth_oauth = crate::plugins::auth_oauth::Settings::default();
+    let superuser = crate::plugins::superuser::Settings::default();
     let policy = crate::plugins::policy::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let webhooks_out = crate::plugins::webhooks_out::Settings::default();
+    let oauth_client = crate::plugins::oauth_client::Settings::default();
     let errors = brocanth_errors::ErrorsConfig::default();
     let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
     let flash = brocanth_middleware::FlashConfig::default();
@@ -4598,18 +4589,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
-        ("auth.url", format!("{:?}", auth.url)),
-        (
-            "auth.signing_key_env",
-            format!("{:?}", auth.signing_key_env),
-        ),
-        ("auth.cookie_name", format!("{:?}", auth.cookie_name)),
-        ("auth.secure", format!("{:?}", auth.secure)),
-        ("auth.idle_timeout", format!("{:?}", auth.idle_timeout)),
-        (
-            "auth.absolute_timeout",
-            format!("{:?}", auth.absolute_timeout),
-        ),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
@@ -4661,51 +4640,16 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
         ("flags.refresh_secs", format!("{:?}", flags.refresh_secs)),
         ("flags.migrate", format!("{:?}", flags.migrate)),
-        ("auth_oauth.base_url", format!("{:?}", auth_oauth.base_url)),
         (
-            "auth_oauth.after_sign_in",
-            format!("{:?}", auth_oauth.after_sign_in),
+            "auth.signing_key_env",
+            format!("{:?}", auth.signing_key_env),
         ),
+        ("auth.cookie_name", format!("{:?}", auth.cookie_name)),
+        ("auth.secure", format!("{:?}", auth.secure)),
+        ("auth.idle_timeout", format!("{:?}", auth.idle_timeout)),
         (
-            "auth_oauth.sign_in_page",
-            format!("{:?}", auth_oauth.sign_in_page),
-        ),
-        (
-            "auth_oauth.github_client_id",
-            format!("{:?}", auth_oauth.github_client_id),
-        ),
-        (
-            "auth_oauth.github_client_secret",
-            format!("{:?}", auth_oauth.github_client_secret),
-        ),
-        (
-            "auth_oauth.google_client_id",
-            format!("{:?}", auth_oauth.google_client_id),
-        ),
-        (
-            "auth_oauth.google_client_secret",
-            format!("{:?}", auth_oauth.google_client_secret),
-        ),
-        (
-            "auth_oauth.microsoft_client_id",
-            format!("{:?}", auth_oauth.microsoft_client_id),
-        ),
-        (
-            "auth_oauth.microsoft_client_secret",
-            format!("{:?}", auth_oauth.microsoft_client_secret),
-        ),
-        (
-            "auth_oauth.gitlab_client_id",
-            format!("{:?}", auth_oauth.gitlab_client_id),
-        ),
-        (
-            "auth_oauth.gitlab_client_secret",
-            format!("{:?}", auth_oauth.gitlab_client_secret),
-        ),
-        ("superuser.email", format!("{:?}", superuser.email)),
-        (
-            "superuser.password_env",
-            format!("{:?}", superuser.password_env),
+            "auth.absolute_timeout",
+            format!("{:?}", auth.absolute_timeout),
         ),
         (
             "storage_routes.max_bytes",
@@ -4774,6 +4718,99 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("webhooks_in.secret", format!("{:?}", webhooks_in.secret)),
         ("webhooks_in.migrate", format!("{:?}", webhooks_in.migrate)),
+        ("cache.url", format!("{:?}", cache.url)),
+        (
+            "audit.retention_days",
+            format!("{:?}", audit.retention_days),
+        ),
+        ("audit.flush_secs", format!("{:?}", audit.flush_secs)),
+        ("audit.migrate", format!("{:?}", audit.migrate)),
+        ("mail.transport", format!("{:?}", mail.transport)),
+        ("mail.from", format!("{:?}", mail.from)),
+        ("mail.from_name", format!("{:?}", mail.from_name)),
+        ("mail.folder", format!("{:?}", mail.folder)),
+        ("mail.smtp_host", format!("{:?}", mail.smtp_host)),
+        ("mail.smtp_port", format!("{:?}", mail.smtp_port)),
+        ("mail.smtp_security", format!("{:?}", mail.smtp_security)),
+        ("mail.smtp_username", format!("{:?}", mail.smtp_username)),
+        ("mail.smtp_password", format!("{:?}", mail.smtp_password)),
+        ("mail.worker", format!("{:?}", mail.worker)),
+        ("auth_oauth.base_url", format!("{:?}", auth_oauth.base_url)),
+        (
+            "auth_oauth.after_sign_in",
+            format!("{:?}", auth_oauth.after_sign_in),
+        ),
+        (
+            "auth_oauth.sign_in_page",
+            format!("{:?}", auth_oauth.sign_in_page),
+        ),
+        (
+            "auth_oauth.github_client_id",
+            format!("{:?}", auth_oauth.github_client_id),
+        ),
+        (
+            "auth_oauth.github_client_secret",
+            format!("{:?}", auth_oauth.github_client_secret),
+        ),
+        (
+            "auth_oauth.google_client_id",
+            format!("{:?}", auth_oauth.google_client_id),
+        ),
+        (
+            "auth_oauth.google_client_secret",
+            format!("{:?}", auth_oauth.google_client_secret),
+        ),
+        (
+            "auth_oauth.microsoft_client_id",
+            format!("{:?}", auth_oauth.microsoft_client_id),
+        ),
+        (
+            "auth_oauth.microsoft_client_secret",
+            format!("{:?}", auth_oauth.microsoft_client_secret),
+        ),
+        (
+            "auth_oauth.gitlab_client_id",
+            format!("{:?}", auth_oauth.gitlab_client_id),
+        ),
+        (
+            "auth_oauth.gitlab_client_secret",
+            format!("{:?}", auth_oauth.gitlab_client_secret),
+        ),
+        ("superuser.email", format!("{:?}", superuser.email)),
+        (
+            "superuser.password_env",
+            format!("{:?}", superuser.password_env),
+        ),
+        ("policy.dialect", format!("{:?}", policy.dialect)),
+        (
+            "rate_limit.ip_header",
+            format!("{:?}", rate_limit.ip_header),
+        ),
+        (
+            "rate_limit.session_cookie",
+            format!("{:?}", rate_limit.session_cookie),
+        ),
+        (
+            "rate_limit.fail_open",
+            format!("{:?}", rate_limit.fail_open),
+        ),
+        (
+            "webhooks_out.migrate",
+            format!("{:?}", webhooks_out.migrate),
+        ),
+        ("webhooks_out.worker", format!("{:?}", webhooks_out.worker)),
+        (
+            "webhooks_out.concurrency",
+            format!("{:?}", webhooks_out.concurrency),
+        ),
+        (
+            "webhooks_out.timeout_secs",
+            format!("{:?}", webhooks_out.timeout_secs),
+        ),
+        (
+            "webhooks_out.allow_private",
+            format!("{:?}", webhooks_out.allow_private),
+        ),
         (
             "oauth_client.base_url",
             format!("{:?}", oauth_client.base_url),
@@ -4814,53 +4851,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "oauth_client.gitlab_client_secret",
             format!("{:?}", oauth_client.gitlab_client_secret),
-        ),
-        ("cache.url", format!("{:?}", cache.url)),
-        (
-            "audit.retention_days",
-            format!("{:?}", audit.retention_days),
-        ),
-        ("audit.flush_secs", format!("{:?}", audit.flush_secs)),
-        ("audit.migrate", format!("{:?}", audit.migrate)),
-        ("mail.transport", format!("{:?}", mail.transport)),
-        ("mail.from", format!("{:?}", mail.from)),
-        ("mail.from_name", format!("{:?}", mail.from_name)),
-        ("mail.folder", format!("{:?}", mail.folder)),
-        ("mail.smtp_host", format!("{:?}", mail.smtp_host)),
-        ("mail.smtp_port", format!("{:?}", mail.smtp_port)),
-        ("mail.smtp_security", format!("{:?}", mail.smtp_security)),
-        ("mail.smtp_username", format!("{:?}", mail.smtp_username)),
-        ("mail.smtp_password", format!("{:?}", mail.smtp_password)),
-        ("mail.worker", format!("{:?}", mail.worker)),
-        ("policy.dialect", format!("{:?}", policy.dialect)),
-        (
-            "rate_limit.ip_header",
-            format!("{:?}", rate_limit.ip_header),
-        ),
-        (
-            "rate_limit.session_cookie",
-            format!("{:?}", rate_limit.session_cookie),
-        ),
-        (
-            "rate_limit.fail_open",
-            format!("{:?}", rate_limit.fail_open),
-        ),
-        (
-            "webhooks_out.migrate",
-            format!("{:?}", webhooks_out.migrate),
-        ),
-        ("webhooks_out.worker", format!("{:?}", webhooks_out.worker)),
-        (
-            "webhooks_out.concurrency",
-            format!("{:?}", webhooks_out.concurrency),
-        ),
-        (
-            "webhooks_out.timeout_secs",
-            format!("{:?}", webhooks_out.timeout_secs),
-        ),
-        (
-            "webhooks_out.allow_private",
-            format!("{:?}", webhooks_out.allow_private),
         ),
         ("errors.details", format!("{:?}", errors.details)),
         (
@@ -5079,7 +5069,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: 9ce7ad6c8e182a77
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -9523,7 +9513,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -9531,34 +9522,10 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-blog"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
-
-[auth]
-# The Postgres database for accounts and sessions.
-# The tables are created at startup, named brocanth_auth_*. A URL can
-# carry a password, so no flag sets it.
-url = "postgres://localhost/development"
-# The name of the variable that holds the session signing key.
-# Not the key. 32 bytes, base64url. `brocanth` will not invent one: a key
-# minted at startup logs every session out on each restart and differs
-# between the instances of a fleet, so a missing key stops the application.
-#
-#   export MY_BLOG_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
-signing_key_env = "MY_BLOG_SESSION_KEY"
-# The session cookie's name.
-# Development, over plain HTTP on localhost. In production this is
-# "__Host-session" with secure = true, and the two move together: a
-# __Host- cookie that is not Secure is a cookie no browser stores.
-cookie_name = "session"
-# Send the cookie over HTTPS only.
-secure = false
-# Seconds of inactivity before a session is dead.
-# Eight hours unattended, thirty days total. Idle bounds a browser nobody is
-# sitting at; absolute bounds a stolen cookie that is being kept warm.
-idle_timeout = 28800
-# Seconds from creation before a session is dead, however much it was used.
-absolute_timeout = 2592000
 
 [storage]
 # Where uploads are stored.
@@ -9716,43 +9683,27 @@ refresh_secs = 10
 # Off, for a project that keeps brocanth_flags::PgStore::SCHEMA in a migration.
 migrate = true
 
-[auth_oauth]
-# The providers to offer, by id: github, google, microsoft, gitlab.
-# Each one needs its client id and secret below. The server refuses to
-# start when one is missing, so a button never answers an error.
-providers = ["github"]
-# The scheme and host the providers send the browser back to.
-# Register <base_url>/oauth/<provider>/callback at each provider's console.
-base_url = "http://localhost:3000"
-# Where a person goes after a sign-in or a link.
-after_sign_in = "/"
-# Your password sign-in page, for a person who must sign in before a link. Empty means none.
-# sign_in_page = ""
-# The client id of the GitHub OAuth app. Empty means none.
-# github_client_id = ""
-# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
-# github_client_secret = ""
-# The client id of the Google OAuth client. Empty means none.
-# google_client_id = ""
-# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
-# google_client_secret = ""
-# The application (client) id of the Microsoft Entra app. Empty means none.
-# microsoft_client_id = ""
-# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
-# microsoft_client_secret = ""
-# The application id of the GitLab application. Empty means none.
-# gitlab_client_id = ""
-# The secret of the GitLab application. No flag: it is a secret. Empty means none.
-# gitlab_client_secret = ""
-
-[superuser]
-# The address of the superuser the server makes at start. Empty means none.
-# Idempotent: an account that exists is promoted and keeps its password.
-# With accounts in memory this is the only way to have a superuser.
-# email = ""
-# The name of the variable that holds that superuser's password.
-# Not the password. It is read only to create the account.
-password_env = "MY_BLOG_SUPERUSER_PASSWORD"
+[auth]
+# The name of the variable that holds the session signing key.
+# Not the key. 32 bytes, base64url. `brocanth` will not invent one: a key
+# minted at startup logs every session out on each restart and differs
+# between the instances of a fleet, so a missing key stops the application.
+#
+#   export MY_BLOG_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
+signing_key_env = "MY_BLOG_SESSION_KEY"
+# The session cookie's name.
+# Development, over plain HTTP on localhost. In production this is
+# "__Host-session" with secure = true, and the two move together: a
+# __Host- cookie that is not Secure is a cookie no browser stores.
+cookie_name = "session"
+# Send the cookie over HTTPS only.
+secure = false
+# Seconds of inactivity before a session is dead.
+# Eight hours unattended, thirty days total. Idle bounds a browser nobody is
+# sitting at; absolute bounds a stolen cookie that is being kept warm.
+idle_timeout = 28800
+# Seconds from creation before a session is dead, however much it was used.
+absolute_timeout = 2592000
 
 [storage_routes]
 # The largest file accepted, in bytes.
@@ -9813,37 +9764,6 @@ secret = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ=="
 # Off, for a project that keeps brocanth_webhooks::PgSeen::SCHEMA in a migration.
 migrate = true
 
-[oauth_client]
-# The providers to offer, by id: github, google, microsoft, gitlab.
-# Each one needs its client id and secret below. The server refuses to
-# start when one is missing, so a Connect button never answers an error.
-providers = ["github"]
-# The scheme and host the providers send the browser back to.
-# Register <base_url>/connections/<provider>/callback at each provider's console.
-base_url = "http://localhost:3000"
-# The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.
-# Make one with: head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
-# Set it in the environment. A new key makes every stored token unreadable.
-# key = ""
-# Accept http:// provider URLs. Development only, for a local fake provider.
-allow_http = false
-# The client id of the GitHub OAuth app. Empty means none.
-# github_client_id = ""
-# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
-# github_client_secret = ""
-# The client id of the Google OAuth client. Empty means none.
-# google_client_id = ""
-# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
-# google_client_secret = ""
-# The application (client) id of the Microsoft Entra app. Empty means none.
-# microsoft_client_id = ""
-# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
-# microsoft_client_secret = ""
-# The application id of the GitLab application. Empty means none.
-# gitlab_client_id = ""
-# The secret of the GitLab application. No flag: it is a secret. Empty means none.
-# gitlab_client_secret = ""
-
 [cache]
 # The Redis or Valkey URL the cache lives in.
 # A URL can carry a password, so no flag sets it.
@@ -9885,6 +9805,44 @@ smtp_password = ""
 # Run the worker that sends queued mail in this process.
 worker = true
 
+[auth_oauth]
+# The providers to offer, by id: github, google, microsoft, gitlab.
+# Each one needs its client id and secret below. The server refuses to
+# start when one is missing, so a button never answers an error.
+providers = ["github"]
+# The scheme and host the providers send the browser back to.
+# Register <base_url>/oauth/<provider>/callback at each provider's console.
+base_url = "http://localhost:3000"
+# Where a person goes after a sign-in or a link.
+after_sign_in = "/"
+# Your password sign-in page, for a person who must sign in before a link. Empty means none.
+# sign_in_page = ""
+# The client id of the GitHub OAuth app. Empty means none.
+# github_client_id = ""
+# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
+# github_client_secret = ""
+# The client id of the Google OAuth client. Empty means none.
+# google_client_id = ""
+# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
+# google_client_secret = ""
+# The application (client) id of the Microsoft Entra app. Empty means none.
+# microsoft_client_id = ""
+# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
+# microsoft_client_secret = ""
+# The application id of the GitLab application. Empty means none.
+# gitlab_client_id = ""
+# The secret of the GitLab application. No flag: it is a secret. Empty means none.
+# gitlab_client_secret = ""
+
+[superuser]
+# The address of the superuser the server makes at start. Empty means none.
+# Idempotent: an account that exists is promoted and keeps its password.
+# With accounts in memory this is the only way to have a superuser.
+# email = ""
+# The name of the variable that holds that superuser's password.
+# Not the password. It is read only to create the account.
+password_env = "MY_BLOG_SUPERUSER_PASSWORD"
+
 [policy]
 # The SQL a condition compiles to: postgres, the only dialect.
 # This follows `[db] url`, the Postgres database the model reads.
@@ -9925,6 +9883,37 @@ timeout_secs = 10
 # often on this machine. Production reads the default, false: a webhook URL
 # is chosen by whoever registers it, and this stops it reaching your network.
 allow_private = true
+
+[oauth_client]
+# The providers to offer, by id: github, google, microsoft, gitlab.
+# Each one needs its client id and secret below. The server refuses to
+# start when one is missing, so a Connect button never answers an error.
+providers = ["github"]
+# The scheme and host the providers send the browser back to.
+# Register <base_url>/connections/<provider>/callback at each provider's console.
+base_url = "http://localhost:3000"
+# The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.
+# Make one with: head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
+# Set it in the environment. A new key makes every stored token unreadable.
+# key = ""
+# Accept http:// provider URLs. Development only, for a local fake provider.
+allow_http = false
+# The client id of the GitHub OAuth app. Empty means none.
+# github_client_id = ""
+# The client secret of the GitHub OAuth app. No flag: it is a secret. Empty means none.
+# github_client_secret = ""
+# The client id of the Google OAuth client. Empty means none.
+# google_client_id = ""
+# The client secret of the Google OAuth client. No flag: it is a secret. Empty means none.
+# google_client_secret = ""
+# The application (client) id of the Microsoft Entra app. Empty means none.
+# microsoft_client_id = ""
+# The client secret of the Microsoft Entra app. No flag: it is a secret. Empty means none.
+# microsoft_client_secret = ""
+# The application id of the GitLab application. Empty means none.
+# gitlab_client_id = ""
+# The secret of the GitLab application. No flag: it is a secret. Empty means none.
+# gitlab_client_secret = ""
 
 [errors]
 # Show the cause of a 500 in a debug build. A release build never shows it.
@@ -10913,6 +10902,7 @@ fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
@@ -10932,7 +10922,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -10981,6 +10971,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -10989,14 +10980,42 @@ enum Apply {
 
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
-    let config = database()?;
+    let mut config = database()?;
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
+    config.statement_timeout = None;
+    config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
         let orm = Orm::from_db(&pool);
-        let db = orm.connection();
-        let before = Migrator::get_migration_with_status(db).await?;
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()
@@ -11007,7 +11026,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
         match what {
             Apply::Up => {
                 let pending = named(MigrationStatus::Pending);
-                Migrator::up(db, None).await?;
                 if pending.is_empty() {
                     println!("Nothing to apply: each migration is applied.");
                 }
@@ -11017,7 +11035,6 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             }
             Apply::Down(n) => {
                 let applied = named(MigrationStatus::Applied);
-                Migrator::down(db, Some(n)).await?;
                 if applied.is_empty() {
                     println!("Nothing to roll back: no migration is applied.");
                 }
@@ -13248,7 +13265,7 @@ fn actor(_ctx: &Ctx) -> Option<String> {
 //! else in the project changes type.
 //!
 //! 1. **`Store = PgStore`.** Accounts and sessions are rows in the
-//!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and
+//!    `brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and
 //!    a deploy. The pool is built in `before_start` with no connection, and
 //!    the readiness check that `serve` awaits before it listens runs
 //!    `migrate` once (it is idempotent and takes an advisory lock). To review
@@ -13323,7 +13340,7 @@ use brocanth_auth::{Clock as _, Passwords, PgStore, SystemClock};
 
 /// Where identities, sessions and single-use tokens live.
 ///
-/// Postgres, at `[auth] url`. See the file header.
+/// Postgres, on the pool the `db` plugin opened. See the file header.
 pub type Store = PgStore;
 
 /// How this application reaches a provider.
@@ -13351,11 +13368,9 @@ pub type Services = brocanth_auth::Auth<Store, Http, Clock>;
 /// It derives `Deserialize` because this application reads it from
 /// `[auth]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// The Postgres database the accounts and sessions live in.
-    pub url: String,
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
@@ -13373,25 +13388,9 @@ pub struct Settings {
     pub absolute_timeout: i64,
 }
 
-/// Every field but a secret, which prints as `<redacted>`: a log line or
-/// a panic message that prints the settings leaks no secret.
-impl std::fmt::Debug for Settings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Settings")
-            .field("url", &"<redacted>")
-            .field("signing_key_env", &self.signing_key_env)
-            .field("cookie_name", &self.cookie_name)
-            .field("secure", &self.secure)
-            .field("idle_timeout", &self.idle_timeout)
-            .field("absolute_timeout", &self.absolute_timeout)
-            .finish()
-    }
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
             signing_key_env: "MY_BLOG_SESSION_KEY".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
@@ -13424,16 +13423,6 @@ impl Plugin for Auth {
             store: None,
             sweeper: None,
         }
-    }
-
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.settings.url.is_empty() {
-            return Err(PluginError::new(
-                "[auth] url is required; accounts live in a Postgres database\n\
-                 help: set `url` under [auth] in the config file, or the variable for `auth.url`",
-            ));
-        }
-        Ok(())
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
@@ -13504,21 +13493,10 @@ impl Plugin for Auth {
             ..SessionConfig::default()
         };
 
-        // The hooks are synchronous and opening a pool is not, so the pool
-        // opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "[auth] needs a Tokio runtime at startup to open its pool ({e})\n\
-                 help: build the application inside the runtime that serves it"
-            ))
-        })?;
-        let store = {
-            let _entered = runtime.enter();
-            PgStore::connect_lazy(&self.settings.url)
-                .map_err(|e| PluginError::new(format!("[auth] {e}")))?
-        };
+        // The pool the `db` plugin opened, which registers before this one:
+        // one set of connections for the pages and the accounts.
+        let db = lc.require_service::<brocanth_db::Db>()?;
+        let store = PgStore::from_pool(db.pool().clone());
         let store = Arc::new(store);
         self.store = Some(Arc::clone(&store));
         // Ready when the database answers. The first check also creates the
@@ -13593,20 +13571,6 @@ impl Plugin for Auth {
         if let Some(services) = &self.services {
             cx.insert(services.clone());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_printed_settings_never_shows_a_secret() {
-        let settings = super::Settings {
-            url: "not-for-the-log".to_string(),
-            ..super::Settings::default()
-        };
-        let printed = format!("{settings:?}");
-        assert!(!printed.contains("not-for-the-log"), "{printed}");
-        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/auth_lockout.rs =====
@@ -14440,7 +14404,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -14459,8 +14424,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -14486,12 +14452,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -19141,14 +19107,11 @@ impl Plugin for Superuser {
 //!
 //! # The middleware this does not mount
 //!
-//! `ValidationPlugin` offers a middleware called `validation.report`, and
-//! this plugin does not pass the offer on. The offer is a name; the crate
-//! ships no function behind it, because turning an unhandled report into a
-//! 422 means knowing what this application's `Response` is. Mounting a name
-//! with no layer behind it stops the application at startup, so the offer is
-//! withheld until there is something to mount. Write the layer in this file,
-//! add `"validation.report" => Some(validation::layer),` to
-//! `src/plugins/mod.rs`, and forward `configure_router` to `self.inner`.
+//! None. Turning an unhandled report into a 422 means knowing what this
+//! application's `Response` is, so `brocanth-schema` ships no layer and
+//! offers none. To add one: write the layer in this file, offer it as
+//! `validation.report` from a `configure_router` here, and add
+//! `"validation.report" => Some(validation::layer),` to `src/plugins/mod.rs`.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
@@ -20014,37 +19977,6 @@ flag on. When a flag is on for everyone for good, delete the constant
 and the branch that reads it; the admin tab then lists the stored rule
 as not declared, so it can be removed.
 
-## Provider sign-in
-
-`src/plugins/auth_oauth/mod.rs` mounts the OAuth flow at `/oauth`. A
-sign-in button is a form that posts to `/oauth/<provider>`, never a
-link that starts the flow: a GET that starts a sign-in can be fired by
-any page on the web.
-
-Never link a provider to an account because the addresses match. The
-flow links only on a POST from a session that is signed in as that
-account, so a provider that reports somebody else's address cannot
-take the account over.
-
-A client secret goes in `$<APP>_AUTH_OAUTH__<PROVIDER>_CLIENT_SECRET`,
-never in a committed config file.
-
-## Account lockout
-
-`src/plugins/auth_lockout.rs` builds the lockout with the policy in
-`src/modules/auth_lockout.rs`. Sign in through `lockout(&auth)?.login(..)`,
-not `auth.accounts().login(..)`, or wrong passwords are not counted.
-Render `Attempt::Refused` and `Attempt::JustLocked` with the same words
-and status; mail the owner on `JustLocked`. Call `clear` after a password
-reset.
-
-## Superusers
-
-`src/plugins/superuser/mod.rs` reads the signed-in member of staff with
-`staff(ctx)`. A superuser passes every check of the admin. Never set the
-superuser flag from a form or a page: an operator sets it, with
-`[superuser] email` at start or the `createsuperuser` command.
-
 ## File routes
 
 Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
@@ -20074,24 +20006,6 @@ A source is a name, a `Scheme` and a `Handler`, added in `configure` in
 not add its path to the CSRF exempt list: the hook answers before the CSRF
 check and only for a verified delivery. A handler returns `Err` to have
 the sender retry; it runs once per idempotency key.
-
-## Connected accounts
-
-`src/plugins/oauth_client/mod.rs` mounts the connect pages at
-`/connections`. A Connect button is a form that posts to
-`/connections/<provider>`, never a link: a GET that starts a connection
-can be fired by any page on the web. Pass `return_to` only as a path on
-this site; anything else is dropped.
-
-When a call fails with `brocanth_oauth_client::Error::Reconnect`, the
-grant is gone: send the person to `/connections` to connect again. Do
-not retry it. The scopes are in `scopes()` in that file: ask for the
-fewest the code needs.
-
-The key that seals the tokens goes in `$<APP>_OAUTH_CLIENT__KEY`, and a
-client secret in `$<APP>_OAUTH_CLIENT__<PROVIDER>_CLIENT_SECRET`, never in
-a committed config file. Changing the key makes every stored token
-unreadable.
 
 ## Views
 
@@ -20238,12 +20152,36 @@ password in a file that is in git or on a command line.
 In development `[mail] transport` is `log`: each message is in the log,
 and nothing is sent.
 
-## Roles
+## Provider sign-in
 
-Check a permission with `crate::plugins::roles::require(ctx, "<name>")`.
-A role answers which people; it does not answer which rows. Put a row
-rule in a `brocanth_policy::Policy`, and combine it with a permission
-through `Staff::gate`. Never filter rows after a paginated load.
+`src/plugins/auth_oauth/mod.rs` mounts the OAuth flow at `/oauth`. A
+sign-in button is a form that posts to `/oauth/<provider>`, never a
+link that starts the flow: a GET that starts a sign-in can be fired by
+any page on the web.
+
+Never link a provider to an account because the addresses match. The
+flow links only on a POST from a session that is signed in as that
+account, so a provider that reports somebody else's address cannot
+take the account over.
+
+A client secret goes in `$<APP>_AUTH_OAUTH__<PROVIDER>_CLIENT_SECRET`,
+never in a committed config file.
+
+## Account lockout
+
+`src/plugins/auth_lockout.rs` builds the lockout with the policy in
+`src/modules/auth_lockout.rs`. Sign in through `lockout(&auth)?.login(..)`,
+not `auth.accounts().login(..)`, or wrong passwords are not counted.
+Render `Attempt::Refused` and `Attempt::JustLocked` with the same words
+and status; mail the owner on `JustLocked`. Call `clear` after a password
+reset.
+
+## Superusers
+
+`src/plugins/superuser/mod.rs` reads the signed-in member of staff with
+`staff(ctx)`. A superuser passes every check of the admin. Never set the
+superuser flag from a form or a page: an operator sets it, with
+`[superuser] email` at start or the `createsuperuser` command.
 
 ## Row-level security
 
@@ -20302,13 +20240,23 @@ Do not post to a partner's URL from a page: the delivery log, the
 signature and the retries come from `emit`. Show an endpoint's secret
 once, to the person who registered it, and never log it.
 
-## Connected accounts in memory
+## Connected accounts
 
-The tokens live in this process (`oauth-client-memory`). A restart drops
-every connection, and two processes do not share them. It is for
-development and tests: `brocanth check --deploy` refuses it. Run
-`brocanth remove oauth-client-memory` before production; the tokens then
-go to Postgres.
+`src/plugins/oauth_client/mod.rs` mounts the connect pages at
+`/connections`. A Connect button is a form that posts to
+`/connections/<provider>`, never a link: a GET that starts a connection
+can be fired by any page on the web. Pass `return_to` only as a path on
+this site; anything else is dropped.
+
+When a call fails with `brocanth_oauth_client::Error::Reconnect`, the
+grant is gone: send the person to `/connections` to connect again. Do
+not retry it. The scopes are in `scopes()` in that file: ask for the
+fewest the code needs.
+
+The key that seals the tokens goes in `$<APP>_OAUTH_CLIENT__KEY`, and a
+client secret in `$<APP>_OAUTH_CLIENT__<PROVIDER>_CLIENT_SECRET`, never in
+a committed config file. Changing the key makes every stored token
+unreadable.
 
 ## Errors
 
@@ -20331,6 +20279,13 @@ the pages in its directory and below it, inside the layouts above it.
 The nearest file wins. The components are `NotFound` and `ErrorPage`,
 and each may declare `caught: &Caught`. After you add one where there
 was none, run `touch src/pages/mod.rs`.
+
+## Roles
+
+Check a permission with `crate::plugins::roles::require(ctx, "<name>")`.
+A role answers which people; it does not answer which rows. Put a row
+rule in a `brocanth_policy::Policy`, and combine it with a permission
+through `Staff::gate`. Never filter rows after a paginated load.
 
 ## Conditional GET
 
@@ -20362,6 +20317,14 @@ The next HTML page shows it inside `<div id="flash">`, which the root
 layout carries. Keep that element in the layout. A page that draws a
 form again without a redirect uses `flash.now(level, text)`. The text
 is plain: the hook escapes it. Never put HTML or a secret in a message.
+
+## Connected accounts in memory
+
+The tokens live in this process (`oauth-client-memory`). A restart drops
+every connection, and two processes do not share them. It is for
+development and tests: `brocanth check --deploy` refuses it. Run
+`brocanth remove oauth-client-memory` before production; the tokens then
+go to Postgres.
 
 ## Filters
 
@@ -20451,7 +20414,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 45a9cd9231f08df1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20607,7 +20570,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "jobs", "cache"]
+adapted_to = ["config", "jobs", "cache", "db"]
 
 [modules.auth-oauth]
 version = "0.1.0"
@@ -21033,4 +20996,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 59a9711551b9afea

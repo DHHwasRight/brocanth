@@ -6,13 +6,16 @@ rust-version.workspace = true
 description = "The brocanth model layer: validations, correct eager loading, hook-safe bulk writes, N+1 detection and dirty tracking over SeaORM."
 readme = "README.md"
 
+# Every dependency but `brocanth-scaffold` is behind `runtime`, on by
+# default through `postgres`. The CLI takes `scaffold` alone, so writing the
+# `model` module into a project links no ORM, no driver and no Tokio.
 [dependencies]
-brocanth-model-derive = { path = "derive", version = "=0.1.0" }
+brocanth-model-derive = { path = "derive", version = "=0.1.0", optional = true }
 
 # The publishing seam, and the whole of what this crate knows about who reads
 # a write (PLAN.md §10). It has no dependencies of its own, so the arrow costs
 # an application that publishes to nobody one `wants` call returning false.
-brocanth-events = { workspace = true }
+brocanth-events = { workspace = true, optional = true }
 
 # Only for `src/plugin.rs`, which is the ORM's end of `brocanth::plugin_model`.
 # Optional, and off, because a model layer is useful without a router: an
@@ -39,32 +42,58 @@ brocanth-policy = { workspace = true, optional = true }
 #
 # The driver is not listed here. It arrives through the `postgres` feature
 # below.
-sea-orm = { version = "=2.0.4", default-features = false, features = [
+sea-orm = { version = "=2.0.4", default-features = false, optional = true, features = [
     "runtime-tokio-rustls",
     "macros",
     "with-chrono",
     "entity-registry",
 ] }
-sea-orm-migration = { version = "=2.0.4", default-features = false, features = [
+sea-orm-migration = { version = "=2.0.4", default-features = false, optional = true, features = [
     "runtime-tokio-rustls",
     "with-chrono",
     "entity-registry",
 ] }
 
-async-trait = "0.1"
-inventory = "0.3"
-regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
-thiserror = "2"
+async-trait = { version = "0.1", optional = true }
+inventory = { version = "0.3", optional = true }
+regex = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["raw_value"], optional = true }
+thiserror = { version = "2", optional = true }
 # Only for `testing::Harness`, whose drop runs its cleanup on a runtime of its
 # own. SeaORM already links tokio, so this adds no crate.
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt"], optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `model`. It lives beside this crate because what it writes is a statement
+# about this crate: `Orm::from_db`, `Orm::migrate_locked`, the plugin seam.
+# Off: an application with models never links the code that writes them.
+brocanth-scaffold = { workspace = true, optional = true }
 
 [features]
+# The model layer itself: every module but `scaffold`. `postgres` turns it
+# on, and `postgres` is the default.
+runtime = [
+    "dep:brocanth-model-derive",
+    "dep:brocanth-events",
+    "dep:sea-orm",
+    "dep:sea-orm-migration",
+    "dep:async-trait",
+    "dep:inventory",
+    "dep:regex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:tokio",
+]
+
+# The `model` module of `brocanth create`. The CLI takes it with no default
+# features.
+scaffold = ["dep:brocanth-scaffold"]
+
 # The ORM's end of the core's model seam: `brocanth_model::plugin`. See the
 # dependency line above for why it is off.
-plugin = ["dep:brocanth"]
+plugin = ["runtime", "dep:brocanth"]
 
 # `Orm`, built from a `brocanth_db::Db`. Postgres, because that is the only
 # pool `brocanth-db` opens.
@@ -72,7 +101,7 @@ db = ["dep:brocanth-db", "postgres"]
 
 # `brocanth_model::policy`: a `brocanth-policy` condition as a SeaORM
 # condition, for `Entity::find().filter(..)`.
-policy = ["dep:brocanth-policy"]
+policy = ["runtime", "dep:brocanth-policy"]
 
 # Postgres is the base. brocanth stores queues, cache and blobs in the same
 # database as the models, and every one of those is better on Postgres: a real
@@ -85,7 +114,7 @@ policy = ["dep:brocanth-policy"]
 # The feature stays, on by default, so that crates which name it keep
 # building. A build without it does not compile.
 default = ["postgres"]
-postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
+postgres = ["runtime", "sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -101,7 +130,13 @@ brocanth-model = { path = ".", default-features = false, features = [
     "plugin",
     "db",
     "policy",
+    "scaffold",
 ] }
+
+# For `src/scaffold.rs`'s test: the empty `migrations/mod.rs` that `create`
+# writes must be the bytes the `migrate` tool writes. A cycle through
+# dev-dependencies, which cargo allows.
+brocanth-migrate = { workspace = true }
 
 # The subscriber half, for `tests/changes.rs` only: the proof that a row
 # written through the ORM reaches a realtime subscriber is worth more than two
