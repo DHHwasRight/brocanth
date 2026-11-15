@@ -909,7 +909,9 @@ pub(crate) fn read_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 }
 
 pub(crate) fn write_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
-    vec![Diagnostic::error("write", format!("{e}")).at(path.display().to_string())]
+    vec![Diagnostic::error("write", format!("{e}"))
+        .at(path.display().to_string())
+        .help("check that the directory exists and that you can write to it")]
 }
 
 #[cfg(test)]

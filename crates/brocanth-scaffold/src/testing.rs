@@ -120,7 +120,12 @@ pub fn golden(path: impl AsRef<Path>, actual: &str) {
     if expected == actual {
         return;
     }
-    let (line, want, got) = expected
+    panic!("{}", mismatch(path, &expected, actual));
+}
+
+/// The message for a golden file that differs from what was generated.
+fn mismatch(path: &Path, expected: &str, actual: &str) -> String {
+    let first = expected
         .lines()
         .map(Some)
         .chain(std::iter::repeat(None))
@@ -128,16 +133,34 @@ pub fn golden(path: impl AsRef<Path>, actual: &str) {
         .take_while(|(a, b)| a.is_some() || b.is_some())
         .enumerate()
         .find(|(_, (a, b))| a != b)
-        .map(|(at, (a, b))| (at + 1, a.unwrap_or("<end>"), b.unwrap_or("<end>")))
-        .unwrap_or((0, "", ""));
-    panic!(
+        .map(|(at, (a, b))| (at + 1, a.unwrap_or("<end>"), b.unwrap_or("<end>")));
+    // `lines()` hides a final newline and a `\r`, so two texts can differ
+    // with every line equal. Say so, rather than "line 0" and two blanks.
+    let Some((line, want, got)) = first else {
+        let what = if expected.contains('\r') != actual.contains('\r') {
+            "the line endings (CRLF against LF)"
+        } else {
+            "the newline at the end of the file"
+        };
+        return format!(
+            "error: the generated project differs from {} only in {what}\n\
+             \x20 golden:    {} bytes\n\
+             \x20 generated: {} bytes\n\
+             help: if the change is intended, run with BROCANTH_BLESS=1 and read the diff \
+             before you commit it",
+            path.display(),
+            expected.len(),
+            actual.len()
+        );
+    };
+    format!(
         "error: the generated project differs from {} at line {line}\n\
          \x20 golden:    {want}\n\
          \x20 generated: {got}\n\
          help: if the change is intended, run with BROCANTH_BLESS=1 and read the diff \
          before you commit it",
         path.display()
-    );
+    )
 }
 
 /// The Rust files in `files` that rustfmt would change, or cannot parse.
@@ -305,6 +328,20 @@ mod tests {
             .iter()
             .map(|(p, c)| (p.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_mismatch_in_the_final_newline_or_line_endings_is_named() {
+        let path = Path::new("g.txt");
+        let newline = mismatch(path, "a\nb\n", "a\nb");
+        assert!(newline.contains("newline at the end"), "{newline}");
+        assert!(
+            newline.contains("4 bytes") && newline.contains("3 bytes"),
+            "{newline}"
+        );
+        let crlf = mismatch(path, "a\nb\n", "a\r\nb\r\n");
+        assert!(crlf.contains("CRLF"), "{crlf}");
+        assert!(mismatch(path, "a\n", "b\n").contains("at line 1"));
     }
 
     #[test]

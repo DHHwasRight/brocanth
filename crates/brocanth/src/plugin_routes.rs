@@ -113,6 +113,64 @@ impl<'a, E> RouteCx<'a, E> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The dispatch region every front end shares
+// ---------------------------------------------------------------------------
+
+/// What the router decided about a request, before any handler runs.
+///
+/// The server's bridge and `brocanth-test`'s client both call [`route`], so
+/// the 501, the 405 and the 404 have one owner. The handler call stays with
+/// the caller: one blocks, one awaits, and only the caller knows which.
+#[derive(Debug)]
+pub enum Routed<'r, 'p, H> {
+    /// Run this handler. `matched.params()` gives the path parameters.
+    Found {
+        /// The handler to run.
+        handler: &'r H,
+        /// The template and parameters that got there.
+        matched: crate::routing::RouteMatch<'r, 'p, H>,
+    },
+    /// The answer, already built: 501 for a method no route can have, 405
+    /// with `allow`, or 404.
+    Answer(Response),
+}
+
+/// Asks `router` about `request`.
+///
+/// Call it after the request hooks, inside the dispatch region, so that the
+/// response hooks and `after_dispatch` see a 404 like any other response.
+pub fn route<'r, 'p, H>(
+    router: &'r crate::routing::Router<H>,
+    request: &'p Request,
+) -> Routed<'r, 'p, H> {
+    use crate::routing::Dispatch;
+    let Some(verb) = Verb::from_http(request.method()) else {
+        return Routed::Answer(plain(501, "Not Implemented"));
+    };
+    match router.dispatch(verb, request.uri().path()) {
+        Dispatch::Found { handler, matched } => Routed::Found { handler, matched },
+        Dispatch::MethodNotAllowed { allow, .. } => {
+            let mut out = plain(405, "Method Not Allowed");
+            out.headers_mut()
+                .insert(http::header::ALLOW, allow.header_value());
+            Routed::Answer(out)
+        }
+        Dispatch::NotFound => Routed::Answer(plain(404, "Not Found")),
+    }
+}
+
+/// A response with a status and a plain-text body.
+fn plain(status: u16, body: &'static str) -> Response {
+    let mut out = Response::new(crate::plugin_body::Body::from(body));
+    *out.status_mut() = http::StatusCode::from_u16(status).expect("a status this crate wrote");
+    out.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    out
+}
+
 /// What a contributed route is, when it does not wait for anything.
 ///
 /// Unchanged, deliberately. A sync route is the same box, the same vtable and

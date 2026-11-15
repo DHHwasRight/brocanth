@@ -227,9 +227,9 @@ use brocanth::plugin_hooks::{
     Begin, HandlerError, HookFamilies, Request as CoreRequest, RequestState,
     Response as CoreResponse,
 };
-use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
+use brocanth::plugin_routes::{route, AnyHandler, Handler, RouteCx, Routed};
 use brocanth::plugin_shutdown::{ShutdownReason, ShutdownReport};
-use brocanth::routing::{Allow, Dispatch, Router, Verb};
+use brocanth::routing::{Router, Verb};
 use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
 
@@ -475,6 +475,10 @@ fn answered(status: u16, headers: Vec<(String, String)>, body: CoreBody) -> Core
 }
 
 /// A core response with a status, a plain-text body and nothing else.
+///
+/// Only the tests build one now: the 501, 405 and 404 come from the core's
+/// `route`.
+#[cfg(test)]
 fn plain(status: u16, body: &'static str) -> CoreResponse {
     let mut out = CoreResponse::new(CoreBody::from(body));
     *out.status_mut() = http::StatusCode::from_u16(status).expect("a status this crate wrote");
@@ -482,17 +486,6 @@ fn plain(status: u16, body: &'static str) -> CoreResponse {
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    out
-}
-
-/// 405, carrying the verbs the path does answer.
-///
-/// Answering 404 instead would hide the only fact that makes the mistake
-/// findable, which is why the router reports `allow` separately at all.
-fn method_not_allowed(allow: Allow) -> CoreResponse {
-    let mut out = plain(405, "Method Not Allowed");
-    out.headers_mut()
-        .insert(http::header::ALLOW, allow.header_value());
     out
 }
 
@@ -768,25 +761,21 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             // reads, and `RouteCx` borrows it shared.
             let request: &CoreRequest = request;
 
-            let Some(verb) = Verb::from_http(request.method()) else {
-                // Unreachable from the wire: `crate::read` answered 501 before
-                // this module was reached. It is reachable from a request hook
-                // that rewrote the method, and the answer is the same one.
-                return Ok(plain(501, "Not Implemented"));
-            };
-
-            match self.router.dispatch(verb, request.uri().path()) {
-                Dispatch::Found { handler, matched } => {
+            // `route` owns the 501, the 405 and the 404, shared with
+            // `brocanth-test`. They are built here rather than returned
+            // early, so that the response hooks and `after_dispatch` see them
+            // like any other response. The 501 is unreachable from the wire
+            // (`crate::read` answered it) but reachable from a request hook
+            // that rewrote the method.
+            match route(&self.router, request) {
+                Routed::Found { handler, matched } => {
                     let params = matched.params();
                     // After the hooks: a provider may read what they wrote.
                     let context = self.app.context_for(request, &*state);
                     let mut cx = RouteCx::new(request, &params, &context, state);
                     handler.call_blocking(&mut cx)
                 }
-                // Built here rather than returned early, so that the response
-                // hooks and `after_dispatch` see them like any other response.
-                Dispatch::MethodNotAllowed { allow, .. } => Ok(method_not_allowed(allow)),
-                Dispatch::NotFound => Ok(plain(404, "Not Found")),
+                Routed::Answer(response) => Ok(response),
             }
         });
 
@@ -816,19 +805,15 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             Begin::Answered(outcome) => outcome,
             Begin::Dispatch => {
                 let read: &CoreRequest = &request;
-                match Verb::from_http(read.method()) {
-                    None => Ok(plain(501, "Not Implemented")),
-                    Some(verb) => match self.router.dispatch(verb, read.uri().path()) {
-                        Dispatch::Found { handler, matched } => {
-                            let params = matched.params();
-                            // After the hooks: a provider may read what they wrote.
-                            let context = self.app.context_for(read, &state);
-                            let mut cx = RouteCx::new(read, &params, &context, &mut state);
-                            handler.call_inline(&mut cx).await
-                        }
-                        Dispatch::MethodNotAllowed { allow, .. } => Ok(method_not_allowed(allow)),
-                        Dispatch::NotFound => Ok(plain(404, "Not Found")),
-                    },
+                match route(&self.router, read) {
+                    Routed::Found { handler, matched } => {
+                        let params = matched.params();
+                        // After the hooks: a provider may read what they wrote.
+                        let context = self.app.context_for(read, &state);
+                        let mut cx = RouteCx::new(read, &params, &context, &mut state);
+                        handler.call_inline(&mut cx).await
+                    }
+                    Routed::Answer(response) => Ok(response),
                 }
             }
         };
@@ -1181,9 +1166,19 @@ mod tests {
 
     #[test]
     fn the_status_and_the_body_cross_unchanged() {
-        let out = from_core(method_not_allowed(
-            [Verb::Get, Verb::Post].into_iter().collect(),
-        ));
+        let mut builder = Router::builder();
+        builder.route("/x", Verb::Get, ()).expect("a route");
+        builder.route("/x", Verb::Post, ()).expect("a route");
+        let router = builder.build().expect("a table");
+        let request = http::Request::builder()
+            .method("DELETE")
+            .uri("/x")
+            .body(Vec::new())
+            .expect("a request");
+        let Routed::Answer(answer) = route(&router, &request) else {
+            panic!("DELETE /x has no handler");
+        };
+        let out = from_core(answer);
         assert_eq!(out.status, 405);
         assert!(out
             .headers

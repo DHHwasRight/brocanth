@@ -27,10 +27,10 @@ impl Project {
         let start = match dir {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir().map_err(|e| {
-                vec![Diagnostic::error(
-                    "cwd",
-                    format!("cannot read the current directory: {e}"),
-                )]
+                vec![
+                    Diagnostic::error("cwd", format!("cannot read the current directory: {e}"))
+                        .help("`cd` into the project again, or pass it with `-C <DIR>`"),
+                ]
             })?,
         };
         let root = super::delegate::project_root(&start)?;
@@ -38,7 +38,8 @@ impl Project {
         let text = std::fs::read_to_string(&marker).map_err(|e| {
             vec![
                 Diagnostic::error("marker", format!("cannot read the marker: {e}"))
-                    .at(marker.display().to_string()),
+                    .at(marker.display().to_string())
+                    .help("check that the file exists and that you can read it"),
             ]
         })?;
         let doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| {

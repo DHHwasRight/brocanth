@@ -30,7 +30,7 @@
 //! lets the registration work through a re-export: a project never names
 //! `linkme` in its own manifest.
 
-use heck::{ToShoutySnakeCase, ToSnakeCase};
+use heck::ToSnakeCase;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, Item, ItemStruct, LitStr};
@@ -116,14 +116,11 @@ fn expand(strukt: &ItemStruct, override_name: &Option<String>) -> proc_macro2::T
         None => ident.to_string().to_snake_case(),
     };
 
-    // Prefixed and shouty so it cannot collide with anything the author wrote,
-    // and suffixed with the derived name rather than the struct's, so two
-    // commands that differ only by `name = "..."` still get distinct statics.
-    let slot = format_ident!(
-        "__BROCANTH_COMMAND_{}",
-        name.to_shouty_snake_case(),
-        span = ident.span()
-    );
+    // Prefixed so it cannot collide with anything the author wrote, and
+    // suffixed with the struct's identifier as written, which is unique in its
+    // module. The command name is not: `cache:clear`, `cache-clear` and
+    // `cache_clear` are three names and would be one static once shouted.
+    let slot = format_ident!("__BROCANTH_COMMAND_{}", ident, span = ident.span());
 
     quote! {
         #strukt
@@ -139,6 +136,7 @@ fn expand(strukt: &ItemStruct, override_name: &Option<String>) -> proc_macro2::T
         #[::brocanth_command::linkme::distributed_slice(::brocanth_command::COMMANDS)]
         #[linkme(crate = ::brocanth_command::linkme)]
         #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
         static #slot: ::brocanth_command::CommandEntry =
             ::brocanth_command::entry::<#ident #ty_generics>();
     }

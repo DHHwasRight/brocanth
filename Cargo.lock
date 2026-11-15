@@ -965,6 +965,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brocanth-command-macros",
+ "brocanth-config",
  "clap",
  "linkme",
  "trybuild",

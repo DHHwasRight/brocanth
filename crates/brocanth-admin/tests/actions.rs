@@ -180,7 +180,7 @@ fn a_set_action_writes_its_values_and_the_journal_hears_what_changed() {
     );
     assert_eq!(answer.status(), 303);
     let detail = html(&send(&admin, "GET", "/admin/post/2", "", ""));
-    detail.assert_text("Publishedyes");
+    detail.assert_text("Published yes");
     // Post 1 was already published, so only post 2 changed a value.
     let heard = log.lock().unwrap().clone();
     let two = heard

@@ -727,3 +727,31 @@ printed line when no database is set. `Dialect` keeps one variant, so the
 public API and the generated code keep their shape. The core's
 `tests/no_hidden_dependencies.rs` still refuses `rusqlite` and
 `libsqlite3-sys`.
+
+### ADR 6 — Project commands use a distributed slice. An exception to ADR 1.
+
+**Status:** accepted (2026-11-12). **Touches:** `brocanth-command`.
+
+`#[cmd]` registers a command in `brocanth_command::COMMANDS`, a `linkme`
+distributed slice. ADR 1 refuses a slice for the core's seams. This is an
+exception, for these reasons:
+
+1. **A command is not in the request pipeline.** ADR 1 protects what the
+   server does with a request. A command runs only when somebody types its
+   name. A command that arrives through a dependency adds a line to
+   `--help`; it changes no request.
+2. **Nothing is checked at compile time that a slice would lose.** A
+   command name is a string on the command line. clap checks it at run
+   time in either design.
+3. **The collision is loud.** `main` refuses two commands with one name and
+   names both. A command cannot replace another without notice.
+4. **The project owns the list.** A generated project keeps each command in
+   its own file under `src/commands/`, and `mod.rs` names each file. That
+   file is the readable manifest ADR 1 asks for.
+
+The cost is ADR 1's third reason: section garbage collection on some
+linkers, and no collection across a `cdylib`. A project binary is a plain
+executable, so neither applies to the generated layout.
+
+If a dependency ever ships a `#[cmd]` that a project does not want, the
+fallback is ADR 1's: a generated list in `src/commands/mod.rs`.

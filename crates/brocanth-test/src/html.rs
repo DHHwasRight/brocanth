@@ -105,7 +105,13 @@ impl Element {
     /// entities decoded, runs of whitespace collapsed to one space.
     #[must_use]
     pub fn text(&self) -> String {
-        self.inner.as_deref().map(text_of).unwrap_or_default()
+        match self.inner.as_deref() {
+            // A script or a style holds code, not markup: its text is the
+            // code, whitespace collapsed.
+            Some(inner) if is_raw(&self.name) => collapse(inner),
+            Some(inner) => text_of(inner),
+            None => String::new(),
+        }
     }
 
     /// The element's own contents as a region to ask further questions of.
@@ -455,6 +461,59 @@ fn is_raw(name: &str) -> bool {
     RAW.iter().any(|v| name.eq_ignore_ascii_case(v))
 }
 
+/// Elements a browser lays out on their own line or in their own cell, so
+/// the text on either side of one does not run together: `<td>a</td><td>b</td>`
+/// reads `a b`. Inline elements are not here, so `wo<b>rd</b>` stays `word`.
+const BREAKS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "details",
+    "dialog",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "legend",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "option",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+];
+
+fn breaks_text(name: &str) -> bool {
+    BREAKS.iter().any(|v| name.eq_ignore_ascii_case(v))
+}
+
 /// Every element whose name `want` accepts, in source order.
 fn scan(source: &str, want: &dyn Fn(&str) -> bool) -> Vec<Element> {
     let bytes = source.as_bytes();
@@ -494,11 +553,19 @@ fn scan(source: &str, want: &dyn Fn(&str) -> bool) -> Vec<Element> {
 
         if is_raw(name) {
             // The contents are CSS or JavaScript, and markup quoted inside
-            // them is not markup.
-            i = match find_close(source, name, gt + 1) {
-                Some((_, after)) => after,
-                None => break,
+            // them is not markup: the element is kept whole when asked for,
+            // and nothing inside it is scanned.
+            let Some((end, after)) = find_close(source, name, gt + 1) else {
+                break;
             };
+            if want(name) {
+                out.push(Element {
+                    name: name.to_ascii_lowercase(),
+                    attrs: parse_attrs(&source[name_end..gt]),
+                    inner: Some(source[gt + 1..end].to_string()),
+                });
+            }
+            i = after;
             continue;
         }
 
@@ -717,6 +784,17 @@ fn text_of(source: &str) -> String {
                     continue;
                 }
             }
+            if breaks_text(name) {
+                raw.push(' ');
+            }
+        } else if let Some(name_end) = rest
+            .starts_with("</")
+            .then(|| tag_name_end(bytes, i + 2))
+            .flatten()
+        {
+            if breaks_text(&source[i + 2..name_end]) {
+                raw.push(' ');
+            }
         }
         match rest.find('>') {
             Some(end) => i += end + 1,
@@ -805,6 +883,31 @@ fn numeric(entity: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_and_a_style_can_be_asked_for() {
+        let page = Html::new(
+            r#"<head><style>p { color: red }</style><script src="/a.js"></script>
+               <script>if (a < b) { go("<a href='/x'>") }</script></head>"#,
+        );
+        let scripts = page.tags("script");
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].attr("src"), Some("/a.js"));
+        assert!(scripts[1].text().contains("a < b"), "{}", scripts[1].text());
+        assert_eq!(page.tags("style")[0].text(), "p { color: red }");
+        // Markup quoted inside a script is still not markup.
+        assert!(page.links().is_empty());
+    }
+
+    #[test]
+    fn block_elements_keep_their_text_apart_and_inline_ones_do_not() {
+        let page = Html::new("<table><tr><td>a</td><td>b</td></tr></table><p>wo<b>rd</b></p>");
+        assert_eq!(page.text(), "a b word");
+        assert_eq!(
+            Html::new("<li>one</li><li>two</li>line<br>break").text(),
+            "one two line break"
+        );
+    }
 
     #[test]
     fn a_link_is_found_by_its_href_and_not_by_its_bytes() {

@@ -429,24 +429,31 @@ async fn run(
             }),
         };
     }
-    // Nothing when the drain finished. After a timeout, this drops the
-    // connections that are still open.
-    serving.abort();
+    // Nothing when the drain finished. After a timeout, this ends the
+    // listener task, and the server aborts every connection it still has.
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
-    match owned(app).await {
+    match owned(app, remaining).await {
         Some(mut app) => {
+            let remaining = grace.saturating_sub(started.elapsed());
             let report = app.core.shutdown(reason, Some(remaining));
             plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => {
+            let why = "a request still holds the application, so no plugin stopped";
+            plugins::say!(warn, "{why}");
+            failed.get_or_insert_with(|| why.to_string());
+        }
     }
     match failed {
         None => Ok(()),
@@ -466,21 +473,23 @@ fn stopped(
 }
 
 /// The application back from the connections that shared it, or `None` when
-/// one of them still runs.
+/// one of them still holds it after `budget`.
 ///
-/// `App::shutdown` needs `&mut`. A finished connection task can be a few
-/// instructions from dropping its clone, so this yields a few times first.
-async fn owned(mut app: Arc<App>) -> Option<App> {
-    for _ in 0..64 {
+/// `App::shutdown` needs `&mut`. An aborted connection task drops its clone
+/// when the runtime next reaches it, so this waits a little, inside the
+/// grace period, and at least a few milliseconds.
+async fn owned(mut app: Arc<App>, budget: Duration) -> Option<App> {
+    let until = Instant::now() + budget.max(Duration::from_millis(50));
+    loop {
         match Arc::try_unwrap(app) {
             Ok(app) => return Some(app),
-            Err(shared) => {
+            Err(shared) if Instant::now() < until => {
                 app = shared;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// What the stop thread reports to [`run`].

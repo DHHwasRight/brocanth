@@ -15,6 +15,9 @@ brocanth-command-macros = { path = "../brocanth-command-macros", version = "0.1.
 clap = { version = "4", features = ["derive", "string"] }
 linkme = "0.3"
 anyhow = "1"
+# `AppName::env_var_for_env`: one rule for the `<APP>_ENV` variable with the
+# configuration loader. No default features, so no parser is linked.
+brocanth-config = { path = "../brocanth-config", version = "0.1.0", default-features = false }
 
 # trybuild compiles the cases under tests/ui and compares the compiler's own
 # output against a recorded snapshot, which is the only way to assert that a

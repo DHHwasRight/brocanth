@@ -1318,7 +1318,7 @@ pub enum Kind {
 impl Setting {
     /// A string.
     pub fn text(key: &'static str, value: &str, help: &'static str) -> Self {
-        Self::new(key, Kind::Text, format!("{value:?}"), help)
+        Self::new(key, Kind::Text, toml_string(value), help)
     }
 
     /// A boolean.
@@ -1333,12 +1333,12 @@ impl Setting {
 
     /// A number with a fractional part.
     pub fn float(key: &'static str, value: f64, help: &'static str) -> Self {
-        Self::new(key, Kind::Float, format!("{value:?}"), help)
+        Self::new(key, Kind::Float, toml_float(value), help)
     }
 
     /// A list of strings. No flag; see [`Kind::List`].
     pub fn list(key: &'static str, value: &[&str], help: &'static str) -> Self {
-        let items: Vec<String> = value.iter().map(|item| format!("{item:?}")).collect();
+        let items: Vec<String> = value.iter().map(|item| toml_string(item)).collect();
         let mut setting = Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help);
         setting.flag = false;
         setting
@@ -1404,6 +1404,52 @@ impl Setting {
         self.flag = false;
         self.secret = true;
         self
+    }
+}
+
+/// The Rust toolchain a generated project builds with.
+///
+/// One value for `rust-toolchain.toml`, `mise.toml` and the Dockerfile's
+/// `RUST_VERSION`, so the three cannot drift. It must match the toolchain
+/// brocanth's proc-macro artifacts were built with: they are not compatible
+/// across patch releases.
+pub const RUST_VERSION: &str = "1.98";
+
+/// `value` as a TOML basic string, quotes included.
+///
+/// Not Rust's `{:?}`: Debug writes a zero-width space as `\u{200b}`, which TOML
+/// refuses. This writes the escapes TOML 1.0 defines, `\uXXXX` for
+/// any other control character, and every other character as itself.
+pub fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `value` as a TOML float: `nan`, `inf` and `-inf` as TOML spells them,
+/// and a finite number always with a fractional part or an exponent.
+pub fn toml_float(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        // Debug writes `1.0` for one and `1e20` for 1e20, both valid TOML.
+        format!("{value:?}")
     }
 }
 
@@ -1786,6 +1832,21 @@ pub fn order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toml_value_uses_toml_escapes_and_not_rust_debug() {
+        assert_eq!(toml_string("a \"b\" \\ c"), r#""a \"b\" \\ c""#);
+        // Debug would write `\u{200b}`, which TOML refuses.
+        assert_eq!(
+            toml_string("zero\u{200b}width it's"),
+            "\"zero\u{200b}width it's\""
+        );
+        assert_eq!(toml_string("bell\u{7}"), r#""bell\u0007""#);
+        assert_eq!(toml_float(f64::NAN), "nan");
+        assert_eq!(toml_float(f64::NEG_INFINITY), "-inf");
+        assert_eq!(toml_float(1.0), "1.0");
+        assert_eq!(Setting::text("k", "it's", "h").value, "\"it's\"");
+    }
 
     const SETTINGS_RS: &str = "\
 /// What this plugin is built from.

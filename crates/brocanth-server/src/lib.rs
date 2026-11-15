@@ -633,6 +633,12 @@ impl Server {
         // h2, no further keep-alive on h1 -- and resolves when the last one is
         // done. Counting connections by hand would get the protocol half wrong.
         let graceful = GracefulShutdown::new();
+        // Every connection task, so none outlives `run`. Each task holds a
+        // clone of `handle`, and the caller may need sole ownership of what
+        // that clone holds once `run` is over: a drain that timed out, or a
+        // `run` future that was dropped, aborts them all (a `JoinSet`
+        // aborts its tasks when it is dropped).
+        let mut connections = tokio::task::JoinSet::new();
 
         // Installed before the first accept, so a client that was answered
         // knows a signal from now on stops the server.
@@ -676,11 +682,14 @@ impl Server {
                 Err(e) => return Err(ServeError::Accept(e)),
             };
 
+            // Reap the finished tasks, so the set holds only open ones.
+            while connections.try_join_next().is_some() {}
+
             let handle = Arc::clone(&handle);
             let builder = builder.clone();
             let watcher = graceful.watcher();
             let streams = self.streams.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let service = service_fn(move |req: hyper::Request<Incoming>| {
                     let handle = Arc::clone(&handle);
                     let streams = streams.clone();
@@ -718,10 +727,11 @@ impl Server {
             None => drained.await,
             Some(grace) => {
                 if tokio::time::timeout(grace, drained).await.is_err() {
-                    // Dropping `graceful` drops the watchers, which drops the
-                    // connections, which drops the bodies. A client mid-frame
-                    // sees a truncated response; the alternative is a deploy
-                    // that never finishes.
+                    // Abort every connection task and wait until each one
+                    // is dropped, with its body and its clone of `handle`.
+                    // A client mid-frame sees a truncated response; the
+                    // alternative is a deploy that never finishes.
+                    connections.shutdown().await;
                     return Ok(());
                 }
             }

@@ -44,11 +44,14 @@ pub struct Context {
 impl Context {
     /// Reads the environment and finds the project root.
     ///
-    /// `$BROCANTH_ENV` names the environment and defaults to `development`.
+    /// `app` is the application name, `crate::app::APP` in a generated
+    /// project. `$<APP>_ENV` names the environment (`MY_BLOG_ENV` for
+    /// `my-blog`), the same variable the configuration loader and the image
+    /// read. `$BROCANTH_ENV` is a fallback, and the default is `development`.
     /// The root is the nearest ancestor holding `brocanth.toml`, falling back
     /// to the current directory so a command still runs outside a project.
-    pub fn boot() -> anyhow::Result<Self> {
-        let env = std::env::var("BROCANTH_ENV").unwrap_or_else(|_| "development".to_string());
+    pub fn boot(app: &str) -> anyhow::Result<Self> {
+        let env = env_from(app, |name| std::env::var(name).ok());
         let here = std::env::current_dir()?;
         let root = here
             .ancestors()
@@ -58,7 +61,8 @@ impl Context {
         Ok(Self { env, root })
     }
 
-    /// The environment name: `development` unless `$BROCANTH_ENV` says else.
+    /// The environment name: `$<APP>_ENV`, else `$BROCANTH_ENV`, else
+    /// `development`.
     pub fn env(&self) -> &str {
         &self.env
     }
@@ -67,6 +71,18 @@ impl Context {
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
+}
+
+/// The environment name for `app`, read through `lookup`.
+///
+/// One rule with the configuration loader: `brocanth_config::AppName` spells
+/// the variable, so `my-blog`, `my_blog` and `MyBlog` all read `MY_BLOG_ENV`.
+fn env_from(app: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let own = brocanth_config::AppName::new(app).env_var_for_env();
+    lookup(&own)
+        .or_else(|| lookup("BROCANTH_ENV"))
+        .filter(|env| !env.is_empty())
+        .unwrap_or_else(|| brocanth_config::DEFAULT_ENV.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +125,8 @@ pub struct CommandEntry {
 /// Every command linked into this binary.
 ///
 /// Populated at link time. Order is whatever the linker chose, so anything
-/// that cares sorts first.
+/// that cares sorts first. A slice here is a recorded exception to ADR 1
+/// (PLAN.md §13, ADR 6): a command is not in the request pipeline.
 #[linkme::distributed_slice]
 pub static COMMANDS: [CommandEntry];
 
@@ -383,6 +400,40 @@ mod tests {
         );
     }
 
+    /// Three names that shout to one spelling. Before the static was named
+    /// after the struct, these three did not compile together.
+    #[cmd(name = "cache:clear")]
+    #[derive(clap::Args)]
+    struct CacheClearColon {}
+    #[cmd(name = "cache-clear")]
+    #[derive(clap::Args)]
+    struct CacheClearDash {}
+    #[cmd(name = "cache_clear")]
+    #[derive(clap::Args)]
+    struct CacheClearSnake {}
+    impl Command for CacheClearColon {
+        fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    impl Command for CacheClearDash {
+        fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    impl Command for CacheClearSnake {
+        fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn names_that_shout_alike_each_register() {
+        for name in ["cache:clear", "cache-clear", "cache_clear"] {
+            assert!(COMMANDS.iter().any(|e| e.name == name), "{name} is missing");
+        }
+    }
+
     #[test]
     fn the_derived_name_is_the_struct_name_in_snake_case() {
         assert_eq!(
@@ -434,7 +485,28 @@ mod tests {
 
     #[test]
     fn boot_defaults_the_environment_rather_than_failing_without_one() {
-        let ctx = Context::boot().expect("boot works outside a project");
+        let ctx = Context::boot("brocanth-command-test").expect("boot works outside a project");
         assert!(!ctx.env().is_empty());
+    }
+
+    #[test]
+    fn the_environment_comes_from_the_app_variable_first() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        // The image sets `<APP>_ENV`; the command must see the same value.
+        let both = vars(&[("MY_BLOG_ENV", "production"), ("BROCANTH_ENV", "staging")]);
+        assert_eq!(env_from("my-blog", both), "production");
+        // `BROCANTH_ENV` stays as a fallback.
+        assert_eq!(
+            env_from("my-blog", vars(&[("BROCANTH_ENV", "staging")])),
+            "staging"
+        );
+        assert_eq!(env_from("my-blog", vars(&[])), "development");
     }
 }

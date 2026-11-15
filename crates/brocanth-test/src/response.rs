@@ -18,17 +18,36 @@ pub struct TestResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// The error a streaming body ended with, if it ended with one.
+    body_error: Option<String>,
     chain: Vec<String>,
 }
 
 impl TestResponse {
     /// The core's response, read into something a test owns.
     ///
-    /// The one boundary; see the module header.
+    /// The one boundary; see the module header. A streaming body is driven
+    /// to its end on this thread, by [`crate::rt::block_on`].
     pub(crate) fn from_core(response: Response) -> Self {
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
+        let (head, body) = response.into_parts();
+        let (body, body_error) = crate::rt::block_on(collect(body));
+        Self::from_parts(&head, body, body_error)
+    }
+
+    /// [`TestResponse::from_core`], awaited on the caller's runtime.
+    ///
+    /// A stream that waits on a Tokio timer or channel is woken by that
+    /// runtime. Parking the thread instead would hang a current-thread
+    /// runtime, because the driver that would wake it is this thread.
+    pub(crate) async fn from_core_async(response: Response) -> Self {
+        let (head, body) = response.into_parts();
+        let (body, body_error) = collect(body).await;
+        Self::from_parts(&head, body, body_error)
+    }
+
+    fn from_parts(head: &http::response::Parts, body: Vec<u8>, body_error: Option<String>) -> Self {
+        let headers = head
+            .headers
             .iter()
             .map(|(name, value)| {
                 (
@@ -38,13 +57,10 @@ impl TestResponse {
             })
             .collect();
         TestResponse {
-            status,
+            status: head.status.as_u16(),
             headers,
-            // The one place in this crate that reads a core `Response`,
-            // which is why a streaming body changed this line and no
-            // assertion above it. A stream is collected here, because a
-            // test holds bytes and asserts on them.
-            body: collect(response.into_body()),
+            body,
+            body_error,
             chain: Vec::new(),
         }
     }
@@ -92,9 +108,29 @@ impl TestResponse {
     }
 
     /// The body, as bytes.
+    ///
+    /// # Panics
+    ///
+    /// When the body stream ended with an error. The bytes are then a
+    /// prefix, and an assertion on a prefix passes or fails by chance.
+    /// [`TestResponse::body_error`] reads the error without a panic.
     #[must_use]
     pub fn body(&self) -> &[u8] {
+        if let Some(error) = &self.body_error {
+            panic!(
+                "the body stream failed after {} bytes: {error}\n\
+                 help: the handler's stream returned an error; fix the stream, \
+                 or assert on `body_error()` when the error is the point",
+                self.body.len()
+            );
+        }
         &self.body
+    }
+
+    /// The error a streaming body ended with, or `None` when it ended well.
+    #[must_use]
+    pub fn body_error(&self) -> Option<&str> {
+        self.body_error.as_deref()
     }
 
     /// The body as text.
@@ -105,7 +141,7 @@ impl TestResponse {
     /// a loud failure rather than a lossy one.
     #[must_use]
     pub fn text(&self) -> &str {
-        std::str::from_utf8(&self.body).unwrap_or_else(|e| panic!("the body is not UTF-8: {e}"))
+        std::str::from_utf8(self.body()).unwrap_or_else(|e| panic!("the body is not UTF-8: {e}"))
     }
 
     /// The body as a page to ask questions of.
@@ -266,38 +302,40 @@ fn truncate(text: &str) -> String {
     format!("{}\n… and {} more bytes", &text[..cut], text.len() - cut)
 }
 
-/// Every byte of a body, whichever shape it arrived in.
+/// Every byte of a body, whichever shape it arrived in, and the error a
+/// stream ended with.
 ///
 /// A buffered body is already the answer. A streaming one is driven to its
-/// end on this thread, because a test holds a whole response and asserts on
-/// it — a client that handed back a half-read stream would make every
-/// assertion racy.
+/// end, because a test holds a whole response and asserts on it -- a client
+/// that handed back a half-read stream would make every assertion racy.
 ///
-/// It parks between chunks rather than giving up on `Pending`. An SSE body
-/// fed by a broker on another thread is pending most of the time, and a
-/// collector that stopped there would silently return a prefix. A stream
-/// that never ends hangs the test, which is the honest failure: a response
-/// that never ends is what the handler wrote.
-fn collect(body: brocanth::plugin_body::Body) -> Vec<u8> {
+/// It waits on `Pending` rather than giving up. An SSE body fed by a broker
+/// on another thread is pending most of the time, and a collector that
+/// stopped there would silently return a prefix. A stream that never ends
+/// hangs the test, which is the honest failure: a response that never ends
+/// is what the handler wrote.
+///
+/// An error mid-body is kept, not dropped: the bytes before it are a prefix,
+/// and [`TestResponse::body`] refuses to hand a prefix out as the body.
+async fn collect(body: brocanth::plugin_body::Body) -> (Vec<u8>, Option<String>) {
     use brocanth::plugin_body::Body;
     use core::task::Poll;
 
     match body {
-        Body::Buffered(bytes) => bytes,
+        Body::Buffered(bytes) => (bytes, None),
         Body::Streaming(mut stream) => {
             let mut out = Vec::new();
-            crate::rt::block_on(core::future::poll_fn(move |cx| loop {
+            core::future::poll_fn(move |cx| loop {
                 match stream.poll_chunk(cx) {
                     Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
-                    // An error mid-body is not a status a test can see:
-                    // the headers are long gone. What arrived is what a
-                    // client would have had.
-                    Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-                        return Poll::Ready(core::mem::take(&mut out))
+                    Poll::Ready(Some(Err(error))) => {
+                        return Poll::Ready((core::mem::take(&mut out), Some(error.to_string())))
                     }
+                    Poll::Ready(None) => return Poll::Ready((core::mem::take(&mut out), None)),
                     Poll::Pending => return Poll::Pending,
                 }
-            }))
+            })
+            .await
         }
     }
 }
