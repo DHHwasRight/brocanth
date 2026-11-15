@@ -1524,39 +1524,6 @@ pub fn config_section(section: &str, settings: &[Setting]) -> String {
     out
 }
 
-/// `value` as a TOML basic string, quoted.
-///
-/// Not Rust's `{:?}`: it writes `\u{1b}` and `\0`, which TOML refuses.
-fn toml_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// `value` as a TOML float: `nan`, `inf` and `-inf` as TOML spells them,
-/// and always with a fraction or an exponent, so it reads back as a float.
-fn toml_float(value: f64) -> String {
-    if value.is_nan() {
-        "nan".to_string()
-    } else if value.is_infinite() {
-        if value > 0.0 { "inf" } else { "-inf" }.to_string()
-    } else {
-        format!("{value:?}")
-    }
-}
-
 fn config_line(key: &str, setting: &Setting) -> String {
     let mut out = format!("# {}\n", setting.full_help());
     if !setting.note.is_empty() {
