@@ -2578,12 +2578,29 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         if hits.items.is_empty() {
             body.push_str(&format!("<p>Nothing matches “{}”.</p>", escape(&term)));
         } else {
-            body.push_str(&format!("<p>{}</p><ol>", pager.summary()));
-            for hit in &hits.items {
+            body.push_str(&format!("<p>{}</p>", pager.summary()));
+            if hits.more {
                 body.push_str(&format!(
-                    "<li><a href=\"{}\">{}</a><p>{}</p></li>",
-                    escape(&hit.url),
-                    escape(&hit.title),
+                    "<p>More than {} results: try a narrower term.</p>",
+                    brocanth_search::MAX_COUNT
+                ));
+            }
+            body.push_str("<ol>");
+            for hit in &hits.items {
+                // A link only to a path or an http(s) URL: the index is
+                // written by code, and a `javascript:` URL in it would run
+                // here.
+                let title = if documents::safe_url(&hit.url) {
+                    format!(
+                        "<a href=\"{}\">{}</a>",
+                        escape(&hit.url),
+                        escape(&hit.title)
+                    )
+                } else {
+                    escape(&hit.title)
+                };
+                body.push_str(&format!(
+                    "<li>{title}<p>{}</p></li>",
                     escape(&hit.excerpt(200))
                 ));
             }
@@ -2601,6 +2618,7 @@ fn escape(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 ===== src/plugins/db/mod.rs =====
 //! The database, as this application registers it.
@@ -3055,9 +3073,13 @@ from `ctx.links()`, which keeps the filters and the sort.
 `migrations/m20260101_000000_search_documents.rs` creates the table. Run `migrate sync`
 once so `migrations/mod.rs` lists it, then `migrate up`.
 
-- Write a row with `brocanth_search::documents::upsert(ctx.db(), kind,
-  key, title, body, url)` when a thing changes, in the same
-  transaction or job, and `documents::remove` when it goes.
+- Write a row with `brocanth_search::documents::upsert(db, kind, key,
+  title, body, url)` when a thing changes, and `documents::remove`
+  when it goes. Pass the `&mut Tx` that writes the thing, so the row
+  commits with it, or `ctx.db()` from a job. `url` is a path or an
+  http(s) URL; anything else is refused.
+- The count stops at `brocanth_search::MAX_COUNT`. Put /search behind
+  a rate limit on a large index: each search runs two queries.
 - Every row is public. Index only what any visitor may read, or put
   the rule in `src/pages/search.rs`: it goes into the `WHERE`, so a
   hidden row is never ranked, counted or shown.
@@ -3094,7 +3116,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 386fda7cb6781b77 -->
+<!-- brocanth-digest: 381b64101226c771 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

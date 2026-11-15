@@ -428,24 +428,31 @@ async fn run(
             }),
         };
     }
-    // Nothing when the drain finished. After a timeout, this drops the
-    // connections that are still open.
-    serving.abort();
+    // Nothing when the drain finished. After a timeout, this ends the
+    // listener task, and the server aborts every connection it still has.
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
-    match owned(app).await {
+    match owned(app, remaining).await {
         Some(mut app) => {
+            let remaining = grace.saturating_sub(started.elapsed());
             let report = app.core.shutdown(reason, Some(remaining));
             plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => {
+            let why = "a request still holds the application, so no plugin stopped";
+            plugins::say!(warn, "{why}");
+            failed.get_or_insert_with(|| why.to_string());
+        }
     }
     match failed {
         None => Ok(()),
@@ -465,21 +472,23 @@ fn stopped(
 }
 
 /// The application back from the connections that shared it, or `None` when
-/// one of them still runs.
+/// one of them still holds it after `budget`.
 ///
-/// `App::shutdown` needs `&mut`. A finished connection task can be a few
-/// instructions from dropping its clone, so this yields a few times first.
-async fn owned(mut app: Arc<App>) -> Option<App> {
-    for _ in 0..64 {
+/// `App::shutdown` needs `&mut`. An aborted connection task drops its clone
+/// when the runtime next reaches it, so this waits a little, inside the
+/// grace period, and at least a few milliseconds.
+async fn owned(mut app: Arc<App>, budget: Duration) -> Option<App> {
+    let until = Instant::now() + budget.max(Duration::from_millis(50));
+    loop {
         match Arc::try_unwrap(app) {
             Ok(app) => return Some(app),
-            Err(shared) => {
+            Err(shared) if Instant::now() < until => {
                 app = shared;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// What the stop thread reports to [`run`].
@@ -579,6 +588,12 @@ impl Signals {
 /// `begin_async` and not `begin`: it runs a hook that waits as well as
 /// one that does not. With no hook that waits, it is ready on its first
 /// poll.
+///
+/// A panic in a request hook, the chain or the page is a 500, and the
+/// response hooks still see it: a logger that never saw the 500 would
+/// not be a logger. Without the net the panic unwinds into the
+/// server's connection task and the client gets a closed socket with
+/// no status. The net catches nothing under `panic = "abort"`.
 pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
     let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
         // The path and the query do not make a URI. The table was not
@@ -586,9 +601,20 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
         return brocanth_server::Response::text(400, "Bad Request");
     };
     let mut state = RequestState::new();
-    let outcome = match app.core.begin_async(&mut request, &mut state).await {
-        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
-        Begin::Answered(outcome) => outcome,
+    let caught = brocanth_server::bridge::catch_unwind(std::panic::AssertUnwindSafe(async {
+        match app.core.begin_async(&mut request, &mut state).await {
+            Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
+            Begin::Answered(outcome) => outcome,
+        }
+    }))
+    .await;
+    let outcome = match caught {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = brocanth_server::bridge::panic_message(&*payload);
+            plugins::say!(error, "a request panicked: {message}"; %message);
+            Ok(sent(Response::new(500, "Internal Server Error")))
+        }
     };
     let response = app.core.finish(&mut request, &mut state, outcome);
     brocanth_server::bridge::from_core(response)
@@ -2344,7 +2370,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -2352,7 +2379,9 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-photos"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 
 [storage]
@@ -2402,7 +2431,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2421,8 +2451,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2448,12 +2479,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-photos".to_string(),

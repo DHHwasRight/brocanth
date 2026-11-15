@@ -1802,6 +1802,15 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "webhooks_out.keep_days",
+        help: "Days a delivered or failed delivery stays in the log. 0 keeps it.",
+        flag: true,
+        file: "src/modules/webhooks_out.rs",
+        flags: crate::modules::webhooks_out::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -2088,6 +2097,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", webhooks_out.allow_private),
         ),
         (
+            "webhooks_out.keep_days",
+            format!("{:?}", webhooks_out.keep_days),
+        ),
+        (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
@@ -2188,7 +2201,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 08502dad10964cdc
+// brocanth-digest: 2cff9239ce1d75e5
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2464,6 +2477,7 @@ pub mod webhooks_out {
         Concurrency,
         TimeoutSecs,
         AllowPrivate,
+        KeepDays,
     }
 
     impl Key {
@@ -2475,6 +2489,7 @@ pub mod webhooks_out {
                 Key::Concurrency => "webhooks_out.concurrency",
                 Key::TimeoutSecs => "webhooks_out.timeout_secs",
                 Key::AllowPrivate => "webhooks_out.allow_private",
+                Key::KeepDays => "webhooks_out.keep_days",
             }
         }
     }
@@ -2512,7 +2527,7 @@ pub mod webhooks_out {
     }
 }
 
-// brocanth-digest: 0865f188afe730c4
+// brocanth-digest: e849cc66292fc380
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2702,7 +2717,7 @@ use crate::plugins::shape::webhooks::Module;
 pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/webhooks_out.rs =====
 //! `webhooks-out`: signed outgoing webhooks: endpoints and a delivery log in
-//! Postgres, retries through jobs.
+//! Postgres, retries on a Postgres queue.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2827,6 +2842,8 @@ timeout_secs = 10
 # often on this machine. Production reads the default, false: a webhook URL
 # is chosen by whoever registers it, and this stops it reaching your network.
 allow_private = true
+# Days a delivered or failed delivery stays in the log. 0 keeps it.
+keep_days = 30
 ===== src/plugins/admin/mod.rs =====
 //! The backoffice, at `mount_at` in `src/modules/admin.rs`.
 //!
@@ -3585,9 +3602,27 @@ impl Plugin for Jobs {
 //!
 //! The deliveries are retried on the `webhooks` queue by a worker this
 //! plugin runs, over the `db` module's pool. With the admin, they are the
-//! admin's `webhooks` tab.
+//! admin's `webhooks` tab. A delivered or failed row is deleted after
+//! `[webhooks_out] keep_days`.
+//!
+//! An event that must not be lost is emitted on the transaction that
+//! changed the data, with `hooks.emit_in(&mut tx, ..)`: the delivery rows
+//! and their jobs commit with it, or not at all.
 
-pub use brocanth_webhooks::{OutgoingConfig as Settings, OutgoingPlugin as WebhooksOut};
+pub use brocanth_webhooks::OutgoingConfig as Settings;
+
+/// The crate's plugin, stopped within this application's shutdown grace.
+pub type WebhooksOut = brocanth_webhooks::OutgoingPlugin<Grace>;
+
+/// `[server] shutdown_grace_secs`: how long a drain waits for the
+/// deliveries in progress.
+pub struct Grace;
+
+impl brocanth_webhooks::outgoing::ShutdownGrace for Grace {
+    fn grace() -> Result<std::time::Duration, String> {
+        crate::plugins::shutdown_grace()
+    }
+}
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -3619,9 +3654,9 @@ request.
 - `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `webhooks`  signed webhooks: verified deliveries in, signed events out; pick a direction below
-- `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs
+- `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries on a Postgres queue
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks-in`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks-in`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3724,7 +3759,8 @@ log, never to the client.
 
 ## Outgoing webhooks
 
-Send an event with `Outgoing::emit`, from the code that changed the data.
+Send an event with `Outgoing::emit_in` on the transaction that changed the
+data, or `Outgoing::emit` after it.
 Do not post to a partner's URL from a page: the delivery log, the
 signature and the retries come from `emit`. Show an endpoint's secret
 once, to the person who registered it, and never log it.
@@ -3760,7 +3796,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 2324d76b21863cae -->
+<!-- brocanth-digest: fea9915ed7b15415 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

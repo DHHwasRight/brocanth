@@ -13,7 +13,7 @@ The wizard calls it: *Sign-up, sign-in and reset pages*.
 | Part of | [`auth`](auth.md), off until you tick it |
 | Needs | [`rsx`](rsx.md), [`input`](input.md), [`middleware-csrf`](middleware-csrf.md), [`mail`](mail.md), [`flash`](flash.md) |
 | After | [`auth`](auth.md), [`flash`](flash.md), [`mail`](mail.md), [`auth-lockout`](auth-lockout.md) |
-| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md), [`auth-lockout`](auth-lockout.md) |
+| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md), [`db`](db.md), [`auth-lockout`](auth-lockout.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` (through `auth`) |

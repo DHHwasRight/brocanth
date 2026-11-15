@@ -61,7 +61,7 @@ edition = "2021"
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
-brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["postgres"] }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-oauth-client = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["admin", "postgres"] }
@@ -1301,11 +1301,11 @@ mod tests {
         let mut expected = vec![
             "/".to_string(),
             "/about".to_string(),
-            "/connections".to_string(),
-            "/connections/{*rest}".to_string(),
             "/users/{id}".to_string(),
             crate::modules::admin::MODULE.mount_at.to_string(),
             format!("{}/{{*rest}}", crate::modules::admin::MODULE.mount_at),
+            crate::modules::oauth_client::MODULE.mount_at.to_string(),
+            crate::modules::oauth_client::MODULE.mount_at.to_owned() + "/{*rest}",
         ];
         expected.sort();
         assert_eq!(patterns, expected);
@@ -1859,6 +1859,15 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "auth.totp_key_env",
+        help: "The name of the variable that holds the key sealing TOTP secrets.",
+        flag: true,
+        file: "src/modules/auth.rs",
+        flags: crate::modules::auth::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
         path: "auth.cookie_name",
         help: "The session cookie's name.",
         flag: true,
@@ -2280,6 +2289,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.signing_key_env",
             format!("{:?}", auth.signing_key_env),
         ),
+        ("auth.totp_key_env", format!("{:?}", auth.totp_key_env)),
         ("auth.cookie_name", format!("{:?}", auth.cookie_name)),
         ("auth.secure", format!("{:?}", auth.secure)),
         ("auth.idle_timeout", format!("{:?}", auth.idle_timeout)),
@@ -2433,7 +2443,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 7e4f1ced51ca5f24
+// brocanth-digest: cd576ddfc641fee8
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2587,6 +2597,7 @@ pub mod auth {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         SigningKeyEnv,
+        TotpKeyEnv,
         CookieName,
         Secure,
         IdleTimeout,
@@ -2598,6 +2609,7 @@ pub mod auth {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::SigningKeyEnv => "auth.signing_key_env",
+                Key::TotpKeyEnv => "auth.totp_key_env",
                 Key::CookieName => "auth.cookie_name",
                 Key::Secure => "auth.secure",
                 Key::IdleTimeout => "auth.idle_timeout",
@@ -2807,7 +2819,7 @@ pub mod oauth_client {
     }
 }
 
-// brocanth-digest: 4fcc15991ce1541f
+// brocanth-digest: f37bcc4f553d45b2
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -3172,6 +3184,13 @@ secure = true
 #
 #   export MY_APP_SESSION_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
 signing_key_env = "MY_APP_SESSION_KEY"
+# The name of the variable that holds the key sealing TOTP secrets.
+# Not the key. 32 bytes, base64url, and not the signing key: that one is
+# rotated to sign everybody out. Unset, TOTP secrets are stored plain;
+# set it before anybody turns on two-step sign-in.
+#
+#   export MY_APP_TOTP_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
+totp_key_env = "MY_APP_TOTP_KEY"
 # The session cookie's name.
 # Development, over plain HTTP on localhost. In production this is
 # "__Host-session" with secure = true, and the two move together: a
@@ -3192,7 +3211,8 @@ absolute_timeout = 2592000
 # start when one is missing, so a Connect button never answers an error.
 providers = ["github"]
 # The scheme and host the providers send the browser back to.
-# Register <base_url>/connections/<provider>/callback at each provider's console.
+# Register <base_url><mount_at>/<provider>/callback at each provider's console; mount_at is
+# in src/modules/oauth_client.rs.
 base_url = "http://localhost:3000"
 # The key that seals the tokens: 32 random bytes, base64url. No flag: it is a secret. Empty means none.
 # Make one with: head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
@@ -3457,7 +3477,7 @@ mod tests {
 //! that never registered this plugin does not compile:
 //!
 //! ```ignore
-//! use brocanth_auth::mfa::{Admission, Enrolled, FactorPolicy, FactorSet};
+//! use brocanth_auth::mfa::{Admission, FactorPolicy};
 //!
 //! let auth = ctx.provided::<Services, _>().expect("a dispatched request");
 //!
@@ -3465,21 +3485,16 @@ mod tests {
 //! //    time whether or not the address has an account.
 //! let who = auth.accounts().login(email, password).await?;
 //!
-//! // 2. What this account could prove. Nothing: `Mfa` needs a store trait
-//! //    this application does not implement, so the enrolment is empty and
-//! //    the constructor is named so that a reviewer stops on it. The day
-//! //    there is an `MfaStore`, `Mfa::second_factors` answers this properly
-//! //    and this line goes.
-//! let enrolled =
-//!     Enrolled::without_asking_the_store(who.account().id.clone(), FactorSet::empty());
+//! // 2. What this account could prove: its confirmed TOTP and its
+//! //    recovery codes, read from the store.
+//! let proof = who.into_proof();
+//! let enrolled = auth.mfa()?.second_factors(&proof).await?;
 //!
 //! // 3. The policy, which consumes the proof. `Admitted` has no public
 //! //    constructor, so this step cannot be skipped -- a sign-in that
 //! //    forgot the second factor is a program that does not compile rather
 //! //    than one that ships.
-//! let Admission::Admit(admitted) =
-//!     FactorPolicy::default().admit(&enrolled, who.into_proof())
-//! else {
+//! let Admission::Admit(admitted) = FactorPolicy::default().admit(&enrolled, proof) else {
 //!     return Err(Error::new(401, "sign in"));
 //! };
 //!
@@ -3488,31 +3503,24 @@ mod tests {
 //! // `started.cookie` is the `Set-Cookie` header to send back.
 //! ```
 //!
-//! **A page cannot do that yet.** A handler here is
-//! `Box<dyn Fn(&mut Ctx) -> Result<Response, Error>>`, which is synchronous,
-//! and every method above is `async fn`. What runs today is a test, a
-//! `manage` subcommand, and anything else of yours that already has a
-//! runtime. The sign-in form arrives with the core's request hooks, which are
-//! also what the two middleware offers below are waiting for.
+//! A page is an `async fn`, so it makes these calls itself. The
+//! `auth-screens` module writes the sign-up, sign-in, reset, verify and
+//! TOTP pages under `/account` that do exactly this; read
+//! `src/pages/account/signin.rs` and `src/plugins/auth_screens/mod.rs`
+//! (`admit`) before you write your own.
 //!
 //! # Three decisions this file makes, each in one line
 //!
 //! They are type aliases so that changing one changes one line and nothing
 //! else in the project changes type.
 //!
-//! 1. **`Store = MemoryStore`.** It is a `Mutex<HashMap>`. Accounts and
-//!    sessions last exactly as long as the process, so a restart is a logout
-//!    for everybody and a deploy loses every account. That is the one thing
-//!    in this file to replace before anybody else uses this application: write
-//!    an `AuthStore` over your database -- fourteen methods, of which the two
-//!    that carry a requirement are a unique email and a `consume_token` that
-//!    deletes and returns under one lock -- and change the line below.
-//!
-//!    When you do, the build moves: a pool is opened asynchronously and no
-//!    stage may wait for it, so `configure` becomes `before_start`, builds the
-//!    pool lazily and registers a readiness check that `serve` awaits before
-//!    it listens. `brocanth-cache` does it in about ten lines and they are
-//!    worth copying rather than inventing.
+//! 1. **`Store = PgStore`.** Accounts and sessions are rows in the
+//!    `brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and
+//!    a deploy. The pool is built in `before_start` with no connection, and
+//!    the readiness check that `serve` awaits before it listens runs
+//!    `migrate` once (it is idempotent and takes an advisory lock). To review
+//!    the schema in a migration file instead, copy `PgStore::schema_sql()`
+//!    into one and delete the `migrate` call.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is
@@ -3526,7 +3534,9 @@ mod tests {
 //!
 //! # Adding a provider
 //!
-//! Three steps, and the flow code never learns the provider's name.
+//! The `auth-oauth` module does this for GitHub, Google, Microsoft and
+//! GitLab: the routes, their settings and the `Lax` cookie. By hand, it is
+//! three steps, and the flow code never learns the provider's name.
 //!
 //! 1. In `Cargo.toml`, `brocanth-auth = { ..., features = ["reqwest-client"] }`.
 //! 2. Here, `pub type Http = brocanth_auth::http_client::ReqwestClient;`.
@@ -3562,27 +3572,25 @@ mod tests {
 //!
 //! # What is not here
 //!
-//! Second factors, one-time codes and login alerts. Each needs a store trait
-//! of its own -- `MfaStore`, `OtpStore`, `SignInLocationStore` -- and
-//! `brocanth-auth` deliberately keeps all three off `Auth`, so that an
-//! application wanting a password form does not have to implement a TOTP
-//! table. An application that wants them builds them here, from the same
-//! `Arc<Store>`, and puts them on the context itself: one line each, in this
-//! file, where the decision is visible.
+//! One-time codes and login alerts. Both stores implement their traits
+//! (`OtpStore`, `SignInLocationStore`); an application that wants them
+//! builds them from `auth.store()` and puts them on the context itself.
+//! Second factors are `auth.mfa()`, and `auth-screens` has the TOTP page.
 
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_auth::http_client::StubHttp;
 use brocanth_auth::plugin::AuthConfig;
 use brocanth_auth::session::{SameSite, SessionConfig, SigningKey};
-use brocanth_auth::{MemoryStore, Passwords, SystemClock};
+use brocanth_auth::{Clock as _, Passwords, PgStore, SystemClock};
 
 /// Where identities, sessions and single-use tokens live.
 ///
-/// In memory, for now. See the file header: this is the line to change first.
-pub type Store = MemoryStore;
+/// Postgres, on the pool the `db` plugin opened. See the file header.
+pub type Store = PgStore;
 
 /// How this application reaches a provider.
 ///
@@ -3615,6 +3623,9 @@ pub struct Settings {
     /// The *name* of the environment variable holding the session signing
     /// key, not the key. 32 bytes, base64url.
     pub signing_key_env: String,
+    /// The *name* of the environment variable holding the key that seals
+    /// TOTP secrets at rest. Unset, they are stored plain.
+    pub totp_key_env: String,
     /// The session cookie's name. `__Host-` in production: it is the only
     /// prefix a browser enforces, and what it enforces is `Secure`, a path of
     /// `/` and no `Domain` -- so a subdomain takeover cannot set a session
@@ -3633,6 +3644,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             signing_key_env: "MY_APP_SESSION_KEY".to_string(),
+            totp_key_env: "MY_APP_TOTP_KEY".to_string(),
             cookie_name: "__Host-session".to_string(),
             secure: true,
             idle_timeout: 8 * 60 * 60,
@@ -3643,9 +3655,13 @@ impl Default for Settings {
 
 pub struct Auth {
     settings: Settings,
-    /// Built at `configure`, so this is an `Option` for exactly the length of
-    /// the build.
+    /// Built at `before_start`, so this is an `Option` for exactly the length
+    /// of the build.
     services: Option<Services>,
+    /// The store, kept for the sweep.
+    store: Option<Arc<Store>>,
+    /// The sweep, stopped at shutdown.
+    sweeper: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Plugin for Auth {
@@ -3657,10 +3673,12 @@ impl Plugin for Auth {
         Self {
             settings: config,
             services: None,
+            store: None,
+            sweeper: None,
         }
     }
 
-    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {
             return Err(PluginError::new(
                 "[auth] cookie_name must not be empty\n\
@@ -3728,15 +3746,32 @@ impl Plugin for Auth {
             ..SessionConfig::default()
         };
 
-        // Nothing here opens anything, so there is no `before_start`:
-        // `MemoryStore` is a `HashMap` and `Auth::build` is synchronous. A
-        // store over a database is a pool, a pool is opened asynchronously,
-        // and no stage may wait for it -- so that swap moves this block into
-        // `before_start`, where it builds the pool lazily and registers a
-        // readiness check that `serve` awaits. `brocanth-cache` does that.
+        // The pool the `db` plugin opened, which registers before this one:
+        // one set of connections for the pages and the accounts.
+        let db = lc.require_service::<brocanth_db::Db>()?;
+        let store = PgStore::from_pool(db.pool().clone());
+        let store = Arc::new(store);
+        self.store = Some(Arc::clone(&store));
+        // Ready when the database answers. The first check also creates the
+        // tables, and the first check is the one `serve` awaits before it
+        // listens: an unreachable database stops the start there.
+        let probe = Arc::clone(&store);
+        let migrated = Arc::new(tokio::sync::OnceCell::new());
+        lc.ready_when(move || {
+            let probe = Arc::clone(&probe);
+            let migrated = Arc::clone(&migrated);
+            async move {
+                migrated
+                    .get_or_try_init(|| probe.migrate())
+                    .await
+                    .map_err(|e| format!("creating the auth tables: {e}"))?;
+                probe.ping().await.map_err(|e| e.to_string())
+            }
+        });
+
         self.services = Some(
             brocanth_auth::Auth::build(AuthConfig {
-                store: Arc::new(Store::new()),
+                store,
                 http: Arc::new(Http::new()),
                 clock: Arc::new(SystemClock),
                 signing_key,
@@ -3747,6 +3782,10 @@ impl Plugin for Auth {
             })
             .map_err(|e| PluginError::new(format!("[auth] {e}")))?,
         );
+        // TOTP secrets sealed at rest, when the variable holds a key.
+        if let Some(services) = self.services.take() {
+            self.services = Some(sealing_totp(services, &self.settings.totp_key_env)?);
+        }
         // In the services too, for a plugin that reads the accounts at
         // startup, such as `superuser`.
         if let Some(services) = &self.services {
@@ -3755,13 +3794,54 @@ impl Plugin for Auth {
         Ok(())
     }
 
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Dead sessions, spent tokens and expired one-time codes, every
+        // fifteen minutes. Every read checks expiry already, so this only
+        // keeps the tables small. Each instance runs it, and the deletes do
+        // not mind.
+        let Some(store) = self.store.clone() else {
+            return Ok(());
+        };
+        let idle_timeout = self.settings.idle_timeout;
+        self.sweeper = Some(tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            loop {
+                every.tick().await;
+                if let Err(e) = store.sweep(SystemClock.now(), idle_timeout).await {
+                    crate::plugins::say!(warn, "[auth] sweep: {e}"; error = %e);
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.abort();
+        }
+        Ok(())
+    }
+
     fn provide(&self, cx: &mut ContextBuilder) {
-        // `configure` runs before the server is handed the application, so
+        // `before_start` runs before the server is handed the application, so
         // the services are here by the time any request builds a context.
         if let Some(services) = &self.services {
             cx.insert(services.clone());
         }
     }
+}
+
+/// The services with TOTP secrets sealed at rest, when `var` holds a key.
+/// Unset, the secrets are stored plain: set it before anybody enrols.
+fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> {
+    let Ok(raw) = std::env::var(var) else {
+        return Ok(services);
+    };
+    let key = brocanth_auth::SecretKey::parse(&raw)
+        .map_err(|e| PluginError::new(format!("[auth] ${var}: {e}")))?;
+    services
+        .with_totp_key(key)
+        .map_err(|e| PluginError::new(format!("[auth] {e}")))
 }
 ===== src/plugins/db/mod.rs =====
 //! The database, as this application registers it.
@@ -4607,13 +4687,14 @@ registration.
 ## Connected accounts
 
 `src/plugins/oauth_client/mod.rs` mounts the connect pages at
-`/connections`. A Connect button is a form that posts to
-`/connections/<provider>`, never a link: a GET that starts a connection
-can be fired by any page on the web. Pass `return_to` only as a path on
-this site; anything else is dropped.
+`mount_at` (`src/modules/oauth_client.rs`, `/connections` unless
+changed). Below, `<mount_at>` is that path. A Connect button is a form
+that posts to `<mount_at>/<provider>`, never a link: a GET that
+starts a connection can be fired by any page on the web. Pass
+`return_to` only as a path on this site; anything else is dropped.
 
 When a call fails with `brocanth_oauth_client::Error::Reconnect`, the
-grant is gone: send the person to `/connections` to connect again. Do
+grant is gone: send the person to `<mount_at>` to connect again. Do
 not retry it. The scopes are in `scopes()` in that file: ask for the
 fewest the code needs.
 
@@ -4651,7 +4732,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 7f354a8147165146 -->
+<!-- brocanth-digest: 0631306536bb82f9 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

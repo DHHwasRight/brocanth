@@ -12,7 +12,7 @@ command.
 | Part of | none |
 | Needs | [`auth`](auth.md): a superuser is an account with a flag, and `auth` holds the accounts |
 | After | [`auth`](auth.md) |
-| Adapts to | [`config`](config.md), [`commands`](commands.md), [`jobs`](jobs.md), [`cache`](cache.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md), [`commands`](commands.md), [`jobs`](jobs.md), [`cache`](cache.md), [`db`](db.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth`, feature `admin` with `admin` |

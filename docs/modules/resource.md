@@ -11,7 +11,7 @@ Typed CRUD routes over one table, with the policy in the WHERE clause.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | none |
+| Adapts to | [`middleware-csrf`](middleware-csrf.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-resource` (features `pages`; no default features) |

@@ -13,7 +13,7 @@ The wizard calls it: *Accounts and passwords. No OAuth provider*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md) |
+| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md), [`db`](db.md), [`auth-oauth`](auth-oauth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` |

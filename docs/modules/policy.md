@@ -13,7 +13,7 @@ The wizard calls it: *Authorisation rules that compile into the WHERE clause*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md), [`model`](model.md) |
-| Adapts to | [`config`](config.md), [`model`](model.md), [`realtime`](realtime.md) |
+| Adapts to | [`realtime`](realtime.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-policy` |

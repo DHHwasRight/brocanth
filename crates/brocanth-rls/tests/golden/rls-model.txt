@@ -2516,8 +2516,8 @@ fn url() -> anyhow::Result<String> {
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
-use brocanth_db::migrate::Lock;
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
 use brocanth_model::Orm;
@@ -2536,7 +2536,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -2585,6 +2585,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -2594,72 +2595,82 @@ enum Apply {
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
     let mut config = database()?;
-    // `[db]` is tuned for requests. A migration may run longer than a
-    // request may, and it writes: no statement timeout, no read-only.
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
     config.statement_timeout = None;
     config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
-        // SeaORM takes no lock. This is the advisory lock brocanth-db's
-        // own migrator takes, so two release jobs take turns rather than
-        // apply one pending list twice. Held until the end, and the status
-        // below is read under it.
-        let lock = Lock::acquire(&pool).await?;
-        let result = locked(&pool, what).await;
-        lock.release().await;
-        result
+        let orm = Orm::from_db(&pool);
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
+        let named = |status: MigrationStatus| -> Vec<String> {
+            before
+                .iter()
+                .filter(|m| m.status() == status)
+                .map(|m| m.name().to_string())
+                .collect()
+        };
+        match what {
+            Apply::Up => {
+                let pending = named(MigrationStatus::Pending);
+                if pending.is_empty() {
+                    println!("Nothing to apply: each migration is applied.");
+                }
+                for name in pending {
+                    println!("applied      {name}");
+                }
+            }
+            Apply::Down(n) => {
+                let applied = named(MigrationStatus::Applied);
+                if applied.is_empty() {
+                    println!("Nothing to roll back: no migration is applied.");
+                }
+                for name in applied.iter().rev().take(n as usize) {
+                    println!("rolled back  {name}");
+                }
+            }
+            Apply::Status => {
+                if before.is_empty() {
+                    println!("No migration in migrations/.");
+                }
+                for m in &before {
+                    let status = match m.status() {
+                        MigrationStatus::Applied => "applied",
+                        MigrationStatus::Pending => "pending",
+                    };
+                    println!("{status:<12} {}", m.name());
+                }
+            }
+        }
+        Ok(())
     })
-}
-
-/// `apply`, under the lock.
-async fn locked(pool: &Db, what: Apply) -> anyhow::Result<()> {
-    let orm = Orm::from_db(pool);
-    let db = orm.connection();
-    let before = Migrator::get_migration_with_status(db).await?;
-    let named = |status: MigrationStatus| -> Vec<String> {
-        before
-            .iter()
-            .filter(|m| m.status() == status)
-            .map(|m| m.name().to_string())
-            .collect()
-    };
-    match what {
-        Apply::Up => {
-            let pending = named(MigrationStatus::Pending);
-            Migrator::up(db, None).await?;
-            if pending.is_empty() {
-                println!("Nothing to apply: each migration is applied.");
-            }
-            for name in pending {
-                println!("applied      {name}");
-            }
-        }
-        Apply::Down(n) => {
-            let applied = named(MigrationStatus::Applied);
-            Migrator::down(db, Some(n)).await?;
-            if applied.is_empty() {
-                println!("Nothing to roll back: no migration is applied.");
-            }
-            for name in applied.iter().rev().take(n as usize) {
-                println!("rolled back  {name}");
-            }
-        }
-        Apply::Status => {
-            if before.is_empty() {
-                println!("No migration in migrations/.");
-            }
-            for m in &before {
-                let status = match m.status() {
-                    MigrationStatus::Applied => "applied",
-                    MigrationStatus::Pending => "pending",
-                };
-                println!("{status:<12} {}", m.name());
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Runs the `migrate` tool with these arguments, from the project root.
@@ -2998,7 +3009,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. The default is a
+    /// local development database; set the variable for `db.url` everywhere else.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -3017,8 +3029,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -3049,7 +3062,7 @@ impl Default for Settings {
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -3305,10 +3318,11 @@ impl Plugin for Model {
 //! /// The tenant of the request: the policy reads it, the request sets it.
 //! pub const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);
 //!
-//! let member = Role::new("app_member").member("app_login");
+//! let member = Role::new("app_user").member("app_login");
 //! // With `model`, name the table and column by the entity: a typo does
 //! // not compile. `Table::named("posts")` is the string escape hatch.
-//! let posts = Table::of(post::Entity).force().grant(&member, Privilege::CRUD);
+//! // Forced by default: the owner obeys the policies too.
+//! let posts = Table::of(post::Entity).grant(&member, Privilege::CRUD);
 //! let mine = SqlExpr::column(post::Column::TenantId).eq(TENANT.get());
 //! Schema::new()
 //!     .role(member.clone())
@@ -3319,7 +3333,7 @@ impl Plugin for Model {
 //! A request then runs as its identity, inside one transaction:
 //!
 //! ```ignore
-//! let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
+//! let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 //! ```
 
@@ -3360,7 +3374,7 @@ request.
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rls`  Postgres row-level security declared in Rust; `rls make` writes the migration
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `sessions`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3466,13 +3480,16 @@ transaction, as its identity. Set each value through the `Setting`
 constant the policy reads, so the key cannot drift:
 
 ```rust
-let me = brocanth_db::DbIdentity::new().role("app_member").setting(&TENANT, tenant_id);
+let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
 ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
-`transact_as` runs as the login role, and the policies see no value.
+`transact_as` runs as the login role, and the policies see no value. A
+table is forced by default. On a table declared `.no_force()` the owner
+bypasses the policies: when the login role owns the tables, a statement
+outside `transact_as` returns every row.
 
 A SeaORM query takes the identity the same way. `Orm::transact_as` runs
 the same statements in a SeaORM transaction:
@@ -3514,7 +3531,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b2425bec1a205f22 -->
+<!-- brocanth-digest: 5b55cfe2b348af5a -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

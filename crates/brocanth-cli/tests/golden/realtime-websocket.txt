@@ -2222,62 +2222,26 @@ overflow = "drop-oldest"
 //!    the socket. Else 403.
 //!
 //! A topic the browser asks for later (`subscribe <topic>`) passes the same
-//! `authorise`. The loop is `crate::plugins::realtime_websocket`.
+//! `authorise`, in `src/plugins/realtime/authorise.rs`. The loop is
+//! `crate::plugins::realtime_websocket`.
 
-use brocanth_realtime::{Gate, Subscription, Topic};
 use brocanth_server::websocket::Handshake;
 
 use crate::pages::{Ctx, Error, IntoResponse, Response};
+use crate::plugins::realtime::authorise::{authorise, topics, value, viewer};
 use crate::plugins::realtime::Broadcast;
 use crate::plugins::realtime_websocket::{self, Filed};
-
-/// Collections any visitor may follow: every row, every change.
-///
-/// Empty, so nothing is public until somebody says so here.
-const PUBLIC: &[&str] = &[];
 
 /// Sites other than this host whose pages may open a socket, spelled as a
 /// browser sends its `Origin`: `"https://app.example.com"`.
 const ALLOWED_ORIGINS: &[&str] = &[];
-
-/// Who is asking: what `authorise` needs, read from the request once.
-///
-/// The socket outlives the request, so `authorise` cannot read the request
-/// when the browser subscribes later. Put here what it decides on: the
-/// session's user id, a role.
-pub struct Viewer;
-
-fn viewer(_ctx: &Ctx) -> Viewer {
-    Viewer
-}
-
-/// Whether `viewer` may follow `topic`, and gated by what.
-///
-/// The one place a topic is authorised, and the place to edit. A public
-/// collection takes `Gate::everyone()`. Rows that a policy decides take the
-/// policy: `from_policy` gates `posts/*` with the list rule and `posts/42`
-/// with the view rule, and the broker inverts the rule into an index key, so
-/// a write is a map lookup and not a check per subscriber.
-///
-/// ```ignore
-/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
-/// ```
-fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
-    if PUBLIC.contains(&topic.collection_name()) {
-        return Ok(Subscription::new(topic, Gate::everyone()));
-    }
-    Err(format!(
-        "no rule lets this socket follow {topic}\n\
-         help: add one to `authorise` in src/pages/realtime/socket.rs"
-    ))
-}
 
 pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
     let handshake = Handshake::read(|name| ctx.header(name), ALLOWED_ORIGINS)
         .map_err(|refused| Error::new(refused.status(), refused.to_string()))?;
     let viewer = viewer(ctx);
     let mut subscriptions = Vec::new();
-    for topic in topics(&ctx.query)? {
+    for topic in topics(&ctx.query).map_err(|why| Error::new(400, why))? {
         let name = topic.to_string();
         let subscription = authorise(&viewer, topic).map_err(|why| Error::new(403, why))?;
         subscriptions.push((name, subscription));
@@ -2287,23 +2251,29 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         .ok_or_else(|| Error::internal("the realtime plugin put no broker on the context"))?
         .broker;
 
-    // A browser that reconnects sends the id of the last frame it read. The
-    // broker keeps no history to replay, so the honest answer to "did I miss
-    // anything" is yes whenever a frame was published since.
-    let missed = value(&ctx.query, "last")
-        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
-
     // At the cap the broker refuses rather than evicting somebody.
     let client = broker
         .connect()
         .map_err(|e| Error::new(503, e.to_string()).with_header("retry-after", "5"))?;
     let mut filed = Filed::new();
     for (name, subscription) in subscriptions {
+        if filed.contains_key(&name) {
+            continue;
+        }
         let subscribed = client
             .subscribe(subscription)
             .map_err(|e| Error::new(400, e.to_string()))?;
         filed.insert(name, subscribed.id);
     }
+
+    // A browser that reconnects sends the id of the last frame it read. The
+    // broker keeps no history to replay, so the honest answer to "did I miss
+    // anything" is yes whenever a frame was published since. Read after the
+    // subscriptions exist: a frame published before this read reached no
+    // mailbox, and this read then counts it as missed. An id this broker
+    // cannot compare (another process, or not a number) is missed too.
+    let missed = value(&ctx.query, "last")
+        .is_some_and(|seen| seen.trim().parse::<u64>().ok() != Some(broker.last_frame_id()));
 
     let headers = handshake.headers().into_iter().collect();
     let rule: realtime_websocket::Authorise = Box::new(move |topic| authorise(&viewer, topic));
@@ -2315,56 +2285,6 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         stream: Some(stream),
         ..Default::default()
     })
-}
-
-/// Every `topics=` in the query, split at commas and parsed. None is
-/// allowed: the browser can subscribe after the socket opens.
-fn topics(query: &str) -> Result<Vec<Topic>, Error> {
-    let mut out = Vec::new();
-    for pair in query.split('&') {
-        let Some(("topics", value)) = pair.split_once('=') else {
-            continue;
-        };
-        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
-            let topic =
-                Topic::parse(text).map_err(|e| Error::new(400, format!("topic {text:?}: {e}")))?;
-            out.push(topic);
-        }
-    }
-    Ok(out)
-}
-
-/// The first value of `name` in the query, as sent.
-fn value<'q>(query: &'q str, name: &str) -> Option<&'q str> {
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(key, _)| *key == name)
-        .map(|(_, value)| value)
-}
-
-/// A query value with its `%XX` and `+` undone.
-fn decoded(value: &str) -> Result<String, Error> {
-    let bad = || {
-        Error::new(
-            400,
-            format!("the query value {value:?} is not percent-encoded UTF-8"),
-        )
-    };
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(byte) = rest.next() {
-        bytes.push(match byte {
-            b'+' => b' ',
-            b'%' => {
-                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
-                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
-                u8::from_str_radix(hex, 16).map_err(|_| bad())?
-            }
-            other => other,
-        });
-    }
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 #[cfg(test)]
@@ -2392,16 +2312,6 @@ mod tests {
             async move { crate::app::handle(&app, request).await }
         }));
         (addr, stopper)
-    }
-
-    #[test]
-    fn topics_are_read_from_the_query_encoded_or_not() {
-        let read = topics("topics=posts/*,posts%2F42&x=1").expect("two");
-        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
-        assert_eq!(names, ["posts/*", "posts/42"]);
-        assert!(topics("").expect("none is allowed").is_empty());
-        assert!(topics("topics=posts").is_err(), "a topic has a slash");
-        assert_eq!(value("a=1&last=7", "last"), Some("7"));
     }
 
     #[tokio::test]
@@ -2444,6 +2354,139 @@ mod tests {
             .expect_err("no rule allows posts");
         assert_eq!(refused.status, Some(403));
         stopper.stop();
+    }
+}
+===== src/plugins/realtime/authorise.rs =====
+//! Who may follow which realtime topic: the one place a topic is
+//! authorised, for every transport.
+//!
+//! `GET /realtime/events` (server-sent events) and `GET /realtime/socket` (a
+//! WebSocket) both read the topics with `topics`, read the viewer with
+//! `viewer`, and pass each topic to `authorise`. The socket also passes each
+//! `subscribe <topic>` the browser sends later. Edit `authorise` here; never
+//! filter frames after delivery.
+//!
+//! A socket outlives the request that opened it, so the viewer is read once,
+//! when the connection opens, and kept for its life. A logout does not reach
+//! an open connection: the socket loop closes each socket after `MAX_AGE`
+//! (`src/plugins/realtime_websocket/mod.rs`) and the browser reconnects with
+//! a fresh viewer. Close a user's sockets at logout when that is too late.
+
+use brocanth_realtime::{Gate, Subscription, Topic};
+
+use crate::pages::Ctx;
+
+/// Collections any visitor may follow: every row, every change.
+///
+/// Empty, so nothing is public until somebody says so here.
+pub const PUBLIC: &[&str] = &[];
+
+/// Who is asking: what `authorise` needs, read from the request once.
+///
+/// Put here what `authorise` decides on: the session's user id, a role.
+pub struct Viewer;
+
+/// The viewer of this request.
+pub fn viewer(_ctx: &Ctx) -> Viewer {
+    Viewer
+}
+
+/// Whether `viewer` may follow `topic`, and gated by what.
+///
+/// A public collection takes `Gate::everyone()`. Rows that a policy decides
+/// take the policy: `from_policy` gates `posts/*` with the list rule and
+/// `posts/42` with the view rule, and the broker inverts the rule into an
+/// index key, so a write is a map lookup and not a check per subscriber.
+///
+/// ```ignore
+/// return Ok(Subscription::from_policy(topic, &PostPolicy, &viewer.user_id));
+/// ```
+pub fn authorise(_viewer: &Viewer, topic: Topic) -> Result<Subscription, String> {
+    if PUBLIC.contains(&topic.collection_name()) {
+        return Ok(Subscription::new(topic, Gate::everyone()));
+    }
+    Err(format!(
+        "no rule lets this request follow {topic}\n\
+         help: add one to `authorise` in src/plugins/realtime/authorise.rs"
+    ))
+}
+
+/// Every `topics=` in the query, split at commas, parsed, and each named
+/// once: a topic asked for twice is one subscription, not two.
+pub fn topics(query: &str) -> Result<Vec<Topic>, String> {
+    let mut out: Vec<Topic> = Vec::new();
+    for pair in query.split('&') {
+        let Some(("topics", value)) = pair.split_once('=') else {
+            continue;
+        };
+        for text in decoded(value)?.split(',').filter(|t| !t.is_empty()) {
+            let topic = Topic::parse(text).map_err(|e| format!("topic {text:?}: {e}"))?;
+            if !out.contains(&topic) {
+                out.push(topic);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The first value of `name` in the query, decoded.
+pub fn value(query: &str, name: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .and_then(|(_, value)| decoded(value).ok())
+}
+
+/// A query value with its `%XX` and `+` undone.
+fn decoded(value: &str) -> Result<String, String> {
+    let bad = || {
+        format!(
+            "the query value {value:?} is not percent-encoded UTF-8\n\
+             help: encode the topics with `encodeURIComponent`"
+        )
+    };
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hex = [rest.next().ok_or_else(bad)?, rest.next().ok_or_else(bad)?];
+                let hex = std::str::from_utf8(&hex).map_err(|_| bad())?;
+                u8::from_str_radix(hex, 16).map_err(|_| bad())?
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topics_are_read_from_the_query_encoded_or_not() {
+        let read = topics("topics=posts/*,posts%2F42&x=1&topics=users%2F*").expect("three");
+        let names: Vec<String> = read.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["posts/*", "posts/42", "users/*"]);
+        assert!(topics("").expect("none is read").is_empty());
+        assert!(topics("topics=posts").is_err(), "a topic has a slash");
+        assert_eq!(value("a=1&last=7", "last").as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn a_topic_asked_for_twice_is_read_once() {
+        let read = topics("topics=posts/*,posts%2F*&topics=posts/*").expect("one");
+        assert_eq!(read.len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_public_until_listed() {
+        let refused =
+            authorise(&Viewer, Topic::parse("posts/*").expect("a topic")).expect_err("no rule yet");
+        assert!(refused.contains("\nhelp: "), "{refused}");
     }
 }
 ===== src/plugins/realtime/mod.rs =====
@@ -2494,18 +2537,33 @@ mod tests {
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
 //!    transport at all.
-//! 3. **Long polling.** Keep the `Client` in the session; each request calls
+//! 3. **Long polling.** Keep each session's `Client` on the server, in a map
+//!    from session id to `Client` with an idle timeout (a `Client` holds the
+//!    broker, so it cannot go into a cookie); each request calls
 //!    `Mailbox::recv_timeout` for a few seconds, then `Mailbox::drain`, and
 //!    returns the frames as one finished body. Every hook runs exactly as
 //!    specified. It costs a request per interval and a little latency.
 //! 4. **Nothing.** The index costs what it holds, and an application that
 //!    publishes without subscribers pays for a map lookup that finds no one.
+//!
+//! # One process
+//!
+//! The broker lives in this process, and so do its subscribers. Two
+//! instances behind a load balancer do not see each other's writes: a
+//! browser connected to one hears nothing of a write handled by the other.
+//! `brocanth-realtime`'s `listen-notify` feature has the codec and the sink
+//! for Postgres `LISTEN/NOTIFY`; this file does not wire it. The frame ids
+//! start at the clock, so a browser that reconnects to a new process is told
+//! `lagged` rather than trusted to have missed nothing.
 
 use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth_realtime::{Broker, Config, Overflow};
+
+/// Who may follow which topic, for every transport.
+pub mod authorise;
 
 /// What this plugin is built from.
 ///
@@ -2609,6 +2667,9 @@ impl Plugin for Realtime {
                     queue: self.settings.queue,
                     overflow,
                 })
+                // An id from an earlier process never equals one from this
+                // process, so a reconnect across a restart reads `lagged`.
+                .frame_ids_from_clock()
                 .build(),
         );
         Ok(())
@@ -2664,7 +2725,9 @@ impl Plugin for Realtime {
 //! stops taking from the mailbox, and `[realtime] overflow` decides what is
 //! lost: `drop-oldest` and `drop-newest` drop frames and the browser reads
 //! `lagged`; `disconnect` closes the mailbox, and this loop closes the
-//! socket with code 1013.
+//! socket with code 1013. A send that is not written within one `HEARTBEAT`
+//! ends the loop: a peer that stopped reading must not hold its client, and
+//! the pings cannot run while a send waits.
 //!
 //! # Ending
 //!
@@ -2674,18 +2737,29 @@ impl Plugin for Realtime {
 //! * The server stops. The loop sends the frames already queued, then a
 //!   close frame with code 1001, and ends, so a deploy does not wait for a
 //!   subscriber. The browser reconnects with `?last=<id>`.
+//! * The socket reaches `MAX_AGE`. The loop closes it with code 1001 and the
+//!   browser reconnects. The viewer `authorise` decides on is read once,
+//!   when the socket opens, so this is the longest a socket keeps the rights
+//!   of a session that logged out or lost a role.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 use brocanth_realtime::{Client, Event, Subscription, SubscriptionId, Topic};
-use brocanth_server::websocket::{self, Incoming, WebSocket};
+use brocanth_server::websocket::{self, Gone, Incoming, WebSocket};
 use tokio::time::{Instant, MissedTickBehavior};
 
 /// How often the socket pings the browser. A browser that has not answered
 /// by the next ping is gone, so this is also the longest a dead subscriber
-/// holds its mailbox.
+/// holds its mailbox, and the longest one send may wait.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// How long one socket lives before the server closes it and the browser
+/// reconnects. The viewer is read again on the reconnect, so a logout or a
+/// role change reaches an open socket within this time. Shorten it when that
+/// matters more than a reconnect; or close the user's sockets at logout.
+pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
 
 /// Who may follow what: the page's `authorise`, with what it read from the
 /// request already captured.
@@ -2701,62 +2775,90 @@ pub type Filed = HashMap<String, SubscriptionId>;
 /// since the last one it read; the broker keeps no history, so the socket
 /// says `lagged` instead.
 pub async fn run(
+    socket: WebSocket,
+    client: Client,
+    authorise: Authorise,
+    filed: Filed,
+    missed: bool,
+) {
+    serve(socket, client, authorise, filed, missed, MAX_AGE).await;
+}
+
+/// [`run`], with the socket's age limit as an argument, so a test can wait
+/// for it.
+async fn serve(
     mut socket: WebSocket,
     client: Client,
     authorise: Authorise,
     mut filed: Filed,
     missed: bool,
+    max_age: Duration,
 ) {
-    if missed && socket.send_text(lagged(None)).await.is_err() {
+    if missed && !written(socket.send_text(lagged(None))).await {
         return;
     }
     let mut ticker = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let expiry = tokio::time::sleep(max_age);
+    tokio::pin!(expiry);
     loop {
         tokio::select! {
             event = client.mailbox().recv() => match event {
                 Some(event) => {
-                    if socket.send_text(encoded(event)).await.is_err() {
+                    if !written(socket.send_text(encoded(event))).await {
                         return;
                     }
                 }
                 // This loop holds the client, so only the overflow policy
                 // closes its mailbox: `disconnect` fired.
                 None => {
-                    return socket
-                        .close(websocket::TRY_AGAIN_LATER, "too far behind; reconnect")
-                        .await;
+                    return bye(socket, websocket::TRY_AGAIN_LATER, "too far behind; reconnect").await;
                 }
             },
             incoming = socket.recv() => match incoming {
                 Incoming::Text(command) => {
                     let answer = obey(&client, &authorise, &mut filed, &command);
-                    if socket.send_text(answer).await.is_err() {
+                    if !written(socket.send_text(answer)).await {
                         return;
                     }
                 }
                 Incoming::Binary(_) => {
-                    return socket.close(websocket::POLICY, "send text commands").await;
+                    return bye(socket, websocket::POLICY, "send text commands").await;
                 }
                 Incoming::Stopping => {
                     for event in client.mailbox().drain() {
-                        if socket.send_text(encoded(event)).await.is_err() {
+                        if !written(socket.send_text(encoded(event))).await {
                             return;
                         }
                     }
-                    return socket
-                        .close(websocket::GOING_AWAY, "the server is stopping")
-                        .await;
+                    return bye(socket, websocket::GOING_AWAY, "the server is stopping").await;
                 }
                 Incoming::Closed(_) => return,
             },
             _ = ticker.tick() => {
-                if socket.keepalive().await.is_err() {
+                if !written(socket.keepalive()).await {
                     return;
                 }
             }
+            () = &mut expiry => {
+                return bye(socket, websocket::GOING_AWAY, "reconnect to check the session again").await;
+            }
         }
     }
+}
+
+/// Whether a send was written within one `HEARTBEAT`.
+///
+/// A peer that stops reading leaves a write pending, and while it waits
+/// nothing else in the loop runs: no ping, no stop signal. So a send that
+/// takes longer than a heartbeat ends the connection.
+async fn written(send: impl Future<Output = Result<(), Gone>>) -> bool {
+    matches!(tokio::time::timeout(HEARTBEAT, send).await, Ok(Ok(())))
+}
+
+/// Sends a close frame, but waits no longer than one `HEARTBEAT` to write it.
+async fn bye(socket: WebSocket, code: u16, reason: &str) {
+    let _ = tokio::time::timeout(HEARTBEAT, socket.close(code, reason)).await;
 }
 
 /// One command from the browser, obeyed, and the record that answers it.
@@ -2836,6 +2938,11 @@ mod tests {
 
     /// A server whose one route is this loop, with every topic public.
     async fn open(broker: &Arc<Broker>) -> (WebSocket, Stopper) {
+        open_for(broker, MAX_AGE).await
+    }
+
+    /// [`open`], with sockets that live `max_age`.
+    async fn open_for(broker: &Arc<Broker>, max_age: Duration) -> (WebSocket, Stopper) {
         let server = Server::bind("127.0.0.1:0").await.expect("a port");
         let addr = server.local_addr().expect("an address");
         let stopper = server.stopper();
@@ -2848,7 +2955,9 @@ mod tests {
                 let client = broker.connect().expect("room");
                 let everyone: Authorise =
                     Box::new(|topic| Ok(Subscription::new(topic, Gate::everyone())));
-                handshake.response(move |socket| run(socket, client, everyone, Filed::new(), false))
+                handshake.response(move |socket| {
+                    serve(socket, client, everyone, Filed::new(), false, max_age)
+                })
             }
         }));
         let socket = websocket::connect(addr, "/", None).await.expect("open");
@@ -2905,6 +3014,17 @@ mod tests {
         assert_eq!(
             next(&mut socket).await,
             Incoming::Text("event:unsubscribed\ndata:posts/*\n\n".into())
+        );
+        stopper.stop();
+    }
+
+    #[tokio::test]
+    async fn a_socket_past_its_age_is_closed_so_the_browser_reconnects() {
+        let broker = Broker::new();
+        let (mut socket, stopper) = open_for(&broker, Duration::from_millis(200)).await;
+        assert_eq!(
+            next(&mut socket).await,
+            Incoming::Closed(Some(websocket::GOING_AWAY))
         );
         stopper.stop();
     }
@@ -2993,16 +3113,20 @@ unlikely.
 the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
 `src/pages/realtime/socket.rs` is the route.
 
-- Authorise every topic in `authorise` in `src/pages/realtime/socket.rs`.
+- Authorise every topic in `authorise` in `src/plugins/realtime/authorise.rs`.
   It runs for the topics in the URL and for each `subscribe <topic>` the
   browser sends later, so read what it needs (the user id) into `Viewer`
   when the socket opens. Never filter frames after delivery.
+- A socket keeps the `Viewer` it opened with. The loop closes it after
+  `MAX_AGE` and the browser reconnects with a fresh one; a logout must
+  close the user's open sockets when that is too late.
+- Frames reach only the sockets open on this process.
 - A page on another site is refused by its `Origin`. List a second site of
   your own in `ALLOWED_ORIGINS`; never turn the check off.
 - Each message is one record in the server-sent-events format: `id:`,
   `event:` (the topic) and `data:` lines. `lagged` means the view may be
   stale: fetch it again. A close with code 1001 means the server is
-  stopping: reconnect with `?last=<id>`.
+  stopping or the socket reached its age: reconnect with `?last=<id>`.
 
   ```js
   const socket = new WebSocket(`ws://${location.host}/realtime/socket?topics=posts/*`);
@@ -3038,7 +3162,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 8ce2ff137723ec9e -->
+<!-- brocanth-digest: c8320a7ec11697ec -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -3066,14 +3190,14 @@ kind = ["enhancer", "middleware"]
 files = ["src/modules/realtime.rs", "src/plugins/realtime/"]
 config = ["realtime"]
 crates = ["brocanth-realtime"]
-adapted_to = ["config"]
+adapted_to = ["config", "realtime-websocket"]
 
 [modules.realtime-websocket]
 version = "0.1.0"
 kind = ["routes"]
-files = ["src/modules/realtime_websocket.rs", "src/pages/realtime/socket.rs", "src/plugins/realtime_websocket/"]
+files = ["src/modules/realtime_websocket.rs", "src/pages/realtime/socket.rs", "src/plugins/realtime/authorise.rs", "src/plugins/realtime_websocket/"]
 config = []
 crates = ["brocanth-server", "brocanth-events"]
 adapted_to = []
 
-# brocanth-digest: 366b54c5e86159ea
+# brocanth-digest: cb41589129ae8db6

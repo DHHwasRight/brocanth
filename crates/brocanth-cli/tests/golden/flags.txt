@@ -73,7 +73,6 @@ brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", feature
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 ===== .gitignore =====
 /target
-/var/uploads
 ===== rust-toolchain.toml =====
 [toolchain]
 channel = "1.98"
@@ -2179,8 +2178,8 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/modules/sessions.rs =====
-//! `sessions`: a placeholder: the cookie's name on the context; no session
-//! state, no signature.
+//! `sessions`: a cookie name on the context and an empty `session` layer to
+//! build on; no session store, for sign-in pick `auth`.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2209,8 +2208,8 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/modules/storage.rs =====
-//! `storage`: uploads on a local disk, addressed by content hash; no object
-//! store and no S3.
+//! `storage`: uploads on a local disk, or in Postgres with `db`, addressed by
+//! content hash; no S3.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2239,11 +2238,12 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/plugins/sessions/mod.rs =====
-//! A session placeholder: the cookie's name, on the context.
+//! A sessions seam: a cookie name on the context and an empty layer.
 //!
-//! Nothing here keeps state or signs a cookie, and the `session` layer
-//! passes every request through. Write the store and the signature before
-//! anything trusts a session: a login, a cart, a CSRF token.
+//! **This is not a session.** The `session` layer passes every request
+//! through, and nothing reads, signs or writes the cookie. Signed sessions
+//! with sign-in and sign-out are the `auth` module (`brocanth-auth`):
+//! `brocanth add auth`. Build here only a session that is not an account.
 
 use brocanth::plugin_api::{Lifecycle, MiddlewareCatalog, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
@@ -2356,17 +2356,20 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! defanged for the `Content-Disposition` header it ends up in, and never
 //! touches the filesystem.
 //!
+//! The objects live under `root`, on this machine's disk. A second instance
+//! does not see them, and `brocanth check --deploy` says so: add the `db`
+//! module and they live in Postgres instead.
+//!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
 //! through no other route. Delete the registration in `src/plugins/mod.rs`
 //! and delete this file, and the application stores no files and links
 //! nothing to store them with.
 //!
-//! # Uploading
+//! # Uploading and serving
 //!
-//! There is no upload route here, on purpose: `brocanth-storage` parses no
-//! multipart body and knows nothing about HTTP, and whether *this*
-//! application lets *this* request store a file is a policy question a
-//! generator cannot answer. A handler that has already asked it writes:
+//! The `storage-routes` module writes the HTTP edge: an upload route behind a
+//! guard this project writes, and a download route behind a file token.
+//! Without it, a handler that has already asked its own policy stores a file:
 //!
 //! ```ignore
 //! let files = ctx.provided::<FileStore, _>().expect("a dispatched request");
@@ -2380,12 +2383,10 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! bytes rather than from `sent_type`, because a client that labels a file
 //! `text/html` is choosing what this origin serves back to the next visitor.
 //!
-//! # Serving
-//!
-//! Also the application's, and for a sharper reason: a file token says "the
-//! bearer may read this object" and carries no identity at all. Mint one only
-//! for a request that has already passed the policy, because after that the
-//! token is the only thing between the object and whoever the URL reaches.
+//! A file token says "the bearer may read this object" and carries no
+//! identity at all. Mint one only for a request that has already passed the
+//! policy, because after that the token is the only thing between the object
+//! and whoever the URL reaches.
 //!
 //! ```ignore
 //! let token = files.tokens.issue(&key);           // after the policy said yes
@@ -2393,18 +2394,14 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! let meta = files.store.meta(&key).await?;
 //! ```
 //!
-//! `ObjectMeta::content_type` answers `is_safe_to_inline`, which is the bit
-//! the download route needs to force an attachment for everything that is not
-//! a recognised image.
-//!
 //! # Thumbnails
 //!
-//! `get_variant` and `put_variant` are here already, with the `variants`
-//! feature off: moving derived bytes needs no codec, so this build can serve
-//! a variant another process computed and cannot compute one itself. Turning
-//! the feature on in `Cargo.toml` adds `derive_variant`, and adds png, jpeg,
-//! gif and webp decoders pointed at stranger-supplied bytes. An application
-//! that stores documents should leave it off.
+//! `get_variant` and `put_variant` are here already: moving derived bytes
+//! needs no codec, so this build can serve a variant another process
+//! computed. The `storage-thumbnails` module turns on the `variants` feature,
+//! which adds `derive_variant` and png, jpeg, gif and webp decoders pointed
+//! at stranger-supplied bytes. An application that stores documents should
+//! leave it off.
 //!
 //! # One secret, two keys
 //!
@@ -2413,8 +2410,10 @@ pub fn layer<'a>(ctx: &'a mut Ctx, next: AsyncNext<'a, Ctx, Response>) -> BoxFut
 //! separators, so an address key cannot sign a token and a token key cannot
 //! address an object. Rotating the secret invalidates every outstanding token
 //! at once, which is the break-glass, and it also changes the address new
-//! uploads are stored at -- objects already on disk keep the address they
+//! uploads are stored at -- objects already stored keep the address they
 //! were written under, so rotate it with a plan rather than on a Friday.
+//! Outside development the plugin refuses the scaffold's secret and any
+//! secret shorter than 32 characters.
 
 use std::sync::Arc;
 
@@ -2461,24 +2460,37 @@ impl Default for Settings {
     }
 }
 
+/// The scaffold's secret, which the repository shows to anybody.
+const DEVELOPMENT_SECRET: &str = "development only: replace before anything is uploaded in anger";
+
+/// Whether this process runs in development or a test: `$<APP>_ENV` unset,
+/// `development` or `test`. The variable the config plugin reads too.
+fn development() -> bool {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    match std::env::var(var) {
+        Ok(env) => env == "development" || env == "test",
+        Err(_) => true,
+    }
+}
+
+/// Whether `secret` may sign tokens here. In development anything goes;
+/// elsewhere not the scaffold's secret, which this repository shows to
+/// anybody, and not one shorter than 32 characters.
+fn usable_secret(secret: &str, development: bool) -> bool {
+    development || (secret != DEVELOPMENT_SECRET && secret.len() >= 32)
+}
+
 /// What this plugin puts on the context.
 ///
 /// A wrapper and not the two values loose, because `ContextItem` is
-/// brocanth's trait and both of these are `brocanth-storage`'s types. That
-/// crate deliberately does not depend on the core -- it has no routes, parses
-/// no multipart body and knows nothing about HTTP -- so the impl that joins
-/// the two belongs in the one crate that can see both, which is this one.
+/// brocanth's trait and both of these are `brocanth-storage`'s types, so the
+/// impl that joins the two belongs in this crate, which names both.
 pub struct FileStore {
-    /// The store, behind the trait rather than as a `LocalDisk`, so swapping
-    /// the backend is a change in this file and nowhere else.
+    /// The store, behind the trait, so swapping the backend is a change in
+    /// this file and nowhere else.
     ///
-    /// Allowed to be unread, and only until one thing changes. Every
-    /// `Storage` method is `async` and the startup line below is not, so
-    /// nothing the generator writes can touch this field — a handler is
-    /// what uses it, and a handler cannot reach the per-request context
-    /// yet, because `Ctx` in `src/pages/mod.rs` has no extractor. Delete
-    /// this attribute the moment you write the first upload route; it is
-    /// a note about today, not about the field.
+    /// Nothing this project generated reads it: a handler does, with
+    /// `ctx.provided::<FileStore, _>()`. Delete this attribute when one does.
     #[allow(dead_code)]
     pub store: Arc<dyn Storage>,
     /// Mints and verifies the short-lived tokens a download route checks.
@@ -2524,6 +2536,12 @@ impl Plugin for Files {
                  help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
+        if !usable_secret(&self.settings.secret, development()) {
+            return Err(PluginError::new(
+                "[storage] secret is the scaffold's development value or shorter than 32 characters\n\
+                 help: set the variable for `storage.secret` to 32 random bytes, such as the output of `head -c 32 /dev/urandom | base64`",
+            ));
+        }
         if self.settings.token_ttl <= 0 {
             return Err(PluginError::new(
                 "[storage] token_ttl must be at least one second, or no token is ever valid\n\
@@ -2546,8 +2564,7 @@ impl Plugin for Files {
         let tokens = FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
             .with_ttl(self.settings.token_ttl);
         // On the services too, where a plugin registered after this one
-        // reads them at its own `configure`: the upload and download routes
-        // of `storage-routes` do.
+        // reads them: the upload and download routes of `storage-routes` do.
         lc.services_mut().insert(Arc::clone(&store));
         lc.services_mut().insert(tokens.clone());
         self.store = Some(store);
@@ -2569,6 +2586,16 @@ impl Plugin for Files {
 
 #[cfg(test)]
 mod tests {
+    use super::{usable_secret, DEVELOPMENT_SECRET};
+
+    #[test]
+    fn the_development_secret_is_refused_outside_development() {
+        assert!(usable_secret(DEVELOPMENT_SECRET, true));
+        assert!(!usable_secret(DEVELOPMENT_SECRET, false));
+        assert!(!usable_secret("short", false));
+        assert!(usable_secret(&"x".repeat(32), false));
+    }
+
     #[test]
     fn a_printed_settings_never_shows_a_secret() {
         let settings = super::Settings {
@@ -2606,10 +2633,10 @@ request.
 ## What this binary contains
 
 - `core`  the router, the context, the plugin seams
-- `sessions`  a placeholder: the cookie's name on the context; no session state, no signature
-- `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
+- `sessions`  a cookie name on the context and an empty `session` layer to build on; no session store, for sign-in pick `auth`
+- `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `config`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -2644,6 +2671,15 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Sessions seam
+
+`src/plugins/sessions/mod.rs` is a seam, not a session. Its `layer`
+passes every request through; nothing reads, signs or writes the
+cookie, and `Session` holds only the cookie's name. For accounts,
+sign-in and a signed session cookie, use the `auth` module
+(`brocanth-auth`): `auth.sessions()` on the context. Do not build a
+second session beside it.
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -2668,7 +2704,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 41e038046dfa456c -->
+<!-- brocanth-digest: c3c81c563868df0c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

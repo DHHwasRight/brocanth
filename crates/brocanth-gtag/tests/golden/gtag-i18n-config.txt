@@ -2796,8 +2796,8 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/modules/gtag.rs =====
-//! `gtag`: Google Analytics 4 behind a consent banner; nothing leaves before
-//! the visitor accepts.
+//! `gtag`: Google Analytics 4 behind a consent banner; in `basic` mode nothing
+//! leaves before the visitor accepts.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2925,6 +2925,8 @@ exclude = []
 # cookie_domain = ""
 # A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none.
 # A server only: a static export has no one to report a choice to.
+# The file is per instance, and a container loses it when it stops
+# unless the path is on a volume that outlives it.
 # consent_log = ""
 
 [gtag.banner]
@@ -3116,7 +3118,7 @@ request.
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-security-headers`  HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
-- `gtag`  Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts
+- `gtag`  Google Analytics 4 behind a consent banner; in `basic` mode nothing leaves before the visitor accepts
 
 **Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware-csrf`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
@@ -3205,7 +3207,10 @@ has. Change the wording in the catalogs.
 
 `brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.
 Its hook puts a consent banner and Google's tag into every HTML page,
-before `</body>`. Nothing reaches Google before the visitor accepts.
+before `</body>`. In `basic` mode, the default, nothing reaches Google
+before the visitor accepts. In `advanced` mode, Google's script loads
+on the first page with every consent denied, and sends cookieless
+pings before any choice.
 
 Do not add a second Google tag, and do not send a page view yourself:
 the hook scrubs the URL first. Never put an email address, a name or a
@@ -3215,7 +3220,10 @@ and the scrubber only catches what it can recognise. A link with
 
 The choice lives in the visitor's browser. To keep a record of it on
 the server, set `consent_log` to a file: each choice is one JSON line
-with no address and no user agent.
+with no address and no user agent. The file is per instance; keep it
+on a volume that outlives the container. The report path,
+`/__consent`, answers only the site's own pages: give it a rate-limit
+rule.
 
 The banner speaks the request's locale. Its words are the
 `[gtag.banner]` keys of `locales/*.toml`; change them there, in every
@@ -3249,7 +3257,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: a7a44ed9fb49952a -->
+<!-- brocanth-digest: 561ffdc8ed22e8ed -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

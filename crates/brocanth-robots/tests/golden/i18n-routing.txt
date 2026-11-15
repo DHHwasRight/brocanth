@@ -429,24 +429,31 @@ async fn run(
             }),
         };
     }
-    // Nothing when the drain finished. After a timeout, this drops the
-    // connections that are still open.
-    serving.abort();
+    // Nothing when the drain finished. After a timeout, this ends the
+    // listener task, and the server aborts every connection it still has.
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
-    match owned(app).await {
+    match owned(app, remaining).await {
         Some(mut app) => {
+            let remaining = grace.saturating_sub(started.elapsed());
             let report = app.core.shutdown(reason, Some(remaining));
             plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => {
+            let why = "a request still holds the application, so no plugin stopped";
+            plugins::say!(warn, "{why}");
+            failed.get_or_insert_with(|| why.to_string());
+        }
     }
     match failed {
         None => Ok(()),
@@ -466,21 +473,23 @@ fn stopped(
 }
 
 /// The application back from the connections that shared it, or `None` when
-/// one of them still runs.
+/// one of them still holds it after `budget`.
 ///
-/// `App::shutdown` needs `&mut`. A finished connection task can be a few
-/// instructions from dropping its clone, so this yields a few times first.
-async fn owned(mut app: Arc<App>) -> Option<App> {
-    for _ in 0..64 {
+/// `App::shutdown` needs `&mut`. An aborted connection task drops its clone
+/// when the runtime next reaches it, so this waits a little, inside the
+/// grace period, and at least a few milliseconds.
+async fn owned(mut app: Arc<App>, budget: Duration) -> Option<App> {
+    let until = Instant::now() + budget.max(Duration::from_millis(50));
+    loop {
         match Arc::try_unwrap(app) {
             Ok(app) => return Some(app),
-            Err(shared) => {
+            Err(shared) if Instant::now() < until => {
                 app = shared;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// What the stop thread reports to [`run`].
@@ -580,6 +589,12 @@ impl Signals {
 /// `begin_async` and not `begin`: it runs a hook that waits as well as
 /// one that does not. With no hook that waits, it is ready on its first
 /// poll.
+///
+/// A panic in a request hook, the chain or the page is a 500, and the
+/// response hooks still see it: a logger that never saw the 500 would
+/// not be a logger. Without the net the panic unwinds into the
+/// server's connection task and the client gets a closed socket with
+/// no status. The net catches nothing under `panic = "abort"`.
 pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
     let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
         // The path and the query do not make a URI. The table was not
@@ -587,9 +602,20 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
         return brocanth_server::Response::text(400, "Bad Request");
     };
     let mut state = RequestState::new();
-    let outcome = match app.core.begin_async(&mut request, &mut state).await {
-        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
-        Begin::Answered(outcome) => outcome,
+    let caught = brocanth_server::bridge::catch_unwind(std::panic::AssertUnwindSafe(async {
+        match app.core.begin_async(&mut request, &mut state).await {
+            Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
+            Begin::Answered(outcome) => outcome,
+        }
+    }))
+    .await;
+    let outcome = match caught {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = brocanth_server::bridge::panic_message(&*payload);
+            plugins::say!(error, "a request panicked: {message}"; %message);
+            Ok(sent(Response::new(500, "Internal Server Error")))
+        }
     };
     let response = app.core.finish(&mut request, &mut state, outcome);
     brocanth_server::bridge::from_core(response)
@@ -3260,7 +3286,7 @@ request.
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3356,7 +3382,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 53ec6c8e436fd2d6 -->
+<!-- brocanth-digest: a6bda3a44fb707a9 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

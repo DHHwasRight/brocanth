@@ -2349,7 +2349,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -2357,7 +2358,9 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-blog"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
@@ -2553,8 +2556,8 @@ fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
-use brocanth_db::migrate::Lock;
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
 use brocanth_model::Orm;
@@ -2573,7 +2576,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -2622,6 +2625,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -2631,72 +2635,82 @@ enum Apply {
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
     let mut config = database()?;
-    // `[db]` is tuned for requests. A migration may run longer than a
-    // request may, and it writes: no statement timeout, no read-only.
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
     config.statement_timeout = None;
     config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
-        // SeaORM takes no lock. This is the advisory lock brocanth-db's
-        // own migrator takes, so two release jobs take turns rather than
-        // apply one pending list twice. Held until the end, and the status
-        // below is read under it.
-        let lock = Lock::acquire(&pool).await?;
-        let result = locked(&pool, what).await;
-        lock.release().await;
-        result
+        let orm = Orm::from_db(&pool);
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
+        let named = |status: MigrationStatus| -> Vec<String> {
+            before
+                .iter()
+                .filter(|m| m.status() == status)
+                .map(|m| m.name().to_string())
+                .collect()
+        };
+        match what {
+            Apply::Up => {
+                let pending = named(MigrationStatus::Pending);
+                if pending.is_empty() {
+                    println!("Nothing to apply: each migration is applied.");
+                }
+                for name in pending {
+                    println!("applied      {name}");
+                }
+            }
+            Apply::Down(n) => {
+                let applied = named(MigrationStatus::Applied);
+                if applied.is_empty() {
+                    println!("Nothing to roll back: no migration is applied.");
+                }
+                for name in applied.iter().rev().take(n as usize) {
+                    println!("rolled back  {name}");
+                }
+            }
+            Apply::Status => {
+                if before.is_empty() {
+                    println!("No migration in migrations/.");
+                }
+                for m in &before {
+                    let status = match m.status() {
+                        MigrationStatus::Applied => "applied",
+                        MigrationStatus::Pending => "pending",
+                    };
+                    println!("{status:<12} {}", m.name());
+                }
+            }
+        }
+        Ok(())
     })
-}
-
-/// `apply`, under the lock.
-async fn locked(pool: &Db, what: Apply) -> anyhow::Result<()> {
-    let orm = Orm::from_db(pool);
-    let db = orm.connection();
-    let before = Migrator::get_migration_with_status(db).await?;
-    let named = |status: MigrationStatus| -> Vec<String> {
-        before
-            .iter()
-            .filter(|m| m.status() == status)
-            .map(|m| m.name().to_string())
-            .collect()
-    };
-    match what {
-        Apply::Up => {
-            let pending = named(MigrationStatus::Pending);
-            Migrator::up(db, None).await?;
-            if pending.is_empty() {
-                println!("Nothing to apply: each migration is applied.");
-            }
-            for name in pending {
-                println!("applied      {name}");
-            }
-        }
-        Apply::Down(n) => {
-            let applied = named(MigrationStatus::Applied);
-            Migrator::down(db, Some(n)).await?;
-            if applied.is_empty() {
-                println!("Nothing to roll back: no migration is applied.");
-            }
-            for name in applied.iter().rev().take(n as usize) {
-                println!("rolled back  {name}");
-            }
-        }
-        Apply::Status => {
-            if before.is_empty() {
-                println!("No migration in migrations/.");
-            }
-            for m in &before {
-                let status = match m.status() {
-                    MigrationStatus::Applied => "applied",
-                    MigrationStatus::Pending => "pending",
-                };
-                println!("{status:<12} {}", m.name());
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Runs the `migrate` tool with these arguments, from the project root.
@@ -2943,7 +2957,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2962,8 +2977,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2989,12 +3005,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -3266,7 +3282,7 @@ request.
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3389,7 +3405,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 16c6c2dc77492c52 -->
+<!-- brocanth-digest: 5c38893713ae6cad -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
