@@ -95,7 +95,10 @@ impl Entry {
 
 /// Two jobs claimed the same [`Job::KIND`].
 #[derive(Debug, thiserror::Error)]
-#[error("two job types are both registered as {kind:?}; a kind must be unique")]
+#[error(
+    "two job types are both registered as {kind:?}; a kind must be unique\n\
+     help: give one of the two types another `KIND`"
+)]
 pub struct DuplicateKind {
     /// The kind both types used.
     pub kind: &'static str,

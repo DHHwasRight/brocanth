@@ -474,7 +474,7 @@ Changed, with the reason:
   running job, `DeadRow` for a dead one, `DeadId` for its id. The jobs
   copies (`WaitingJob`, `RunningJob`, `DeadJob`) were the same columns in
   milliseconds.
-- `Job::PRIORITY` and `Enqueue::priority` stay and do nothing. The queue
+- `Job::PRIORITY` and `Enqueue::priority` stay, deprecated, and do nothing. The queue
   contract has no numeric priority on purpose (`Job::QUEUE` in the queue
   crate says why). A queue per urgency is the replacement.
 - `reclaim_orphans` is gone. A lease that runs out makes the job claimable
@@ -490,7 +490,8 @@ as it is, and then moves what the old tables hold, in one transaction:
 
 - every row of `brocanth_jobs` goes to `queue_bulk` with its kind, queue,
   payload, attempts, unique key and `run_at`. A running row becomes ready
-  at once: its worker was the old code, which no longer runs.
+  one old lease (sixty seconds) after the move, not at once: during a
+  rolling deploy its old worker may still run it.
 - every row of `brocanth_dead_jobs` goes to `queue_dead`, with the failure
   kind, the message and the backtrace in `failure`.
 
@@ -498,6 +499,11 @@ The old tables stay, empty, so a worker of the old version still running
 during a rolling deploy does not fail; the next `migrate` moves what it
 wrote. Drop them by hand when no old worker is left. A unique key that
 `queue_bulk` already holds is not moved twice.
+
+A project that keeps the schema in its own migrations (`Queue::schema_sql`)
+and turns `migrate` off calls `Queue::migrate_legacy` for the move. The
+statements are not in `schema_sql`: they read tables that a project which
+never ran the first queue does not have.
 
 ### 6.4 One database
 

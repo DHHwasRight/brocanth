@@ -220,8 +220,18 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
     /// # Errors
     /// The client cannot be built.
     pub fn new(db: Db, config: &OutgoingConfig) -> Result<Self, OutError> {
-        let client = client(config)?;
         let queue = Queue::from_pool(db.pool().clone());
+        Self::on_queue(db, queue, config)
+    }
+
+    /// The outgoing side over `db`, with its delivery jobs on `queue`: the
+    /// queue the jobs plugin published, with its clock, its event sink and
+    /// its store. [`OutgoingPlugin`] uses this.
+    ///
+    /// # Errors
+    /// The client cannot be built.
+    pub fn on_queue(db: Db, queue: Queue, config: &OutgoingConfig) -> Result<Self, OutError> {
+        let client = client(config)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
@@ -890,17 +900,17 @@ impl Plugin for OutgoingPlugin {
                  help: register the db plugin before this one",
             ));
         };
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "[webhooks_out] needs a Tokio runtime at startup ({e})\n\
-                 help: build the application inside the runtime that serves it"
-            ))
-        })?;
-        let outgoing = {
-            let _entered = runtime.enter();
-            Outgoing::new(db, &self.config)
-                .map_err(|e| PluginError::new(format!("[webhooks_out] {e}")))?
+        // The queue the jobs plugin published, which registers before this
+        // one: its clock, its event sink and its store, not a second queue
+        // on the `db` pool.
+        let Some(queue) = lc.services().get::<Queue>().cloned() else {
+            return Err(PluginError::new(
+                "[webhooks_out] the jobs plugin published no queue: a delivery is a job\n\
+                 help: register the jobs plugin before this one",
+            ));
         };
+        let outgoing = Outgoing::on_queue(db, queue, &self.config)
+            .map_err(|e| PluginError::new(format!("[webhooks_out] {e}")))?;
         outgoing.install();
         if self.config.migrate {
             let probe = outgoing.clone();

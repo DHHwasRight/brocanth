@@ -1117,7 +1117,24 @@ async fn a_graceful_stop_claims_nothing_new(queue: Queue) {
     assert_eq!(state.attempts, 0);
 }
 
+/// A zero interval would panic inside a spawned timer, long after the call
+/// that set it. The builder refuses it, with a help line.
+async fn a_zero_interval_is_refused_when_the_worker_is_built(queue: Queue) {
+    for builder in [
+        Worker::builder(&queue).maintenance_interval(Duration::ZERO),
+        Worker::builder(&queue).heartbeat_interval(Duration::ZERO),
+    ] {
+        let refused = builder
+            .register::<Echo>()
+            .build()
+            .err()
+            .expect("a zero interval is refused");
+        assert!(refused.to_string().contains("help:"), "{refused}");
+    }
+}
+
 on_every_backend!(
+    a_zero_interval_is_refused_when_the_worker_is_built,
     a_job_goes_in_comes_out_and_runs,
     a_failing_job_backs_off_and_then_lands_in_the_dead_letter,
     two_workers_never_run_the_same_job,

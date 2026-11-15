@@ -23,9 +23,11 @@
 //!
 //! Three cases, one plugin file:
 //!
-//! * **`db` chosen**: the queue runs on the pool the `db` plugin opened
-//!   (`Queue::from_pool`). One set of connections to size, and `[jobs]`
-//!   has no `url`.
+//! * **`db` chosen**: the queue runs on a small control pool of its own,
+//!   opened on the database the `db` plugin connects to (`Queue::beside`),
+//!   and `[jobs]` has no `url`. Not on the `db` pool itself: job bodies
+//!   use that one, and a running job must never hold the connection its
+//!   own heartbeat needs.
 //! * **No `db`**: the queue opens its own pool from `[jobs] url`. A
 //!   project can have a queue and no ORM.
 //! * **`jobs-memory` chosen**: the queue lives in the process
@@ -294,7 +296,7 @@ fn plugin_rs(project: &Project, store: Store) -> String {
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};
 use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_jobs::{{Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle}};
+use brocanth_jobs::{{Finish, Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle}};
 use serde::{{Deserialize, Serialize}};
 
 // ---------------------------------------------------------------------------
@@ -448,36 +450,10 @@ impl Plugin for Jobs {{
         let Some(worker) = self.worker.take() else {{
             return Ok(());
         }};
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {{
-            return Ok(());
-        }};
-        // On a current-thread runtime this thread drives the I/O, so a wait
-        // here never ends. The worker stops by itself, by its deadline.
-        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {{
-            return Ok(());
-        }}
-        // On a multi-thread runtime the workers drive it, and a scoped
-        // thread waits without blocking one of them, inside what is left.
-        let remaining = sd.remaining();
-        let finished = async move {{
-            match remaining {{
-                Some(left) => tokio::time::timeout(left, worker.finished()).await.ok(),
-                None => Some(worker.finished().await),
-            }}
-        }};
-        let ended = std::thread::scope(|scope| {{
-            scope
-                .spawn(|| runtime.block_on(finished))
-                .join()
-                .map_err(|_| {{
-                    PluginError::new(
-                        "[jobs] the stopping thread panicked\n\
-                         help: read the panic message above; it names the cause",
-                    )
-                }})
-        }})?;
-        match ended {{
-            Some(Ok(report)) => {{
+        // Waits inside what is left of the grace. On a current-thread
+        // runtime it cannot wait, and the worker stops by its own deadline.
+        match worker.finish_blocking(sd.remaining()) {{
+            Ok(Finish::Stopped(report)) => {{
                 let (finished, returned) = (report.finished, report.returned);
                 crate::plugins::say!(
                     info,
@@ -487,11 +463,9 @@ impl Plugin for Jobs {{
                 );
                 Ok(())
             }}
-            Some(Err(e)) => Err(PluginError::new(format!(
-                "[jobs] stopping the worker: {{e}}\n\
-                 help: read the panic message above; it names the cause"
-            ))),
-            None => Err(PluginError::new(
+            Ok(Finish::NotWaited) => Ok(()),
+            Err(e) => Err(PluginError::new(format!("[jobs] stopping the worker: {{e}}"))),
+            Ok(Finish::Deadline) => Err(PluginError::new(
                 "[jobs] the worker was still giving jobs back at the deadline\n\
                  help: raise `shutdown_grace_secs` under [server], so the worker has time to give them back",
             )),
@@ -529,26 +503,11 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
                      ));\n        }\n";
     let migrating_ready = |what: &str| {
         format!(
-            "        // Ready when {what} answers: one cheap read. With `migrate`, the\n        \
-             // first check creates the tables, and the first check is the one\n        \
-             // `serve` awaits before it listens: an unreachable database stops\n        \
-             // the start there.\n        \
-             let probe = queue.clone();\n        \
-             let migrate = self.settings.migrate;\n        \
-             let migrated = std::sync::Arc::new(tokio::sync::OnceCell::new());\n        \
-             lc.ready_when(move || {{\n            \
-             let probe = probe.clone();\n            \
-             let migrated = std::sync::Arc::clone(&migrated);\n            \
-             async move {{\n                \
-             if migrate {{\n                    \
-             migrated\n                        \
-             .get_or_try_init(|| probe.migrate())\n                        \
-             .await\n                        \
-             .map_err(|e| format!(\"creating the jobs tables: {{e}}\"))?;\n                \
-             }}\n                \
-             probe.ping().await.map_err(|e| e.to_string())\n            \
-             }}\n        \
-             }});\n"
+            "        // Ready when {what} answers: a catalogue lookup, the same cost\n        \
+             // however long the queue is. With `migrate`, the first check creates\n        \
+             // the tables, and the first check is the one `serve` awaits before it\n        \
+             // listens: an unreachable database stops the start there.\n        \
+             lc.ready_when(queue.readiness_check(self.settings.migrate));\n"
         )
     };
     match store {
@@ -581,14 +540,31 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
             migrate_field.to_string(),
             migrate_default.to_string(),
             String::new(),
-            "        // The pool the `db` plugin opened, which registers before this one:\n        \
-             // one set of connections for the pages and the queue.\n        \
+            "        // On the database the `db` plugin opened, which registers before\n        \
+             // this one, but on a small pool of the queue's own. Job bodies use\n        \
+             // the `db` pool; if the queue's claim, heartbeat and settle shared it,\n        \
+             // busy jobs could hold every connection, the heartbeats would stop and\n        \
+             // every lease would expire at once. Ten connections serve one worker\n        \
+             // and the enqueues of the pages; the worker refuses to start on fewer\n        \
+             // than it needs. The pool spawns its upkeep task, so it needs the\n        \
+             // runtime entered.\n        \
              let db = lc.require_service::<brocanth_db::Db>()?;\n        \
-             let queue = Queue::from_pool(db.pool().clone());\n"
+             let runtime = tokio::runtime::Handle::try_current().map_err(|e| {\n            \
+             PluginError::new(format!(\n                \
+             \"[jobs] needs a Tokio runtime at startup to open its pool ({e})\\n\\\n                 \
+             help: build the application inside the runtime that serves it\"\n            \
+             ))\n        \
+             })?;\n        \
+             let queue = {\n            \
+             let _entered = runtime.enter();\n            \
+             Queue::beside(db.pool(), 10)\n        \
+             };\n"
                 .to_string(),
             migrating_ready("the queue"),
-            "//! In Postgres, on the pool the `db` plugin opened: one set of connections\n\
-             //! for the pages and the queue, so `[db] max_connections` sizes both."
+            "//! In Postgres, on the database the `db` plugin opened, through a small\n\
+             //! pool of the queue's own (ten connections): job bodies use the `db`\n\
+             //! pool, and a running job never holds a connection its heartbeat needs.\n\
+             //! `[db] max_connections` sizes the pages and the jobs; add ten for the queue."
                 .to_string(),
         ),
         Store::Memory => (
@@ -601,11 +577,7 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
              let queue = Queue::memory();\n"
                 .to_string(),
             "        // Ready while the queue answers, which in memory is always.\n        \
-             let probe = queue.clone();\n        \
-             lc.ready_when(move || {\n            \
-             let probe = probe.clone();\n            \
-             async move { probe.ping().await.map_err(|e| e.to_string()) }\n        \
-             });\n"
+             lc.ready_when(queue.readiness_check(false));\n"
                 .to_string(),
             "//! In this process's memory (`jobs-memory`), for development and tests.\n\
              //! A restart loses every job. `brocanth remove jobs-memory` moves the queue\n\

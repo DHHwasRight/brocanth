@@ -18,8 +18,14 @@ use std::time::Duration;
 /// Jitter is the half of this that gets skipped and then causes an incident.
 /// Without it, a hundred jobs failing against the same downed service retry in
 /// the same millisecond, forever, and the retry storm is what keeps the service
-/// down. `jitter` is a fraction: `0.25` spreads each delay uniformly across
-/// `[0.75 d, 1.25 d]`.
+/// down. `jitter` is a fraction, and it only subtracts: `0.25` spreads each
+/// delay across `[0.75 d, d]`. It never adds, so a delay never passes `max`,
+/// which a backend may declare as its ceiling. This is the engine's rule
+/// ([`brocanth_queue::Backoff`]); the worker runs this schedule through it.
+///
+/// The default here is not the engine's (five seconds, up to six hours).
+/// It is the first queue's, kept so that a job written for it retries on
+/// the schedule it always had.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Backoff {
     base_ms: u64,
@@ -103,26 +109,16 @@ impl Backoff {
         Duration::from_millis(delay.min(self.max_ms))
     }
 
-    /// The delay before attempt `attempt + 1`, jittered.
+    /// The delay before attempt `attempt + 1`, jittered: what the worker
+    /// waits. It is the engine's computation, seeded from `rng`.
     #[must_use]
     pub fn delay(&self, attempt: u32, rng: &mut Prng) -> Duration {
-        let base = self.base_delay(attempt).as_millis() as f64;
-        if self.jitter <= 0.0 {
-            return Duration::from_millis(base as u64);
-        }
-        // Uniform in [1 - j, 1 + j].
-        let spread = 1.0 - self.jitter + 2.0 * self.jitter * rng.next_f64();
-        Duration::from_millis((base * spread).max(0.0) as u64)
+        self.to_queue().delay(attempt, rng.next_u64())
     }
 }
 
 impl Backoff {
-    /// The same schedule in the engine's terms.
-    ///
-    /// One difference, on purpose: the engine's jitter only subtracts, so a
-    /// delay never goes past `max`, which a backend may declare as its
-    /// ceiling. A jitter of 0.25 here is a delay between 75% and 100% of
-    /// the computed one, where the first queue spread it to 125%.
+    /// The same schedule in the engine's terms. The worker runs this one.
     pub(crate) fn to_queue(self) -> brocanth_queue::Backoff {
         brocanth_queue::Backoff::Exponential {
             base: Duration::from_millis(self.base_ms),
@@ -213,21 +209,27 @@ mod tests {
     }
 
     #[test]
-    fn jitter_stays_inside_its_fraction() {
+    fn jitter_only_subtracts_inside_its_fraction() {
         let b = Backoff::new(Duration::from_secs(100), Duration::from_secs(1_000)).jitter(0.25);
         let mut rng = Prng::seeded(42);
         let mut saw_below = false;
-        let mut saw_above = false;
         for _ in 0..1_000 {
             let d = b.delay(1, &mut rng).as_millis() as i64;
-            assert!((75_000..=125_000).contains(&d), "{d} outside [75s, 125s]");
+            assert!((75_000..=100_000).contains(&d), "{d} outside [75s, 100s]");
             saw_below |= d < 100_000;
-            saw_above |= d > 100_000;
         }
-        assert!(
-            saw_below && saw_above,
-            "the jitter spread in one direction only"
-        );
+        assert!(saw_below, "the jitter did not spread at all");
+    }
+
+    #[test]
+    fn delay_is_what_the_worker_waits() {
+        let b = Backoff::DEFAULT;
+        let mut a = Prng::seeded(7);
+        let mut c = Prng::seeded(7);
+        for attempt in 1..6 {
+            let seed = c.next_u64();
+            assert_eq!(b.delay(attempt, &mut a), b.to_queue().delay(attempt, seed));
+        }
     }
 
     #[test]

@@ -189,6 +189,14 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// The key [`Self::UNIQUENESS`] applies to. `None` means the job is never
     /// deduplicated, whatever the constant says.
+    ///
+    /// The key is **global**: one namespace across every job kind and every
+    /// queue, on every backend. A `ChargeCard` keyed `"42"` and a
+    /// `SendReceipt` keyed `"42"` hold one key, so the second is refused as a
+    /// duplicate of the first. Put the job's own namespace in the key, such
+    /// as `format!("charge:{}", self.order)`. The engine does not add one,
+    /// because two kinds that must not run at once can then share a key on
+    /// purpose.
     fn unique_key(&self) -> Option<Cow<'_, str>> {
         None
     }

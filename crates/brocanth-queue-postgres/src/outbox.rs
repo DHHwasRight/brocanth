@@ -18,13 +18,13 @@ fn oops(e: sqlx::Error) -> OutboxError {
     }
 }
 
-fn uniqueness(text: &str, _key: Option<&str>) -> UniquenessKind {
+fn uniqueness(text: &str, window_ms: Option<i64>) -> UniquenessKind {
     match text {
         "until_success" => UniquenessKind::UntilSuccess,
-        // A window's length is not kept on the row: the window was opened in
-        // `queue_dedup` at the enqueue, which is where it belongs, because
-        // it has to outlive both the row and the relay.
-        "window" => UniquenessKind::Window(0),
+        // The window opens when the relay pushes the job, with the length
+        // the enqueue asked for. A row written before `window_ms` existed
+        // has none and gets a zero window, which is what it got then.
+        "window" => UniquenessKind::Window(window_ms.unwrap_or(0).max(0) as u64),
         _ => UniquenessKind::None,
     }
 }
@@ -62,7 +62,7 @@ impl Outbox for PgOutbox {
                FROM picked \
               WHERE o.id = picked.id \
           RETURNING o.id, o.kind, o.queue, o.payload, o.run_at, o.max_attempts, \
-                    o.unique_key, o.uniqueness, o.attempts",
+                    o.unique_key, o.uniqueness, o.window_ms, o.attempts",
         )
         .bind(limit as i64)
         .bind(lease.as_secs_f64())
@@ -86,7 +86,7 @@ impl Outbox for PgOutbox {
                             .get::<Option<DateTime<Utc>>, _>("run_at")
                             .map(std::time::SystemTime::from),
                         max_attempts: r.get::<i32, _>("max_attempts") as u32,
-                        uniqueness: uniqueness(&text, key.as_deref()),
+                        uniqueness: uniqueness(&text, r.get("window_ms")),
                         unique_key: key,
                     },
                 }
@@ -167,13 +167,13 @@ impl Outbox for PgOutbox {
             "WITH gone AS ( \
                  DELETE FROM queue_outbox WHERE id = $1 \
                  RETURNING id, kind, queue, payload, run_at, max_attempts, unique_key, \
-                           uniqueness, attempts, enqueued_at \
+                           uniqueness, window_ms, attempts, enqueued_at \
              ) \
              INSERT INTO queue_outbox_dead \
                  (outbox_id, kind, queue, payload, run_at, max_attempts, unique_key, \
-                  uniqueness, attempts, failure, enqueued_at) \
+                  uniqueness, window_ms, attempts, failure, enqueued_at) \
              SELECT id, kind, queue, payload, run_at, max_attempts, unique_key, \
-                    uniqueness, attempts, $2, enqueued_at \
+                    uniqueness, window_ms, attempts, $2, enqueued_at \
                FROM gone",
         )
         .bind(id)
@@ -257,11 +257,13 @@ impl OutboxInspect for PgOutbox {
         let new_id: Option<i64> = sqlx::query_scalar(
             "WITH gone AS ( \
                  DELETE FROM queue_outbox_dead WHERE id = $1 \
-                 RETURNING kind, queue, payload, run_at, max_attempts, unique_key, uniqueness \
+                 RETURNING kind, queue, payload, run_at, max_attempts, unique_key, uniqueness, \
+                           window_ms \
              ) \
              INSERT INTO queue_outbox \
-                 (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
-             SELECT kind, queue, payload, run_at, max_attempts, unique_key, uniqueness \
+                 (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness, window_ms) \
+             SELECT kind, queue, payload, run_at, max_attempts, unique_key, uniqueness, \
+                    window_ms \
                FROM gone \
              RETURNING id",
         )

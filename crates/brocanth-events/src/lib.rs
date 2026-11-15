@@ -579,9 +579,14 @@ impl fmt::Debug for FanOut {
 }
 
 impl ChangeSink for FanOut {
+    /// Each sink gets the change only if it wants the collection. A sink
+    /// that said no to `posts` is not handed `posts` changes because
+    /// another sink in the fan-out said yes.
     fn publish(&self, change: &RowChange<'_>) {
         for sink in &self.sinks {
-            sink.publish(change);
+            if sink.wants(&change.collection) {
+                sink.publish(change);
+            }
         }
     }
 
@@ -707,6 +712,18 @@ mod tests {
         assert_eq!(first.load(Ordering::SeqCst), 1);
         assert_eq!(second.load(Ordering::SeqCst), 1);
         assert_eq!(third.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_fan_out_skips_a_sink_that_declined_the_collection() {
+        let declined = Arc::new(AtomicUsize::new(0));
+        let wanted = Arc::new(AtomicUsize::new(0));
+        let fan = FanOut::new()
+            .with(Recorder::uninterested(Arc::clone(&declined)))
+            .with(Recorder::new(Arc::clone(&wanted)));
+        fan.publish(&update());
+        assert_eq!(declined.load(Ordering::SeqCst), 0);
+        assert_eq!(wanted.load(Ordering::SeqCst), 1);
     }
 
     #[test]

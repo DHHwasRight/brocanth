@@ -6,7 +6,7 @@
 //! it is still retrying, and a retry can be days after the enqueue.
 
 use chrono::{Duration as Days, NaiveDate, Utc};
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 
 fn name(day: NaiveDate) -> String {
     format!("queue_archive_{}", day.format("%Y%m%d"))
@@ -23,6 +23,12 @@ fn name(day: NaiveDate) -> String {
 /// error rather than the silence the `IF NOT EXISTS` promises. Losing that
 /// race is the expected outcome on a fleet, so it is not an error here.
 pub async fn ensure_archive_partitions(pool: &PgPool, ahead: i64) -> Result<(), sqlx::Error> {
+    ensure_on(&mut *pool.acquire().await?, ahead).await
+}
+
+/// [`ensure_archive_partitions`] on one connection: the sweep runs it on
+/// the connection that holds the upkeep's advisory lock.
+pub(crate) async fn ensure_on(conn: &mut PgConnection, ahead: i64) -> Result<(), sqlx::Error> {
     let today = Utc::now().date_naive();
     for n in 0..=ahead {
         let from = today + Days::days(n);
@@ -34,7 +40,10 @@ pub async fn ensure_archive_partitions(pool: &PgPool, ahead: i64) -> Result<(), 
             from,
             to
         );
-        match sqlx::query(AssertSqlSafe(sql.clone())).execute(pool).await {
+        match sqlx::query(AssertSqlSafe(sql.clone()))
+            .execute(&mut *conn)
+            .await
+        {
             Ok(_) => {}
             Err(e) if lost_the_race(&e) => {}
             Err(e) => return Err(e),
@@ -64,6 +73,14 @@ pub async fn drop_archive_partitions_before(
     pool: &PgPool,
     day: NaiveDate,
 ) -> Result<Vec<String>, sqlx::Error> {
+    drop_on(&mut *pool.acquire().await?, day).await
+}
+
+/// [`drop_archive_partitions_before`] on one connection.
+pub(crate) async fn drop_on(
+    conn: &mut PgConnection,
+    day: NaiveDate,
+) -> Result<Vec<String>, sqlx::Error> {
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname::text \
            FROM pg_class c \
@@ -71,7 +88,7 @@ pub async fn drop_archive_partitions_before(
            JOIN pg_class p ON p.oid = i.inhparent \
           WHERE p.relname = 'queue_archive'",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let cutoff = format!("queue_archive_{}", day.format("%Y%m%d"));
@@ -79,7 +96,7 @@ pub async fn drop_archive_partitions_before(
     for table in rows {
         if table < cutoff {
             sqlx::query(AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
             dropped.push(table);
         }

@@ -15,7 +15,10 @@ use thiserror::Error;
 pub enum Error {
     /// The database said no.
     #[cfg(feature = "postgres")]
-    #[error("the jobs database: {0}")]
+    #[error(
+        "the jobs database: {0}\n\
+         help: check the database URL and that the database is reachable"
+    )]
     Database(#[from] sqlx::Error),
 
     /// The queue backend refused a call, or could not be reached.
@@ -28,7 +31,10 @@ pub enum Error {
     Enqueue(#[from] brocanth_queue::EnqueueError),
 
     /// A job value would not serialise into its payload.
-    #[error("the payload for job `{job}` will not serialise: {source}")]
+    #[error(
+        "the payload for job `{job}` will not serialise: {source}\n\
+         help: make every field of the job serialisable"
+    )]
     Encode {
         /// The job's [`Job::NAME`](crate::Job::NAME).
         job: &'static str,
@@ -38,7 +44,10 @@ pub enum Error {
     },
 
     /// A stored payload would not deserialise back into its job.
-    #[error("the stored payload for job `{job}` will not deserialise: {source}")]
+    #[error(
+        "the stored payload for job `{job}` will not deserialise: {source}\n\
+         help: keep the job's fields compatible with queued rows, or give the new shape a new `NAME`"
+    )]
     Decode {
         /// The job name recorded on the row.
         job: String,
@@ -48,7 +57,10 @@ pub enum Error {
     },
 
     /// A cron expression did not parse.
-    #[error("`{expression}` is not a cron expression: {reason}")]
+    #[error(
+        "`{expression}` is not a cron expression: {reason}\n\
+         help: use five fields: minute hour day-of-month month day-of-week, such as `0 3 * * *`"
+    )]
     Cron {
         /// What was handed in.
         expression: String,
@@ -60,7 +72,10 @@ pub enum Error {
     ///
     /// The worker reports this rather than guessing, because a job name that
     /// silently does nothing is how a queue goes quiet without anybody noticing.
-    #[error("no job named `{name}` is registered on this worker; registered: {known}")]
+    #[error(
+        "no job named `{name}` is registered on this worker; registered: {known}\n\
+         help: register the job type on the worker's `JobRegistry`"
+    )]
     UnknownJob {
         /// The name on the row.
         name: String,
@@ -76,7 +91,10 @@ pub enum Error {
     Backend(String),
 
     /// A worker was asked to start without a Tokio runtime to start on.
-    #[error("there is no Tokio runtime here to run workers on: {0}")]
+    #[error(
+        "there is no Tokio runtime here to run workers on: {0}\n\
+         help: start the worker from inside a Tokio runtime"
+    )]
     NoRuntime(String),
 }
 

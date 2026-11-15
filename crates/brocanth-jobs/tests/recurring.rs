@@ -277,6 +277,80 @@ async fn two_running_workers_run_one_occurrence_once(queue: Queue) {
     assert_eq!(queue.stats().await.expect("stats").total(), 0);
 }
 
+/// A worker whose handle was dropped keeps ticking the schedules. A dropped
+/// handle closes the stop channel, and the ticker used to read that as a
+/// stop and return, while the claim loop spun on it.
+async fn a_dropped_handle_leaves_the_schedules_ticking(queue: Queue) {
+    let clock = ManualClock::new(noon());
+    let queue = queue.with_clock(clock.clone());
+    let t = token("dropped-handle");
+
+    queue
+        .recurring("dropped-handle", "0 * * * *", Nightly { token: t.clone() })
+        .install()
+        .await
+        .expect("install");
+
+    let worker = brocanth_jobs::Worker::builder(&queue)
+        .poll_interval(Duration::from_millis(10))
+        .maintenance_interval(Duration::from_millis(10))
+        .register::<Nightly>()
+        .start()
+        .expect("start");
+    drop(worker);
+    // Long enough for a ticker that read the drop as a stop to have gone.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    clock.set(noon() + chrono::Duration::seconds(3_605));
+    wait_for(
+        "the occurrence to run after the drop",
+        Duration::from_secs(5),
+        || async { log(&t) == vec!["nightly ran"] },
+    )
+    .await;
+}
+
+/// One row whose expression no longer parses does not stop the others: it
+/// is reported, parked a day ahead, and the next row fires.
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_unparsable_schedule_does_not_stop_the_others() {
+    let Some((queue, _schema)) = common::postgres_queue().await else {
+        common::skipped(common::NO_POSTGRES);
+        return;
+    };
+    let clock = ManualClock::new(noon());
+    let errors = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&errors);
+    let queue = queue
+        .with_clock(clock.clone())
+        .with_events(brocanth_jobs::EventFn::new(move |event| {
+            if let brocanth_jobs::JobEvent::InternalError { .. } = event {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+    let t = token("bad-row");
+    for name in ["a-broken", "b-fine"] {
+        queue
+            .recurring(name, "0 * * * *", Nightly { token: t.clone() })
+            .install()
+            .await
+            .expect("install");
+    }
+    let pool = queue.pg_pool().expect("a Postgres queue").clone();
+    sqlx::query("UPDATE brocanth_job_schedules SET cron = 'not a cron' WHERE name = 'a-broken'")
+        .execute(&pool)
+        .await
+        .expect("break the row");
+
+    clock.set(noon() + chrono::Duration::seconds(3_605));
+    assert_eq!(queue.tick_schedules().await.expect("tick"), 1);
+    assert_eq!(errors.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Parked: the next tick does not report it again.
+    assert_eq!(queue.tick_schedules().await.expect("tick"), 0);
+    assert_eq!(errors.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 on_every_backend!(
     an_hourly_schedule_fires_once_when_its_hour_arrives,
     after_downtime_the_default_skips_the_window_it_slept_through,
@@ -288,4 +362,5 @@ on_every_backend!(
     a_bad_cron_expression_is_refused_at_install_rather_than_at_three_in_the_morning,
     a_recurring_job_runs_on_a_worker_like_any_other,
     two_running_workers_run_one_occurrence_once,
+    a_dropped_handle_leaves_the_schedules_ticking,
 );

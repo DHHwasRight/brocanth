@@ -131,6 +131,14 @@ impl Table {
             Table::Transactional => "queue_tx",
         }
     }
+
+    /// What `queue_dead.lane` records for a row from this table.
+    pub(crate) fn lane(self) -> &'static str {
+        match self {
+            Table::Bulk => "bulk",
+            Table::Transactional => "transactional",
+        }
+    }
 }
 
 /// How the adapter behaves.
@@ -241,31 +249,81 @@ impl PgQueue {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
 
-    async fn claim_window(&self, key: &str, secs: f64) -> Result<bool, BackendError> {
-        // A window key has to outlive the row, so it does not live in the
-        // partial unique index. `DO UPDATE ... WHERE` refreshes an expired
-        // key and leaves a live one alone, in one statement and one lock.
-        let row = sqlx::query(
-            "INSERT INTO queue_dedup (key, expires_at) \
-             VALUES ($1, now() + make_interval(secs => $2)) \
-             ON CONFLICT (key) DO UPDATE SET expires_at = EXCLUDED.expires_at \
-             WHERE queue_dedup.expires_at <= now() \
-             RETURNING key",
-        )
-        .bind(key)
-        .bind(secs)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(err)?;
-        Ok(row.is_some())
+/// Open a deduplication window for `key`, in the caller's transaction.
+///
+/// A window key has to outlive the row, so it does not live in the partial
+/// unique index. `DO UPDATE ... WHERE` refreshes an expired key and leaves a
+/// live one alone, in one statement and one lock. False means the window is
+/// held.
+///
+/// It runs in the transaction that writes the job, never on its own: a key
+/// that commits before its job is a key that outlives a failed insert, and
+/// the retry of that insert is then refused as a duplicate of a job that
+/// does not exist.
+pub(crate) async fn claim_window(
+    conn: &mut sqlx::PgConnection,
+    key: &str,
+    secs: f64,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO queue_dedup (key, expires_at) \
+         VALUES ($1, now() + make_interval(secs => $2)) \
+         ON CONFLICT (key) DO UPDATE SET expires_at = EXCLUDED.expires_at \
+         WHERE queue_dedup.expires_at <= now() \
+         RETURNING key",
+    )
+    .bind(key)
+    .bind(secs)
+    .fetch_optional(conn)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Take a transaction-scoped advisory lock on every key in `keys`, in one
+/// statement and in a fixed order.
+///
+/// An `until_success` key is held by two tables, the live one and
+/// `queue_scheduled`, and no index spans both. The lock is what makes "look
+/// in both, then insert" one step against another push of the same key. The
+/// order is what keeps two batches that share keys from deadlocking.
+async fn lock_keys(conn: &mut sqlx::PgConnection, keys: &[&str]) -> Result<(), sqlx::Error> {
+    if keys.is_empty() {
+        return Ok(());
     }
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(h) \
+           FROM (SELECT DISTINCT hashtextextended(k, 0) AS h \
+                   FROM unnest($1::text[]) AS k ORDER BY 1) AS keys",
+    )
+    .bind(keys)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
 
-    async fn insert_scheduled(&self, job: &NewJob, secs: f64) -> Result<Pushed, BackendError> {
+impl PgQueue {
+    async fn insert_scheduled(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        job: &NewJob,
+        secs: f64,
+    ) -> Result<Pushed, sqlx::Error> {
+        // An `until_success` key is held by a waiting row as it is by a live
+        // one, so a delayed push looks in both tables. The key is locked by
+        // the caller, so nothing can insert it between the look and the
+        // write.
+        let held = job.uniqueness == UniquenessKind::UntilSuccess && job.unique_key.is_some();
         let row = sqlx::query(
             "INSERT INTO queue_scheduled \
              (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
-             VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7) \
+             SELECT $1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7 \
+              WHERE NOT $8 \
+                 OR (NOT EXISTS (SELECT 1 FROM queue_bulk WHERE unique_key = $6) \
+                     AND NOT EXISTS (SELECT 1 FROM queue_scheduled \
+                                      WHERE unique_key = $6 \
+                                        AND uniqueness = 'until_success')) \
              RETURNING id",
         )
         .bind(&job.kind)
@@ -275,11 +333,91 @@ impl PgQueue {
         .bind(job.max_attempts as i32)
         .bind(job.unique_key.as_deref())
         .bind(uniqueness_text(job.uniqueness))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(err)?;
-        let id: i64 = row.get("id");
-        Ok(Pushed::Enqueued(JobId(format!("s{id}"))))
+        .bind(held)
+        .fetch_optional(conn)
+        .await?;
+        Ok(match row {
+            Some(r) => Pushed::Enqueued(JobId(format!("s{}", r.get::<i64, _>("id")))),
+            None => Pushed::Duplicate,
+        })
+    }
+
+    /// Push a batch inside one transaction.
+    async fn push_in(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        batch: Vec<NewJob>,
+    ) -> Result<(Vec<Pushed>, bool), sqlx::Error> {
+        let now = SystemTime::now();
+        let table = self.config.table.name();
+        let bulk = self.config.table == Table::Bulk;
+        // On the bulk table an `until_success` key must also be free in
+        // `queue_scheduled`. The partial unique index sees only this table.
+        let insert = format!(
+            "INSERT INTO {table} \
+             (kind, queue, payload, available_at, max_attempts, unique_key, uniqueness) \
+             SELECT $1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7 \
+              WHERE $6::text IS NULL OR NOT $8 \
+                 OR NOT EXISTS (SELECT 1 FROM queue_scheduled \
+                                 WHERE unique_key = $6 AND uniqueness = 'until_success') \
+             ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
+             RETURNING id"
+        );
+        if bulk {
+            let keys: Vec<&str> = batch
+                .iter()
+                .filter(|j| j.uniqueness == UniquenessKind::UntilSuccess)
+                .filter_map(|j| j.unique_key.as_deref())
+                .collect();
+            lock_keys(&mut *conn, &keys).await?;
+        }
+        let mut out = Vec::with_capacity(batch.len());
+        let mut woke = false;
+        for job in batch {
+            if let (Some(key), UniquenessKind::Window(ms)) =
+                (job.unique_key.as_deref(), job.uniqueness)
+            {
+                if !claim_window(&mut *conn, key, Duration::from_millis(ms).as_secs_f64()).await? {
+                    out.push(Pushed::Duplicate);
+                    continue;
+                }
+            }
+            let run_at = job.run_at.unwrap_or(now);
+            let ahead = run_at.duration_since(now).unwrap_or(Duration::ZERO);
+            if ahead > self.config.schedule_after {
+                out.push(
+                    self.insert_scheduled(&mut *conn, &job, ahead.as_secs_f64())
+                        .await?,
+                );
+                continue;
+            }
+            // A window key is held by `queue_dedup`, not by the row, so the
+            // row must not also take the partial unique index.
+            let row_key = match job.uniqueness {
+                UniquenessKind::Window(_) | UniquenessKind::None => None,
+                _ => job.unique_key.as_deref(),
+            };
+            let row = sqlx::query(AssertSqlSafe(insert.clone()))
+                .bind(&job.kind)
+                .bind(&job.queue)
+                .bind(&job.payload)
+                .bind(ahead.as_secs_f64())
+                .bind(job.max_attempts as i32)
+                .bind(row_key)
+                .bind(uniqueness_text(job.uniqueness))
+                .bind(bulk)
+                .fetch_optional(&mut *conn)
+                .await?;
+            match row {
+                Some(r) => {
+                    let id: i64 = r.get("id");
+                    out.push(Pushed::Enqueued(JobId(id.to_string())));
+                    woke = true;
+                }
+                None => out.push(Pushed::Duplicate),
+            }
+        }
+        Ok((out, woke))
     }
 }
 
@@ -308,66 +446,19 @@ impl Backend for PgQueue {
     }
 
     async fn push(&self, batch: Vec<NewJob>) -> Result<Vec<Pushed>, BackendError> {
-        let now = SystemTime::now();
-        let table = self.config.table.name();
-        let insert = format!(
-            "INSERT INTO {table} \
-             (kind, queue, payload, available_at, max_attempts, unique_key, uniqueness) \
-             VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7) \
-             ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
-             RETURNING id"
-        );
-        let mut out = Vec::with_capacity(batch.len());
-        let mut woke = false;
-        for job in batch {
-            if let (Some(key), UniquenessKind::Window(ms)) =
-                (job.unique_key.as_deref(), job.uniqueness)
-            {
-                if !self
-                    .claim_window(key, Duration::from_millis(ms).as_secs_f64())
-                    .await?
-                {
-                    out.push(Pushed::Duplicate);
-                    continue;
-                }
-            }
-            let run_at = job.run_at.unwrap_or(now);
-            let ahead = run_at.duration_since(now).unwrap_or(Duration::ZERO);
-            if ahead > self.config.schedule_after {
-                out.push(self.insert_scheduled(&job, ahead.as_secs_f64()).await?);
-                continue;
-            }
-            // A window key is held by `queue_dedup`, not by the row, so the
-            // row must not also take the partial unique index.
-            let row_key = match job.uniqueness {
-                UniquenessKind::Window(_) | UniquenessKind::None => None,
-                _ => job.unique_key.as_deref(),
-            };
-            let row = sqlx::query(AssertSqlSafe(insert.clone()))
-                .bind(&job.kind)
-                .bind(&job.queue)
-                .bind(&job.payload)
-                .bind(ahead.as_secs_f64())
-                .bind(job.max_attempts as i32)
-                .bind(row_key)
-                .bind(uniqueness_text(job.uniqueness))
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(err)?;
-            match row {
-                Some(r) => {
-                    let id: i64 = r.get("id");
-                    out.push(Pushed::Enqueued(JobId(id.to_string())));
-                    woke = true;
-                }
-                None => out.push(Pushed::Duplicate),
-            }
-        }
+        // One transaction for the whole batch. A failure part way through
+        // inserts nothing, so the caller can push the same batch again: the
+        // relay does exactly that after an outage, and rows that had already
+        // gone in would otherwise run twice. The window keys commit with
+        // their jobs for the same reason.
+        let mut tx = self.pool.begin().await.map_err(err)?;
+        let (out, woke) = self.push_in(&mut tx, batch).await.map_err(err)?;
+        tx.commit().await.map_err(err)?;
         if woke && self.config.notify {
             // Best effort. A missed wake costs one poll interval.
             let _ = sqlx::query("SELECT pg_notify($1, $2)")
                 .bind(NOTIFY_CHANNEL)
-                .bind(table)
+                .bind(self.config.table.name())
                 .execute(&self.pool)
                 .await;
         }
@@ -513,14 +604,15 @@ impl Backend for PgQueue {
                      ) \
                      INSERT INTO queue_dead \
                          (job_id, kind, queue, payload, attempts, max_attempts, \
-                          unique_key, failure, enqueued_at) \
+                          unique_key, failure, enqueued_at, lane) \
                      SELECT id, kind, queue, payload, attempts, max_attempts, \
-                            unique_key, $3, enqueued_at FROM gone"
+                            unique_key, $3, enqueued_at, $4 FROM gone"
                 );
                 sqlx::query(AssertSqlSafe(sql.clone()))
                     .bind(id)
                     .bind(token)
                     .bind(failure.to_string())
+                    .bind(self.config.table.lane())
                     .execute(&self.pool)
                     .await
                     .map_err(err)?
@@ -603,6 +695,20 @@ impl Backend for PgQueue {
                 .execute(&self.pool)
                 .await
                 .map_err(err)?;
+            if done.rows_affected() == 1 || self.config.table != Table::Bulk {
+                return Ok(done.rows_affected() == 1);
+            }
+            // The promoter may have moved it. The live row keeps the id it
+            // had, so the id the push returned still names the job.
+            let done = sqlx::query(
+                "DELETE FROM queue_bulk \
+                  WHERE scheduled_id = $1 \
+                    AND (lease_token IS NULL OR available_at <= now())",
+            )
+            .bind(n)
+            .execute(&self.pool)
+            .await
+            .map_err(err)?;
             return Ok(done.rows_affected() == 1);
         }
         let Ok(n) = id.as_str().parse::<i64>() else {
@@ -645,22 +751,32 @@ impl Backend for PgQueue {
         // 1. Promote scheduled work that is nearly due. This is what makes
         //    an unbounded delay work, here and on a backend with a ceiling.
         if self.config.table == Table::Bulk {
+            //
+            //    A row is deleted only when its insert went in. A key that the
+            //    live table already holds makes the insert do nothing, and a
+            //    delete that ran anyway would lose the job with no trace. The
+            //    push refuses such a key, so this is the rare race; the row
+            //    then waits here until the key is free.
             let sql = format!(
                 "WITH due AS ( \
-                     DELETE FROM queue_scheduled \
+                     SELECT id, kind, queue, payload, run_at, max_attempts, \
+                            unique_key, uniqueness, enqueued_at \
+                       FROM queue_scheduled \
                       WHERE run_at <= now() + make_interval(secs => $1) \
-                     RETURNING kind, queue, payload, run_at, max_attempts, \
-                               unique_key, uniqueness, enqueued_at \
+                      FOR UPDATE SKIP LOCKED \
+                 ), moved AS ( \
+                     INSERT INTO {table} \
+                         (kind, queue, payload, available_at, max_attempts, \
+                          unique_key, uniqueness, enqueued_at, scheduled_id) \
+                     SELECT kind, queue, payload, run_at, max_attempts, \
+                            CASE WHEN uniqueness = 'until_success' \
+                                 THEN unique_key ELSE NULL END, \
+                            uniqueness, enqueued_at, id \
+                       FROM due \
+                     ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
+                     RETURNING scheduled_id \
                  ) \
-                 INSERT INTO {table} \
-                     (kind, queue, payload, available_at, max_attempts, \
-                      unique_key, uniqueness, enqueued_at) \
-                 SELECT kind, queue, payload, run_at, max_attempts, \
-                        CASE WHEN uniqueness = 'until_success' \
-                             THEN unique_key ELSE NULL END, \
-                        uniqueness, enqueued_at \
-                   FROM due \
-                 ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING"
+                 DELETE FROM queue_scheduled WHERE id IN (SELECT scheduled_id FROM moved)"
             );
             sqlx::query(AssertSqlSafe(sql.clone()))
                 .bind(self.config.promote_ahead.as_secs_f64())
@@ -689,12 +805,13 @@ impl Backend for PgQueue {
              ) \
              INSERT INTO queue_dead \
                  (job_id, kind, queue, payload, attempts, max_attempts, \
-                  unique_key, failure, enqueued_at) \
+                  unique_key, failure, enqueued_at, lane) \
              SELECT id, kind, queue, payload, attempts, max_attempts, unique_key, \
-                    coalesce(last_error, 'the worker died on every attempt'), enqueued_at \
+                    coalesce(last_error, 'the worker died on every attempt'), enqueued_at, $1 \
                FROM gone"
         );
         sqlx::query(AssertSqlSafe(sql.clone()))
+            .bind(self.config.table.lane())
             .execute(&self.pool)
             .await
             .map_err(err)?;
@@ -715,17 +832,14 @@ impl Backend for PgQueue {
         //    the missing partition would have turned a retention detail into
         //    duplicate execution across the whole queue.
         //
-        //    Only one table does this, or two queues on one database would
-        //    race to create and drop the same partitions.
-        if self.config.archive && self.config.table == Table::Bulk {
-            partitions::ensure_archive_partitions(&self.pool, PARTITIONS_AHEAD)
-                .await
-                .map_err(err)?;
-            let keep_days = self.config.archive_retention.as_secs() / 86_400;
-            let cutoff = Utc::now().date_naive() - chrono::Duration::days(keep_days as i64);
-            partitions::drop_archive_partitions_before(&self.pool, cutoff)
-                .await
-                .map_err(err)?;
+        //    Every table that archives does this, so a deployment that runs
+        //    only the transactional lane still gets its partitions. Two
+        //    queues on one database would race to create and drop the same
+        //    partitions, so the upkeep runs under a session advisory lock,
+        //    and a sweep that does not get it leaves the work to the one
+        //    that did.
+        if self.config.archive {
+            self.archive_upkeep().await.map_err(err)?;
         }
         Ok(())
     }
@@ -735,6 +849,40 @@ fn parse(lease: &LeaseRef) -> Option<(i64, uuid::Uuid)> {
     let id = lease.id.as_str().parse::<i64>().ok()?;
     let token = lease.token.parse::<uuid::Uuid>().ok()?;
     Some((id, token))
+}
+
+/// The advisory lock the archive upkeep holds: `brocarch`, read the way
+/// [`MIGRATION_LOCK`] is.
+const ARCHIVE_LOCK: i64 = i64::from_be_bytes(*b"brocarch");
+
+impl PgQueue {
+    /// Extend the archive's partitions ahead and drop them behind, if no
+    /// other sweep is doing it now.
+    async fn archive_upkeep(&self) -> Result<(), sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(ARCHIVE_LOCK)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !got {
+            return Ok(());
+        }
+        let result = async {
+            partitions::ensure_on(&mut conn, PARTITIONS_AHEAD).await?;
+            let keep_days = self.config.archive_retention.as_secs() / 86_400;
+            let cutoff = Utc::now().date_naive() - chrono::Duration::days(keep_days as i64);
+            partitions::drop_on(&mut conn, cutoff).await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        let unlock = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(ARCHIVE_LOCK)
+            .execute(&mut *conn)
+            .await;
+        result?;
+        unlock?;
+        Ok(())
+    }
 }
 
 /// Everything in the dead letter, newest first.

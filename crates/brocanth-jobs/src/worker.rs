@@ -33,11 +33,30 @@
 //! are `brocanth_queue::Worker`'s. This worker maps its settings onto the
 //! engine's, gives it the registry, and adds three things:
 //!
-//! * the recurring schedules, ticked every `maintenance_interval`;
+//! * the upkeep: the recurring schedules and the store's sweep, every
+//!   `maintenance_interval`, and on Postgres the outbox relay, so a job
+//!   enqueued with `in_tx` reaches the queue after its transaction commits;
 //! * on Postgres, a listener, so an enqueue wakes the worker
-//!   (`LISTEN/NOTIFY`), and the outbox relay, so a job enqueued with
-//!   `in_tx` reaches the queue after its transaction commits;
+//!   (`LISTEN/NOTIFY`);
 //! * the [`JobEvent`]s, from the engine's observer.
+//!
+//! # One upkeep per queue
+//!
+//! Several workers can run on one [`Queue`] in one process: the jobs plugin
+//! starts one, and a module with jobs of its own (the mailer, the webhooks)
+//! may start another. They claim side by side, but the upkeep runs once:
+//! the first worker to start holds the queue's upkeep token and runs the
+//! ticker, the sweep and the relay; the others check every
+//! `maintenance_interval` and take over when it stops. The workers share
+//! one `LISTEN` connection.
+//!
+//! # The pool
+//!
+//! On Postgres a worker refuses to start when the queue's pool has fewer
+//! connections than the queue's own calls need
+//! ([`brocanth_queue::Budget::control_needed`]). That pool is the control
+//! pool and must not be the one job bodies use: see [`Queue::from_pool`]
+//! and [`Queue::beside`].
 //!
 //! # Shutdown
 //!
@@ -60,7 +79,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use brocanth_queue::{Observer, Settle};
+use brocanth_queue::{Budget, Observer, Settle};
 use tokio::sync::watch;
 
 use crate::error::{Error, Result};
@@ -235,6 +254,18 @@ impl WorkerBuilder {
                     .to_string(),
             ));
         }
+        for (field, value) in [
+            ("heartbeat_interval", self.config.heartbeat_interval),
+            ("stale_after", self.config.stale_after),
+            ("maintenance_interval", self.config.maintenance_interval),
+        ] {
+            if value.is_zero() {
+                return Err(Error::Backend(format!(
+                    "the worker's {field} is zero, and it must be a positive duration\n\
+                     help: set {field} to a duration above zero"
+                )));
+            }
+        }
         if self.config.stale_after < self.config.heartbeat_interval * 3 {
             return Err(Error::Backend(format!(
                 "stale_after ({:?}) must be at least three times heartbeat_interval ({:?}), \
@@ -287,6 +318,10 @@ impl Worker {
 
     /// Spawns the worker on the current Tokio runtime and returns a handle
     /// that stops it.
+    ///
+    /// The worker runs until [`WorkerHandle::stop`] or [`WorkerHandle::shutdown`].
+    /// Dropping the handle does not stop it: it then runs until the runtime
+    /// ends, and no stop can reach it.
     pub fn start(self) -> Result<WorkerHandle> {
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             Error::NoRuntime(format!(
@@ -330,6 +365,21 @@ impl Worker {
     fn engine(&self) -> Result<brocanth_queue::Worker> {
         let config = &self.config;
         let listening = config.listen && self.queue.backend() == "postgres";
+        #[cfg(feature = "postgres")]
+        if let Some(pool) = self.queue.pg_pool() {
+            // The queue's pool is its control pool: the job bodies are not
+            // on it. So only the control half of the budget is checked.
+            let budget = Budget {
+                control_pool: pool.options().get_max_connections(),
+                listener: listening,
+                ..Budget::for_worker(u32::MAX, config.concurrency.max(1) as u32)
+            };
+            budget
+                .check()
+                .map_err(|e| Error::Backend(format!("the queue's pool is too small: {e}")))?;
+        }
+        #[cfg(not(feature = "postgres"))]
+        let _ = Budget::for_worker;
         let engine_config = brocanth_queue::WorkerConfig {
             name: self.id.clone(),
             queue: config.queues[0].clone(),
@@ -353,7 +403,9 @@ impl Worker {
             Arc::new(registry),
             engine_config,
         )
-        .map_err(|e| Error::Backend(format!("{e}\nhelp: check the worker's settings")))?;
+        .map_err(|e| Error::Backend(e.to_string()))?
+        // The upkeep runs once per queue, in `maintain`.
+        .sweep(false);
         Ok(engine.observe(Arc::new(Bridge {
             events: self.queue.event_sink(),
         })))
@@ -375,39 +427,36 @@ impl Worker {
 
         #[allow(unused_mut)]
         let mut engine = engine;
+        // Held until the worker stops: the listener closes when the last
+        // worker on the queue lets go of it.
         #[cfg(feature = "postgres")]
-        if let Some(pool) = queue.pg_pool() {
-            if config.listen {
-                match brocanth_queue_postgres::wakeups(pool).await {
-                    Ok(rx) => {
-                        events.handle(JobEvent::ListenerConnected);
-                        engine = engine.wake_on(rx);
-                    }
-                    Err(e) => events.handle(JobEvent::ListenerFailed {
-                        error: e.to_string(),
-                    }),
+        let mut _wakeups = None;
+        #[cfg(feature = "postgres")]
+        if let (Some(pool), true) = (queue.pg_pool(), config.listen) {
+            match queue.shared_wakeups(pool).await {
+                Ok(rx) => {
+                    events.handle(JobEvent::ListenerConnected);
+                    engine = engine.wake_on((*rx).clone());
+                    _wakeups = Some(rx);
                 }
+                Err(e) => events.handle(JobEvent::ListenerFailed {
+                    error: e.to_string(),
+                }),
             }
-            // The relay moves what `in_tx` wrote to the outbox into the
-            // queue. It runs in every worker: the outbox claim takes rows
-            // with `SKIP LOCKED` under a lease, so several relays share the
-            // work without a leader.
-            let relay = brocanth_queue::Relay::new(
-                Arc::new(brocanth_queue_postgres::PgOutbox::new(pool.clone())),
-                Arc::clone(queue.engine()),
-                brocanth_queue::RelayConfig::default(),
-            );
-            engine = engine.relay(relay);
         }
 
-        let ticker = tokio::spawn(tick_loop(
+        // The relay stops after the jobs: one of them may enqueue in a
+        // transaction on its way out.
+        let (relay_stop_tx, relay_stop_rx) = watch::channel(false);
+        let mut upkeep = AbortOnDrop(tokio::spawn(maintain(
             queue.clone(),
             config.maintenance_interval,
             shutdown.clone(),
-        ));
+            relay_stop_rx,
+        )));
         let report = engine.drain(shutdown).await;
-        ticker.abort();
-        let _ = ticker.await;
+        let _ = relay_stop_tx.send(true);
+        let _ = (&mut upkeep.0).await;
 
         let finished = report.finished as usize;
         let returned = report.returned;
@@ -420,10 +469,78 @@ impl Worker {
     }
 }
 
-/// Ticks the schedules every `every`, from the first moment, until a stop.
-async fn tick_loop(queue: Queue, every: Duration, mut stop: watch::Receiver<Option<Duration>>) {
+/// Aborts a task when the worker's own future is dropped, so an aborted
+/// worker leaves no upkeep running.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Wait for the next change on a stop channel, or for ever once no sender
+/// is left. A bare `changed()` returns at once on a closed channel, and a
+/// loop around it spins.
+async fn changed_or_pending<T>(rx: &mut watch::Receiver<T>) {
+    if rx.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The queue's upkeep, run by one worker per queue at a time: the schedule
+/// ticker, the sweep and, on Postgres, the outbox relay.
+///
+/// A worker that does not get the token checks again every `every`, so the
+/// upkeep moves to another worker when its holder stops.
+async fn maintain(
+    queue: Queue,
+    every: Duration,
+    mut stop: watch::Receiver<Option<Duration>>,
+    relay_stop: watch::Receiver<bool>,
+) {
+    let _token = loop {
+        if let Some(token) = queue.try_lead() {
+            break token;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            () = changed_or_pending(&mut stop) => {}
+        }
+        if stop.borrow().is_some() {
+            return;
+        }
+    };
+
+    // The relay moves what `in_tx` wrote to the outbox into the queue. The
+    // outbox claim takes rows with `SKIP LOCKED` under a lease, so the relays
+    // of several processes share the work without a leader.
+    #[cfg(feature = "postgres")]
+    let relay = queue.pg_pool().map(|pool| {
+        let mut relay = brocanth_queue::Relay::new(
+            Arc::new(brocanth_queue_postgres::PgOutbox::new(pool.clone())),
+            Arc::clone(queue.engine()),
+            brocanth_queue::RelayConfig::default(),
+        );
+        AbortOnDrop(tokio::spawn(async move { relay.run(relay_stop).await }))
+    });
+    #[cfg(not(feature = "postgres"))]
+    let _ = relay_stop;
+
+    tick_loop(&queue, every, stop).await;
+
+    #[cfg(feature = "postgres")]
+    if let Some(mut relay) = relay {
+        let _ = (&mut relay.0).await;
+    }
+}
+
+/// Ticks the schedules and sweeps the store every `every`, from the first
+/// moment, until a stop.
+async fn tick_loop(queue: &Queue, every: Duration, mut stop: watch::Receiver<Option<Duration>>) {
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut sweeping = true;
     while stop.borrow().is_none() {
         tokio::select! {
             _ = tick.tick() => {
@@ -433,12 +550,20 @@ async fn tick_loop(queue: Queue, every: Duration, mut stop: watch::Receiver<Opti
                         error: &error,
                     });
                 }
-            }
-            changed = stop.changed() => {
-                if changed.is_err() {
-                    return;
+                if sweeping {
+                    if let Err(e) = queue.engine().sweep().await {
+                        // A backend that cannot sweep says so once, and is
+                        // not asked again.
+                        sweeping = !matches!(e, brocanth_queue::BackendError::Unsupported(_));
+                        let error = Error::Store(e);
+                        queue.event_sink().handle(JobEvent::InternalError {
+                            during: "sweeping the queue",
+                            error: &error,
+                        });
+                    }
                 }
             }
+            () = changed_or_pending(&mut stop) => {}
         }
     }
 }
@@ -569,6 +694,60 @@ impl WorkerHandle {
     pub fn abort(self) {
         self.join.abort();
     }
+
+    /// Waits, from a synchronous shutdown hook, for the worker to stop
+    /// after a [`WorkerHandle::stop`], for at most `within` (`None`: as long
+    /// as it takes).
+    ///
+    /// A plugin's `shutdown` is synchronous and runs inside the runtime the
+    /// worker runs on. On a multi-thread runtime a scoped thread blocks on
+    /// the worker, which does not hold one of the runtime's threads. On a
+    /// current-thread runtime this thread drives the I/O, so a wait would
+    /// never end: it returns [`Finish::NotWaited`] at once, and the worker
+    /// stops by itself, by its own deadline. Outside a runtime it does the
+    /// same.
+    pub fn finish_blocking(self, within: Option<Duration>) -> Result<Finish> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Ok(Finish::NotWaited);
+        };
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Ok(Finish::NotWaited);
+        }
+        let finished = async move {
+            match within {
+                Some(left) => tokio::time::timeout(left, self.finished()).await.ok(),
+                None => Some(self.finished().await),
+            }
+        };
+        let ended = std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(finished))
+                .join()
+                .map_err(|_| {
+                    Error::NoRuntime(
+                        "the thread that waits for the worker panicked; \
+                         read the panic message above, it names the cause"
+                            .to_string(),
+                    )
+                })
+        })?;
+        match ended {
+            Some(report) => Ok(Finish::Stopped(report?)),
+            None => Ok(Finish::Deadline),
+        }
+    }
+}
+
+/// How [`WorkerHandle::finish_blocking`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finish {
+    /// The worker stopped, and this is what it did.
+    Stopped(ShutdownReport),
+    /// The wait was not possible here (a current-thread runtime, or no
+    /// runtime). The worker stops by itself, by its own deadline.
+    NotWaited,
+    /// The worker was still giving jobs back when the time ran out.
+    Deadline,
 }
 
 fn stop(tx: &watch::Sender<Option<Duration>>, grace: Duration) {

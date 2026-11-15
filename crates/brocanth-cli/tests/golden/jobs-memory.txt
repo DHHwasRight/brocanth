@@ -2245,7 +2245,7 @@ concurrency = 5
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
 use brocanth::plugin_shutdown::ShutdownCx;
-use brocanth_jobs::{Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle};
+use brocanth_jobs::{Finish, Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -2356,11 +2356,7 @@ impl Plugin for Jobs {
         let queue = Queue::memory();
 
         // Ready while the queue answers, which in memory is always.
-        let probe = queue.clone();
-        lc.ready_when(move || {
-            let probe = probe.clone();
-            async move { probe.ping().await.map_err(|e| e.to_string()) }
-        });
+        lc.ready_when(queue.readiness_check(false));
 
         // So the admin's jobs tab, which mounts before this runs, finds it.
         queue.install();
@@ -2412,36 +2408,10 @@ impl Plugin for Jobs {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return Ok(());
-        };
-        // On a current-thread runtime this thread drives the I/O, so a wait
-        // here never ends. The worker stops by itself, by its deadline.
-        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
-            return Ok(());
-        }
-        // On a multi-thread runtime the workers drive it, and a scoped
-        // thread waits without blocking one of them, inside what is left.
-        let remaining = sd.remaining();
-        let finished = async move {
-            match remaining {
-                Some(left) => tokio::time::timeout(left, worker.finished()).await.ok(),
-                None => Some(worker.finished().await),
-            }
-        };
-        let ended = std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(finished))
-                .join()
-                .map_err(|_| {
-                    PluginError::new(
-                        "[jobs] the stopping thread panicked\n\
-                         help: read the panic message above; it names the cause",
-                    )
-                })
-        })?;
-        match ended {
-            Some(Ok(report)) => {
+        // Waits inside what is left of the grace. On a current-thread
+        // runtime it cannot wait, and the worker stops by its own deadline.
+        match worker.finish_blocking(sd.remaining()) {
+            Ok(Finish::Stopped(report)) => {
                 let (finished, returned) = (report.finished, report.returned);
                 crate::plugins::say!(
                     info,
@@ -2451,11 +2421,9 @@ impl Plugin for Jobs {
                 );
                 Ok(())
             }
-            Some(Err(e)) => Err(PluginError::new(format!(
-                "[jobs] stopping the worker: {e}\n\
-                 help: read the panic message above; it names the cause"
-            ))),
-            None => Err(PluginError::new(
+            Ok(Finish::NotWaited) => Ok(()),
+            Err(e) => Err(PluginError::new(format!("[jobs] stopping the worker: {e}"))),
+            Ok(Finish::Deadline) => Err(PluginError::new(
                 "[jobs] the worker was still giving jobs back at the deadline\n\
                  help: raise `shutdown_grace_secs` under [server], so the worker has time to give them back",
             )),

@@ -13,21 +13,30 @@ pub enum EnqueueError {
     /// A [`Lane::Transactional`] job was enqueued outside a transaction.
     /// There is no correct thing to do: the job exists to commit with the
     /// data it refers to, and there is no transaction to commit with.
-    #[error("job {kind:?} is transactional and must be enqueued with in_tx")]
+    #[error(
+        "job {kind:?} is transactional and must be enqueued with in_tx\n\
+         help: enqueue it with `in_tx` inside the transaction that writes its data"
+    )]
     NeedsTransaction {
         /// The job's kind.
         kind: &'static str,
     },
     /// A [`Lane::Bulk`] job was enqueued into a transaction with a handle
     /// that has no outbox.
-    #[error("job {kind:?} is bulk and the transaction handle has no outbox")]
+    #[error(
+        "job {kind:?} is bulk and the transaction handle has no outbox\n\
+         help: use a transaction handle with an outbox, or enqueue the job outside the transaction"
+    )]
     NoOutbox {
         /// The job's kind.
         kind: &'static str,
     },
     /// The payload is larger than the backend accepts. Caught here so it
     /// fails at the call site, with a stack, and not at delivery.
-    #[error("payload for {kind:?} is {size} bytes, the backend accepts {limit}")]
+    #[error(
+        "payload for {kind:?} is {size} bytes, the backend accepts {limit}\n\
+         help: store the large data elsewhere and put its id in the payload"
+    )]
     PayloadTooLarge {
         /// The job's kind.
         kind: &'static str,
@@ -37,7 +46,10 @@ pub enum EnqueueError {
         limit: usize,
     },
     /// The requested delay is further out than the backend can express.
-    #[error("delay for {kind:?} is {want:?}, the backend allows at most {limit:?}")]
+    #[error(
+        "delay for {kind:?} is {want:?}, the backend allows at most {limit:?}\n\
+         help: use a shorter delay, or a recurring schedule for work that is far out"
+    )]
     DelayTooLong {
         /// The job's kind.
         kind: &'static str,
@@ -47,7 +59,10 @@ pub enum EnqueueError {
         limit: Duration,
     },
     /// The job asks for a uniqueness the backend cannot hold.
-    #[error("job {kind:?} asks for {want:?}, the backend offers {have:?}")]
+    #[error(
+        "job {kind:?} asks for {want:?}, the backend offers {have:?}\n\
+         help: relax the job's uniqueness, or run it on a backend that holds it"
+    )]
     UniquenessUnsupported {
         /// The job's kind.
         kind: &'static str,
@@ -57,7 +72,10 @@ pub enum EnqueueError {
         have: crate::backend::UniquenessSupport,
     },
     /// The job did not serialize.
-    #[error("could not serialize {kind:?}: {source}")]
+    #[error(
+        "could not serialize {kind:?}: {source}\n\
+         help: make every field of the job serialisable"
+    )]
     Serialize {
         /// The job's kind.
         kind: &'static str,
@@ -66,7 +84,10 @@ pub enum EnqueueError {
     },
     /// The outbox has more undelivered rows than it is allowed to hold. The
     /// transaction should roll back. See `OnOutboxFull` in [`crate::outbox`].
-    #[error("the outbox holds {rows} undelivered rows, the limit is {limit}")]
+    #[error(
+        "the outbox holds {rows} undelivered rows, the limit is {limit}\n\
+         help: roll the transaction back; check that a relay runs and that the queue is reachable"
+    )]
     OutboxFull {
         /// How many rows are waiting.
         rows: u64,
@@ -77,7 +98,10 @@ pub enum EnqueueError {
     #[error(transparent)]
     Backend(#[from] BackendError),
     /// The transactional store refused or could not be reached.
-    #[error("transactional store: {0}")]
+    #[error(
+        "transactional store: {0}\n\
+         help: check the database connection; roll the transaction back"
+    )]
     Store(String),
 }
 
@@ -296,8 +320,15 @@ pub trait TxEnqueue: Send {
     ) -> impl Future<Output = Result<Pushed, EnqueueError>> + Send;
 }
 
-/// A job id produced by a transactional write, for a caller that wants to
+/// An id produced by a transactional write, for a caller that wants to
 /// record it beside the data it committed with.
+///
+/// It is a job id only for [`Lane::Transactional`]. A [`Lane::Bulk`] job
+/// enqueued in a transaction is an outbox row until the relay delivers it,
+/// and the backend gives it its job id then. The Postgres adapter marks such
+/// an id with an `o` (`o123`), and `cancel` and the screens refuse it: an
+/// outbox row is not a queue row, and its number may belong to an unrelated
+/// job.
 pub type TxJobId = JobId;
 
 #[cfg(test)]

@@ -79,6 +79,10 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// most brokers cannot, and an API that offers it cannot move. Put
     /// urgent work on its own [`Job::QUEUE`] and give that queue its own
     /// worker or a larger share of one.
+    ///
+    /// Deprecated, so the compiler says so where it is read. A job that
+    /// still sets it warns nowhere; remove the line.
+    #[deprecated(note = "no effect; put urgent work on a separate QUEUE")]
     const PRIORITY: i32 = 0;
 
     /// How many times the job may be *started* before it goes to the dead
