@@ -34,17 +34,18 @@ pub const MARKER: &str = "brocanth.toml";
 /// that `brocanth <name>` never reaches. `check` and `admin` each have a
 /// twin in a generated project, and each built-in runs that twin itself
 /// when it needs the project: `check` after its module checks, `admin
-/// eject` never (the project's `admin eject` calls this tool).
-pub const BUILT_IN: &[&str] = &["create", "new", "add", "check", "admin"];
+/// eject` never (the project's `admin eject` calls this tool). A test in
+/// `main.rs` compares this list with the parser's, so they cannot drift.
+pub const BUILT_IN: &[&str] = &["create", "new", "add", "remove", "check", "admin"];
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir().map_err(|e| {
-            vec![Diagnostic::error(
-                "cwd",
-                format!("cannot read the current directory: {e}"),
-            )]
+            vec![
+                Diagnostic::error("cwd", format!("cannot read the current directory: {e}"))
+                    .help("`cd` into the project again, or pass it with `-C <DIR>`"),
+            ]
         })?,
     };
 
@@ -66,8 +67,8 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
         crate::ui::paint(crate::ui::DIM, "(brocanth.toml)")
     ));
 
-    build(&root)?;
-    let binary = binary_path(&root)?;
+    let built = build(&root)?;
+    let binary = binary_path(&root, &built)?;
     // With `-C`, the caller's directory is outside the project, and the
     // binary finds its root by walking up from where it runs. So it runs in
     // the root. Without `-C`, the caller is already inside the project, and
@@ -81,8 +82,8 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
 /// [`run`] replaces this process instead; a built-in that runs a project
 /// command as one half of its work cannot.
 pub fn run_and_wait(root: &Path, args: &[OsString]) -> Result<bool, Vec<Diagnostic>> {
-    build(root)?;
-    let binary = binary_path(root)?;
+    let built = build(root)?;
+    let binary = binary_path(root, &built)?;
     let status = Command::new(&binary)
         .current_dir(root)
         .args(args)
@@ -144,22 +145,33 @@ pub fn has_module(root: &Path, key: &str) -> Option<bool> {
     Some(found)
 }
 
-/// Builds the project, with cargo's own output passed through.
-fn build(root: &Path) -> Result<(), Vec<Diagnostic>> {
+/// Builds the project, with cargo's diagnostics passed through, and
+/// returns each binary cargo wrote, as `(target name, executable)`.
+///
+/// The paths come from cargo itself (`--message-format`), so a
+/// `build.target` triple, a profile and the `.exe` suffix are cargo's to
+/// know, not a guess here.
+fn build(root: &Path) -> Result<Vec<(String, PathBuf)>, Vec<Diagnostic>> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let status = Command::new(&cargo)
-        .args(["build", "--quiet"])
+    let output = Command::new(&cargo)
+        .args([
+            "build",
+            "--quiet",
+            "--message-format=json-render-diagnostics",
+        ])
         .current_dir(root)
         // Inherited rather than captured: a compile error belongs on the
         // screen as cargo wrote it, with its colours and its spans, not
-        // summarised by a second tool.
+        // summarised by a second tool. With this message format cargo
+        // renders the diagnostics to stderr and writes JSON to stdout.
         .stderr(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .status()
+        .stdout(Stdio::piped())
+        .output()
         .map_err(|e| {
             vec![Diagnostic::error("cargo", format!("cannot run cargo: {e}"))
                 .help("cargo has to be on PATH, or $CARGO has to name it")]
         })?;
+    let status = output.status;
 
     if !status.success() {
         // No message: cargo has already said everything useful, on the stderr
@@ -169,20 +181,37 @@ fn build(root: &Path) -> Result<(), Vec<Diagnostic>> {
             "the project does not compile, so no command was run",
         )]);
     }
-    Ok(())
+    Ok(executables(&output.stdout))
+}
+
+/// The binaries in cargo's JSON messages, as `(target name, executable)`.
+fn executables(json: &[u8]) -> Vec<(String, PathBuf)> {
+    cargo_metadata::Message::parse_stream(json)
+        .filter_map(Result::ok)
+        .filter_map(|message| match message {
+            cargo_metadata::Message::CompilerArtifact(artifact) => artifact
+                .executable
+                .map(|path| (artifact.target.name, PathBuf::from(path))),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Where cargo actually put the binary.
-fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
+///
+/// `built` is what [`build`] returned. Without it (the help listing does
+/// not build), the path is the default one: `debug/<name>` under the
+/// target directory, with the platform's executable suffix.
+fn binary_path(root: &Path, built: &[(String, PathBuf)]) -> Result<PathBuf, Vec<Diagnostic>> {
     let metadata = cargo_metadata::MetadataCommand::new()
         .manifest_path(root.join("Cargo.toml"))
         .no_deps()
         .exec()
         .map_err(|e| {
-            vec![Diagnostic::error(
-                "metadata",
-                format!("cannot read cargo metadata: {e}"),
-            )]
+            vec![
+                Diagnostic::error("metadata", format!("cannot read cargo metadata: {e}"))
+                    .help("run `cargo metadata --no-deps` in the project to see what cargo says"),
+            ]
         })?;
 
     // By manifest path, not `root_package`: that one means "the workspace
@@ -222,14 +251,20 @@ fn binary_path(root: &Path) -> Result<PathBuf, Vec<Diagnostic>> {
             .help("a brocanth project needs a `src/main.rs` calling `brocanth_command::main`")]
         })?;
 
+    if let Some((_, path)) = built.iter().find(|(name, _)| *name == bin.name) {
+        return Ok(path.clone());
+    }
     // From metadata, so `CARGO_TARGET_DIR`, a workspace root and a shared
     // target directory are all already accounted for.
-    let path = metadata.target_directory.join("debug").join(&bin.name);
-    let path = PathBuf::from(path);
+    let file = format!("{}{}", bin.name, std::env::consts::EXE_SUFFIX);
+    let path = PathBuf::from(metadata.target_directory.join("debug").join(file));
     if !path.is_file() {
         return Err(vec![Diagnostic::error(
             "missing-binary",
             format!("{} was not produced by the build", path.display()),
+        )
+        .help(
+            "run `cargo build` in the project and look for the binary under `target/`",
         )]);
     }
     Ok(path)
@@ -253,6 +288,9 @@ fn handoff(binary: &Path, args: &[OsString], cwd: Option<&Path>) -> Outcome {
     Err(vec![Diagnostic::error(
         "exec",
         format!("cannot run {}: {error}", binary.display()),
+    )
+    .help(
+        "run the binary directly to see why; `cargo clean` and a rebuild replace it",
     )])
 }
 
@@ -264,10 +302,10 @@ fn handoff(binary: &Path, args: &[OsString], cwd: Option<&Path>) -> Outcome {
         command.current_dir(cwd);
     }
     let status = command.args(args).status().map_err(|e| {
-        vec![Diagnostic::error(
-            "spawn",
-            format!("cannot run {}: {e}", binary.display()),
-        )]
+        vec![
+            Diagnostic::error("spawn", format!("cannot run {}: {e}", binary.display()))
+                .help("run the binary directly to see why; `cargo clean` and a rebuild replace it"),
+        ]
     })?;
     match status.code() {
         Some(code) => Ok(std::process::ExitCode::from(
@@ -300,7 +338,7 @@ pub fn listed(dir: Option<&Path>) -> Option<Vec<(String, String)>> {
     if !has_command_line(&root) {
         return None;
     }
-    let binary = binary_path(&root).ok()?;
+    let binary = binary_path(&root, &[]).ok()?;
 
     let out = Command::new(&binary)
         .arg("--help")
@@ -337,9 +375,8 @@ fn parse_help(help: &str) -> Vec<(String, String)> {
             }
             break;
         }
-        let Some((name, about)) = line.trim().split_once("  ") else {
-            continue;
-        };
+        // A command with no doc comment is a name alone on its line.
+        let (name, about) = line.trim().split_once("  ").unwrap_or((line.trim(), ""));
         let name = name.trim();
         // `help` is clap's, not the project's, and `brocanth` has its own.
         // A built-in name is `brocanth`'s too: a second subcommand with
@@ -366,6 +403,7 @@ Usage: blog [OPTIONS] <COMMAND>
 Commands:
   serve    Serve the application over HTTP
   ping     Answer pong
+  bare
   migrate  Apply, roll back or list the migrations in migrations/
   help     Print this message or the help of the given subcommand(s)
 
@@ -384,6 +422,8 @@ Options:
                     "Serve the application over HTTP".to_string()
                 ),
                 ("ping".to_string(), "Answer pong".to_string()),
+                // No doc comment, so no about: still a command.
+                ("bare".to_string(), String::new()),
                 (
                     "migrate".to_string(),
                     "Apply, roll back or list the migrations in migrations/".to_string()
@@ -391,6 +431,22 @@ Options:
             ],
             "`help` is clap's, `migrate` is the project's own since it left `brocanth`, \
              and the options block is not a command list"
+        );
+    }
+
+    #[test]
+    fn the_executable_is_the_path_cargo_reports_and_not_a_guess() {
+        // A `build.target` triple puts the binary under the triple, and on
+        // Windows it ends in `.exe`. Cargo's message says where it is.
+        let json = br#"{"reason":"compiler-artifact","package_id":"path+file:///p#blog@0.1.0","manifest_path":"/p/Cargo.toml","target":{"kind":["bin"],"crate_types":["bin"],"name":"blog","src_path":"/p/src/main.rs","edition":"2021","doc":true,"doctest":false,"test":false},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/t/x86_64-pc-windows-msvc/debug/blog.exe"],"executable":"/t/x86_64-pc-windows-msvc/debug/blog.exe","fresh":true}
+{"reason":"build-finished","success":true}
+"#;
+        assert_eq!(
+            executables(json),
+            vec![(
+                "blog".to_string(),
+                PathBuf::from("/t/x86_64-pc-windows-msvc/debug/blog.exe")
+            )]
         );
     }
 

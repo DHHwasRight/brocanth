@@ -266,3 +266,24 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_lists_every_subcommand_and_alias_the_parser_has() {
+        let command = Cli::command();
+        let mut parsed: Vec<&str> = command
+            .get_subcommands()
+            .flat_map(|sub| std::iter::once(sub.get_name()).chain(sub.get_all_aliases()))
+            .collect();
+        parsed.sort_unstable();
+        let mut listed = commands::delegate::BUILT_IN.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            parsed, listed,
+            "help: update `BUILT_IN` in commands/delegate.rs to match `Command`"
+        );
+    }
+}
