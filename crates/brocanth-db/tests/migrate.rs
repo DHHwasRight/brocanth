@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use brocanth_db::migrate::{read_dir, MigrateError, Migrator, State};
+use brocanth_db::migrate::{read_dir, Lock, MigrateError, Migrator, State};
 use brocanth_db::{Db, DbConfig};
 
 fn url() -> Option<String> {
@@ -234,5 +234,30 @@ async fn a_new_file_is_pending_and_applies_as_written() {
     assert_eq!(sb.tables().await, ["brocanth_migrations", "notes"]);
     assert_eq!(sb.migrator().down(5).await.unwrap(), [name]);
     assert_eq!(sb.tables().await, ["brocanth_migrations"]);
+    sb.drop().await;
+}
+
+#[tokio::test]
+async fn a_held_lock_makes_up_wait_until_it_is_released() {
+    let Some(sb) = Sandbox::new().await else {
+        return;
+    };
+    sb.write(
+        "20260101000000_a",
+        "CREATE TABLE a (id int);\n-- down\nDROP TABLE a;\n",
+    );
+    // What the `model` module's migrate holds around SeaORM's `up`.
+    let lock = Lock::acquire(&sb.db).await.expect("the lock");
+    let db = sb.db.clone();
+    let files = read_dir(&sb.dir).expect("read the files");
+    let up = tokio::spawn(async move { Migrator::new(&db, files).up().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !up.is_finished(),
+        "`up` ran while another run held the lock"
+    );
+    lock.release().await;
+    let applied = up.await.expect("the task").expect("up after the release");
+    assert_eq!(applied, ["20260101000000_a"]);
     sb.drop().await;
 }

@@ -460,6 +460,46 @@ async fn applied(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
     Ok(names)
 }
 
+/// The advisory lock [`Migrator::up`] and [`Migrator::down`] hold, for a
+/// migrator that is not this one.
+///
+/// The `model` module applies SeaORM migrations, and SeaORM takes no lock:
+/// two release jobs would apply one pending list at once. It holds this
+/// lock around its own `up` and `down`, with the key this module uses, so
+/// any two migration runs against one database take turns.
+///
+/// The lock lives on a connection of its own, detached from the pool. Call
+/// [`Lock::release`]; a dropped `Lock` closes the connection, and the lock
+/// ends with it.
+#[derive(Debug)]
+pub struct Lock {
+    conn: PgConnection,
+}
+
+impl Lock {
+    /// Waits for the lock, on a new connection from `db`'s pool.
+    ///
+    /// # Errors
+    /// [`MigrateError::Db`] when no connection opens or the lock statement
+    /// fails.
+    pub async fn acquire(db: &Db) -> Result<Self, MigrateError> {
+        let mut conn = db
+            .pool()
+            .acquire()
+            .await
+            .map_err(DbError::connect)?
+            .detach();
+        lock(&mut conn).await?;
+        Ok(Self { conn })
+    }
+
+    /// Releases the lock and closes its connection.
+    pub async fn release(mut self) {
+        unlock(&mut self.conn).await;
+        let _ = self.conn.close().await;
+    }
+}
+
 async fn lock(conn: &mut PgConnection) -> Result<(), MigrateError> {
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(LOCK)
