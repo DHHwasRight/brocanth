@@ -375,9 +375,12 @@ fn diff(ui: &Ui, dir: Option<&Path>, args: DiffArgs) -> Outcome {
             continue;
         };
         let path = format!("{SCREENS}/{}", copy.file());
-        let text = std::fs::read_to_string(root.join(&path)).map_err(|e| {
-            vec![Diagnostic::error("admin/read", format!("cannot read the copy: {e}")).at(&path)]
-        })?;
+        let text =
+            std::fs::read_to_string(root.join(&path)).map_err(|e| {
+                vec![Diagnostic::error("admin/read", format!("cannot read the copy: {e}"))
+                .at(&path)
+                .help("check that you can read the file; `brocanth admin eject` writes it again")]
+            })?;
         let Some(theirs) = shipped.template(screen) else {
             ui.warn(format!(
                 "{}: brocanth-admin {} has no `{}.rsx` to compare with",
@@ -649,13 +652,15 @@ fn add_rsx(path: &PathBuf) -> Result<bool, Vec<Diagnostic>> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         vec![
             Diagnostic::error("manifest", format!("cannot read Cargo.toml: {e}"))
-                .at(path.display().to_string()),
+                .at(path.display().to_string())
+                .help("run this inside the project, or pass it with `-C <DIR>`"),
         ]
     })?;
     let mut doc = text.parse::<DocumentMut>().map_err(|e| {
         vec![
             Diagnostic::error("manifest", format!("Cargo.toml is not TOML: {e}"))
-                .at(path.display().to_string()),
+                .at(path.display().to_string())
+                .help("fix the TOML at the line above, then run the command again"),
         ]
     })?;
     let deps = doc

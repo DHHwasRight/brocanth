@@ -839,7 +839,9 @@ fn title_in_literal(title: &str, format: bool) -> String {
 }
 
 fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
-    vec![Diagnostic::error("write", format!("{e}")).at(path.display().to_string())]
+    vec![Diagnostic::error("write", format!("{e}"))
+        .at(path.display().to_string())
+        .help("check that the directory exists and that you can write to it")]
 }
 
 // -- the files --------------------------------------------------------------
@@ -858,7 +860,8 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
             "cycle",
             format!("these modules wait for each other: {}", stuck.join(", ")),
         )
-        .note("a module's `after` list says which other modules write first")]
+        .note("a module's `after` list says which other modules write first")
+        .help("remove one of these modules from the list, and report the cycle to brocanth")]
     })?;
 
     let mut built = brocanth_scaffold::Scaffold::new();
@@ -891,7 +894,10 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
     let mut wrong: Vec<Diagnostic> = built
         .problems()
         .iter()
-        .map(|problem| Diagnostic::error("module", problem.clone()))
+        .map(|problem| {
+            Diagnostic::error("module", problem.clone())
+                .help("this is a bug in a module; leave that module out and report it to brocanth")
+        })
         .collect();
     for owner in unpaired {
         wrong.push(
@@ -1106,6 +1112,9 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
             return Err(vec![Diagnostic::error(
                 "module",
                 format!("a module writes {taken}, which the scaffold already writes"),
+            )
+            .help(
+                "this is a bug in a module; leave that module out and report it to brocanth",
             )]);
         }
         files.push((path.to_string(), contents.to_string()));
@@ -1688,7 +1697,10 @@ fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
                             *pick,
                             format!("two modules want `{}` from different places", dep.name),
                         )
-                        .note("a dependency line can name one source")]);
+                        .note("a dependency line can name one source")
+                        .help(
+                            "leave one of the two modules out, and report the clash to brocanth",
+                        )]);
                     }
                     for feature in dep.features {
                         if !held.features.contains(&feature) {
