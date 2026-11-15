@@ -385,10 +385,14 @@ impl std::fmt::Debug for Flow {
 ///
 /// `before_dispatch` runs in declared order and may short-circuit;
 /// `after_dispatch` runs in reverse declared order, sees the finished
-/// response, and cannot change it. It runs only for the hooks whose
-/// `before_dispatch` ran: when a hook stops the chain, it and the hooks
-/// before it get `after_dispatch`, and the hooks after it get neither half.
-/// So a hook can count on the state its own `before_dispatch` wrote. A logger implements both; a metrics plugin
+/// response, and cannot change it.
+///
+/// `after_dispatch` runs for every hook in the chain, for every response:
+/// also for the hooks after one that stopped the chain, whose
+/// `before_dispatch` never ran. A request log needs that: it sees the 401 or
+/// the 429 that an earlier hook answered, wherever it sits in the chain. So
+/// a hook that reads, in `after_dispatch`, a value its own `before_dispatch`
+/// put on the [`RequestState`] must handle its absence. A logger implements both; a metrics plugin
 /// implements both; a request-id plugin implements only the first.
 pub trait RequestHook: Send + Sync + 'static {
     /// Before the handler. Returning [`Flow::Respond`] stops the chain and the
@@ -479,10 +483,6 @@ pub trait AsyncRequestHook: Send + Sync + 'static {
         let _ = (request, response, state);
     }
 }
-
-/// How many request hooks ran `before_dispatch` when one stopped the chain:
-/// the stopper and every hook before it. Absent when the whole chain ran.
-struct StoppedAt(usize);
 
 /// One step of the request chain: a hook that returns, or a hook that waits.
 ///
@@ -1144,19 +1144,16 @@ impl Pipeline {
         if !H::REQUEST {
             return Ok(Flow::Continue);
         }
-        for (index, step) in self.request.iter().enumerate() {
+        for step in &self.request {
             // `H::ASYNC_REQUEST` is false here, so the chain holds no async
             // step and this arm is dead. It is written as a skip rather than
             // an `unreachable!` so the hot path carries no panic landing pad.
             let RequestStep::Sync(hook) = step else {
                 continue;
             };
-            match hook.before_dispatch(request, state) {
-                Ok(Flow::Continue) => {}
-                stop => {
-                    state.insert(StoppedAt(index + 1));
-                    return stop;
-                }
+            match hook.before_dispatch(request, state)? {
+                Flow::Continue => {}
+                stop => return Ok(stop),
             }
         }
         Ok(Flow::Continue)
@@ -1188,17 +1185,14 @@ impl Pipeline {
         if !H::REQUEST && !H::ASYNC_REQUEST {
             return Ok(Flow::Continue);
         }
-        for (index, step) in self.request.iter().enumerate() {
+        for step in &self.request {
             let flow = match step {
-                RequestStep::Sync(hook) => hook.before_dispatch(request, state),
-                RequestStep::Async(hook) => hook.before_dispatch(request, state).await,
+                RequestStep::Sync(hook) => hook.before_dispatch(request, state)?,
+                RequestStep::Async(hook) => hook.before_dispatch(request, state).await?,
             };
             match flow {
-                Ok(Flow::Continue) => {}
-                stop => {
-                    state.insert(StoppedAt(index + 1));
-                    return stop;
-                }
+                Flow::Continue => {}
+                stop => return Ok(stop),
             }
         }
         Ok(Flow::Continue)
@@ -1209,9 +1203,6 @@ impl Pipeline {
     /// Both kinds, and synchronously for both: `after_dispatch` has nothing
     /// to wait for. So a caller that used the async entry point still
     /// finishes the request with no runtime in hand.
-    ///
-    /// Only the hooks whose `before_dispatch` ran: when one stopped the
-    /// chain, the hooks after it are skipped here too.
     #[inline]
     pub fn after_dispatch<H: HookFamilies>(
         &self,
@@ -1222,10 +1213,7 @@ impl Pipeline {
         if !H::REQUEST && !H::ASYNC_REQUEST {
             return;
         }
-        let ran = state
-            .take::<StoppedAt>()
-            .map_or(self.request.len(), |stopped| stopped.0);
-        for step in self.request[..ran.min(self.request.len())].iter().rev() {
+        for step in self.request.iter().rev() {
             step.after_dispatch(request, response, state);
         }
     }

@@ -457,8 +457,7 @@ fn a_required_hook_cannot_be_turned_off() {
         .plugin_hooking(Csrf::new(Rec::default()))
         .hooks_off("csrf", ["check"])
         .build()
-        .err()
-        .expect("the build refuses");
+        .unwrap_err();
     assert!(
         matches!(err, BuildError::HooksOffRequired { name: "check", .. }),
         "{err}"
