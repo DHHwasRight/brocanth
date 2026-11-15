@@ -2389,9 +2389,12 @@ async fn run(
     }
     // Nothing when the drain finished. After a timeout, this ends the
     // listener task, and the server aborts every connection it still has.
-    // Awaited, so the aborts are under way before the plugins stop.
-    serving.abort();
-    let _ = serving.await;
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
