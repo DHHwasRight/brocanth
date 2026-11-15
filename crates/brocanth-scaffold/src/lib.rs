@@ -1318,7 +1318,7 @@ pub enum Kind {
 impl Setting {
     /// A string.
     pub fn text(key: &'static str, value: &str, help: &'static str) -> Self {
-        Self::new(key, Kind::Text, format!("{value:?}"), help)
+        Self::new(key, Kind::Text, toml_string(value), help)
     }
 
     /// A boolean.
@@ -1333,12 +1333,12 @@ impl Setting {
 
     /// A number with a fractional part.
     pub fn float(key: &'static str, value: f64, help: &'static str) -> Self {
-        Self::new(key, Kind::Float, format!("{value:?}"), help)
+        Self::new(key, Kind::Float, toml_float(value), help)
     }
 
     /// A list of strings. No flag; see [`Kind::List`].
     pub fn list(key: &'static str, value: &[&str], help: &'static str) -> Self {
-        let items: Vec<String> = value.iter().map(|item| format!("{item:?}")).collect();
+        let items: Vec<String> = value.iter().map(|item| toml_string(item)).collect();
         let mut setting = Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help);
         setting.flag = false;
         setting
@@ -1438,6 +1438,39 @@ pub fn config_section(section: &str, settings: &[Setting]) -> String {
     out
 }
 
+/// `value` as a TOML basic string, quoted.
+///
+/// Not Rust's `{:?}`: it writes `\u{1b}` and `\0`, which TOML refuses.
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `value` as a TOML float: `nan`, `inf` and `-inf` as TOML spells them,
+/// and always with a fraction or an exponent, so it reads back as a float.
+fn toml_float(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        format!("{value:?}")
+    }
+}
+
 fn config_line(key: &str, setting: &Setting) -> String {
     let mut out = format!("# {}\n", setting.full_help());
     if !setting.note.is_empty() {
@@ -1518,8 +1551,22 @@ impl Scaffold {
     /// Two modules claiming one path is a problem rather than a last writer:
     /// which one won would otherwise depend on the order of an array in the
     /// CLI, and the loser's contribution would vanish in silence.
+    ///
+    /// The path is relative to the project root, with `/` between plain
+    /// segments. An absolute path, a `.` or `..` segment, an empty segment or
+    /// a backslash is a problem: it would write outside the project, or name
+    /// one file two ways and slip past the check above.
     pub fn file(&mut self, path: impl Into<String>, contents: impl Into<String>) {
         let path = path.into();
+        if let Some(why) = unsafe_path(&path) {
+            self.problems.push(format!(
+                "`{}` writes {path:?}, which {why}\n\
+                 help: give a path relative to the project root, such as \
+                 `src/plugins/{}/mod.rs`",
+                self.writing, self.writing
+            ));
+            return;
+        }
         let mine = Owned {
             by: self.writing.clone(),
             text: contents.into(),
@@ -1690,10 +1737,66 @@ impl Scaffold {
         self.bins.iter().map(|(_, bin)| bin)
     }
 
+    /// Check that `key` wrote only into slots one of its `categories`
+    /// opens ([`Category::allows`]), and record a problem for each slot it
+    /// had no right to.
+    ///
+    /// The CLI calls it after each module contributes, so a third-party
+    /// module that writes into a closed slot is refused at `brocanth create`
+    /// and not only in a test it may never run.
+    pub fn check_slots(&mut self, key: &str, categories: &[Category]) {
+        let mut wrong = Vec::new();
+        for (slot, lines) in &self.slots {
+            let writes = lines.iter().any(|owned| owned.by == key);
+            if writes && !categories.iter().any(|c| c.allows(*slot)) {
+                wrong.push(*slot);
+            }
+        }
+        for slot in wrong {
+            let open: Vec<&str> = slot.open_to().iter().map(|c| c.name()).collect();
+            self.problems.push(format!(
+                "`{key}` writes {slot}, which is open to {}, and `{key}` is {}\n\
+                 help: add the category to the manifest of `{key}` with \
+                 `.category(Category::..)`, or write into a slot its categories open",
+                open.join(", "),
+                if categories.is_empty() {
+                    "in no category".to_string()
+                } else {
+                    categories
+                        .iter()
+                        .map(|c| c.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+        }
+    }
+
     /// Everything that was wrong, in the order it was found.
     pub fn problems(&self) -> &[String] {
         &self.problems
     }
+}
+
+/// Why `path` is not a plain path relative to the project root, if it is
+/// not.
+fn unsafe_path(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("is empty");
+    }
+    if path.contains('\\') {
+        return Some("holds a backslash, and a path separator is `/`");
+    }
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
+        return Some("is absolute and would land outside the project");
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Some("has a `..` segment and can land outside the project");
+    }
+    if path.split('/').any(|segment| segment.is_empty() || segment == ".") {
+        return Some("has an empty or `.` segment, so it names a file two ways");
+    }
+    None
 }
 
 /// The handle [`Scaffold::at`] returns. Each call appends one contribution.
@@ -1786,6 +1889,59 @@ pub fn order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_is_written_as_toml_and_not_as_rust() {
+        assert_eq!(toml_string("a\"b\\c\nd"), r#""a\"b\\c\nd""#);
+        assert_eq!(toml_string("\u{1b}[0m\0"), r#""\u001B[0m\u0000""#);
+        assert_eq!(toml_float(f64::NAN), "nan");
+        assert_eq!(toml_float(f64::NEG_INFINITY), "-inf");
+        assert_eq!(toml_float(1.0), "1.0");
+        let list = Setting::list("k", &["\u{7f}"], "h");
+        assert_eq!(list.value, r#"["\u007F"]"#);
+    }
+
+    #[test]
+    fn a_path_outside_the_project_or_named_two_ways_is_a_problem() {
+        for bad in [
+            "/etc/passwd",
+            "../outside.rs",
+            "src/../../x",
+            "./src/main.rs",
+            "src//main.rs",
+            "src\\main.rs",
+            "C:/x",
+            "",
+        ] {
+            let mut s = Scaffold::new();
+            s.now_writing("evil");
+            s.file(bad, "x");
+            assert_eq!(s.files().count(), 0, "{bad:?} was written");
+            let problem = s.problems().first().expect("a problem");
+            assert!(problem.contains("\nhelp: "), "{problem}");
+        }
+        let mut s = Scaffold::new();
+        s.file("src/plugins/ok/mod.rs", "x");
+        assert!(s.problems().is_empty());
+    }
+
+    #[test]
+    fn a_slot_the_categories_do_not_open_is_a_problem() {
+        let mut s = Scaffold::new();
+        s.now_writing("pages-thing");
+        s.at(Slot::PagesRenderers).line("x");
+        s.at(Slot::PluginsMod).line("pub mod x;");
+        s.check_slots("pages-thing", &[Category::Routes]);
+        assert_eq!(s.problems().len(), 1, "{:?}", s.problems());
+        let problem = &s.problems()[0];
+        assert!(problem.contains("PagesRenderers") || problem.contains("renderer"), "{problem}");
+        assert!(problem.contains("\nhelp: "), "{problem}");
+        let mut s = Scaffold::new();
+        s.now_writing("r");
+        s.at(Slot::PagesRenderers).line("x");
+        s.check_slots("r", &[Category::Renderer]);
+        assert!(s.problems().is_empty());
+    }
 
     const SETTINGS_RS: &str = "\
 /// What this plugin is built from.

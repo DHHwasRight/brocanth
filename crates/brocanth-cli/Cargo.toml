@@ -125,6 +125,9 @@ toml_edit = "0.25"
 # a scaffold that fails on a train.
 
 [dev-dependencies]
+# `testing::check_module`, so the CLI holds its own modules to the manifest
+# rules through the check a module crate runs.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
 # The core and the configuration loader, for tests only. The tool writes
 # text and links neither (tests/lean.rs holds that line). The tests use them
 # to check that what it writes is what the real crates accept: a generated

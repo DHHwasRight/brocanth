@@ -831,6 +831,7 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
         crate::modules::find(key)
             .unwrap_or_else(|| unreachable!("`{key}` is not a module this CLI has"))
             .contribute(&project, &mut built);
+        built.check_slots(key, &about(key).categories);
     }
     framework_settings(&mut built);
 
@@ -855,7 +856,10 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
     let mut wrong: Vec<Diagnostic> = built
         .problems()
         .iter()
-        .map(|problem| Diagnostic::error("module", problem.clone()))
+        .map(|problem| match problem.split_once("\nhelp: ") {
+            Some((what, help)) => Diagnostic::error("module", what).help(help),
+            None => Diagnostic::error("module", problem.clone()),
+        })
         .collect();
     for owner in unpaired {
         wrong.push(
@@ -1061,11 +1065,22 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     // with a path above is caught here rather than by whichever happened to
     // be written second.
     for (path, contents) in built.files() {
+        // Written below, after this loop, so the check against `files`
+        // cannot see it yet; without this the scaffold's brief would
+        // replace the module's file with no word.
+        if path == "AGENTS.md" {
+            return Err(vec![Diagnostic::error(
+                "module",
+                "a module writes AGENTS.md, which the scaffold writes from `Slot::AgentsSections`",
+            )
+            .help("write the module's section into `Slot::AgentsSections` instead of the file")]);
+        }
         if let Some((taken, _)) = files.iter().find(|(p, _)| p == path) {
             return Err(vec![Diagnostic::error(
                 "module",
                 format!("a module writes {taken}, which the scaffold already writes"),
-            )]);
+            )
+            .help("give the module's file a path under the module's own directory")]);
         }
         files.push((path.to_string(), contents.to_string()));
     }
