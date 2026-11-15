@@ -48,6 +48,7 @@ use std::sync::Arc;
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::identity::{Account, AccountId, ProviderIdentity, ProviderLink};
+use crate::impersonation::AccountHolder;
 use crate::mfa::{FactorKind, FactorSet, Verified};
 use crate::storage::{AuthStore, NewAccount, NewProviderLink};
 
@@ -171,11 +172,17 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
             }
         }
 
+        // Only a verified address becomes the account's address. An
+        // unverified one would let somebody claim an address before its
+        // owner signs up: the owner then resets the password of an account
+        // that the claimant still reaches through this link. The address
+        // stays on the link as a contact, and the owner can register it.
+        let verified = identity.email.clone().filter(|_| identity.email_verified);
         let account = self
             .store
             .create_account(NewAccount {
-                email: identity.email.clone(),
-                email_verified: identity.email_verified,
+                email_verified: verified.is_some(),
+                email: verified,
                 // No password. An account created this way signs in through
                 // its provider until its owner sets one, and a `None` hash is
                 // what stops `Accounts::login` from accepting anything.
@@ -193,11 +200,15 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
 
     /// Attaches a provider to an account.
     ///
-    /// **The caller must already have authenticated the session as
-    /// `account`.** This function cannot check that — it has no session — and
-    /// calling it from an unauthenticated handler reintroduces exactly the
-    /// takeover the rest of this module prevents. There is one caller in a
-    /// correct application and it is the settings page.
+    /// Takes an [`AccountHolder`], not an account id: a provider link is a
+    /// credential, and [`AccountHolder::of`] refuses an impersonated session.
+    /// An operator acting as a customer cannot attach their own provider and
+    /// so keep a way in after the impersonation ends.
+    ///
+    /// **The caller must already have authenticated the session as the
+    /// holder.** Build the holder with [`AccountHolder::of`] from the signed-in
+    /// session. There is one caller in a correct application and it is the
+    /// settings page.
     ///
     /// # Errors
     /// Returns [`AuthError::AlreadyLinked`] when the provider identity belongs
@@ -205,9 +216,10 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
     /// account succeeds and refreshes the stored address.
     pub async fn link(
         &self,
-        account: &AccountId,
+        who: &AccountHolder,
         identity: &ProviderIdentity,
     ) -> Result<ProviderLink, AuthError> {
+        let account = who.account();
         if let Some(existing) = self
             .store
             .link(&identity.provider, &identity.subject)
@@ -230,7 +242,8 @@ impl<S: AuthStore, C: Clock> Linking<S, C> {
     /// Returns [`AuthError::Misconfigured`] when this is the last credential,
     /// which is a programming error in the calling screen rather than a user
     /// error.
-    pub async fn unlink(&self, account: &AccountId, provider: &str) -> Result<(), AuthError> {
+    pub async fn unlink(&self, who: &AccountHolder, provider: &str) -> Result<(), AuthError> {
+        let account = who.account();
         let links = self.store.links_for_account(account).await?;
         let has_password = self
             .store

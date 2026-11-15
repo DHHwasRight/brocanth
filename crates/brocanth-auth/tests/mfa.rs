@@ -11,7 +11,7 @@ use brocanth_auth::mfa::{
 };
 use brocanth_auth::recovery::RecoveryCodes;
 use brocanth_auth::session::{Privilege, SigningKey};
-use brocanth_auth::storage::{AuthStore, NewAccount};
+use brocanth_auth::storage::{AuthStore, MfaStore, NewAccount};
 use common::Fixture;
 
 async fn an_account(f: &Fixture) -> AccountId {
@@ -392,6 +392,9 @@ async fn regenerating_kills_the_whole_previous_set() {
             "a code from the list the user replaced still works"
         );
     }
+    // Ten wrong codes reached the cap on wrong codes; wait for the window.
+    f.clock
+        .advance(brocanth_auth::mfa::SECOND_FACTOR_WINDOW + 1);
     assert!(mfa
         .verify_recovery_code(&account, new.codes()[0].as_str())
         .await
@@ -433,4 +436,145 @@ async fn an_account_with_no_totp_answers_the_same_error_as_a_wrong_code() {
     let account = an_account(&f).await;
     let err = mfa.verify_totp(&account, "123456").await.unwrap_err();
     assert!(matches!(err, AuthError::InvalidCredentials), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Enrolment asks for a fresh elevation and never replaces a working factor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_enrolled_account_cannot_begin_again() {
+    let f = Fixture::new();
+    let account = an_account(&f).await;
+    let (enrolment, _) = enrol(&f, &account).await;
+    let mfa = f.mfa();
+    let who = AccountHolder::without_a_session(account.clone());
+    let err = mfa
+        .begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::AlreadyEnrolled), "{err:?}");
+    // The working secret is still the confirmed one.
+    let stored = f.store.totp_secret(&account).await.unwrap().unwrap();
+    assert!(stored.confirmed_at.is_some());
+    assert_eq!(stored.secret, enrolment.secret.as_bytes().to_vec());
+}
+
+#[tokio::test]
+async fn a_session_that_did_not_re_prove_itself_cannot_change_a_factor() {
+    let f = Fixture::new();
+    let account = an_account(&f).await;
+    let sessions = f.sessions();
+    let mfa = f.mfa();
+
+    let plain = common::signed_in(&sessions, &account).await.session;
+    let who = AccountHolder::of(&plain).unwrap();
+    let err = mfa
+        .begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::ElevationRequired), "{err:?}");
+    assert!(matches!(
+        mfa.regenerate_recovery_codes(&who).await.unwrap_err(),
+        AuthError::ElevationRequired
+    ));
+    assert!(matches!(
+        mfa.disable_totp(&who).await.unwrap_err(),
+        AuthError::ElevationRequired
+    ));
+
+    let elevated = common::elevated(&sessions, &account).await.session;
+    let who = AccountHolder::of(&elevated).unwrap();
+    mfa.begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .expect("a fresh elevation enrols");
+
+    // An elevation goes stale.
+    f.clock
+        .advance(FactorPolicy::recommended().elevation_ttl() + 1);
+    let err = mfa
+        .begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::ElevationRequired), "{err:?}");
+}
+
+#[tokio::test]
+async fn wrong_second_factor_codes_are_capped_per_account() {
+    use brocanth_auth::mfa::{SECOND_FACTOR_MAX_FAILURES, SECOND_FACTOR_WINDOW};
+
+    let f = Fixture::new();
+    let account = an_account(&f).await;
+    let (enrolment, codes) = enrol(&f, &account).await;
+    let mfa = f.mfa();
+    // The enrolment spent this step; the next one is the code to type.
+    f.clock.advance(30);
+    let right = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+    let wrong = if right == "000000" {
+        "111111"
+    } else {
+        "000000"
+    };
+
+    for _ in 0..SECOND_FACTOR_MAX_FAILURES {
+        let err = mfa.verify_totp(&account, wrong).await.unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials), "{err:?}");
+    }
+    // The cap is reached: the right TOTP code and a right recovery code are
+    // refused too, and in the same words.
+    assert!(matches!(
+        mfa.verify_totp(&account, &right).await.unwrap_err(),
+        AuthError::InvalidCredentials
+    ));
+    let recovery = codes.codes()[0].as_str().to_string();
+    assert!(matches!(
+        mfa.verify_recovery_code(&account, &recovery)
+            .await
+            .unwrap_err(),
+        AuthError::InvalidCredentials
+    ));
+
+    // When the window is over, the next right code works and clears the count.
+    f.clock.advance(SECOND_FACTOR_WINDOW + 1);
+    let right = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+    let _proof = mfa
+        .verify_totp(&account, &right)
+        .await
+        .expect("a right code");
+    let _spent = mfa
+        .verify_recovery_code(&account, &recovery)
+        .await
+        .expect("the recovery code was not spent while refused");
+}
+
+#[tokio::test]
+async fn a_sealed_totp_secret_is_not_in_the_store_and_still_signs_in() {
+    use brocanth_auth::SecretKey;
+
+    let f = Fixture::new();
+    let account = an_account(&f).await;
+    let key = SecretKey::from_bytes([7; 32]);
+    let mfa = f.mfa().sealing_secrets_with(key.clone());
+    let who = AccountHolder::without_a_session(account.clone());
+    let enrolment = mfa
+        .begin_totp_enrolment(&who, "Brocanth", "ada@example.com")
+        .await
+        .unwrap();
+    let stored = f.store.totp_secret(&account).await.unwrap().unwrap().secret;
+    assert_ne!(stored, enrolment.secret.as_bytes(), "sealed at rest");
+    let code = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+    mfa.confirm_totp_enrolment(&who, &code).await.unwrap();
+    f.clock.advance(30);
+    let next = mfa.totp().code_at(&enrolment.secret, f.clock.now());
+
+    // Without the key, a sealed secret is an error that says what to set.
+    let err = f.mfa().verify_totp(&account, &next).await.unwrap_err();
+    assert!(err.to_string().contains("help:"), "{err}");
+    // With it, the code signs in.
+    let _proof = f
+        .mfa()
+        .sealing_secrets_with(key)
+        .verify_totp(&account, &next)
+        .await
+        .expect("the sealed secret opens");
 }

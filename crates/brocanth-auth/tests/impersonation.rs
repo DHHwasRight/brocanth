@@ -1,4 +1,4 @@
-//! Impersonation: both identities on the row, and the five things an operator
+//! Impersonation: both identities on the row, and the six things an operator
 //! wearing somebody's face cannot do.
 
 mod common;
@@ -234,9 +234,65 @@ async fn ending_an_impersonation_deletes_it_and_returns_the_operators_cookie() {
 #[test]
 fn the_list_of_refusals_names_where_each_one_lives() {
     // A test that fails when somebody quietly shortens the list.
-    assert_eq!(Restricted::all().len(), 5);
+    assert_eq!(Restricted::all().len(), 6);
     for refusal in Restricted::all() {
         assert!(!refusal.enforced_by().is_empty(), "{refusal}");
         assert!(!refusal.to_string().is_empty());
     }
+}
+
+#[tokio::test]
+async fn signing_the_operator_out_everywhere_ends_their_impersonations() {
+    let f = Fixture::new();
+    let sessions = f.sessions();
+    let operator = an_elevated_operator(&f).await;
+    let subject = an_account(&f, "ada@example.com").await;
+    let acting = sessions
+        .impersonate(&operator, &subject, "TICKET-4471")
+        .await
+        .unwrap()
+        .session;
+    let cookie = sessions.seal(&acting.id);
+    sessions
+        .load(&cookie)
+        .await
+        .expect("alive while the operator is");
+
+    sessions.revoke_all(&operator.account).await.unwrap();
+    assert!(sessions.load(&cookie).await.is_err());
+    assert!(f.store.session(&acting.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_impersonation_dies_with_the_operator_session() {
+    let f = Fixture::new();
+    let sessions = f.sessions();
+    let operator = an_elevated_operator(&f).await;
+    let subject = an_account(&f, "ada@example.com").await;
+    let acting = sessions
+        .impersonate(&operator, &subject, "TICKET-4471")
+        .await
+        .unwrap()
+        .session;
+    // Only the operator's own session row goes, as a sign-out does.
+    sessions.revoke(&operator.id).await.unwrap();
+    assert!(sessions.load(&sessions.seal(&acting.id)).await.is_err());
+}
+
+#[tokio::test]
+async fn ending_an_impersonation_after_the_operator_session_expired_is_no_session() {
+    let f = Fixture::new();
+    let sessions = f.sessions();
+    let operator = an_elevated_operator(&f).await;
+    let subject = an_account(&f, "ada@example.com").await;
+    let acting = sessions
+        .impersonate(&operator, &subject, "TICKET-4471")
+        .await
+        .unwrap()
+        .session;
+    // The operator's session idles out; the impersonation is younger.
+    f.clock.advance(sessions.config().idle_timeout);
+    let err = sessions.end_impersonation(&acting).await.unwrap_err();
+    assert!(matches!(err, AuthError::NoSession), "{err:?}");
+    assert!(f.store.session(&operator.id).await.unwrap().is_none());
 }

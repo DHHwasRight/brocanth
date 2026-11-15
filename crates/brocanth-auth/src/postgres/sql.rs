@@ -105,6 +105,11 @@ pub(crate) const SCHEMA: &[&str] = &[
         ON brocanth_auth_sessions (account)"#,
     r#"CREATE INDEX IF NOT EXISTS brocanth_auth_sessions_expiry
         ON brocanth_auth_sessions (absolute_expires_at)"#,
+    // For "sign out everywhere" on an operator: the impersonations it opened
+    // go too. Partial, because almost no row has an operator.
+    r#"CREATE INDEX IF NOT EXISTS brocanth_auth_sessions_operator
+        ON brocanth_auth_sessions (impersonation_operator)
+        WHERE impersonation_operator IS NOT NULL"#,
     // -- single-use tokens ---------------------------------------------------
     //
     // `verifier_hash` is the SHA-256 of the secret half. The secret itself is
@@ -128,6 +133,13 @@ pub(crate) const SCHEMA: &[&str] = &[
         created_at   BIGINT NOT NULL,
         confirmed_at BIGINT,
         last_step    BIGINT NOT NULL DEFAULT 0
+    )"#,
+    // Wrong codes at the second-factor step, per account: the cap that
+    // stops a guessing run by somebody who has the password.
+    r#"CREATE TABLE IF NOT EXISTS brocanth_auth_second_factor_failures (
+        account  TEXT    PRIMARY KEY,
+        failures INTEGER NOT NULL CHECK (failures >= 0),
+        since    BIGINT  NOT NULL
     )"#,
     r#"CREATE TABLE IF NOT EXISTS brocanth_auth_recovery_codes (
         account TEXT  NOT NULL,
@@ -289,7 +301,7 @@ pub(crate) const TOUCH_SESSION: &str =
 pub(crate) const DELETE_SESSION: &str = "DELETE FROM brocanth_auth_sessions WHERE id = $1";
 
 pub(crate) const DELETE_SESSIONS_FOR_ACCOUNT: &str =
-    "DELETE FROM brocanth_auth_sessions WHERE account = $1";
+    "DELETE FROM brocanth_auth_sessions WHERE account = $1 OR impersonation_operator = $1";
 
 // ---------------------------------------------------------------------------
 // single-use tokens
@@ -468,6 +480,26 @@ pub(crate) const LOCKED_UNTIL: &str =
 
 pub(crate) const CLEAR_FAILED_LOGINS: &str =
     "DELETE FROM brocanth_auth_failed_logins WHERE account = $1";
+
+// ---------------------------------------------------------------------------
+// second-factor failures
+// ---------------------------------------------------------------------------
+
+/// One wrong code, in one statement, with the window rule of
+/// [`RECORD_FAILED_LOGIN`].
+pub(crate) const RECORD_SECOND_FACTOR_FAILURE: &str =
+    "INSERT INTO brocanth_auth_second_factor_failures AS f \
+     (account, failures, since) VALUES ($1, 1, $2) \
+     ON CONFLICT (account) DO UPDATE SET \
+     failures = CASE WHEN f.since < $3 THEN 1 ELSE f.failures + 1 END, \
+     since = CASE WHEN f.since < $3 THEN $2 ELSE f.since END \
+     RETURNING failures";
+
+pub(crate) const SECOND_FACTOR_FAILURES: &str = "SELECT failures \
+     FROM brocanth_auth_second_factor_failures WHERE account = $1 AND since >= $2";
+
+pub(crate) const CLEAR_SECOND_FACTOR_FAILURES: &str =
+    "DELETE FROM brocanth_auth_second_factor_failures WHERE account = $1";
 
 // ---------------------------------------------------------------------------
 // sweeping

@@ -196,6 +196,8 @@ pub mod recovery;
 pub mod scaffold;
 
 #[cfg(feature = "runtime")]
+pub mod secret_key;
+#[cfg(feature = "runtime")]
 pub mod session;
 #[cfg(feature = "runtime")]
 pub mod staff;
@@ -249,6 +251,8 @@ pub use postgres::{PgStore, Swept};
 pub use providers::{Provider, ProviderKind};
 #[cfg(feature = "runtime")]
 pub use recovery::{RecoveryCode, RecoveryCodes};
+#[cfg(feature = "runtime")]
+pub use secret_key::SecretKey;
 #[cfg(feature = "runtime")]
 pub use session::{Privilege, SameSite, SessionConfig, SessionId, Sessions, SetCookie, SigningKey};
 #[cfg(feature = "runtime")]

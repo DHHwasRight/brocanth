@@ -70,6 +70,10 @@ impl Module for AuthScreens {
             "accounts are in Postgres, so the generated end-to-end test is left out",
         )
         .adapts_to(
+            "db",
+            "accounts are in Postgres, so the generated end-to-end test is left out",
+        )
+        .adapts_to(
             "auth-lockout",
             "sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock",
         )
@@ -153,6 +157,7 @@ impl Module for AuthScreens {
 /// The routes, for the route-table test.
 const ROUTES: &[&str] = &[
     "/account/code",
+    "/account/elevate",
     "/account/forgot",
     "/account/reset/{token}",
     "/account/signin",
@@ -673,6 +678,7 @@ mod tests {
         "/account/reset/a-token",
         "/account/verify/a-token",
         "/account/totp",
+        "/account/elevate",
     ];
 
     #[tokio::test]
@@ -985,6 +991,16 @@ mod tests {
         let mut browser = Browser::new().await;
         browser.sign_up("ada@example.com").await;
         browser.sign_in("ada@example.com", PASSWORD).await;
+
+        // A session that did not type its password again is sent to do so.
+        let asked = browser.get("/account/totp").await;
+        assert_eq!(asked.header("location"), Some("/account/elevate"));
+        let wrong = browser.post("/account/elevate", "password=not+it").await;
+        assert_eq!(wrong.status, 422);
+        let password = format!("password={}", PASSWORD.replace(' ', "+"));
+        let elevated = browser.post("/account/elevate", &password).await;
+        assert_eq!(elevated.header("location"), Some("/account/totp"));
+
         let page = text(&browser.get("/account/totp").await);
         let start = page.find("<code>").expect("the key") + "<code>".len();
         let secret = &page[start..start + page[start..].find("</code>").expect("closed")];
@@ -1012,6 +1028,11 @@ mod tests {
             .map(|rest| rest[..rest.find("</code>").expect("closed")].to_string())
             .collect();
         assert!(!recovery.is_empty(), "the recovery codes, once: {page}");
+
+        // A GET on an enrolled account draws no new key over the working one.
+        let again = text(&browser.get("/account/totp").await);
+        assert!(again.contains("already on"), "{again}");
+        assert!(!again.contains("type the key"), "{again}");
 
         // The password alone now leads to the code page, not a session.
         browser.post("/account/signout", "").await;
@@ -1203,6 +1224,18 @@ pub fn Code(csrf: &str, error: &str) -> Element {
     </section>
 }
 
+pub fn Elevate(csrf: &str, error: &str) -> Element {
+    <section>
+        <h1>Confirm it is you</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/elevate">
+            {! csrf}
+            <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+            <button>Continue</button>
+        </form>
+    </section>
+}
+
 pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) -> Element {
     <section>
         <h1>Two-step sign-in</h1>
@@ -1239,6 +1272,7 @@ const PAGES: &[(&str, &str)] = &[
     ("src/pages/account/reset/[token].rs", RESET_RS),
     ("src/pages/account/verify/[token].rs", VERIFY_RS),
     ("src/pages/account/totp.rs", TOTP_RS),
+    ("src/pages/account/elevate.rs", ELEVATE_RS),
 ];
 
 const SIGNUP_RS: &str = r#"//! `/account/signup` -- a new account, and a mail to confirm the address.
@@ -1607,8 +1641,13 @@ const TOTP_RS: &str = r#"//! `/account/totp` -- turn on two-step sign-in with an
 //!
 //! The GET draws a new key and stores it unconfirmed; the POST confirms it
 //! with a code from the app and shows the recovery codes, once.
+//!
+//! Both ask for a session that typed its password again a few minutes ago
+//! (`/account/elevate`): a stolen cookie alone must not enrol the thief's
+//! app. An account that already has TOTP keeps it: this page never draws
+//! a key over a working one.
 
-use brocanth_auth::{AccountHolder, AuthError};
+use brocanth_auth::{AccountHolder, AuthError, FactorKind};
 use brocanth_middleware::Level;
 
 use crate::pages::{html, views, Ctx, Error, Response};
@@ -1620,6 +1659,8 @@ pub struct Confirm {
     code: String,
 }
 
+const ON: &str = "Two-step sign-in is already on for this account.";
+
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let auth = screens::services(ctx)?;
     let links = screens::screens(ctx)?;
@@ -1628,13 +1669,23 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
         return Ok(see_other("/account/signin"));
     };
     let holder = AccountHolder::of(&session)?;
+    let mfa = auth.mfa()?;
+    if mfa.enrolled(&holder).await?.contains(FactorKind::Totp) {
+        return page(ctx, "", "", ON, &[], 200);
+    }
     let label = screens::email_of(&auth, &session).await?;
-    let enrolment = auth
-        .mfa()?
+    match mfa
         .begin_totp_enrolment(&holder, links.issuer(), &label)
-        .await?;
-    let secret = enrolment.secret.to_base32();
-    page(ctx, &secret, &enrolment.uri, "", &[], 200)
+        .await
+    {
+        Ok(enrolment) => {
+            let secret = enrolment.secret.to_base32();
+            page(ctx, &secret, &enrolment.uri, "", &[], 200)
+        }
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 200),
+        Err(other) => Err(other.into()),
+    }
 }
 
 pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -1675,6 +1726,8 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
             &[],
             422,
         ),
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 409),
         Err(other) => Err(other.into()),
     }
 }
@@ -1698,6 +1751,74 @@ fn page(
             codes,
         }
     )?;
+    page.status = status;
+    Ok(page)
+}
+"#;
+
+const ELEVATE_RS: &str = r#"//! `/account/elevate` -- type the password again before a change to the
+//! way this account signs in.
+//!
+//! A right password elevates the session for a few minutes
+//! (`FactorPolicy::elevation_ttl`), then the browser goes back to
+//! `/account/totp`. An account with a second factor cannot elevate with the
+//! password alone.
+
+use brocanth_auth::{AccountHolder, AuthError, FactorPolicy};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Password {
+    #[check(zod::Text::new().min(1).max(1024))]
+    password: String,
+}
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    if screens::signed_in(ctx, &auth).await.is_none() {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    }
+    again(ctx, "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    AccountHolder::of(&session)?;
+    let Some(form) = screens::form::<Password>(ctx)? else {
+        return again(ctx, "Enter your password.", 422);
+    };
+    let email = screens::email_of(&auth, &session).await?;
+    let proof = match auth.accounts().login(&email, &form.password).await {
+        Ok(signed) => signed.into_proof(),
+        Err(AuthError::InvalidCredentials) => return again(ctx, "That password is wrong.", 422),
+        Err(other) => return Err(other.into()),
+    };
+    if proof.account() != &session.account {
+        return again(ctx, "That password is wrong.", 422);
+    }
+    let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let Some(elevation) = FactorPolicy::recommended().for_elevation(&enrolled, proof) else {
+        return again(
+            ctx,
+            "This account has a second factor, so a password alone cannot confirm the change.",
+            403,
+        );
+    };
+    let started = auth.sessions().elevate(&session.id, elevation).await?;
+    Ok(see_other("/account/totp").with_header("set-cookie", started.cookie.to_string()))
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(ctx, views::account::screens::Elevate { csrf: &csrf, error })?;
     page.status = status;
     Ok(page)
 }

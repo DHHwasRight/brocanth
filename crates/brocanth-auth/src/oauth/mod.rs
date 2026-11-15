@@ -210,10 +210,13 @@ impl FlowState {
     }
 }
 
-fn sign(key: &SigningKey, message: &[u8]) -> Vec<u8> {
+fn sign(key: &SigningKey, payload: &[u8]) -> Vec<u8> {
     // `SigningKey::sign` is private to the session module on purpose: one key,
-    // one signer. This goes through the same code.
-    key.sign_message(message)
+    // one signer. This goes through the same code, under its own tag (see
+    // `SigningKey::sign_message`).
+    let mut message = b"oauth-flow.".to_vec();
+    message.extend_from_slice(payload);
+    key.sign_message(&message)
 }
 
 /// Where to send the browser, and what to keep until it comes back.
@@ -574,17 +577,9 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
         flow: &FlowState,
         callback: &CallbackParams,
     ) -> Result<Authenticated, AuthError> {
-        // 1. The provider may have refused outright.
-        if let Some(error) = &callback.error {
-            return Err(AuthError::ProviderRefused {
-                error: error.clone(),
-                description: callback.error_description.clone(),
-            });
-        }
-
-        // 2. CSRF, in constant time, before anything else. A `!=` here returns
-        //    at the first differing byte and tells a patient attacker how much
-        //    of their guess was right.
+        // 1. CSRF, in constant time, before anything else -- the provider's
+        //    error too. A `!=` here returns at the first differing byte and
+        //    tells a patient attacker how much of their guess was right.
         if !ct_eq_str(&callback.state, &flow.state) {
             return Err(AuthError::StateMismatch);
         }
@@ -593,6 +588,16 @@ impl<H: HttpClient, C: Clock> OauthClient<H, C> {
         // does.
         if flow.provider != provider.id {
             return Err(AuthError::StateMismatch);
+        }
+
+        // 2. The provider may have refused outright. Read only now: a
+        //    cross-site link to `/callback?error=x` carries no state, and must
+        //    not end a sign-in that is under way.
+        if let Some(error) = &callback.error {
+            return Err(AuthError::ProviderRefused {
+                error: error.clone(),
+                description: callback.error_description.clone(),
+            });
         }
         if self.clock.now() - flow.started_at > self.flow_ttl {
             return Err(AuthError::FlowExpired);

@@ -308,6 +308,7 @@ impl Builder {
                 http,
                 api,
                 clock: self.clock,
+                allow_http: self.allow_http,
                 expiry_delta: self.expiry_delta,
                 flights: Mutex::new(HashMap::new()),
                 app_tokens: Mutex::new(HashMap::new()),
@@ -349,6 +350,7 @@ struct Inner {
     http: Http,
     api: reqwest::Client,
     clock: Arc<dyn Clock>,
+    allow_http: bool,
     expiry_delta: i64,
     flights: Flights<(String, String)>,
     app_tokens: Mutex<HashMap<String, Token>>,
@@ -401,6 +403,11 @@ impl OauthClient {
             .providers
             .get(id)
             .ok_or_else(|| Error::UnknownProvider(id.to_string()))
+    }
+
+    /// Whether plain `http` URLs are allowed (development, a fake provider).
+    pub(crate) fn allows_http(&self) -> bool {
+        self.inner.allow_http
     }
 
     /// The redirect URI to register at provider `id`.
@@ -729,12 +736,16 @@ impl OauthClient {
     ///
     /// # Errors
     /// [`Error::Store`].
-    pub async fn all_connections(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<Connection>, Error> {
+    pub async fn all_connections(&self, limit: u32, offset: u32) -> Result<Vec<Connection>, Error> {
         Ok(self.inner.store.list(limit, offset).await?)
+    }
+
+    /// How many connections there are.
+    ///
+    /// # Errors
+    /// [`Error::Store`].
+    pub async fn count_connections(&self) -> Result<u64, Error> {
+        Ok(self.inner.store.count().await?)
     }
 
     /// Revokes the grant at the provider when it has an RFC 7009 endpoint,
@@ -745,6 +756,20 @@ impl OauthClient {
     /// # Errors
     /// [`Error::Store`].
     pub async fn disconnect(&self, account: &str, provider: &str) -> Result<bool, Error> {
+        // The refresh lock of this key: a refresh in flight finishes first,
+        // and its write lands before the delete. Without it, the refresh
+        // saves its token after the delete and the connection comes back.
+        let key = (account.to_string(), provider.to_string());
+        let lock = flight(&self.inner.flights, &key);
+        let result = {
+            let _held = lock.lock().await;
+            self.disconnect_held(account, provider).await
+        };
+        land(&self.inner.flights, &key, lock);
+        result
+    }
+
+    async fn disconnect_held(&self, account: &str, provider: &str) -> Result<bool, Error> {
         let Some(row) = self.inner.store.get(account, provider).await? else {
             return Ok(false);
         };

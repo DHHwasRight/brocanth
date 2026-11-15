@@ -34,20 +34,26 @@
 //! # An anonymous session is not staff
 //!
 //! [`Staff::from_cookie_header`] answers `None` for a pre-login session,
-//! whatever account it names: [`Privilege::Anonymous`] carries no proof. An
-//! impersonated session carries the impersonated account's powers and not
-//! the operator's, because that is what impersonation means.
+//! whatever account it names: [`Privilege::Anonymous`] carries no proof.
+//!
+//! # An impersonated session is not staff either
+//!
+//! An impersonated session acts for its subject in the application, but it
+//! gets no staff rights, the subject's or the operator's. Otherwise an
+//! operator with one narrow role who impersonates a superuser becomes one.
+//! [`Staff::impersonate`] also refuses a staff subject and asks the
+//! operator for the `accounts.impersonate` permission.
 
 use std::collections::BTreeSet;
 
-use crate::accounts::{Accounts, RegistrationNotice};
+use crate::accounts::Accounts;
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::http_client::HttpClient;
 use crate::identity::{Account, AccountId, EmailAddress};
 use crate::plugin::Auth;
-use crate::session::Privilege;
-use crate::storage::StaffStore;
+use crate::session::{Privilege, StartedSession};
+use crate::storage::{SessionRecord, StaffStore};
 
 /// One signed-in member of staff: the account, whether it is a superuser,
 /// and what its roles grant.
@@ -108,7 +114,7 @@ impl Staff {
             Err(AuthError::NoSession) => return Ok(None),
             Err(other) => return Err(other),
         };
-        if session.privilege == Privilege::Anonymous {
+        if session.privilege == Privilege::Anonymous || session.is_impersonated() {
             return Ok(None);
         }
         Ok(Self::load(&**auth.store(), &session.account)
@@ -120,6 +126,65 @@ impl Staff {
     pub fn account(&self) -> &Account {
         &self.account
     }
+
+    /// Opens a session in which this member of staff acts as `subject`.
+    ///
+    /// [`Sessions::impersonate`] with the two checks it cannot make, because
+    /// it does not read staff records: the operator holds
+    /// [`IMPERSONATE`](Self::IMPERSONATE) (a superuser holds every
+    /// permission), and the subject is not staff. Impersonating a member of
+    /// staff would hand the operator rights that nobody gave them.
+    ///
+    /// [`Sessions::impersonate`]: crate::session::Sessions::impersonate
+    ///
+    /// # Errors
+    /// Returns [`AuthError::Misconfigured`] when the operator session is not
+    /// this member of staff's, when the permission is missing, or when the
+    /// subject is staff or does not exist, and whatever
+    /// [`Sessions::impersonate`] returns.
+    pub async fn impersonate<S, H, C>(
+        &self,
+        auth: &Auth<S, H, C>,
+        operator_session: &SessionRecord,
+        subject: &AccountId,
+        reason: impl Into<String>,
+    ) -> Result<StartedSession, AuthError>
+    where
+        S: StaffStore,
+        H: HttpClient,
+        C: Clock,
+    {
+        if operator_session.account != self.account.id {
+            return Err(AuthError::misconfigured(
+                "that operator session belongs to another account\n\
+                 help: pass the session this Staff record was read from",
+            ));
+        }
+        if !self.allows(Self::IMPERSONATE) {
+            return Err(AuthError::misconfigured(format!(
+                "impersonation needs the `{}` permission\n\
+                 help: give the operator a role that holds it",
+                Self::IMPERSONATE
+            )));
+        }
+        let target = Self::load(&**auth.store(), subject).await?.ok_or_else(|| {
+            AuthError::misconfigured(
+                "no account has that id\nhelp: pick the subject from the accounts list",
+            )
+        })?;
+        if target.is_staff() {
+            return Err(AuthError::misconfigured(
+                "a member of staff cannot be impersonated\n\
+                 help: ask them to act, or change their roles first",
+            ));
+        }
+        auth.sessions()
+            .impersonate(operator_session, subject, reason)
+            .await
+    }
+
+    /// The permission [`Staff::impersonate`] asks for.
+    pub const IMPERSONATE: &'static str = "accounts.impersonate";
 
     /// The account's address, or its id when it has none. For a screen.
     pub fn name(&self) -> String {
@@ -185,8 +250,8 @@ pub enum SuperuserOutcome {
     /// No account had the address: one was created with the password, and
     /// made a superuser.
     Created(AccountId),
-    /// An account had the address and was not a superuser. Now it is. Its
-    /// password did not change.
+    /// An account had the address, proven, and was not a superuser. Now it
+    /// is. Its password did not change.
     Promoted(AccountId),
     /// The account was a superuser already. Nothing changed.
     Unchanged(AccountId),
@@ -208,9 +273,15 @@ impl SuperuserOutcome {
 /// keeps its own: a command run twice must not reset a password somebody
 /// already changed. Idempotent, so a server can call it at every start.
 ///
+/// An existing account is promoted only when its address is verified. A
+/// stranger who signs up with the superuser address before the first start
+/// owns an unverified account and its password; promoting it would make
+/// them superuser.
+///
 /// # Errors
-/// Returns [`AuthError::InvalidEmail`] for an address that is not one, and
-/// fails when the store or the hasher fails.
+/// Returns [`AuthError::InvalidEmail`] for an address that is not one,
+/// [`AuthError::Misconfigured`] when an account with an unverified address
+/// holds it, and fails when the store or the hasher fails.
 pub async fn ensure_superuser<S: StaffStore, C: Clock>(
     accounts: &Accounts<S, C>,
     store: &S,
@@ -222,22 +293,40 @@ pub async fn ensure_superuser<S: StaffStore, C: Clock>(
         Some(account) if store.is_superuser(&account.id).await? => {
             return Ok(SuperuserOutcome::Unchanged(account.id))
         }
-        Some(account) => SuperuserOutcome::Promoted(account.id),
-        None => match accounts.register(email, password).await?.notice {
-            RegistrationNotice::Created { account, .. } => SuperuserOutcome::Created(account.id),
+        Some(account) => promoted(account)?,
+        // Verified from the start: the operator's configuration names the
+        // address, and a racing replica must see it proven.
+        None => match accounts.create_vouched(&address, password).await? {
+            Some(account) => SuperuserOutcome::Created(account.id),
             // Registered between the read above and the insert: promote the
-            // account that won.
-            RegistrationNotice::AlreadyRegistered { email } => {
+            // account that won, when its address is proven.
+            None => {
                 let account = store
-                    .account_by_email(&email)
+                    .account_by_email(&address)
                     .await?
                     .ok_or_else(|| AuthError::Store("an address is taken by no account".into()))?;
-                SuperuserOutcome::Promoted(account.id)
+                promoted(account)?
             }
         },
     };
     store.set_superuser(outcome.account(), true).await?;
     Ok(outcome)
+}
+
+/// An existing account becomes superuser only with a proven address.
+fn promoted(account: Account) -> Result<SuperuserOutcome, AuthError> {
+    if !account.email_verified {
+        let email = account
+            .email
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string);
+        return Err(AuthError::misconfigured(format!(
+            "the account with the superuser address {email} has not proven that address, \
+             so it is not made superuser\n\
+             help: verify the address of that account, or delete it and start again"
+        )));
+    }
+    Ok(SuperuserOutcome::Promoted(account.id))
 }
 
 #[cfg(test)]
@@ -292,6 +381,20 @@ mod tests {
             .register("ada@example.com", "a long passphrase")
             .await
             .unwrap();
+        let ada = store
+            .account_by_email(&EmailAddress::parse("ada@example.com").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Not while the address is unproven: whoever signed up first owns it.
+        let refused = ensure_superuser(&accounts, &store, "ada@example.com", "ignored")
+            .await
+            .expect_err("an unverified address is not promoted");
+        assert!(refused.to_string().contains("help:"), "{refused}");
+        assert!(!store.is_superuser(&ada.id).await.unwrap());
+
+        store.set_email_verified(&ada.id, true).await.unwrap();
         let outcome = ensure_superuser(&accounts, &store, "ada@example.com", "ignored")
             .await
             .unwrap();

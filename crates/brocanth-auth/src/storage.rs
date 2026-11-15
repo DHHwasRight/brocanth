@@ -114,7 +114,9 @@ pub enum StoreError {
     EmailTaken,
 
     /// Anything else.
-    #[error("{0}")]
+    #[error(
+        "{0}\nhelp: check that the database is reachable and its tables exist (PgStore::migrate)"
+    )]
     Backend(String),
 }
 
@@ -338,11 +340,14 @@ pub trait AuthStore: Send + Sync + 'static {
     /// Deletes one session.
     async fn delete_session(&self, id: &SessionId) -> Result<(), StoreError>;
 
-    /// Deletes every session belonging to an account, and answers how many.
+    /// Deletes every session belonging to an account, and every session the
+    /// account opened as an impersonation operator, and answers how many.
     ///
     /// This is "sign me out everywhere", and it is also what a password change
     /// and a password reset must call: a stolen password that has already been
-    /// used to open a session is not revoked by changing the password.
+    /// used to open a session is not revoked by changing the password. The
+    /// impersonations go too: an operator who was compromised must not keep
+    /// acting as somebody else until the impersonation times out.
     async fn delete_sessions_for_account(&self, account: &AccountId) -> Result<u64, StoreError>;
 
     // -- single-use tokens -------------------------------------------------
@@ -492,6 +497,30 @@ pub trait MfaStore: AuthStore {
 
     /// How many recovery codes are left.
     async fn count_recovery_codes(&self, account: &AccountId) -> Result<u32, StoreError>;
+
+    /// Counts one wrong second-factor code at `at`, and answers the count
+    /// in the window. A window that began before `window_start` is over:
+    /// the count starts again at 1 from `at`.
+    ///
+    /// **Must be atomic**, as [`LockoutStore::record_failed_login`] is, so
+    /// that ten wrong codes at once count ten.
+    async fn record_second_factor_failure(
+        &self,
+        account: &AccountId,
+        at: UnixTime,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError>;
+
+    /// The wrong second-factor codes counted in a window that began at or
+    /// after `window_start`. Zero when the window is over or there is none.
+    async fn second_factor_failures(
+        &self,
+        account: &AccountId,
+        window_start: UnixTime,
+    ) -> Result<u32, StoreError>;
+
+    /// Forgets the wrong second-factor codes of the account.
+    async fn clear_second_factor_failures(&self, account: &AccountId) -> Result<(), StoreError>;
 }
 
 /// One-time-code challenges.

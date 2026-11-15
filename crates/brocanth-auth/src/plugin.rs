@@ -72,6 +72,7 @@ use crate::mfa::Mfa;
 use crate::oauth::{ClientConfig, OauthClient};
 use crate::password::Passwords;
 use crate::providers::Provider;
+use crate::secret_key::SecretKey;
 use crate::session::{SessionConfig, Sessions, SigningKey};
 use crate::storage::AuthStore;
 use crate::storage::{LockoutStore, MfaStore};
@@ -117,6 +118,8 @@ struct Inner<S: AuthStore, H: HttpClient, C: Clock> {
     linking: Linking<S, C>,
     oauth: OauthClient<H, C>,
     providers: Vec<ConfiguredProvider>,
+    /// Seals TOTP secrets at rest, when set. See [`Auth::with_totp_key`].
+    totp_key: Option<SecretKey>,
 }
 
 /// The context item: everything a handler needs, behind one `Arc`.
@@ -143,7 +146,11 @@ impl<S: MfaStore, H: HttpClient, C: Clock> Auth<S, H, C> {
     /// # Errors
     /// Fails when the OS has no randomness.
     pub fn mfa(&self) -> Result<Mfa<S, C>, AuthError> {
-        Mfa::new(self.0.store.clone(), self.0.clock.clone())
+        let mfa = Mfa::new(self.0.store.clone(), self.0.clock.clone())?;
+        Ok(match &self.0.totp_key {
+            Some(key) => mfa.sealing_secrets_with(key.clone()),
+            None => mfa,
+        })
     }
 }
 
@@ -196,7 +203,29 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Auth<S, H, C> {
             linking,
             oauth,
             providers: config.providers,
+            totp_key: None,
         })))
+    }
+
+    /// Seals TOTP secrets at rest with `key`: [`Auth::mfa`] then writes
+    /// them sealed and opens sealed ones. Call it right after
+    /// [`Auth::build`], before the services are cloned.
+    ///
+    /// Not the signing key: that one is rotated to sign everybody out, and
+    /// rotating it must not turn off every authenticator. See
+    /// [`crate::secret_key`].
+    ///
+    /// # Errors
+    /// [`AuthError::Misconfigured`] when the services were already cloned.
+    pub fn with_totp_key(mut self, key: SecretKey) -> Result<Self, AuthError> {
+        let inner = Arc::get_mut(&mut self.0).ok_or_else(|| {
+            AuthError::misconfigured(
+                "the TOTP key is set after the auth services were shared\n\
+                 help: call with_totp_key right after Auth::build",
+            )
+        })?;
+        inner.totp_key = Some(key);
+        Ok(self)
     }
 
     /// Registration, login, reset and verification.

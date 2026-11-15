@@ -153,7 +153,8 @@ async fn an_attempt_against_one_challenge_does_not_spend_another() {
     let (first_challenge, _) = sent(&first);
     let (second_challenge, second_code) = sent(&second);
 
-    for _ in 0..5 {
+    // Four: the fifth wrong code would reach the per-account cap below.
+    for _ in 0..4 {
         assert!(otp
             .authenticate(&first_challenge, "00000000")
             .await
@@ -166,6 +167,35 @@ async fn an_attempt_against_one_challenge_does_not_spend_another() {
         .await
         .expect("the second challenge is its own budget");
     assert!(!proof.account().as_str().is_empty());
+}
+
+/// Wrong codes count per account across challenges: a new challenge is not
+/// five fresh guesses.
+#[tokio::test]
+async fn wrong_codes_count_per_account_across_challenges() {
+    use brocanth_auth::mfa::{SECOND_FACTOR_MAX_FAILURES, SECOND_FACTOR_WINDOW};
+
+    let f = Fixture::new();
+    registered(&f).await;
+    let otp = f.otp();
+    for _ in 0..SECOND_FACTOR_MAX_FAILURES {
+        let (challenge, _) = sent(&otp.request("ada@example.com").await.unwrap());
+        assert!(otp.authenticate(&challenge, "00000000").await.is_err());
+    }
+    let (challenge, code) = sent(&otp.request("ada@example.com").await.unwrap());
+    let err = otp
+        .authenticate(&challenge, code.as_str())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidCredentials), "{err:?}");
+
+    // After the window, a fresh challenge works again.
+    f.clock.advance(SECOND_FACTOR_WINDOW + 1);
+    let (challenge, code) = sent(&otp.request("ada@example.com").await.unwrap());
+    let _proof = otp
+        .authenticate(&challenge, code.as_str())
+        .await
+        .expect("the window is over");
 }
 
 // ---------------------------------------------------------------------------

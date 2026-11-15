@@ -477,7 +477,7 @@ impl Module for RateLimit {
         )
         .adapts_to(
             "auth-screens",
-            "the example rule guards its sign-in form; without it the rule is written commented out",
+            "the example rule covers the sign-in, second-factor and password-check posts; without it the rule is written commented out",
         )
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
@@ -512,14 +512,14 @@ impl Module for RateLimit {
         } else if signin {
             (
                 RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
-                    + &LOGIN_RULE.replace("@PATH@", SIGNIN_PATH),
+                    + &LOGIN_RULE.replace("@PATHS@", SCREEN_PATHS),
                 Some(".rule(login)".to_string()),
             )
         } else {
             (
                 RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
                     + LOGIN_RULE_OFF
-                    + &commented(&LOGIN_RULE.replace("@PATH@", "/login"), "// "),
+                    + &commented(&LOGIN_RULE.replace("@PATHS@", LOGIN_PATHS), "// "),
                 None,
             )
         };
@@ -559,7 +559,7 @@ impl Module for RateLimit {
         );
         if project.has("config") {
             let rules = if signin {
-                RULES_TOML.replace("@PATH@", SIGNIN_PATH)
+                RULES_TOML.replace("@PATHS@", SCREEN_PATHS)
             } else {
                 let (head, rule) = RULES_TOML
                     .split_once("[[rate_limit.rules]]")
@@ -568,7 +568,7 @@ impl Module for RateLimit {
                     "{head}{}{}",
                     LOGIN_RULE_OFF_TOML,
                     commented(&format!("[[rate_limit.rules]]{rule}"), "# ")
-                        .replace("@PATH@", "/login")
+                        .replace("@PATHS@", LOGIN_PATHS)
                 )
             };
             s.at(Slot::ConfigSections).block(rules);
@@ -645,9 +645,16 @@ const RULES_IN_FILE: &str = "The rules are `[[rate_limit.rules]]` in config/<env
 /// Where the rules are, without one.
 const RULES_IN_CODE: &str = "The rule is below: `brocanth add config` moves rules to a file.";
 
+/// The example rule's paths: a login form.
+const LOGIN_PATHS: &str = r#""/login""#;
+
+/// The example rule's paths with `auth-screens`: the posts that check a
+/// password or a code.
+const SCREEN_PATHS: &str = r#""/account/signin", "/account/code", "/account/elevate""#;
+
 /// The example rule, as code.
 const LOGIN_RULE: &str = r#"        let login = brocanth_middleware::Rule::new("login", 5, 60)
-            .paths(["@PATH@"])
+            .paths([@PATHS@])
             .methods(["POST"]);
 "#;
 
@@ -660,7 +667,7 @@ const RULES_TOML: &str = r#"
 # `key` is a list of "ip", "session" and "user", first found wins.
 [[rate_limit.rules]]
 name = "login"
-paths = ["@PATH@"]
+paths = [@PATHS@]
 methods = ["POST"]
 limit = 5
 window_secs = 60

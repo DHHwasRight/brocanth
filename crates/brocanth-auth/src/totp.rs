@@ -47,6 +47,9 @@ type HmacSha1 = Hmac<Sha1>;
 /// RFC 4648 base32, which is what an `otpauth:` URI carries.
 const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
+/// The widest skew [`Totp::custom`] accepts, in steps either side.
+const MAX_SKEW_STEPS: i64 = 2;
+
 /// A shared TOTP secret.
 ///
 /// # It is stored in the clear, and that is not an oversight
@@ -115,9 +118,18 @@ impl TotpSecret {
         let mut buffer: u16 = 0;
         let mut bits = 0u32;
         for ch in text.chars().filter(|c| *c != '=' && !c.is_whitespace()) {
+            // `as u8` truncates: without this check 'Ł' (U+0141) would read
+            // as 'A' and parse as another secret.
+            if !ch.is_ascii() {
+                return Err(AuthError::misconfigured(format!(
+                    "`{ch}` is not a base32 character\nhelp: a base32 secret uses A-Z and 2-7 only"
+                )));
+            }
             let upper = ch.to_ascii_uppercase() as u8;
             let value = BASE32.iter().position(|c| *c == upper).ok_or_else(|| {
-                AuthError::misconfigured(format!("`{ch}` is not a base32 character"))
+                AuthError::misconfigured(format!(
+                    "`{ch}` is not a base32 character\nhelp: a base32 secret uses A-Z and 2-7 only"
+                ))
             })?;
             buffer = (buffer << 5) | value as u16;
             bits += 5;
@@ -200,22 +212,29 @@ impl Totp {
     ///
     /// # Errors
     /// Returns [`AuthError::Misconfigured`] for fewer than six or more than ten
-    /// digits, a step outside 1..=300 seconds, or a negative skew. Ten digits
-    /// is the ceiling because dynamic truncation yields a 31-bit number and
-    /// anything past ten digits is a constant leading zero.
+    /// digits, a step outside 1..=300 seconds, or a skew outside 0..=2. Ten
+    /// digits is the ceiling because dynamic truncation yields a 31-bit number
+    /// and anything past ten digits is a constant leading zero. Two steps of
+    /// skew is the ceiling because each step is one more valid code per
+    /// guess and one more HMAC per check.
     pub fn custom(digits: u32, step_seconds: i64, skew_steps: i64) -> Result<Self, AuthError> {
         if !(6..=10).contains(&digits) {
             return Err(AuthError::misconfigured(format!(
-                "a TOTP code is between 6 and 10 digits, not {digits}"
+                "a TOTP code is between 6 and 10 digits, not {digits}\n\
+                 help: use 6, the digits every authenticator app shows"
             )));
         }
         if !(1..=300).contains(&step_seconds) {
             return Err(AuthError::misconfigured(format!(
-                "a TOTP step is between 1 and 300 seconds, not {step_seconds}"
+                "a TOTP step is between 1 and 300 seconds, not {step_seconds}\n\
+                 help: use 30, the step every authenticator app uses"
             )));
         }
-        if skew_steps < 0 {
-            return Err(AuthError::misconfigured("the TOTP skew cannot be negative"));
+        if !(0..=MAX_SKEW_STEPS).contains(&skew_steps) {
+            return Err(AuthError::misconfigured(format!(
+                "the TOTP skew is between 0 and {MAX_SKEW_STEPS} steps, not {skew_steps}\n\
+                 help: use 1, which accepts the code before and after the current one"
+            )));
         }
         Ok(Self {
             digits,
@@ -262,8 +281,13 @@ impl Totp {
             tag[offset + 2],
             tag[offset + 3],
         ]);
-        let modulus = 10u32.pow(self.digits);
-        format!("{:0width$}", binary % modulus, width = self.digits as usize)
+        // u64: 10^10 does not fit a u32, and ten digits is allowed.
+        let modulus = 10u64.pow(self.digits);
+        format!(
+            "{:0width$}",
+            u64::from(binary) % modulus,
+            width = self.digits as usize
+        )
     }
 
     /// The code for an instant.
@@ -331,5 +355,15 @@ mod tests {
         assert!(Totp::custom(11, 30, 1).is_err());
         assert!(Totp::custom(6, 0, 1).is_err());
         assert!(Totp::custom(6, 30, -1).is_err());
+        assert!(Totp::custom(6, 30, 3).is_err());
+        assert!(Totp::custom(6, 30, 2).is_ok());
+    }
+
+    #[test]
+    fn a_character_outside_ascii_is_not_read_as_another() {
+        // 'Ł' is U+0141; truncated to a byte it would be 'A'.
+        let err = TotpSecret::from_base32("ŁAAAAAAA").unwrap_err();
+        assert!(err.to_string().contains("help:"), "{err}");
+        assert!(TotpSecret::from_base32("AAAAAAAA").is_ok());
     }
 }

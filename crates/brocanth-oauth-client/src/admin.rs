@@ -16,12 +16,13 @@ use brocanth_admin::parts;
 use crate::web::escape;
 use crate::{Connection, OauthClient};
 
-/// Rows per page.
-const PAGE: usize = 50;
+/// Rows per page, unless [`ConnectionsPanel::per_page`] says otherwise.
+pub const PER_PAGE: u32 = 50;
 
 /// The connections tab.
 pub struct ConnectionsPanel {
     client: Option<OauthClient>,
+    per_page: u32,
 }
 
 impl ConnectionsPanel {
@@ -30,6 +31,7 @@ impl ConnectionsPanel {
     pub fn new(client: OauthClient) -> Self {
         Self {
             client: Some(client),
+            per_page: PER_PAGE,
         }
     }
 
@@ -37,7 +39,18 @@ impl ConnectionsPanel {
     /// its routes before any plugin starts, so the panel looks when it
     /// renders.
     pub fn installed() -> Self {
-        Self { client: None }
+        Self {
+            client: None,
+            per_page: PER_PAGE,
+        }
+    }
+
+    /// How many connections a page shows. Zero is treated as one. The same
+    /// builder as `brocanth-auth`'s `AccountsPanel::per_page`.
+    #[must_use]
+    pub fn per_page(mut self, per_page: u32) -> Self {
+        self.per_page = per_page.max(1);
+        self
     }
 
     fn client(&self) -> Option<OauthClient> {
@@ -87,21 +100,23 @@ impl Panel for ConnectionsPanel {
         }
         let page = r
             .param("page")
-            .and_then(|p| p.parse::<usize>().ok())
-            .filter(|p| *p >= 1)
-            .unwrap_or(1);
+            .and_then(|p| p.parse::<u32>().ok())
+            .unwrap_or(1)
+            .max(1);
+        let total = client.count_connections().await.map_err(failed)?;
         let rows = client
-            .all_connections(PAGE + 1, (page - 1) * PAGE)
+            .all_connections(self.per_page, (page - 1).saturating_mul(self.per_page))
             .await
             .map_err(failed)?;
+        let last = total.div_ceil(u64::from(self.per_page)).max(1);
         Ok(Some(PanelPage::body(
             "Connections",
-            screen(&r, &rows, page),
+            screen(&r, &rows, page, u64::from(page) < last),
         )))
     }
 }
 
-fn screen(r: &PanelRequest<'_>, rows: &[Connection], page: usize) -> String {
+fn screen(r: &PanelRequest<'_>, rows: &[Connection], page: u32, more: bool) -> String {
     if rows.is_empty() && page == 1 {
         return format!(
             "<p class=\"{}\">Nobody has connected an account yet.</p>",
@@ -113,7 +128,7 @@ fn screen(r: &PanelRequest<'_>, rows: &[Connection], page: usize) -> String {
         parts::table(),
         th = parts::th()
     );
-    for c in rows.iter().take(PAGE) {
+    for c in rows {
         let button = if r.can_act {
             format!(
                 "<form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"account\" value=\"{}\"><input type=\"hidden\" name=\"provider\" value=\"{}\"><button type=\"submit\">Revoke</button></form>",
@@ -144,7 +159,7 @@ fn screen(r: &PanelRequest<'_>, rows: &[Connection], page: usize) -> String {
             page - 1
         ));
     }
-    if rows.len() > PAGE {
+    if more {
         links.push(format!(
             "<a href=\"{}?page={}\">Older</a>",
             escape(&r.url("")),

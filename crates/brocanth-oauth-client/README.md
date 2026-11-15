@@ -90,8 +90,11 @@ let _ = app.send(app.get("https://api.example.com/status")).await?;
 ```
 
 [`OauthClient::token`] refreshes an expired token before it returns it.
-Concurrent callers for one `(account, provider)` make one refresh; the
-others wait and read the new row. A rotated refresh token is stored in the
+Concurrent callers for one `(account, provider)` in one process make one
+refresh; the others wait and read the new row. The lock is per process:
+two instances can still both refresh. When the provider then refuses the
+loser's spent refresh token (`invalid_grant`), the loser reads the row
+again and takes the token the winner stored. A rotated refresh token is stored in the
 same write. A refused refresh token is [`Error::Reconnect`].
 
 [`Authorized::send`] adds `Authorization: Bearer`, and after a 401 it forces

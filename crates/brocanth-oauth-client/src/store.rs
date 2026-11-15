@@ -122,7 +122,13 @@ pub trait TokenStore: Send + Sync + 'static {
     async fn for_account(&self, account: &str) -> Result<Vec<Connection>, StoreError>;
 
     /// Every connection, by account then provider, `limit` from `offset`.
-    async fn list(&self, limit: usize, offset: usize) -> Result<Vec<Connection>, StoreError>;
+    ///
+    /// The same shape as `brocanth-auth`'s `AccountDirectory::accounts`:
+    /// `u32` bounds, and the total from [`TokenStore::count`].
+    async fn list(&self, limit: u32, offset: u32) -> Result<Vec<Connection>, StoreError>;
+
+    /// How many connections there are, for the pager.
+    async fn count(&self) -> Result<u64, StoreError>;
 }
 
 /// Connections in this process's memory. For tests and development: a
@@ -176,13 +182,17 @@ impl TokenStore for MemoryTokenStore {
             .collect())
     }
 
-    async fn list(&self, limit: usize, offset: usize) -> Result<Vec<Connection>, StoreError> {
+    async fn list(&self, limit: u32, offset: u32) -> Result<Vec<Connection>, StoreError> {
         Ok(self
             .rows()
             .values()
-            .skip(offset)
-            .take(limit)
+            .skip(offset as usize)
+            .take(limit as usize)
             .map(Connection::from)
             .collect())
+    }
+
+    async fn count(&self) -> Result<u64, StoreError> {
+        Ok(self.rows().len() as u64)
     }
 }

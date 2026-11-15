@@ -110,6 +110,7 @@ impl Fake {
         Provider::new("fake", "Fake", self.endpoint(), CLIENT_ID, SECRET)
             .scopes(["read", "write"])
             .app_scopes(["app"])
+            .api_host("127.0.0.1")
     }
 
     /// The person consents: the provider issues `code` for this challenge.

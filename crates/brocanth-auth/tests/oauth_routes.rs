@@ -421,6 +421,49 @@ async fn a_signed_in_callback_asks_before_it_links() {
     assert!(auth.linking().links(&account).await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn an_impersonated_session_links_nothing() {
+    let auth = services();
+    let routes = routes(7, "ada@example.com");
+    let ada = password_session(&auth, "ada@example.com").await;
+    let subject = auth
+        .sessions()
+        .from_cookie_header(&ada)
+        .await
+        .unwrap()
+        .account;
+    let answer = round_trip(&auth, &routes, "").await;
+    let pending = jar(&answer);
+
+    // An elevated operator acts as Ada.
+    let ops = password_session(&auth, "ops@example.com").await;
+    let ops = auth
+        .sessions()
+        .from_cookie_header(&ops)
+        .await
+        .unwrap()
+        .account;
+    let operator = common::elevated(auth.sessions(), &ops).await.session;
+    let acting = auth
+        .sessions()
+        .impersonate(&operator, &subject, "TICKET-1")
+        .await
+        .unwrap()
+        .cookie;
+    let acting = acting.as_str().split(';').next().unwrap().to_string();
+
+    // The link POST refuses, and so does a callback in that browser.
+    let both = format!("{acting}; {pending}");
+    let refused = routes
+        .answer(&auth, post("/oauth/github/link", &both))
+        .await
+        .unwrap();
+    assert_eq!(refusal(&refused).0, 403, "{refused:?}");
+    let callback = round_trip(&auth, &routes, &acting).await;
+    assert_eq!(refusal(&callback).0, 403, "{callback:?}");
+    assert!(auth.linking().links(&subject).await.unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // The flow cookie: tampering, expiry, replay, refusal at the provider
 // ---------------------------------------------------------------------------
@@ -717,6 +760,42 @@ async fn an_attackers_callback_in_a_victims_browser_is_refused() {
         .unwrap();
     assert_eq!(refusal(&answer).0, 400);
     assert!(stub.requests().is_empty(), "no call to the provider");
+    assert!(!clears_the_flow(&answer), "the victim's flow goes on");
+}
+
+/// A cross-site link to the callback with `error=` and no state does not end
+/// the sign-in under way: the state is checked before the error.
+#[tokio::test]
+async fn a_forged_provider_error_does_not_end_the_flow() {
+    let auth = services();
+    let stub = Arc::new(github(1, "ada@example.com", true));
+    let routes = routes_on(GITHUB, stub.clone(), Arc::new(TestClock::at(1_700_000_000)));
+    let (url, flow) = start(&auth, &routes).await;
+    let forged = routes
+        .answer(
+            &auth,
+            get("/oauth/github/callback", "error=access_denied", &flow),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refusal(&forged).0, 400);
+    assert!(!clears_the_flow(&forged), "{forged:?}");
+    // The real callback still finishes.
+    let query = format!("code=the-code&state={}", param(&url, "state"));
+    let answer = routes
+        .answer(&auth, get("/oauth/github/callback", &query, &flow))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            answer,
+            OauthAnswer::Page {
+                page: OauthPage::SignedIn { .. },
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

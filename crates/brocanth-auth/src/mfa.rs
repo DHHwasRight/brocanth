@@ -138,12 +138,28 @@ use crate::identity::AccountId;
 use crate::impersonation::AccountHolder;
 use crate::random::{b64, ct_eq, unb64};
 use crate::recovery::{self, RecoveryCodes};
+use crate::secret_key::{self, SecretKey};
 use crate::session::SigningKey;
 use crate::storage::{MfaStore, TotpSecretRecord};
 use crate::totp::{Totp, TotpSecret};
 
 /// How long an elevation lasts before it has to be re-proved, in seconds.
 pub const DEFAULT_ELEVATION_TTL: i64 = 15 * 60;
+
+/// Wrong second-factor codes an account may send in
+/// [`SECOND_FACTOR_WINDOW`] before every code is refused, right or wrong.
+///
+/// The password does not reset the count: somebody who has the password can
+/// renew the pending sign-in at will, so the cap is the only thing between
+/// them and a search of the six-digit space. Five per fifteen minutes, with
+/// three codes valid per guess in the skew window, is about one chance in
+/// seven hundred per day; the mail of a locked sign-in and a rate limit
+/// on the route do the rest.
+pub const SECOND_FACTOR_MAX_FAILURES: u32 = 5;
+
+/// The seconds in which [`SECOND_FACTOR_MAX_FAILURES`] counts. The window
+/// begins at the first wrong code and does not slide.
+pub const SECOND_FACTOR_WINDOW: i64 = 15 * 60;
 
 /// What a factor proves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -466,7 +482,7 @@ impl Verified {
         })
         .expect("a proof always serialises");
         let encoded = b64(&payload);
-        let tag = key.sign_message(encoded.as_bytes());
+        let tag = key.sign_message(&proof_message(&encoded));
         format!("{encoded}.{}", b64(&tag))
     }
 
@@ -481,7 +497,7 @@ impl Verified {
     pub fn unseal(key: &SigningKey, now: UnixTime, sealed: &str) -> Option<Self> {
         let (encoded, tag) = sealed.rsplit_once('.')?;
         let presented = unb64(tag).ok()?;
-        let expected = key.sign_message(encoded.as_bytes());
+        let expected = key.sign_message(&proof_message(encoded));
         // Constant time, for the same reason the session cookie is.
         if !ct_eq(&presented, &expected) {
             return None;
@@ -495,6 +511,14 @@ impl Verified {
             kinds: payload.kinds,
         })
     }
+}
+
+/// The signed message of a sealed proof: its own tag, then the payload. See
+/// [`SigningKey::sign_message`] for the tags.
+fn proof_message(encoded: &str) -> Vec<u8> {
+    let mut message = b"auth-proof.".to_vec();
+    message.extend_from_slice(encoded.as_bytes());
+    message
 }
 
 /// What an account could prove, as the store answered it.
@@ -847,6 +871,8 @@ pub struct Mfa<S: MfaStore, C: Clock> {
     /// enrolled, so that "no second factor" costs what "wrong code" costs.
     /// [`crate::password::Passwords`] keeps a dummy hash for the same reason.
     dummy: TotpSecret,
+    /// Seals TOTP secrets at rest, when set. See [`crate::secret_key`].
+    seal: Option<SecretKey>,
 }
 
 impl<S: MfaStore, C: Clock> Mfa<S, C> {
@@ -863,7 +889,30 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
             policy: FactorPolicy::recommended(),
             recovery_code_count: recovery::CODES_PER_SET,
             dummy: TotpSecret::generate()?,
+            seal: None,
         })
+    }
+
+    /// Seals every TOTP secret this service writes with `key`, and opens
+    /// sealed ones with it. A plain secret written before still works.
+    #[must_use]
+    pub fn sealing_secrets_with(mut self, key: SecretKey) -> Self {
+        self.seal = Some(key);
+        self
+    }
+
+    /// The secret a stored row holds, opened when it is sealed.
+    fn stored_secret(&self, account: &AccountId, stored: &[u8]) -> Result<TotpSecret, AuthError> {
+        if !secret_key::is_sealed(stored) {
+            return Ok(TotpSecret::from_bytes(stored.to_vec()));
+        }
+        let key = self.seal.as_ref().ok_or_else(|| {
+            AuthError::misconfigured(
+                "a TOTP secret is sealed and no second-factor key is set\n\
+                 help: give Mfa the key it was sealed with (Mfa::sealing_secrets_with)",
+            )
+        })?;
+        Ok(TotpSecret::from_bytes(key.open_totp(account, stored)?))
     }
 
     /// Replaces the TOTP parameters. Read [`Totp::custom`] first.
@@ -974,27 +1023,54 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         Ok(set)
     }
 
+    /// Refuses a holder whose session did not re-prove itself within the
+    /// policy's elevation window.
+    fn require_elevation(&self, who: &AccountHolder) -> Result<(), AuthError> {
+        if who.elevation_is_fresh(self.clock.now(), self.policy.elevation_ttl()) {
+            Ok(())
+        } else {
+            Err(AuthError::ElevationRequired)
+        }
+    }
+
     /// Starts a TOTP enrolment: a fresh secret, stored unconfirmed.
     ///
     /// Calling it again before confirmation replaces the pending secret, which
-    /// is what a user who abandoned the first QR code expects.
+    /// is what a user who abandoned the first QR code expects. Once a secret
+    /// is confirmed this refuses: a second enrolment would overwrite the
+    /// working authenticator. Remove it first with [`Mfa::disable_totp`].
     ///
     /// # Errors
     /// Returns [`AuthError::Impersonated`] through [`AccountHolder`] — an
-    /// operator cannot enrol a factor on somebody else's account — and fails
-    /// when randomness or the store fails.
+    /// operator cannot enrol a factor on somebody else's account —,
+    /// [`AuthError::ElevationRequired`] when the session did not re-prove
+    /// itself recently, [`AuthError::AlreadyEnrolled`] when TOTP is on, and
+    /// fails when randomness or the store fails.
     pub async fn begin_totp_enrolment(
         &self,
         who: &AccountHolder,
         issuer: &str,
         label: &str,
     ) -> Result<TotpEnrolment, AuthError> {
+        self.require_elevation(who)?;
+        if self
+            .store
+            .totp_secret(who.account())
+            .await?
+            .is_some_and(|r| r.confirmed_at.is_some())
+        {
+            return Err(AuthError::AlreadyEnrolled);
+        }
         let secret = TotpSecret::generate()?;
+        let stored = match &self.seal {
+            Some(key) => key.seal_totp(who.account(), secret.as_bytes())?,
+            None => secret.as_bytes().to_vec(),
+        };
         self.store
             .put_totp_secret(
                 who.account(),
                 TotpSecretRecord {
-                    secret: secret.as_bytes().to_vec(),
+                    secret: stored,
                     created_at: self.clock.now(),
                     confirmed_at: None,
                     last_step: 0,
@@ -1017,18 +1093,28 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
     ///
     /// # Errors
     /// Returns [`AuthError::InvalidCredentials`] for a wrong code,
-    /// [`AuthError::Misconfigured`] when no enrolment was started, and
-    /// [`AuthError::Impersonated`] through [`AccountHolder`].
+    /// [`AuthError::Misconfigured`] when no enrolment was started,
+    /// [`AuthError::AlreadyEnrolled`] when the secret is already confirmed,
+    /// [`AuthError::ElevationRequired`] when the session did not re-prove
+    /// itself recently, and [`AuthError::Impersonated`] through
+    /// [`AccountHolder`].
     pub async fn confirm_totp_enrolment(
         &self,
         who: &AccountHolder,
         presented: &str,
     ) -> Result<RecoveryCodes, AuthError> {
+        self.require_elevation(who)?;
         let account = who.account();
         let record = self.store.totp_secret(account).await?.ok_or_else(|| {
-            AuthError::misconfigured("there is no TOTP enrolment to confirm on this account")
+            AuthError::misconfigured(
+                "there is no TOTP enrolment to confirm on this account\n\
+                 help: call Mfa::begin_totp_enrolment first",
+            )
         })?;
-        let secret = TotpSecret::from_bytes(record.secret);
+        if record.confirmed_at.is_some() {
+            return Err(AuthError::AlreadyEnrolled);
+        }
+        let secret = self.stored_secret(account, &record.secret)?;
         let step = self
             .totp
             .matching_step(&secret, presented, self.clock.now())
@@ -1054,9 +1140,11 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
     /// paper, that the user believes they have deleted.
     ///
     /// # Errors
-    /// Returns [`AuthError::Impersonated`] through [`AccountHolder`], and fails
-    /// when the store fails.
+    /// Returns [`AuthError::Impersonated`] through [`AccountHolder`],
+    /// [`AuthError::ElevationRequired`] when the session did not re-prove
+    /// itself recently, and fails when the store fails.
     pub async fn disable_totp(&self, who: &AccountHolder) -> Result<(), AuthError> {
+        self.require_elevation(who)?;
         let account = who.account();
         self.store.delete_totp_secret(account).await?;
         self.store
@@ -1068,12 +1156,14 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
     /// Replaces the recovery codes and returns the new set, once.
     ///
     /// # Errors
-    /// Returns [`AuthError::Impersonated`] through [`AccountHolder`], and fails
-    /// when randomness or the store fails.
+    /// Returns [`AuthError::Impersonated`] through [`AccountHolder`],
+    /// [`AuthError::ElevationRequired`] when the session did not re-prove
+    /// itself recently, and fails when randomness or the store fails.
     pub async fn regenerate_recovery_codes(
         &self,
         who: &AccountHolder,
     ) -> Result<RecoveryCodes, AuthError> {
+        self.require_elevation(who)?;
         let codes = RecoveryCodes::generate_count(self.recovery_code_count)?;
         self.store
             .replace_recovery_codes(who.account(), codes.digests())
@@ -1103,11 +1193,22 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         account: &AccountId,
         presented: &str,
     ) -> Result<Verified, AuthError> {
+        self.refuse_when_capped(account).await?;
+        let verified = self.check_totp(account, presented).await;
+        self.count(account, verified).await
+    }
+
+    async fn check_totp(
+        &self,
+        account: &AccountId,
+        presented: &str,
+    ) -> Result<Verified, AuthError> {
         let record = self.store.totp_secret(account).await?;
         let enrolled = record
             .as_ref()
             .filter(|r| r.confirmed_at.is_some())
-            .map(|r| TotpSecret::from_bytes(r.secret.clone()));
+            .map(|r| self.stored_secret(account, &r.secret))
+            .transpose()?;
         let secret = enrolled.as_ref().unwrap_or(&self.dummy);
 
         let step = self.totp.matching_step(secret, presented, self.clock.now());
@@ -1138,14 +1239,57 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
         account: &AccountId,
         presented: &str,
     ) -> Result<RecoveryAccepted, AuthError> {
+        self.refuse_when_capped(account).await?;
         let digest = recovery::digest(presented);
-        if !self.store.consume_recovery_code(account, &digest).await? {
-            return Err(AuthError::InvalidCredentials);
-        }
+        let spent = self.store.consume_recovery_code(account, &digest).await?;
+        let proof = if spent {
+            Ok(Verified::minted(
+                account.clone(),
+                FactorSet::of([FactorKind::RecoveryCode]),
+            ))
+        } else {
+            Err(AuthError::InvalidCredentials)
+        };
+        let proof = self.count(account, proof).await?;
         Ok(RecoveryAccepted {
-            proof: Verified::minted(account.clone(), FactorSet::of([FactorKind::RecoveryCode])),
+            proof,
             remaining: self.store.count_recovery_codes(account).await?,
         })
+    }
+
+    /// Refuses every code, right or wrong, once the account has had
+    /// [`SECOND_FACTOR_MAX_FAILURES`] wrong ones in the window. A right
+    /// code is refused too: answering it would tell a guessing run when it
+    /// has won.
+    async fn refuse_when_capped(&self, account: &AccountId) -> Result<(), AuthError> {
+        let window_start = self.clock.now() - SECOND_FACTOR_WINDOW;
+        let failures = self
+            .store
+            .second_factor_failures(account, window_start)
+            .await?;
+        if failures >= SECOND_FACTOR_MAX_FAILURES {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Ok(())
+    }
+
+    /// Counts a wrong code, or forgets the count after a right one.
+    async fn count(
+        &self,
+        account: &AccountId,
+        outcome: Result<Verified, AuthError>,
+    ) -> Result<Verified, AuthError> {
+        match &outcome {
+            Ok(_) => self.store.clear_second_factor_failures(account).await?,
+            Err(AuthError::InvalidCredentials) => {
+                let now = self.clock.now();
+                self.store
+                    .record_second_factor_failure(account, now, now - SECOND_FACTOR_WINDOW)
+                    .await?;
+            }
+            Err(_) => {}
+        }
+        outcome
     }
 
     /// Whether an elevation granted at `since` is still fresh.
@@ -1157,6 +1301,26 @@ impl<S: MfaStore, C: Clock> Mfa<S, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sealed_proof_is_signed_under_its_own_tag() {
+        let key = SigningKey::from_bytes([9; 32]);
+        let proof = Verified::minted(AccountId::new("ada"), FactorSet::of([FactorKind::Password]));
+        let sealed = proof.seal(&key, 100, 60);
+        let (encoded, tag) = sealed.rsplit_once('.').unwrap();
+        // The signature is over the tagged message, not the bare payload, so
+        // it verifies as no other kind of message under the same key.
+        assert_eq!(
+            crate::random::unb64(tag).unwrap(),
+            key.sign_message(&proof_message(encoded))
+        );
+        assert_ne!(
+            crate::random::unb64(tag).unwrap(),
+            key.sign_message(encoded.as_bytes())
+        );
+        assert!(Verified::unseal(&key, 100, &sealed).is_some());
+        assert!(crate::oauth::FlowState::unseal(&key, &sealed).is_err());
+    }
 
     #[test]
     fn a_set_round_trips_through_its_names() {

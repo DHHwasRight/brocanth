@@ -260,6 +260,31 @@ impl<S: AuthStore, C: Clock> Accounts<S, C> {
         }
     }
 
+    /// Creates an account whose address the operator vouches for, so it is
+    /// verified from the start. For [`crate::staff::ensure_superuser`],
+    /// whose address comes from the operator's configuration; never for a
+    /// form. `None` when the address is taken.
+    pub(crate) async fn create_vouched(
+        &self,
+        email: &EmailAddress,
+        password: &str,
+    ) -> Result<Option<Account>, AuthError> {
+        let hash = self.passwords.hash(password)?;
+        match self
+            .store
+            .create_account(NewAccount {
+                email: Some(email.clone()),
+                email_verified: true,
+                password_hash: Some(hash),
+            })
+            .await
+        {
+            Ok(account) => Ok(Some(account)),
+            Err(StoreError::EmailTaken) => Ok(None),
+            Err(other) => Err(other.into()),
+        }
+    }
+
     /// Authenticates an address and a password.
     ///
     /// Answers an [`Authenticated`], which carries the account **and** a

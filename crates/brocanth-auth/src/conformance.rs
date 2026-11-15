@@ -210,6 +210,8 @@ macro_rules! mfa_store_conformance {
                 a_recovery_code_is_spent_once,
                 replacing_recovery_codes_with_nothing_removes_them,
                 concurrent_spends_of_one_recovery_code_win_once,
+                second_factor_failures_count_in_a_window_and_clear,
+                concurrent_second_factor_failures_all_count,
             ]
         );
     };
@@ -1036,6 +1038,57 @@ pub mod mfa_store {
         .await;
         let won = results.iter().filter(|w| **w).count();
         assert_eq!(won, 1, "one recovery code was spent {won} times");
+    }
+
+    /// Wrong second-factor codes count per account in a window that begins
+    /// at the first one; a read sees only a live window; clear forgets it.
+    pub async fn second_factor_failures_count_in_a_window_and_clear<S: MfaStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        let eve = account(&*store, None).await;
+        assert_eq!(store.second_factor_failures(&ada, T0).await.unwrap(), 0);
+        for expected in [1u32, 2, 3] {
+            let n = store
+                .record_second_factor_failure(&ada, T0, T0 - 100)
+                .await
+                .unwrap();
+            assert_eq!(n, expected);
+        }
+        assert_eq!(store.second_factor_failures(&ada, T0).await.unwrap(), 3);
+        assert_eq!(
+            store.second_factor_failures(&ada, T0 + 1).await.unwrap(),
+            0,
+            "a window that began before the start is over"
+        );
+        assert_eq!(store.second_factor_failures(&eve, T0).await.unwrap(), 0);
+        assert_eq!(
+            store
+                .record_second_factor_failure(&ada, T0 + 500, T0 + 1)
+                .await
+                .unwrap(),
+            1,
+            "a new window"
+        );
+        store.clear_second_factor_failures(&ada).await.unwrap();
+        assert_eq!(store.second_factor_failures(&ada, T0).await.unwrap(), 0);
+    }
+
+    /// Many wrong codes at once: each one counts.
+    pub async fn concurrent_second_factor_failures_all_count<S: MfaStore>(store: Arc<S>) {
+        let ada = account(&*store, None).await;
+        race(&store, |store, _| {
+            let ada = ada.clone();
+            async move {
+                store
+                    .record_second_factor_failure(&ada, T0, T0 - 100)
+                    .await
+                    .expect("record")
+            }
+        })
+        .await;
+        assert_eq!(
+            store.second_factor_failures(&ada, T0 - 100).await.unwrap(),
+            RACERS as u32
+        );
     }
 }
 

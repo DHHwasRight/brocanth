@@ -217,3 +217,80 @@ async fn gate_is_a_constant_predicate() {
         "a row rule still opens what the role does not"
     );
 }
+
+/// An elevated session for `email`, as the operator of an impersonation.
+async fn elevated(auth: &Services, email: &str) -> brocanth_auth::SessionRecord {
+    let cookie = signed_in(auth, email).await;
+    let session = auth.sessions().from_cookie_header(&cookie).await.unwrap();
+    let proof = auth
+        .accounts()
+        .login(email, "a long passphrase")
+        .await
+        .unwrap()
+        .into_proof();
+    let enrolled = Enrolled::without_asking_the_store(proof.account().clone(), FactorSet::empty());
+    let elevation = FactorPolicy::recommended()
+        .for_elevation(&enrolled, proof)
+        .expect("a password elevates an account with no second factor");
+    auth.sessions()
+        .elevate(&session.id, elevation)
+        .await
+        .unwrap()
+        .session
+}
+
+/// Impersonating a member of staff hands over no staff rights, and
+/// `Staff::impersonate` refuses it outright.
+#[tokio::test]
+async fn an_impersonated_session_is_not_staff() {
+    let auth = services();
+    let ops = account(&auth, "ops@example.com").await;
+    auth.store().set_superuser(&ops, true).await.unwrap();
+    let ed = account(&auth, "ed@example.com").await;
+    let plain = account(&auth, "plain@example.com").await;
+    auth.store()
+        .put_role(&Role::new("support", [Staff::IMPERSONATE]))
+        .await
+        .unwrap();
+    auth.store().assign_role(&ed, "support").await.unwrap();
+
+    // Through the bare session call, Ed acts as the superuser: no rights.
+    let operator = elevated(&auth, "ed@example.com").await;
+    let acting = auth
+        .sessions()
+        .impersonate(&operator, &ops, "TICKET-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        Staff::from_cookie_header(&auth, &header(&acting.cookie))
+            .await
+            .unwrap(),
+        None,
+        "an impersonation of a superuser is not a superuser"
+    );
+
+    // Through `Staff::impersonate`, a staff subject is refused.
+    let me = Staff::load(&**auth.store(), &ed).await.unwrap().unwrap();
+    let refused = me
+        .impersonate(&auth, &operator, &ops, "TICKET-2")
+        .await
+        .expect_err("a staff subject is refused");
+    assert!(refused.to_string().contains("help:"), "{refused}");
+    me.impersonate(&auth, &operator, &plain, "TICKET-3")
+        .await
+        .expect("a customer can be impersonated with the permission");
+
+    // Without the permission, nobody is impersonated.
+    auth.store()
+        .put_role(&Role::new("editor", ["post.change"]))
+        .await
+        .unwrap();
+    let al = account(&auth, "al@example.com").await;
+    auth.store().assign_role(&al, "editor").await.unwrap();
+    let editor = Staff::load(&**auth.store(), &al).await.unwrap().unwrap();
+    let operator = elevated(&auth, "al@example.com").await;
+    assert!(editor
+        .impersonate(&auth, &operator, &plain, "TICKET-4")
+        .await
+        .is_err());
+}

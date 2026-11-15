@@ -66,7 +66,7 @@ fn the_screens_are_pages_with_a_csrf_field_in_every_form() {
     let files = shape("auth-screens", SCREENS);
     let markup = file(&files, "src/pages/account/screens.rsx");
     let forms = markup.matches("<form method=\"post\"").count();
-    assert_eq!(forms, 8, "every screen posts");
+    assert_eq!(forms, 9, "every screen posts");
     assert_eq!(markup.matches("{! csrf}").count(), forms, "{markup}");
     let plugin = file(&files, "src/plugins/auth_screens/mod.rs");
     assert!(plugin.contains("mod tests"));
@@ -85,6 +85,21 @@ fn with_postgres_the_generated_test_is_left_out() {
     let files = brocanth_cli::testing::generate("my-blog", &picks, MODULES)
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!file(&files, "src/plugins/auth_screens/mod.rs").contains("mod tests"));
+}
+
+/// `db` alone is a Postgres database: accounts and sessions go there, and
+/// the dependency line turns `postgres` on through `feature_with`.
+#[test]
+fn with_db_accounts_live_in_postgres() {
+    let files = brocanth_cli::testing::generate("my-blog", &["config", "db", "auth"], MODULES)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(file(&files, "src/plugins/auth/mod.rs").contains("pub type Store = PgStore;"));
+    let manifest = file(&files, "Cargo.toml");
+    let line = manifest
+        .lines()
+        .find(|l| l.starts_with("brocanth-auth = "))
+        .expect("an auth line");
+    assert!(line.contains("\"postgres\""), "{line}");
 }
 
 /// A screen without the CSRF check is refused, not written.
@@ -154,6 +169,10 @@ fn provider_sign_in_mounts_the_flow_and_reads_its_section() {
         );
     }
     assert!(plugin.contains("fn a_printed_settings_never_shows_a_secret()"));
+    // The callback is a cross-site navigation that reads the session.
+    let auth = file(&files, "src/plugins/auth/mod.rs");
+    assert!(auth.contains("same_site: SameSite::Lax,"), "{auth}");
+    assert!(!auth.contains("SameSite::Strict"), "{auth}");
 }
 
 /// Superusers and roles with the admin, accounts in Postgres and a command
