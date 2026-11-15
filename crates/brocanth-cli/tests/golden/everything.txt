@@ -133,10 +133,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
+    brocanth_command::main_with(
+        brocanth_command::Context::boot(crate::app::APP)?,
+        plugins::flag_args,
+    )
 }
 
-// brocanth-digest: 66933f175a53b9f3
+// brocanth-digest: 20bcdda031e957d8
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -433,24 +436,31 @@ async fn run(
             }),
         };
     }
-    // Nothing when the drain finished. After a timeout, this drops the
-    // connections that are still open.
-    serving.abort();
+    // Nothing when the drain finished. After a timeout, this ends the
+    // listener task, and the server aborts every connection it still has.
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
-    match owned(app).await {
+    match owned(app, remaining).await {
         Some(mut app) => {
+            let remaining = grace.saturating_sub(started.elapsed());
             let report = app.core.shutdown(reason, Some(remaining));
             plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => {
+            let why = "a request still holds the application, so no plugin stopped";
+            plugins::say!(warn, "{why}");
+            failed.get_or_insert_with(|| why.to_string());
+        }
     }
     match failed {
         None => Ok(()),
@@ -470,21 +480,23 @@ fn stopped(
 }
 
 /// The application back from the connections that shared it, or `None` when
-/// one of them still runs.
+/// one of them still holds it after `budget`.
 ///
-/// `App::shutdown` needs `&mut`. A finished connection task can be a few
-/// instructions from dropping its clone, so this yields a few times first.
-async fn owned(mut app: Arc<App>) -> Option<App> {
-    for _ in 0..64 {
+/// `App::shutdown` needs `&mut`. An aborted connection task drops its clone
+/// when the runtime next reaches it, so this waits a little, inside the
+/// grace period, and at least a few milliseconds.
+async fn owned(mut app: Arc<App>, budget: Duration) -> Option<App> {
+    let until = Instant::now() + budget.max(Duration::from_millis(50));
+    loop {
         match Arc::try_unwrap(app) {
             Ok(app) => return Some(app),
-            Err(shared) => {
+            Err(shared) if Instant::now() < until => {
                 app = shared;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// What the stop thread reports to [`run`].
@@ -1446,6 +1458,24 @@ fn mounted(
     crate::plugins::auth_oauth::mount(routes, crate::modules::auth_oauth::MODULE.mount_at)?;
     crate::plugins::oauth_client::mount(routes, crate::modules::oauth_client::MODULE.mount_at)?;
     Ok(())
+}
+
+/// Every route `mounted` adds, as `(verb, pattern)`, for the `routes`
+/// command. It runs `mounted` on an empty table, so the list is the one the
+/// server serves and not a second record of it.
+pub fn mounted_routes() -> Result<Vec<(String, String)>, ::brocanth::routing::BuildError> {
+    let mut routes = ::brocanth::routing::Router::builder();
+    mounted(&mut routes)?;
+    let table = routes.build()?;
+    Ok(table
+        .routes()
+        .iter()
+        .flat_map(|(template, allow)| {
+            allow
+                .iter()
+                .map(move |verb| (verb.as_str().to_string(), template.pattern().to_string()))
+        })
+        .collect())
 }
 
 // -- the entrance ----------------------------------------------------------
@@ -7782,7 +7812,8 @@ use crate::plugins::shape::config::Module;
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/sessions.rs =====
-//! `sessions`: a cookie, and a `Session` the context hands a handler.
+//! `sessions`: a placeholder: the cookie's name on the context; no session
+//! state, no signature.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -9995,28 +10026,6 @@ pub mod settings;
 
 // brocanth-digest: e19130295a5ab4cb
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
-===== src/commands/serve.rs =====
-//! `serve` -- the one command the scaffold wrote.
-//!
-//! It is ordinary project code: rename it, give it more flags, or delete it.
-//! The framework does not own this command line.
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Serve the application over HTTP.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Serve {
-    /// Address to bind.
-    #[arg(long, default_value_t = crate::app::default_addr())]
-    pub addr: String,
-}
-
-impl Command for Serve {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
-    }
-}
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
 //!
@@ -10061,6 +10070,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default. A step that needs more asks for it in its own job.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -10076,8 +10089,9 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      # The tests that need Postgres read this; without it they skip.
-      BROCANTH_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # `[db] url` for the config loader, so a test that loads the
+      # configuration as the server does reaches this service.
+      MY_BLOG_DB__URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       # Reads rust-toolchain.toml, and caches the target directory.
@@ -10155,10 +10169,12 @@ ENV MY_BLOG_ADDR=0.0.0.0:3000 \
     MY_BLOG_ENV=production
 EXPOSE 3000
 
-# `/up` is the liveness probe of `observability-health`. Any HTTP answer
-# passes, so a project without it passes with a 404: the process answers.
+# `/up` is the liveness probe of `observability-health`. With that module,
+# `curl -f` fails the check on any status that is not 2xx. Without it, any
+# HTTP answer passes, so the 404 from a missing `/up` means "the process
+# answers".
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -sS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
+  CMD curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:3000/up || exit 1
 
 # `serve` drains on SIGTERM for `[server] shutdown_grace_secs` (25 by
 # default). Give `docker stop` more than that: `docker stop -t 30`.
@@ -10245,17 +10261,31 @@ spec:
               value: "25"
             - name: MY_BLOG_OBSERVABILITY__DRAIN_DELAY_SECS
               value: "5"
+            # The probe paths below, pinned here so a config file that moves
+            # them cannot leave the probes asking for a 404.
+            - name: MY_BLOG_OBSERVABILITY__LIVE_PATH
+              value: /up
+            - name: MY_BLOG_OBSERVABILITY__READY_PATH
+              value: /readyz
+            - name: MY_BLOG_OBSERVABILITY__METRICS_BIND
+              value: "0.0.0.0:9090"
           livenessProbe:
             httpGet:
               path: /up
               port: http
             periodSeconds: 10
+          # `/readyz` runs every plugin check, each with a 2 s budget
+          # (`check_timeout`). The probe waits 3 s, and one slow check does
+          # not drop every replica at once: it takes three misses. The drain
+          # is unaffected, because `/readyz` answers 503 for the whole
+          # `drain_delay_secs`.
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
             periodSeconds: 2
-            failureThreshold: 1
+            timeoutSeconds: 3
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
@@ -10914,6 +10944,7 @@ fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
 use std::collections::BTreeSet;
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_db::migrate::Lock;
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
 use brocanth_model::Orm;
@@ -10989,57 +11020,73 @@ enum Apply {
 
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
-    let config = database()?;
+    let mut config = database()?;
+    // `[db]` is tuned for requests. A migration may run longer than a
+    // request may, and it writes: no statement timeout, no read-only.
+    config.statement_timeout = None;
+    config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
-        let orm = Orm::from_db(&pool);
-        let db = orm.connection();
-        let before = Migrator::get_migration_with_status(db).await?;
-        let named = |status: MigrationStatus| -> Vec<String> {
-            before
-                .iter()
-                .filter(|m| m.status() == status)
-                .map(|m| m.name().to_string())
-                .collect()
-        };
-        match what {
-            Apply::Up => {
-                let pending = named(MigrationStatus::Pending);
-                Migrator::up(db, None).await?;
-                if pending.is_empty() {
-                    println!("Nothing to apply: each migration is applied.");
-                }
-                for name in pending {
-                    println!("applied      {name}");
-                }
+        // SeaORM takes no lock. This is the advisory lock brocanth-db's
+        // own migrator takes, so two release jobs take turns rather than
+        // apply one pending list twice. Held until the end, and the status
+        // below is read under it.
+        let lock = Lock::acquire(&pool).await?;
+        let result = locked(&pool, what).await;
+        lock.release().await;
+        result
+    })
+}
+
+/// `apply`, under the lock.
+async fn locked(pool: &Db, what: Apply) -> anyhow::Result<()> {
+    let orm = Orm::from_db(pool);
+    let db = orm.connection();
+    let before = Migrator::get_migration_with_status(db).await?;
+    let named = |status: MigrationStatus| -> Vec<String> {
+        before
+            .iter()
+            .filter(|m| m.status() == status)
+            .map(|m| m.name().to_string())
+            .collect()
+    };
+    match what {
+        Apply::Up => {
+            let pending = named(MigrationStatus::Pending);
+            Migrator::up(db, None).await?;
+            if pending.is_empty() {
+                println!("Nothing to apply: each migration is applied.");
             }
-            Apply::Down(n) => {
-                let applied = named(MigrationStatus::Applied);
-                Migrator::down(db, Some(n)).await?;
-                if applied.is_empty() {
-                    println!("Nothing to roll back: no migration is applied.");
-                }
-                for name in applied.iter().rev().take(n as usize) {
-                    println!("rolled back  {name}");
-                }
-            }
-            Apply::Status => {
-                if before.is_empty() {
-                    println!("No migration in migrations/.");
-                }
-                for m in &before {
-                    let status = match m.status() {
-                        MigrationStatus::Applied => "applied",
-                        MigrationStatus::Pending => "pending",
-                    };
-                    println!("{status:<12} {}", m.name());
-                }
+            for name in pending {
+                println!("applied      {name}");
             }
         }
-        Ok(())
-    })
+        Apply::Down(n) => {
+            let applied = named(MigrationStatus::Applied);
+            Migrator::down(db, Some(n)).await?;
+            if applied.is_empty() {
+                println!("Nothing to roll back: no migration is applied.");
+            }
+            for name in applied.iter().rev().take(n as usize) {
+                println!("rolled back  {name}");
+            }
+        }
+        Apply::Status => {
+            if before.is_empty() {
+                println!("No migration in migrations/.");
+            }
+            for m in &before {
+                let status = match m.status() {
+                    MigrationStatus::Applied => "applied",
+                    MigrationStatus::Pending => "pending",
+                };
+                println!("{status:<12} {}", m.name());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Runs the `migrate` tool with these arguments, from the project root.
@@ -11244,10 +11291,10 @@ fn database() -> anyhow::Result<DbConfig> {
 //! `routes signup` is the one page and `routes POST` is every route that
 //! writes.
 //!
-//! These are the pages. A plugin that mounts its own routes through a
-//! `RouteSource` would not be in the list, and nothing this project has
-//! mounts one -- so today the two are the same table. Say so here if that
-//! stops being true.
+//! The routes a module mounts (an admin, an API under `/api`) follow the
+//! pages, from `crate::pages::mounted_routes()`. That runs the same
+//! `mounted` the server runs, so the list cannot fall behind either. Their
+//! handler column reads `(mounted)`: the module owns the function.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
@@ -11261,7 +11308,7 @@ pub struct Routes {
 
 impl Command for Routes {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        let (header, mut rows) = table();
+        let (header, mut rows) = table()?;
         if let Some(filter) = &self.filter {
             rows.retain(|row| row.iter().any(|cell| cell.contains(filter)));
         }
@@ -11291,6 +11338,9 @@ impl Command for Routes {
     }
 }
 
+/// The handler column of a route a module mounted.
+const MOUNTED: &str = "(mounted)";
+
 /// One line, every cell padded to its column but the last.
 ///
 /// The last is left alone, because trailing spaces are invisible until
@@ -11315,9 +11365,9 @@ fn print_row<'a>(widths: &[usize], cells: impl Iterator<Item = &'a str>) {
 /// Five columns, because this project has `input`: `described()` read every
 /// handler's signature while the crate compiled, so what a route takes and
 /// gives is known here and worth a column.
-fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
+fn table() -> anyhow::Result<(Vec<&'static str>, Vec<Vec<String>>)> {
     let described = crate::pages::described();
-    let rows = crate::pages::handlers()
+    let mut rows: Vec<Vec<String>> = crate::pages::handlers()
         .iter()
         .map(|(verb, pattern, handler)| {
             let shape = described
@@ -11340,7 +11390,38 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
             ]
         })
         .collect();
-    (vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows)
+    for (verb, pattern) in crate::pages::mounted_routes()? {
+        rows.push(vec![
+            verb,
+            pattern,
+            MOUNTED.to_string(),
+            "-".into(),
+            "-".into(),
+        ]);
+    }
+    Ok((vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows))
+}
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value_t = crate::app::default_addr())]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
 }
 ===== src/pages/about.rsx =====
 // The parameters are this page's contract with its handler. Rename one and
@@ -18202,7 +18283,11 @@ pub async fn require(ctx: &Ctx, permission: &str) -> Result<Staff, Error> {
     Ok(staff)
 }
 ===== src/plugins/sessions/mod.rs =====
-//! Cookie sessions, and the one value they put on the context.
+//! A session placeholder: the cookie's name, on the context.
+//!
+//! Nothing here keeps state or signs a cookie, and the `session` layer
+//! passes every request through. Write the store and the signature before
+//! anything trusts a session: a login, a cart, a CSRF token.
 
 use brocanth::plugin_api::{Lifecycle, MiddlewareCatalog, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
@@ -18278,7 +18363,7 @@ impl Plugin for Sessions {
     fn configure_router(&mut self, catalog: &mut MiddlewareCatalog<'_>) -> Result<(), PluginError> {
         catalog.offer(
             "session",
-            "reads the cookie and puts a Session on the context",
+            "placeholder: passes the request through; reads and signs no cookie yet",
         );
         Ok(())
     }
@@ -18297,9 +18382,9 @@ impl Plugin for Sessions {
     }
 }
 
-/// The layer `session` mounts. Reading the cookie off the request and writing
-/// `Set-Cookie` on the way out both need the request type that arrives with the
-/// HTTP server; the seam is here and it is already the right shape.
+/// The layer `session` mounts. It does nothing yet: it passes the request
+/// through. Reading the cookie off the request, checking its signature and
+/// writing `Set-Cookie` on the way out go here; the seam is the right shape.
 ///
 /// A layer may wait, which is what a session store wants: the lookup is
 /// awaited here and holds no thread.
@@ -19558,7 +19643,7 @@ request.
 - `observability-tracing`  an OTLP span per request and per job, W3C traceparent in and out; needs a collector
 - `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
-- `sessions`  a cookie, and a `Session` the context hands a handler
+- `sessions`  a placeholder: the cookie's name on the context; no session state, no signature
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
@@ -19798,6 +19883,19 @@ the broker's frames. `src/plugins/realtime_websocket/mod.rs` is the loop;
   socket.onmessage = (e) => console.log(e.data);
   socket.onopen = () => socket.send("subscribe posts/42");
   ```
+
+## Tasks
+
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
+`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
+below the line that starts `// Your commands`. `brocanth add` rewrites the
+lines above it and keeps yours. The command becomes a subcommand
+automatically — registration happens at link time.
+
+```
+brocanth --help      # lists this project's commands too
+brocanth serve
+```
 
 ## HTML from users
 
@@ -20414,19 +20512,6 @@ A stream is never compressed. To keep a buffered body as it is, set
 `Cache-Control: no-transform`. A hook of your own that rewrites the
 body goes in `runs_after`, so compression waits for it.
 
-## Tasks
-
-A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
-`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
-below the line that starts `// Your commands`. `brocanth add` rewrites the
-lines above it and keeps yours. The command becomes a subcommand
-automatically — registration happens at link time.
-
-```
-brocanth --help      # lists this project's commands too
-brocanth serve
-```
-
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -20451,7 +20536,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 52f15a04d2434908 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -21007,7 +21092,7 @@ kind = ["external"]
 files = ["src/modules/docker.rs", ".dockerignore", "Dockerfile"]
 config = []
 crates = []
-adapted_to = []
+adapted_to = ["observability-health"]
 
 [modules.docker-kubernetes]
 version = "0.1.0"
@@ -21015,7 +21100,7 @@ kind = ["external"]
 files = ["src/modules/docker_kubernetes.rs", "deploy/kubernetes.yaml"]
 config = []
 crates = []
-adapted_to = []
+adapted_to = ["observability-metrics"]
 
 [modules.ci]
 version = "0.1.0"
@@ -21033,4 +21118,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 9289bfd8fe1aae33

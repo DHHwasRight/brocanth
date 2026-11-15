@@ -136,10 +136,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> brocanth_command::anyhow::Result<()> {
-    brocanth_command::main_with(brocanth_command::Context::boot()?, plugins::flag_args)
+    brocanth_command::main_with(
+        brocanth_command::Context::boot(crate::app::APP)?,
+        plugins::flag_args,
+    )
 }
 
-// brocanth-digest: b41ab8e212735100
+// brocanth-digest: b9e6c26b2108095b
 ===== src/app.rs =====
 //! My Blog -- everything this binary contains, in the order it happens.
 //!
@@ -437,24 +440,31 @@ async fn run(
             }),
         };
     }
-    // Nothing when the drain finished. After a timeout, this drops the
-    // connections that are still open.
-    serving.abort();
+    // Nothing when the drain finished. After a timeout, this ends the
+    // listener task, and the server aborts every connection it still has.
+    // Awaited, so the aborts are under way before the plugins stop; not
+    // when it finished, because a select above may have read it already.
+    if !serving.is_finished() {
+        serving.abort();
+        let _ = serving.await;
+    }
 
     // Phase 2: the plugins, inside what is left of the grace period.
     let remaining = grace.saturating_sub(started.elapsed());
-    match owned(app).await {
+    match owned(app, remaining).await {
         Some(mut app) => {
+            let remaining = grace.saturating_sub(started.elapsed());
             let report = app.core.shutdown(reason, Some(remaining));
             plugins::say!(info, "{report}");
             if failed.is_none() && (!report.is_clean() || report.overran()) {
                 failed = Some(format!("the plugins did not stop cleanly in {grace:?}"));
             }
         }
-        None => plugins::say!(
-            warn,
-            "a request still holds the application, so no plugin stopped"
-        ),
+        None => {
+            let why = "a request still holds the application, so no plugin stopped";
+            plugins::say!(warn, "{why}");
+            failed.get_or_insert_with(|| why.to_string());
+        }
     }
     match failed {
         None => Ok(()),
@@ -474,21 +484,23 @@ fn stopped(
 }
 
 /// The application back from the connections that shared it, or `None` when
-/// one of them still runs.
+/// one of them still holds it after `budget`.
 ///
-/// `App::shutdown` needs `&mut`. A finished connection task can be a few
-/// instructions from dropping its clone, so this yields a few times first.
-async fn owned(mut app: Arc<App>) -> Option<App> {
-    for _ in 0..64 {
+/// `App::shutdown` needs `&mut`. An aborted connection task drops its clone
+/// when the runtime next reaches it, so this waits a little, inside the
+/// grace period, and at least a few milliseconds.
+async fn owned(mut app: Arc<App>, budget: Duration) -> Option<App> {
+    let until = Instant::now() + budget.max(Duration::from_millis(50));
+    loop {
         match Arc::try_unwrap(app) {
             Ok(app) => return Some(app),
-            Err(shared) => {
+            Err(shared) if Instant::now() < until => {
                 app = shared;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// What the stop thread reports to [`run`].
@@ -1220,6 +1232,12 @@ pub fn page_async(
     handler: for<'a> fn(&'a mut Ctx) -> BoxFuture<'a, Result<Response, Error>>,
 ) -> Handler {
     Box::new(handler)
+}
+
+/// Every route a module mounts, for the `routes` command. No module in this
+/// project mounts one; a module that does replaces this function.
+pub fn mounted_routes() -> Result<Vec<(String, String)>, ::brocanth::routing::BuildError> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -2220,28 +2238,6 @@ pub mod settings;
 
 // brocanth-digest: e621d24e31731f25
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
-===== src/commands/serve.rs =====
-//! `serve` -- the one command the scaffold wrote.
-//!
-//! It is ordinary project code: rename it, give it more flags, or delete it.
-//! The framework does not own this command line.
-
-use brocanth_command::{anyhow, clap, cmd, Command, Context};
-
-/// Serve the application over HTTP.
-#[cmd]
-#[derive(clap::Args)]
-pub struct Serve {
-    /// Address to bind.
-    #[arg(long, default_value_t = crate::app::default_addr())]
-    pub addr: String,
-}
-
-impl Command for Serve {
-    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
-    }
-}
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
 //!
@@ -2403,10 +2399,10 @@ impl Command for Export {
 //! `routes signup` is the one page and `routes POST` is every route that
 //! writes.
 //!
-//! These are the pages. A plugin that mounts its own routes through a
-//! `RouteSource` would not be in the list, and nothing this project has
-//! mounts one -- so today the two are the same table. Say so here if that
-//! stops being true.
+//! The routes a module mounts (an admin, an API under `/api`) follow the
+//! pages, from `crate::pages::mounted_routes()`. That runs the same
+//! `mounted` the server runs, so the list cannot fall behind either. Their
+//! handler column reads `(mounted)`: the module owns the function.
 
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 
@@ -2420,7 +2416,7 @@ pub struct Routes {
 
 impl Command for Routes {
     fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
-        let (header, mut rows) = table();
+        let (header, mut rows) = table()?;
         if let Some(filter) = &self.filter {
             rows.retain(|row| row.iter().any(|cell| cell.contains(filter)));
         }
@@ -2450,6 +2446,9 @@ impl Command for Routes {
     }
 }
 
+/// The handler column of a route a module mounted.
+const MOUNTED: &str = "(mounted)";
+
 /// One line, every cell padded to its column but the last.
 ///
 /// The last is left alone, because trailing spaces are invisible until
@@ -2475,8 +2474,8 @@ fn print_row<'a>(widths: &[usize], cells: impl Iterator<Item = &'a str>) {
 /// answers it. What each one takes and gives would be a fourth and a fifth,
 /// and they arrive with the `input` module -- without it nothing in this
 /// project has read a handler's signature.
-fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
-    let rows = crate::pages::handlers()
+fn table() -> anyhow::Result<(Vec<&'static str>, Vec<Vec<String>>)> {
+    let mut rows: Vec<Vec<String>> = crate::pages::handlers()
         .iter()
         .map(|(verb, pattern, handler)| {
             vec![
@@ -2486,7 +2485,32 @@ fn table() -> (Vec<&'static str>, Vec<Vec<String>>) {
             ]
         })
         .collect();
-    (vec!["VERB", "PATTERN", "HANDLER"], rows)
+    for (verb, pattern) in crate::pages::mounted_routes()? {
+        rows.push(vec![verb, pattern, MOUNTED.to_string()]);
+    }
+    Ok((vec!["VERB", "PATTERN", "HANDLER"], rows))
+}
+===== src/commands/serve.rs =====
+//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value_t = crate::app::default_addr())]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
 }
 ===== src/pages/robots.txt.rs =====
 //! `/robots.txt` -- because the file is called `robots.txt.rs`.
@@ -2798,6 +2822,19 @@ A handler returns a value and never writes a response itself. That is
 what makes a half-written body on an error impossible rather than
 unlikely.
 
+## Tasks
+
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
+`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
+below the line that starts `// Your commands`. `brocanth add` rewrites the
+lines above it and keeps yours. The command becomes a subcommand
+automatically — registration happens at link time.
+
+```
+brocanth --help      # lists this project's commands too
+brocanth serve
+```
+
 ## Static site
 
 This project compiles to files. `cargo run -- export` writes every
@@ -2814,19 +2851,6 @@ is the preview, not the deployment.
   (`/about`); the export prefixes them.
 - Do not add a module that runs in a server (a session, a database, a
   queue, the observability probes). `brocanth add` refuses it.
-
-## Tasks
-
-A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under
-`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,
-below the line that starts `// Your commands`. `brocanth add` rewrites the
-lines above it and keeps yours. The command becomes a subcommand
-automatically — registration happens at link time.
-
-```
-brocanth --help      # lists this project's commands too
-brocanth serve
-```
 
 ## Decisions that belong to the person
 
@@ -2852,7 +2876,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: af3f923567d54c47 -->
+<!-- brocanth-digest: 7571a44a80014eb7 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
