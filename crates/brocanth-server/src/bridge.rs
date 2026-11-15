@@ -919,13 +919,13 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             })
             .await;
 
-        // `run` returns after every connection task has ended -- drained, or
-        // aborted when the grace ran out -- so the tasks have dropped their
-        // clones of this `Arc`. A handler on a blocking thread, or an HTTP/2
-        // stream task, may still hold one for a moment; yielding a few times
-        // wins that race. If it does not, the plugins keep running rather
-        // than being stopped through a reference somebody else holds, and
-        // the caller hears so: `StillHeld`, not `Ok`.
+        // After a full drain every connection task has finished, but one
+        // can be a few instructions from dropping its clone of this `Arc`;
+        // yielding a few times wins that race. After a drain that ran out of
+        // time, a connection can still hold its clone. Either way, if the
+        // `Arc` stays shared, the plugins keep running rather than being
+        // stopped through a reference somebody else holds, and the caller
+        // hears so: `StillHeld`, not `Ok`.
         let mut report = None;
         for _ in 0..64 {
             match Arc::try_unwrap(bridge) {
