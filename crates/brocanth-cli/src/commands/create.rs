@@ -3472,13 +3472,19 @@ fn hook_record(built: &Built) -> String {
             name.push('2');
         }
         names.push(name.clone());
-        let line = format!("type {name} = Both<<{ty} as HookSource>::Families, {held}>;\n");
-        if line.len() > 101 {
-            aliases.push_str(&format!(
-                "type {name} =\n    Both<<{ty} as HookSource>::Families, {held}>;\n"
-            ));
-        } else {
+        // The three shapes rustfmt gives the alias at 100 columns: one line,
+        // the type on the next line, or one argument per line.
+        let line = format!("type {name} = Both<<{ty} as HookSource>::Families, {held}>;");
+        let wrapped = format!("    Both<<{ty} as HookSource>::Families, {held}>;");
+        if line.len() <= 100 {
             aliases.push_str(&line);
+            aliases.push('\n');
+        } else if wrapped.len() <= 100 {
+            aliases.push_str(&format!("type {name} =\n{wrapped}\n"));
+        } else {
+            aliases.push_str(&format!(
+                "type {name} = Both<\n    <{ty} as HookSource>::Families,\n    {held},\n>;\n"
+            ));
         }
         held = name;
     }

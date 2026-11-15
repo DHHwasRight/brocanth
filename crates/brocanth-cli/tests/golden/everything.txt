@@ -2439,8 +2439,10 @@ type HookedWebhooksIn =
     Both<<crate::plugins::webhooks_in::WebhooksIn as HookSource>::Families, HookedSecurityHeaders>;
 type HookedAuditPlugin =
     Both<<brocanth_audit::AuditPlugin as HookSource>::Families, HookedWebhooksIn>;
-type HookedStorageRoutes =
-    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedAuditPlugin>;
+type HookedStorageRoutes = Both<
+    <crate::plugins::storage_routes::StorageRoutes as HookSource>::Families,
+    HookedAuditPlugin,
+>;
 type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedStorageRoutes>;
 type HookedErrors = Both<<brocanth_errors::Errors as HookSource>::Families, HookedRateLimit>;
@@ -5065,7 +5067,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 4c44b8106ff34521
+// brocanth-digest: 14886f7fdfc46da5
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
