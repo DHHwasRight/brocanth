@@ -13,7 +13,7 @@ The wizard calls it: *Send mail*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md), [`jobs`](jobs.md) |
-| Adapts to | [`config`](config.md), [`jobs`](jobs.md) |
+| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`db`](db.md), [`jobs-memory`](jobs-memory.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-mail` (features `smtp`, `serde`) |

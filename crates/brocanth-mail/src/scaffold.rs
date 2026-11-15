@@ -63,6 +63,14 @@ impl Module for Mail {
             "jobs",
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
         )
+        .adapts_to(
+            "db",
+            "the application opens Postgres, so the test that starts it is left out",
+        )
+        .adapts_to(
+            "jobs-memory",
+            "a memory queue opens no database, so the test that starts the application stays",
+        )
         .asked_in("behaviour", "Send mail")
         .krate(
             Dep::brocanth("brocanth-mail")
@@ -187,7 +195,9 @@ fn plugin_rs(project: &Project) -> String {
     // When the application opens Postgres -- the `db` module, or a `jobs`
     // queue in Postgres -- a build needs a database: that test is left out.
     // A memory queue (`jobs-memory`) opens none, so the test stays.
-    let postgres = project.has("db") || (jobs && !project.has("jobs-memory"));
+    // Both asked every time, so the manifest check sees both questions.
+    let memory_queue = project.has("jobs-memory");
+    let postgres = project.has("db") || (jobs && !memory_queue);
     text.replace("@APP_TEST@", if postgres { "" } else { APP_TEST })
 }
 

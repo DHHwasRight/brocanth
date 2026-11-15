@@ -59,6 +59,21 @@ pub enum MailError {
     Transport(String),
 }
 
+impl MailError {
+    /// Builds a [`MailError::Transport`].
+    pub fn transport(what: impl Into<String>) -> Self {
+        Self::Transport(what.into())
+    }
+
+    pub(crate) fn address(reason: &'static str) -> Self {
+        Self::InvalidAddress { reason }
+    }
+
+    pub(crate) fn header(field: &'static str, reason: &'static str) -> Self {
+        Self::InvalidHeader { field, reason }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MailError;
@@ -75,20 +90,5 @@ mod tests {
             let text = error.to_string();
             assert!(text.contains("\nhelp: "), "{text}");
         }
-    }
-}
-
-impl MailError {
-    /// Builds a [`MailError::Transport`].
-    pub fn transport(what: impl Into<String>) -> Self {
-        Self::Transport(what.into())
-    }
-
-    pub(crate) fn address(reason: &'static str) -> Self {
-        Self::InvalidAddress { reason }
-    }
-
-    pub(crate) fn header(field: &'static str, reason: &'static str) -> Self {
-        Self::InvalidHeader { field, reason }
     }
 }
