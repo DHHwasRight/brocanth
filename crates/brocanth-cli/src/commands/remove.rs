@@ -120,9 +120,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     let manifest_path = root.join("Cargo.toml");
     let manifest_text =
         std::fs::read_to_string(&manifest_path).map_err(|e| read_error(&manifest_path, &e))?;
-    let manifest: DocumentMut = manifest_text
-        .parse()
-        .map_err(|e| vec![Diagnostic::error("Cargo.toml", format!("{e}")).at("Cargo.toml")])?;
+    let manifest: DocumentMut = manifest_text.parse().map_err(|e| {
+        vec![Diagnostic::error("Cargo.toml", format!("{e}"))
+            .at("Cargo.toml")
+            .help("fix the TOML at the line above, then run `brocanth remove` again")]
+    })?;
     let local = add::local_checkout(&manifest);
     let answers = |picks: Vec<&'static str>| Answers {
         name: project.name.clone(),
@@ -318,27 +320,24 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
         return Err(refusals);
     }
 
+    let legacy = moved
+        .is_some()
+        .then(|| root.join(crate::choices::LEGACY_FLAGS));
+    apply(&root, &writes, legacy.as_deref(), &deletes)?;
     let mut table = Table::new();
-    for (full, text, what) in &writes {
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| write_error(parent, &e))?;
-        }
-        std::fs::write(full, text).map_err(|e| write_error(full, &e))?;
+    for (full, _, what) in &writes {
         table.row(vec![
             Cell::styled(shown(&root, full), ACCENT),
             Cell::styled((*what).to_string(), DIM).right(),
         ]);
     }
-    if moved.is_some() {
-        let flags = root.join(crate::choices::LEGACY_FLAGS);
-        std::fs::remove_file(&flags).map_err(|e| write_error(&flags, &e))?;
+    if legacy.is_some() {
         table.row(vec![
             Cell::styled(crate::choices::LEGACY_FLAGS.to_string(), ACCENT),
             Cell::styled("moved to src/modules/".to_string(), DIM).right(),
         ]);
     }
     for full in &deletes {
-        std::fs::remove_file(full).map_err(|e| write_error(full, &e))?;
         prune(&root, full);
         table.row(vec![
             Cell::styled(shown(&root, full), ACCENT),
@@ -396,6 +395,89 @@ fn shown(root: &Path, full: &Path) -> String {
         .unwrap_or(full)
         .display()
         .to_string()
+}
+
+/// The suffix of a file `apply` stages beside the one it replaces.
+const STAGED: &str = ".brocanth-new";
+
+/// Writes, removes `legacy`, and deletes, as close to all-or-nothing as a
+/// file system allows.
+///
+/// Every new text is written to a staged file beside its target first. A
+/// failure there (a full disk, a read-only directory) removes the staged
+/// files and changes nothing. Then each staged file is renamed over its
+/// target and the deletes run; a failure in this second half is rare, and
+/// its error names every path already changed.
+fn apply(
+    root: &Path,
+    writes: &[(PathBuf, String, &'static str)],
+    legacy: Option<&Path>,
+    deletes: &[PathBuf],
+) -> Result<(), Vec<Diagnostic>> {
+    let staged = |full: &Path| {
+        let mut name = full.as_os_str().to_owned();
+        name.push(STAGED);
+        PathBuf::from(name)
+    };
+    let mut written: Vec<PathBuf> = Vec::new();
+    for (full, text, _) in writes {
+        let tmp = staged(full);
+        let made = match full.parent() {
+            Some(parent) => std::fs::create_dir_all(parent).map_err(|e| (parent.to_path_buf(), e)),
+            None => Ok(()),
+        };
+        let result = made.and_then(|()| std::fs::write(&tmp, text).map_err(|e| (tmp.clone(), e)));
+        if let Err((path, e)) = result {
+            for tmp in &written {
+                let _ = std::fs::remove_file(tmp);
+            }
+            let mut out = write_error(&path, &e);
+            out.push(
+                Diagnostic::warning("nothing written", "the project is exactly as it was")
+                    .help("fix the cause above, then run `brocanth remove` again"),
+            );
+            return Err(out);
+        }
+        written.push(tmp);
+    }
+
+    let mut changed: Vec<String> = Vec::new();
+    let failed = |path: &Path, e: &std::io::Error, changed: &[String]| {
+        let mut out = write_error(path, e);
+        let what = if changed.is_empty() {
+            "none".to_string()
+        } else {
+            changed.join(", ")
+        };
+        out.push(
+            Diagnostic::warning(
+                "partly written",
+                format!("these paths already changed: {what}"),
+            )
+            .help(
+                "finish by hand, or restore them with `git checkout -- <path>` and run \
+                 `brocanth remove` again",
+            ),
+        );
+        out
+    };
+    for (full, _, _) in writes {
+        if let Err(e) = std::fs::rename(staged(full), full) {
+            for tmp in written.iter().filter(|tmp| tmp.exists()) {
+                let _ = std::fs::remove_file(tmp);
+            }
+            return Err(failed(full, &e, &changed));
+        }
+        changed.push(shown(root, full));
+    }
+    for full in legacy
+        .into_iter()
+        .chain(deletes.iter().map(PathBuf::as_path))
+    {
+        std::fs::remove_file(full).map_err(|e| failed(full, &e, &changed))?;
+        changed.push(shown(root, full));
+    }
+    Ok(())
 }
 
 /// Delete the directories above `file` that are now empty, up to `root`.
@@ -886,6 +968,43 @@ fn commands_of_yours(path: &str, yours: &str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_write_changes_nothing_and_leaves_no_staged_file() {
+        let root = std::env::temp_dir().join(format!("brocanth-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.rs"), "old").unwrap();
+        std::fs::write(root.join("gone.rs"), "keep").unwrap();
+        // `blocked` is a file, so nothing can be written under it.
+        std::fs::write(root.join("blocked"), "").unwrap();
+        let writes = vec![
+            (root.join("a.rs"), "new".to_string(), "rewritten"),
+            (root.join("blocked/b.rs"), "b".to_string(), "written"),
+        ];
+        let refused = apply(&root, &writes, None, &[root.join("gone.rs")])
+            .expect_err("the second write cannot succeed");
+        let said: String = refused.iter().map(Diagnostic::render).collect();
+        assert!(
+            said.contains("exactly as it was") && said.contains("help:"),
+            "{said}"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "old");
+        assert!(
+            root.join("gone.rs").exists(),
+            "a delete ran before every write was staged"
+        );
+        assert!(
+            !root.join(format!("a.rs{STAGED}")).exists(),
+            "a staged file was left"
+        );
+
+        let writes = vec![(root.join("a.rs"), "new".to_string(), "rewritten")];
+        apply(&root, &writes, None, &[root.join("gone.rs")]).expect("a clean run");
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "new");
+        assert!(!root.join("gone.rs").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn ui() -> Ui {
         Ui::new(crate::ui::Face::Plain, true, false)
