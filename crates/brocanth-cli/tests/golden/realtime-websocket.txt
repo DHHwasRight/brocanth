@@ -2296,8 +2296,6 @@ mod tests {
     use brocanth_server::websocket::{self, Incoming};
     use brocanth_server::{Server, Stopper};
 
-    use super::*;
-
     /// The whole application on a real port.
     async fn serve() -> (SocketAddr, Stopper) {
         let app = Arc::new(crate::app::build().expect("the application builds"));

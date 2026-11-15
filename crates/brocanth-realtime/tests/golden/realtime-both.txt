@@ -2310,8 +2310,6 @@ mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
 
-    use super::*;
-
     async fn status(target: &str) -> u16 {
         let app = crate::app::build().expect("the application builds");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -2426,8 +2424,6 @@ mod tests {
 
     use brocanth_server::websocket::{self, Incoming};
     use brocanth_server::{Server, Stopper};
-
-    use super::*;
 
     /// The whole application on a real port.
     async fn serve() -> (SocketAddr, Stopper) {
