@@ -66,6 +66,10 @@ impl Module for I18n {
             "oauth-client",
             "with `i18n-routing`, the connect pages' `mount_at` is unprefixed, read from src/modules/oauth_client.rs",
         )
+        .adapts_to(
+            "resource",
+            "with `i18n-routing`, the records API's `mount_at` is unprefixed, read from src/modules/resource.rs",
+        )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
         .outside_runtime()
@@ -182,6 +186,7 @@ fn routing_adjust(project: &Project) -> String {
         ("storage-routes", "path"),
         ("auth-oauth", "mount_at"),
         ("oauth-client", "mount_at"),
+        ("resource", "mount_at"),
     ] {
         if project.has(key) {
             chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));

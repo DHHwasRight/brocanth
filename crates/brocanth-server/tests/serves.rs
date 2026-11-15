@@ -28,9 +28,20 @@ impl Running {
         F: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Response> + Send + 'static,
     {
-        let server = Server::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral port");
+        Self::start_with(|server| server, handle).await
+    }
+
+    /// [`Running::start`], with the server's limits set by `configure`.
+    async fn start_with<F, Fut>(configure: impl FnOnce(Server) -> Server, handle: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Response> + Send + 'static,
+    {
+        let server = configure(
+            Server::bind("127.0.0.1:0")
+                .await
+                .expect("an ephemeral port"),
+        );
         let addr = server.local_addr().expect("local addr").to_string();
         let stopper = server.stopper();
         let task = tokio::spawn(async move {
@@ -289,13 +300,16 @@ async fn a_body_over_the_cap_never_reaches_the_handler() {
     const NEVER_CALLED: usize = usize::MAX;
     let seen = Arc::new(AtomicUsize::new(NEVER_CALLED));
     let recorder = Arc::clone(&seen);
-    let server = Running::start(move |request: Request| {
-        let recorder = Arc::clone(&recorder);
-        async move {
-            recorder.store(request.body.len(), Ordering::SeqCst);
-            Response::text(200, "ok")
-        }
-    })
+    let server = Running::start_with(
+        |server| server.max_body(2 * 1024 * 1024),
+        move |request: Request| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                recorder.store(request.body.len(), Ordering::SeqCst);
+                Response::text(200, "ok")
+            }
+        },
+    )
     .await;
 
     let oversized = 3 * 1024 * 1024;
@@ -333,5 +347,120 @@ async fn a_body_under_the_cap_arrives_whole() {
     raw.push_str(&"y".repeat(size));
     let response = send(&server.addr, &raw).await;
     assert!(response.ends_with(&size.to_string()), "{response}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn the_default_cap_takes_a_body_the_multipart_reader_accepts() {
+    // `brocanth-input` accepts 8 MiB per file by default. A cap below that
+    // made its default unreachable.
+    let server = Running::start(|request: Request| async move {
+        Response::text(200, format!("{}", request.body.len()))
+    })
+    .await;
+    let size = 8 * 1024 * 1024;
+    let mut raw = format!(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+    );
+    raw.push_str(&"x".repeat(size));
+    let response = send(&server.addr, &raw).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with(&size.to_string()), "{response}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_that_never_finishes_its_headers_is_cut_off() {
+    // Slowloris: one byte at a time, never the blank line.
+    let server = Running::start_with(
+        |server| server.header_timeout(Duration::from_millis(200)),
+        |_request: Request| async { Response::text(200, "ok") },
+    )
+    .await;
+    let mut stream = TcpStream::connect(&server.addr).await.expect("connect");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+        .await
+        .expect("write");
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
+    assert!(
+        closed.is_ok(),
+        "the connection was held past the header timeout"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_body_that_stops_arriving_is_a_408_and_never_reaches_the_handler() {
+    let server = Running::start_with(
+        |server| server.body_timeout(Duration::from_millis(200)),
+        |_request: Request| async { panic!("a partial body reached the handler") },
+    )
+    .await;
+    let mut stream = TcpStream::connect(&server.addr).await.expect("connect");
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nab")
+        .await
+        .expect("write");
+    let mut bytes = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes)).await;
+    assert!(read.is_ok(), "the server waited past the body timeout");
+    let response = String::from_utf8_lossy(&bytes);
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn bad_chunking_is_a_400_and_not_a_413() {
+    let server = Running::start(|_request: Request| async {
+        panic!("a body that does not frame reached the handler")
+    })
+    .await;
+    let response = send_tolerantly(
+        &server.addr,
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nzz\r\nab\r\n0\r\n\r\n",
+    )
+    .await;
+    if !response.is_empty() {
+        assert!(!response.starts_with("HTTP/1.1 413"), "{response}");
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn past_the_connection_cap_a_client_waits_for_a_slot() {
+    let server = Running::start_with(
+        |server| server.max_connections(1),
+        |_request: Request| async { Response::text(200, "ok") },
+    )
+    .await;
+    // The first client holds the only slot with headers it never ends.
+    let mut first = TcpStream::connect(&server.addr).await.expect("connect");
+    first.write_all(b"GET / HTTP/1.1\r\n").await.expect("write");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let second = tokio::spawn({
+        let addr = server.addr.clone();
+        async move {
+            send(
+                &addr,
+                "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !second.is_finished(),
+        "a second connection was served past the cap"
+    );
+
+    drop(first);
+    let response = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("the slot came free")
+        .expect("the client task");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     server.stop().await;
 }

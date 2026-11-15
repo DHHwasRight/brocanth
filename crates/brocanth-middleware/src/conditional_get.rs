@@ -303,18 +303,31 @@ pub fn http_date(text: &str) -> Option<i64> {
         "Dec" => 12,
         _ => return None,
     };
+    // Four digits, as the format says. A client-sent year of any size
+    // would overflow the arithmetic below.
     let year: i64 = parts.next()?.parse().ok()?;
     let mut clock = parts.next()?.split(':');
-    let hour: i64 = clock.next()?.parse().ok()?;
-    let minute: i64 = clock.next()?.parse().ok()?;
-    let second: i64 = clock.next()?.parse().ok()?;
+    // Unsigned, so `-1` is no time at all.
+    let hour: u8 = clock.next()?.parse().ok()?;
+    let minute: u8 = clock.next()?.parse().ok()?;
+    let second: u8 = clock.next()?.parse().ok()?;
     if parts.next()? != "GMT" || parts.next().is_some() || clock.next().is_some() {
         return None;
     }
-    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+    if !(1..=9999).contains(&year)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
         return None;
     }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+    Some(
+        days_from_civil(year, month, day) * 86_400
+            + i64::from(hour) * 3_600
+            + i64::from(minute) * 60
+            + i64::from(second),
+    )
 }
 
 /// Days from 1970-01-01 to a date in the proleptic Gregorian calendar.
@@ -354,6 +367,11 @@ mod tests {
             "Sun, 06 Nov 1994 08:49:37 UTC",
             "Sun, 06 Nov 1994 25:49:37 GMT",
             "Sun, 06 Nov 1994 08:49 GMT",
+            "Sun, 06 Nov 1994 -1:49:37 GMT",
+            "Sun, 06 Nov 1994 08:-1:37 GMT",
+            "Sun, 06 Nov 99999999999999999 08:49:37 GMT",
+            "Sun, 06 Nov 9223372036854775807 08:49:37 GMT",
+            "Sun, 06 Nov 0 08:49:37 GMT",
             "",
         ] {
             assert_eq!(http_date(text), None, "{text}");

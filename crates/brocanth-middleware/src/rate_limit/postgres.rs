@@ -34,9 +34,13 @@
 //! after the other, and neither is lost.
 //!
 //! An ended window stays in the table until its key comes back or
-//! [`PgStore::sweep`] deletes it. Run the sweep from a job, every few
-//! minutes.
+//! [`PgStore::sweep`] deletes it. The store runs the sweep itself after
+//! every 1024th count, as [`MemoryStore`](super::MemoryStore) does, so a
+//! client that rotates keys does not grow the table without end. A job
+//! that calls `sweep` more often is still fine.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use brocanth::plugin_routes::BoxFuture;
@@ -47,12 +51,17 @@ use super::{Hit, Store, StoreError};
 /// The default table name.
 pub const TABLE: &str = "brocanth_rate_limits";
 
+/// How many counts between two sweeps of the ended windows.
+const SWEEP_EVERY: u64 = 1024;
+
 /// Rate limit counters in one `UNLOGGED` Postgres table.
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
     table: String,
     hit_sql: String,
+    /// Counts so far, shared by every clone, for the sweep.
+    counted: Arc<AtomicU64>,
 }
 
 impl PgStore {
@@ -103,6 +112,7 @@ impl PgStore {
             pool,
             table,
             hit_sql,
+            counted: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -164,6 +174,15 @@ impl Store for PgStore {
                     .fetch_one(&self.pool)
                     .await
                     .map_err(failed)?;
+            if self
+                .counted
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(SWEEP_EVERY)
+            {
+                // The count is already right. A failed sweep only leaves
+                // ended rows for the next one.
+                let _ = self.sweep().await;
+            }
             Ok(Hit {
                 count: u64::try_from(hits).unwrap_or(0),
                 resets_in: Duration::from_secs(u64::try_from(left).unwrap_or(0)),

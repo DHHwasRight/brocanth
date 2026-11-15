@@ -1440,16 +1440,20 @@ macro_rules! register {
         //
         // The key is the client address. Behind a proxy, register
         // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips in `ip_header`.
+        // strips in `ip_header`. Without either, every client behind the
+        // balancer shares its address and one bucket; the limiter says so
+        // once on stderr.
         //
         // This counts in this process. With more than one process, use
         // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
-        let login = brocanth_middleware::Rule::new("login", 5, 60)
-            .paths(["/login"])
-            .methods(["POST"]);
+        // No module serves a sign-in form, so the example is off. Point
+        // `paths` at yours, uncomment it, and add `.rule(login)` below.
+        // let login = brocanth_middleware::Rule::new("login", 5, 60)
+        //     .paths(["/login"])
+        //     .methods(["POST"]);
         let builder = builder.plugin_hooking(
             <brocanth_middleware::RateLimit as brocanth::plugin_api::Plugin>::new(
-                crate::plugins::rate_limit_settings(&given)?.rule(login),
+                crate::plugins::rate_limit_settings(&given)?,
             ),
         );
         let builder = builder.hooks_off_from(
@@ -2293,7 +2297,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 5294e838ec934445
+// brocanth-digest: f2d87a47199db53e
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2883,14 +2887,17 @@ above the five shows the type.
 ## Rate limit
 
 `brocanth_middleware::RateLimit` is registered in
-`src/plugins/mod.rs` with one example rule (`login`, 5 per 60 s).
+`src/plugins/mod.rs`. Its example rule (`login`) is commented
+out, because no module serves a sign-in form.
 The numbers are an example. Do not invent limits: ask for the limit
 and the window of each route group.
 
 A request whose key cannot be found is not counted. Behind a proxy,
 the address comes from `ProxyHeaders` or from `ip_header`. Never set
 `ip_header` to a header the client can send, such as
-`X-Forwarded-For`, unless the edge overwrites it.
+`X-Forwarded-For`, unless the edge overwrites it. Behind a load
+balancer with neither, every client has the balancer's address and
+shares one bucket: register `ProxyHeaders` trusting the balancer.
 
 ## CSRF
 
@@ -2960,7 +2967,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: fcfc714ba50343de -->
+<!-- brocanth-digest: 4ca890c13ca0b57c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

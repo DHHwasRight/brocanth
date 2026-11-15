@@ -25,14 +25,23 @@
 //! signed-in visitor by account and everybody else by address.
 //!
 //! - [`Key::Ip`]: the header named by [`RateLimitConfig::ip_header`] if
-//!   it is set, then [`ClientInfo`] from a trusted proxy
-//!   ([`ProxyHeaders`](crate::ProxyHeaders)), then the socket's
+//!   it is set and holds an address, then [`ClientInfo`] from a trusted
+//!   proxy ([`ProxyHeaders`](crate::ProxyHeaders)), then the socket's
 //!   [`PeerAddress`]. `ip_header` is for an edge that sets one header
 //!   and strips it from the client (`Fly-Client-IP`, `CF-Connecting-IP`).
-//!   Name it only when that is true, or a client picks its own key.
+//!   Name it only when that is true, or a client picks its own key. A
+//!   request without the header, or with one that is not an address, is
+//!   counted by the next source: it did not come through the edge, and
+//!   the socket is still a real address. An IPv6 address counts by its
+//!   `/64`: one client holds a whole `/64`, and counting each address
+//!   would give it 2^64 buckets.
 //! - [`Key::Session`]: the cookie named by
-//!   [`RateLimitConfig::session_cookie`]. Its SHA-256 is the key, not the
-//!   value, so a session id never reaches the store.
+//!   [`RateLimitConfig::session_cookie`], once the application's session
+//!   hook has put a [`VerifiedSession`] on the request state. Its SHA-256
+//!   is the key, not the value, so a session id never reaches the store.
+//!   A cookie nobody verified is not a key: a client could send a new
+//!   value with each request and get a new bucket each time. Order this
+//!   hook after the session hook with [`RateLimitConfig::after`].
 //! - [`Key::User`]: a [`Subject`] on the request state, which the
 //!   application's own authentication hook puts there. Order this hook
 //!   after that one with [`RateLimitConfig::after`].
@@ -56,10 +65,20 @@
 //!
 //! # When the store fails
 //!
-//! [`RateLimitConfig::fail_open`] decides. By default a store error lets
-//! the request through: a rate limiter that is down should not take the
-//! site down with it. Set it to `false` for a rule that guards something
-//! worth an outage, such as a login form.
+//! [`RateLimitConfig::fail_open`] decides, for every rule at once. By
+//! default a store error lets the request through: a rate limiter that is
+//! down should not take the site down with it. Set it to `false` when the
+//! rules guard something worth an outage, such as a login form. To fail
+//! closed for one group of routes only, register a second limiter with
+//! those rules.
+//!
+//! # Behind a load balancer
+//!
+//! Without [`ProxyHeaders`](crate::ProxyHeaders) or an `ip_header`, every
+//! request behind a balancer has the balancer's address, and every client
+//! shares one bucket. The first time a rule keys a request by a private
+//! socket address, with no forwarded address to read, the limiter writes
+//! one warning to stderr.
 
 mod memory;
 #[cfg(feature = "postgres")]
@@ -102,6 +121,14 @@ pub enum Key {
     /// The [`Subject`] the application put on the request state.
     User,
 }
+
+/// The session cookie is a real session: the application's session hook
+/// read it and found it valid.
+///
+/// The hook inserts this into the request state. [`Key::Session`] counts
+/// a request only when it is there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifiedSession;
 
 /// The signed-in account, as the rate limiter counts it.
 ///
@@ -223,7 +250,8 @@ pub struct RateLimitConfig {
     /// that puts a [`Subject`] on the state, for one.
     /// `proxy-headers.read` is always in the list.
     pub after: Vec<String>,
-    /// Let a request through when the store fails.
+    /// Let a request through when the store fails. One setting for every
+    /// rule of this limiter.
     pub fail_open: bool,
 }
 
@@ -419,8 +447,12 @@ impl Limiter {
 
     fn key(&self, key: Key, request: &Request, state: &RequestState) -> Option<String> {
         match key {
-            Key::Ip => self.address(request, state).map(|ip| format!("ip:{ip}")),
+            Key::Ip => self
+                .address(request, state)
+                .map(|ip| format!("ip:{}", bucket(ip))),
             Key::Session => {
+                // An unverified cookie is any value the client likes.
+                state.get::<VerifiedSession>()?;
                 let name = self.config.session_cookie.as_deref()?;
                 let value = cookie(request.headers(), name)?;
                 let digest = sha2::Sha256::digest(value.as_bytes());
@@ -431,18 +463,28 @@ impl Limiter {
     }
 
     fn address(&self, request: &Request, state: &RequestState) -> Option<IpAddr> {
-        if let Some(header) = &self.config.ip_header {
-            return request
+        // A request without the edge's header did not come through the
+        // edge. Its socket is still a real address, so it is counted by
+        // that, not let through uncounted.
+        let from_header = self.config.ip_header.as_ref().and_then(|header| {
+            request
                 .headers()
                 .get(header.as_str())
                 .and_then(|v| v.to_str().ok())
                 .map(crate::first)
-                .and_then(|v| v.parse().ok());
+                .and_then(|v| v.parse().ok())
+        });
+        if from_header.is_some() {
+            return from_header;
         }
-        state
-            .get::<ClientInfo>()
-            .and_then(|info| info.address)
-            .or_else(|| PeerAddress::of(request))
+        if let Some(address) = state.get::<ClientInfo>().and_then(|info| info.address) {
+            return Some(address);
+        }
+        let peer = PeerAddress::of(request)?;
+        if self.config.ip_header.is_none() {
+            warn_once_if_shared(peer);
+        }
+        Some(peer)
     }
 
     /// What the counts mean: a 429, or the status to put on the response.
@@ -537,6 +579,59 @@ fn cookie<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
             (k.trim() == name).then(|| v.trim())
         })
         .filter(|v| !v.is_empty())
+}
+
+/// What an address counts as: an IPv4 address itself, an IPv6 address
+/// by its `/64`. An IPv4 address mapped into IPv6 counts as the IPv4 one.
+fn bucket(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                let prefix = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+                format!("{prefix}/64")
+            }
+        },
+    }
+}
+
+/// The warning for a key taken from a private socket address, if `peer`
+/// is one. A private peer is most likely a balancer or a proxy, and then
+/// every client shares its bucket. Loopback is left out: that is a
+/// developer's own browser.
+fn shared_peer_warning(peer: IpAddr) -> Option<String> {
+    let private = match peer {
+        IpAddr::V4(v4) => v4.is_private() || is_carrier_grade_nat(v4),
+        IpAddr::V6(v6) => v6.is_unique_local(),
+    };
+    private.then(|| {
+        format!(
+            "rate_limit: a rule counts by address, and the address is the socket's, {peer}, \
+             a private address. Behind a proxy every client shares that one bucket.\n\
+             help: register `ProxyHeaders` trusting {peer}, or set `ip_header` to the header \
+             your edge sets"
+        )
+    })
+}
+
+/// `100.64.0.0/10`, which a cloud network hands to its load balancers.
+fn is_carrier_grade_nat(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    a == 100 && (b & 0xc0) == 64
+}
+
+fn warn_once_if_shared(peer: IpAddr) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(warning) = shared_peer_warning(peer) {
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("{warning}");
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -806,6 +901,46 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_or_unparsable_ip_header_falls_back_to_the_socket() {
+        let l =
+            limiter(RateLimitConfig::rules([Rule::new("login", 5, 60)]).ip_header("fly-client-ip"));
+        for headers in [&[][..], &[("fly-client-ip", "not an address")][..]] {
+            let mut req = request(http::Method::POST, "/", headers);
+            req.extensions_mut()
+                .insert(PeerAddress("198.51.100.4".parse().unwrap()));
+            assert_eq!(
+                l.plan(&req, &RequestState::new()),
+                vec![(0, "login:ip:198.51.100.4".into())],
+                "{headers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ipv6_client_counts_by_its_slash_64() {
+        let l = limiter(RateLimitConfig::rules([Rule::new("api", 10, 60)]));
+        let key = |address: &str| {
+            let mut req = request(http::Method::GET, "/", &[]);
+            req.extensions_mut()
+                .insert(PeerAddress(address.parse().unwrap()));
+            l.plan(&req, &RequestState::new())[0].1.clone()
+        };
+        assert_eq!(key("2001:db8:1:2:aaaa::1"), "api:ip:2001:db8:1:2::/64");
+        assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("::ffff:192.0.2.7"), "api:ip:192.0.2.7");
+    }
+
+    #[test]
+    fn a_private_socket_address_is_warned_about_and_a_public_one_is_not() {
+        let warning = shared_peer_warning("10.0.0.5".parse().unwrap()).expect("a warning");
+        assert!(warning.contains("\nhelp: "), "{warning}");
+        assert!(shared_peer_warning("fd00::1".parse().unwrap()).is_some());
+        assert!(shared_peer_warning("203.0.113.9".parse().unwrap()).is_none());
+        assert!(shared_peer_warning("127.0.0.1".parse().unwrap()).is_none());
+    }
+
+    #[test]
     fn the_socket_address_the_server_bridge_sets_is_a_key() {
         let l = limiter(RateLimitConfig::rules([Rule::new("api", 10, 60)]));
         let mut req = request(http::Method::GET, "/", &[]);
@@ -825,9 +960,32 @@ mod tests {
             "/",
             &[("cookie", "theme=dark; _app_session=secret-value")],
         );
-        let key = &l.plan(&req, &RequestState::new())[0].1;
+        let mut state = RequestState::new();
+        state.insert(VerifiedSession);
+        let key = &l.plan(&req, &state)[0].1;
         assert!(key.starts_with("s:session:"), "{key}");
         assert!(!key.contains("secret-value"), "{key}");
+    }
+
+    #[test]
+    fn an_unverified_session_cookie_is_not_a_key() {
+        // A client that sends a new cookie value with each request would
+        // get a new bucket each time. It falls to the address instead.
+        let l = limiter(
+            RateLimitConfig::rules([Rule::new("s", 10, 60).key([Key::Session, Key::Ip])])
+                .session_cookie("_app_session"),
+        );
+        let mut req = request(
+            http::Method::GET,
+            "/",
+            &[("cookie", "_app_session=made-up")],
+        );
+        req.extensions_mut()
+            .insert(PeerAddress("198.51.100.4".parse().unwrap()));
+        assert_eq!(
+            l.plan(&req, &RequestState::new()),
+            vec![(0, "s:ip:198.51.100.4".into())]
+        );
     }
 
     #[test]

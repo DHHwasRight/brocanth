@@ -21,11 +21,27 @@
 //!
 //! # What this does not stop
 //!
-//! **Somebody who can write a cookie on this site's domain.** A sibling
-//! subdomain over plain HTTP can set `csrf_token` for the parent, then
-//! post the value it chose in both halves. Only a signed token bound to a
-//! session closes that, and this crate has no session to bind to. Say it
-//! here rather than in a post-mortem.
+//! **Somebody who can write a cookie on this site's domain, under another
+//! name.** A sibling subdomain, or a page over plain HTTP, can set a cookie
+//! for the parent, then post the value it chose in both halves. The
+//! default name, `__Host-csrf_token`, closes that: a browser stores a
+//! `__Host-` cookie only from this exact host, over HTTPS, with no
+//! `Domain`. A name without the prefix, or `secure = false` (which drops
+//! the prefix, since no browser stores a `__Host-` cookie that is not
+//! `Secure`), leaves it open. Only a signed token bound to a session
+//! closes it without the prefix, and this crate has no session to bind
+//! to. Say it here rather than in a post-mortem.
+//!
+//! # Why the field is masked
+//!
+//! The token is the same on every page until the cookie changes. A page
+//! compressed with gzip or brotli that also reflects what an attacker
+//! typed leaks a fixed secret a byte at a time through the response size
+//! (BREACH). So [`CsrfToken::hidden_field`] and [`CsrfToken::meta_tag`]
+//! write a masked form: a fresh random pad, then the pad XOR the token,
+//! both in hex. The bytes differ on every response, and the check
+//! unmasks before it compares. The cookie and a header copied from it
+//! hold the token as it is, and that is accepted too.
 //!
 //! **A body this hook cannot read.** The field is read out of an
 //! `application/x-www-form-urlencoded` body and nothing else, because
@@ -79,7 +95,7 @@ pub struct CsrfToken {
 }
 
 impl CsrfToken {
-    /// The hidden input a form carries.
+    /// The hidden input a form carries, with the token masked.
     ///
     /// Nothing here is escaped and nothing here needs to be: the value is
     /// hex, and [`CsrfConfig::check`] refuses a field name that is not
@@ -87,15 +103,25 @@ impl CsrfToken {
     pub fn hidden_field(&self) -> String {
         format!(
             r#"<input type="hidden" name="{}" value="{}">"#,
-            self.field, self.value
+            self.field,
+            self.masked()
         )
+    }
+
+    /// The token masked with a fresh pad: hex of `pad`, then hex of `pad`
+    /// XOR the token. Different on every call, and the check reads it
+    /// back. The token as it is when the OS has no randomness to give,
+    /// which the check accepts as well.
+    pub fn masked(&self) -> String {
+        mask(&self.value).unwrap_or_else(|| self.value.clone())
     }
 
     /// The same HTML with the hidden field inside every form that posts.
     ///
     /// For markup this application did not template itself, such as the
     /// admin's screens. A form whose opening tag says `method="post"`, in
-    /// any case and with either quote, gets the field right after that tag.
+    /// any case, quoted with either quote or not quoted, with or without
+    /// spaces around the `=`, gets the field right after that tag.
     /// A form that already carries the field is left alone. A GET form
     /// gets nothing: it does not need the token and would leak it into a
     /// URL.
@@ -111,8 +137,7 @@ impl CsrfToken {
                 break;
             };
             let close = open + len + 1;
-            let tag = &lower[open..close];
-            let posts = tag.contains(r#"method="post""#) || tag.contains("method='post'");
+            let posts = method_of(&lower[open..close]) == Some("post");
             let rest = &lower[close..];
             let body = &rest[..rest.find("</form").unwrap_or(rest.len())];
             out.push_str(&html[at..close]);
@@ -132,17 +157,52 @@ impl CsrfToken {
     /// takes no header. Not escaped, for the reason
     /// [`hidden_field`](Self::hidden_field) gives.
     pub fn meta_tag(&self) -> String {
+        let value = self.masked();
         match &self.header {
-            Some(header) => format!(
-                r#"<meta name="csrf-token" content="{}" data-header="{}">"#,
-                self.value, header
-            ),
+            Some(header) => {
+                format!(r#"<meta name="csrf-token" content="{value}" data-header="{header}">"#)
+            }
             None => format!(
-                r#"<meta name="csrf-token" content="{}" data-field="{}">"#,
-                self.value, self.field
+                r#"<meta name="csrf-token" content="{value}" data-field="{}">"#,
+                self.field
             ),
         }
     }
+}
+
+/// The value of the `method` attribute of an opening `<form ...>` tag,
+/// already lower case: `method="post"`, `method='post'`, `method=post`,
+/// `method = "post"`.
+fn method_of(tag: &str) -> Option<&str> {
+    let bytes = tag.as_bytes();
+    let mut from = 0;
+    while let Some(found) = tag[from..].find("method") {
+        let start = from + found;
+        from = start + "method".len();
+        // A whole attribute name: not `data-method`, not `methods`.
+        let before = start.checked_sub(1).map(|at| bytes[at]);
+        if !before.is_some_and(|b| b.is_ascii_whitespace()) {
+            continue;
+        }
+        let rest = tag[from..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        return Some(match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                let inner = &rest[1..];
+                &inner[..inner.find(quote).unwrap_or(inner.len())]
+            }
+            _ => {
+                let end = rest
+                    .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            }
+        });
+    }
+    None
 }
 
 /// Where the token lives, and who does not have to send one.
@@ -155,6 +215,11 @@ impl CsrfToken {
 pub struct CsrfConfig {
     /// The cookie this hook owns. It is this hook's own cookie, not the
     /// session's: nothing else reads or writes it.
+    ///
+    /// `__Host-csrf_token` by default: a browser takes a `__Host-` cookie
+    /// only from this host, over HTTPS, so a sibling subdomain cannot plant
+    /// one. With `secure` off the prefix is dropped on the wire, because a
+    /// browser stores no `__Host-` cookie that is not `Secure`.
     pub cookie: String,
     /// The form field the token comes back in.
     pub field: String,
@@ -184,7 +249,7 @@ impl Default for CsrfConfig {
     /// for fetch callers, nothing exempt.
     fn default() -> Self {
         Self {
-            cookie: "csrf_token".to_string(),
+            cookie: "__Host-csrf_token".to_string(),
             field: "_csrf_token".to_string(),
             header: Some("x-csrf-token".to_string()),
             exempt: Vec::new(),
@@ -224,10 +289,21 @@ impl CsrfConfig {
         self
     }
 
-    /// Drop `Secure` from the cookie. Development only.
+    /// Drop `Secure` from the cookie. Development only. A `__Host-` prefix
+    /// on the cookie name is dropped with it.
     pub fn insecure(mut self) -> Self {
         self.secure = false;
         self
+    }
+
+    /// The cookie's name on the wire: [`cookie`](Self::cookie), without a
+    /// `__Host-` prefix when the cookie is not `Secure`.
+    pub fn cookie_name(&self) -> &str {
+        if self.secure {
+            &self.cookie
+        } else {
+            self.cookie.strip_prefix("__Host-").unwrap_or(&self.cookie)
+        }
     }
 
     /// Why this configuration cannot work, if it cannot.
@@ -356,17 +432,18 @@ impl Hook {
 
     /// The 403, and what to send instead.
     fn refuse(&self, why: &str) -> Flow {
+        let cookie = self.config.cookie_name();
         let how = match &self.config.header {
             Some(header) => format!(
-                "send the `{}` field, or the `{}` header, with the value of the `{}` cookie",
-                self.config.field, header, self.config.cookie
+                "send the `{}` field, or the `{header}` header, with the value of the `{cookie}` cookie",
+                self.config.field
             ),
             None => format!(
-                "send the `{}` field with the value of the `{}` cookie",
-                self.config.field, self.config.cookie
+                "send the `{}` field with the value of the `{cookie}` cookie",
+                self.config.field
             ),
         };
-        let mut response = Response::new(Body::from(format!("{why}: {how}\n").into_bytes()));
+        let mut response = Response::new(Body::from(format!("{why}\nhelp: {how}\n").into_bytes()));
         *response.status_mut() = http::StatusCode::FORBIDDEN;
         response.headers_mut().insert(
             http::header::CONTENT_TYPE,
@@ -382,7 +459,7 @@ impl RequestHook for Hook {
         request: &mut Request,
         state: &mut RequestState,
     ) -> Result<Flow, PluginError> {
-        let present = cookie(request.headers(), &self.config.cookie).map(str::to_string);
+        let present = cookie(request.headers(), self.config.cookie_name()).map(str::to_string);
         let held = present.as_deref().filter(|value| ours(value));
 
         // Minted before the check, and put on the state even when the
@@ -409,6 +486,7 @@ impl RequestHook for Hook {
         let Some(held) = held else {
             return Ok(self.refuse("this request carried no CSRF cookie"));
         };
+        let sent = unmask(&sent);
         if !ct_eq(sent.as_bytes(), held.as_bytes()) {
             return Ok(self.refuse("the CSRF token does not match the cookie"));
         }
@@ -444,7 +522,8 @@ impl ResponseHook for Hook {
         }
         let mut cookie = format!(
             "{}={}; Path=/; SameSite=Lax",
-            self.config.cookie, token.value
+            self.config.cookie_name(),
+            token.value
         );
         if self.config.header.is_none() {
             // Nothing reads it from script, so nothing should be able to.
@@ -514,12 +593,53 @@ fn mint() -> Result<String, PluginError> {
              help: let the process read the OS random source (getrandom(2) or /dev/urandom)"
         ))
     })?;
-    let mut out = String::with_capacity(TOKEN_CHARS);
+    Ok(hex(&bytes))
+}
+
+/// `pad || pad XOR token`, in hex, with a fresh pad. `None` when the OS has
+/// no randomness or the token is not one this hook minted.
+fn mask(token: &str) -> Option<String> {
+    let raw = unhex(token).filter(|raw| raw.len() == TOKEN_BYTES)?;
+    let mut pad = vec![0u8; raw.len()];
+    getrandom::fill(&mut pad).ok()?;
+    let masked: Vec<u8> = pad.iter().zip(&raw).map(|(p, t)| p ^ t).collect();
+    Some(hex(&pad) + &hex(&masked))
+}
+
+/// The token inside a masked value, or the value as it came when it is
+/// not masked: a fetch caller copies the cookie into the header as it is.
+fn unmask(sent: &str) -> String {
+    if sent.len() == TOKEN_CHARS * 2 {
+        if let Some(bytes) = unhex(sent) {
+            let (pad, masked) = bytes.split_at(TOKEN_BYTES);
+            let token: Vec<u8> = pad.iter().zip(masked).map(|(p, m)| p ^ m).collect();
+            return hex(&token);
+        }
+    }
+    sent.to_string()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble is one hex digit"));
         out.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("a nibble is one hex digit"));
     }
-    Ok(out)
+    out
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let high = char::from(pair[0]).to_digit(16)?;
+            let low = char::from(pair[1]).to_digit(16)?;
+            u8::try_from(high * 16 + low).ok()
+        })
+        .collect()
 }
 
 /// Equality that does not say where it stopped.
@@ -571,20 +691,77 @@ mod tests {
         }
     }
 
+    const FIELD: &str = r#"<input type="hidden" name="_csrf_token" value=""#;
+
     #[test]
     fn every_posting_form_gets_the_field_and_a_get_form_does_not() {
         let html = r#"<form method="get"><input name="q"></form><FORM class="x" METHOD="POST" action="/a"><button></button></FORM><form method='post'></form>"#;
         let out = stamp_token().stamp_forms(html);
-        let field = stamp_token().hidden_field();
-        assert_eq!(out.matches(&field).count(), 2, "{out}");
-        assert!(
-            out.contains(&format!(r#"action="/a">{field}<button>"#)),
-            "{out}"
-        );
+        assert_eq!(out.matches(FIELD).count(), 2, "{out}");
+        assert!(out.contains(&format!(r#"action="/a">{FIELD}"#)), "{out}");
         assert!(
             out.starts_with(r#"<form method="get"><input name="q">"#),
             "{out}"
         );
+    }
+
+    #[test]
+    fn an_unquoted_or_spaced_post_method_is_a_posting_form() {
+        for html in [
+            "<form method=post action=/a></form>",
+            r#"<form method = "post"></form>"#,
+            "<form action=/a method=POST></form>",
+            "<form\n  method='Post'\n></form>",
+        ] {
+            let out = stamp_token().stamp_forms(html);
+            assert_eq!(out.matches(FIELD).count(), 1, "{html} -> {out}");
+        }
+        for html in [
+            "<form method=get></form>",
+            r#"<form data-method="post"></form>"#,
+            "<form></form>",
+        ] {
+            let out = stamp_token().stamp_forms(html);
+            assert_eq!(out, html, "{html}");
+        }
+    }
+
+    #[test]
+    fn the_field_is_masked_differently_each_time_and_still_checks() {
+        let value = token();
+        let csrf = CsrfToken {
+            value: value.clone(),
+            field: "_csrf_token".into(),
+            header: None,
+            fresh: false,
+        };
+        let (one, two) = (csrf.masked(), csrf.masked());
+        assert_ne!(one, two, "a fixed secret in a compressed page leaks");
+        assert!(!one.contains(&value), "{one}");
+        assert_eq!(unmask(&one), value);
+        assert_eq!(unmask(&two), value);
+        let (flow, _) = run(&hook(), form(Some(&value), Some(&one)));
+        assert_eq!(status(&flow), None, "a masked field was refused");
+        // The token as it is, as a fetch caller copies it from the cookie.
+        let (flow, _) = run(&hook(), form(Some(&value), Some(&value)));
+        assert_eq!(status(&flow), None);
+    }
+
+    #[test]
+    fn the_default_cookie_is_host_only_and_drops_the_prefix_without_secure() {
+        let hook = hook();
+        let (_, mut state) = run(&hook, request(http::Method::GET, "/", &[], ""));
+        let set = set_cookie(&hook, &mut state).remove(0);
+        assert!(set.starts_with("__Host-csrf_token="), "{set}");
+        assert!(set.contains("Path=/") && set.contains("Secure"), "{set}");
+        assert!(!set.contains("Domain"), "{set}");
+
+        let plain = Hook {
+            config: CsrfConfig::default().insecure(),
+        };
+        let (_, mut state) = run(&plain, request(http::Method::GET, "/", &[], ""));
+        let set = set_cookie(&plain, &mut state).remove(0);
+        assert!(set.starts_with("csrf_token="), "{set}");
     }
 
     #[test]
@@ -613,7 +790,7 @@ mod tests {
         let mut headers = vec![("content-type", "application/x-www-form-urlencoded")];
         let jar;
         if let Some(value) = cookie {
-            jar = format!("csrf_token={value}");
+            jar = format!("__Host-csrf_token={value}");
             headers.push(("cookie", jar.as_str()));
         }
         let body = match field {
@@ -734,7 +911,7 @@ mod tests {
     #[test]
     fn the_header_carries_the_token_for_a_fetch_caller() {
         let value = token();
-        let jar = format!("csrf_token={value}");
+        let jar = format!("__Host-csrf_token={value}");
         let sent = request(
             http::Method::POST,
             "/posts",
@@ -820,7 +997,7 @@ mod tests {
         // reading a field out of an upload means parsing one in a hook. A
         // form that uploads sends the header.
         let value = token();
-        let jar = format!("csrf_token={value}");
+        let jar = format!("__Host-csrf_token={value}");
         let upload = request(
             http::Method::POST,
             "/posts",
@@ -839,7 +1016,7 @@ mod tests {
     #[test]
     fn one_cookie_is_found_among_others() {
         let value = token();
-        let jar = format!("other=1; csrf_token={value}; _app_session=xyz");
+        let jar = format!("other=1; __Host-csrf_token={value}; _app_session=xyz");
         let sent = request(
             http::Method::POST,
             "/posts",
@@ -864,13 +1041,12 @@ mod tests {
     fn the_hidden_field_carries_the_token() {
         let (_, state) = run(&hook(), request(http::Method::GET, "/posts", &[], ""));
         let token = state.get::<CsrfToken>().expect("a token");
-        assert_eq!(
-            token.hidden_field(),
-            format!(
-                r#"<input type="hidden" name="_csrf_token" value="{}">"#,
-                token.value
-            )
-        );
+        let field = token.hidden_field();
+        let sent = field
+            .strip_prefix(FIELD)
+            .and_then(|rest| rest.strip_suffix(r#"">"#))
+            .expect("the hidden input");
+        assert_eq!(unmask(sent), token.value);
     }
 
     /// Every `Set-Cookie` the response hook writes for this request.

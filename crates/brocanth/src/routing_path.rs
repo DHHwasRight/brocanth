@@ -542,7 +542,11 @@ pub(crate) fn sanitize_ident(raw: &str) -> String {
     if out.is_empty() {
         out.push('_');
     }
-    if is_rust_keyword(&out) {
+    // `crate`, `super`, `self`, `Self` and `_` cannot be raw identifiers,
+    // so they are mangled rather than escaped.
+    if matches!(out.as_str(), "crate" | "super" | "self" | "Self" | "_") {
+        out.push('_');
+    } else if is_rust_keyword(&out) {
         out.insert_str(0, "r#");
     }
     out
@@ -556,8 +560,6 @@ pub(crate) fn is_rust_keyword(word: &str) -> bool {
         "where", "while", "async", "await", "abstract", "become", "box", "do", "final", "macro",
         "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
     ];
-    // `self`, `Self` and `_` cannot be raw identifiers, so they are mangled
-    // rather than escaped.
     KEYWORDS.contains(&word)
 }
 
@@ -596,6 +598,17 @@ fn encode(raw: &str, keep_slash: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyword_that_cannot_be_raw_is_mangled_and_the_rest_are_escaped() {
+        assert_eq!(sanitize_ident("crate"), "crate_");
+        assert_eq!(sanitize_ident("super"), "super_");
+        assert_eq!(sanitize_ident("self"), "self_");
+        assert_eq!(sanitize_ident("Self"), "self_");
+        assert_eq!(sanitize_ident("_"), "__");
+        assert_eq!(sanitize_ident("type"), "r#type");
+        assert_eq!(sanitize_ident("posts"), "posts");
+    }
 
     fn route(file: &str) -> String {
         route_for_file(file, "src/pages")

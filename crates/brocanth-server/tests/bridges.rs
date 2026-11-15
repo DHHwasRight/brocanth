@@ -432,7 +432,7 @@ async fn the_server_owns_the_413_and_the_core_never_sees_it() {
     });
     let server = Running::start(app, router).await;
 
-    let oversized = 3 * 1024 * 1024;
+    let oversized = brocanth_server::MAX_BODY + 1024 * 1024;
     let mut raw = format!(
         "POST /hello HTTP/1.1\r\nHost: x\r\nContent-Length: {oversized}\r\n\
          Connection: close\r\n\r\n"

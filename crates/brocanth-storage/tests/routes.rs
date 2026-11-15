@@ -153,7 +153,7 @@ fn form(fields: &[(&str, &str)], file: (&str, &str, &[u8])) -> Vec<u8> {
 fn upload(rig: &Rig, body: Vec<u8>) -> TestResponse {
     (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .body("multipart/form-data; boundary=b", body),
     )
 }
@@ -282,7 +282,7 @@ fn a_download_needs_a_token_for_that_file() {
     assert_eq!(get(&rig, "/files/not-an-address").status(), 404);
     let post = (rig.send)(
         TestRequest::post(format!("/files/{hex}"))
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", CSRF),
     );
     assert_eq!(post.status(), 405);
@@ -392,7 +392,7 @@ fn a_body_that_is_not_multipart_is_a_415_with_help() {
     let rig = rig(RoutesConfig::default(), true);
     let sent = (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", CSRF)
             .body("application/x-www-form-urlencoded", b"file=abc".to_vec()),
     );
@@ -401,7 +401,7 @@ fn a_body_that_is_not_multipart_is_a_415_with_help() {
 
     let no_boundary = (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", CSRF)
             .body("multipart/form-data", b"--b--\r\n".to_vec()),
     );
@@ -450,7 +450,7 @@ fn a_fetch_caller_uploads_with_the_header_and_gets_201_with_the_link() {
     let bytes = b"notes from a script".to_vec();
     let sent = (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", CSRF)
             .body(
                 "multipart/form-data; boundary=b",
@@ -712,7 +712,7 @@ fn another_verb_on_a_file_is_a_405_that_names_get() {
     for verb in [Verb::Delete, Verb::Put, Verb::Patch] {
         let answer = (rig.send)(
             TestRequest::new(verb, format!("/files/{}", key.to_hex()))
-                .header("cookie", &format!("csrf_token={CSRF}"))
+                .header("cookie", &format!("__Host-csrf_token={CSRF}"))
                 .header("x-csrf-token", CSRF),
         );
         assert_eq!(answer.status(), 405, "{verb:?}");
@@ -726,7 +726,7 @@ fn the_lift_never_overrides_a_header_the_caller_sent() {
     let rig = rig(RoutesConfig::default(), true);
     let sent = (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", &"cd".repeat(32))
             .body(
                 "multipart/form-data; boundary=b",
@@ -759,7 +759,7 @@ fn with_the_lift_hook_off_a_plain_form_stops_at_the_csrf_check() {
     // A fetch caller's header does not need the hook.
     let sent = (rig.send)(
         TestRequest::post("/files")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .header("x-csrf-token", CSRF)
             .body(
                 "multipart/form-data; boundary=b",
@@ -803,7 +803,7 @@ fn the_path_setting_moves_both_routes() {
     let bytes = b"moved".to_vec();
     let sent = (rig.send)(
         TestRequest::post("/uploads")
-            .header("cookie", &format!("csrf_token={CSRF}"))
+            .header("cookie", &format!("__Host-csrf_token={CSRF}"))
             .body(
                 "multipart/form-data; boundary=b",
                 form(&[("_csrf_token", CSRF)], ("a.txt", "text/plain", &bytes)),

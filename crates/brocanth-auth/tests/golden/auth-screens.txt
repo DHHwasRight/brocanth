@@ -3181,8 +3181,9 @@ shutdown_grace_secs = 25
 # The cookie this hook owns.
 cookie = "flash"
 # The environment variable that holds the signing key.
-# The name, not the key. Unset: a random key per process, so a message
-# can be lost when the next request reaches another instance.
+# The name, not the key, which is at least 32 bytes. Unset: a random key
+# per process and a warning, so a message can be lost when the next
+# request reaches another instance.
 key_env = "FLASH_KEY"
 # Send the cookie over HTTPS only.
 secure = true

@@ -204,6 +204,11 @@ pub fn create<R: Resource>(
 /// `brocanth_policy::Verified::update` takes one by value and nothing else
 /// builds the statement.
 ///
+/// The stored row is checked, not the row as the write leaves it: there is
+/// no `WITH CHECK`. Keep every column the `update` rule reads out of
+/// `writable`, or a caller may move a row out of the rule. The README's
+/// "What an update checks" says why both masks are written.
+///
 /// # Errors
 ///
 /// [`Failure::NoRule`], [`Failure::BadRequest`], [`Failure::NotWritable`],

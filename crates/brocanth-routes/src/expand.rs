@@ -625,7 +625,11 @@ fn sanitize(raw: &str) -> String {
     if out.is_empty() {
         out.push('_');
     }
-    if is_rust_keyword(&out) {
+    // `crate`, `super`, `self`, `Self` and `_` cannot be raw identifiers,
+    // so they are mangled rather than escaped.
+    if matches!(out.as_str(), "crate" | "super" | "self" | "Self" | "_") {
+        out.push('_');
+    } else if is_rust_keyword(&out) {
         out.insert_str(0, "r#");
     }
     out
@@ -665,6 +669,15 @@ fn child(base: &str, segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_keyword_that_cannot_be_raw_is_mangled_like_the_core_does() {
+        assert_eq!(super::sanitize("crate"), "crate_");
+        assert_eq!(super::sanitize("super"), "super_");
+        assert_eq!(super::sanitize("self"), "self_");
+        assert_eq!(super::sanitize("_"), "__");
+        assert_eq!(super::sanitize("type"), "r#type");
+    }
+
     use super::*;
 
     /// The expansion as text, which is how a macro's output is read.

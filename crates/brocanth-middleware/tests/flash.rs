@@ -8,7 +8,10 @@ use brocanth::plugin_context::Base;
 use brocanth::plugin_hooks::{HookFamilies, Response};
 use brocanth::plugin_routes::{Handler, RouteCx};
 use brocanth::routing::{Router, Verb};
-use brocanth_middleware::{Flash, FlashConfig, FlashPlugin};
+use brocanth_middleware::{
+    Compression, CompressionConfig, ConditionalGet, ConditionalGetConfig, Flash, FlashConfig,
+    FlashPlugin,
+};
 use brocanth_test::{TestClient, TestRequest, TestResponse};
 
 const LAYOUT: &str = r#"<!DOCTYPE html><html><body><div id="flash" role="status"></div><main>Home</main></body></html>"#;
@@ -115,7 +118,10 @@ fn a_cookie_name_that_cannot_go_in_a_header_stops_the_build() {
 #[test]
 fn two_instances_with_the_key_in_key_env_read_each_others_messages() {
     // A name no other test reads, so setting it races with nothing.
-    std::env::set_var("A046_FLASH_SHARED_KEY", "a key both instances read");
+    std::env::set_var(
+        "A046_FLASH_SHARED_KEY",
+        "a key both instances read, 32 bytes or more",
+    );
     let config = || FlashConfig {
         key_env: "A046_FLASH_SHARED_KEY".into(),
         ..FlashConfig::default().insecure()
@@ -148,10 +154,66 @@ fn without_a_key_another_instance_ignores_the_cookie() {
     );
 }
 
+/// A key shorter than 32 bytes stops the build, with what to do.
+#[test]
+fn a_short_key_stops_the_build() {
+    std::env::set_var("A046_FLASH_SHORT_KEY", "x");
+    let built = AppBuilder::new()
+        .plugin_hooking(FlashPlugin::new(FlashConfig {
+            key_env: "A046_FLASH_SHORT_KEY".into(),
+            ..FlashConfig::default()
+        }))
+        .build();
+    let Err(why) = built else {
+        panic!("a one-byte key was accepted");
+    };
+    assert!(why.to_string().contains("help:"), "{why}");
+}
+
 /// The default sends the cookie over HTTPS only.
 #[test]
 fn the_default_cookie_is_secure() {
     let posted = client_with(FlashConfig::default()).post("/save", &[]);
     let line = posted.header("set-cookie").expect("a message");
     assert!(line.contains("Secure"), "{line}");
+}
+
+/// With compression and the conditional GET on, in the order a generated
+/// project registers them: the message goes into the identity body, so
+/// it is shown, and the `ETag` covers the page with the message in it.
+#[test]
+fn a_message_is_shown_through_compression_and_the_conditional_get() {
+    let app = AppBuilder::new()
+        .plugin_hooking(ConditionalGet::new(ConditionalGetConfig::default()))
+        .plugin_hooking(FlashPlugin::new(FlashConfig::default().insecure()))
+        .plugin_hooking(Compression::new(CompressionConfig {
+            min_bytes: 0,
+            ..CompressionConfig::default()
+        }))
+        .build()
+        .expect("an application");
+    let mut table = Router::builder();
+    table.route("/", Verb::Get, home()).expect("a route");
+    table.route("/save", Verb::Post, save()).expect("a route");
+    let client = TestClient::serving(app, table.build().expect("a table"));
+
+    let cookie = pair(&client.post("/save", &[])).expect("a message");
+    let quiet = client.send(TestRequest::get("/").header("accept-encoding", "gzip"));
+    let shown = client.send(
+        TestRequest::get("/")
+            .header("cookie", &cookie)
+            .header("accept-encoding", "gzip"),
+    );
+    assert_eq!(shown.header("content-encoding"), Some("gzip"));
+    let mut page = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(shown.body()), &mut page)
+        .expect("a gzip body");
+    assert!(page.contains("Saved."), "{page}");
+    let cleared = shown.header("set-cookie").expect("the cookie is cleared");
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    assert_ne!(
+        shown.header("etag"),
+        quiet.header("etag"),
+        "the tag covers the message"
+    );
 }

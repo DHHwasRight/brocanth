@@ -17,9 +17,11 @@
 //! * a `mount` with the shape `Slot::RouterMounts` expects, which mounts
 //!   every resource the application lists. The list starts empty.
 //!
-//! `src/pages/mod.rs` calls that `mount` at `/api`, so a resource added to the
+//! `src/pages/mod.rs` calls that `mount` at `mount_at` from
+//! `src/modules/resource.rs`, `/api` by default, so a resource added to the
 //! list is in the one table `dispatch` consults, and a path a page and a
-//! resource both claim is a build error.
+//! resource both claim is a build error. `i18n-routing` reads the same field
+//! to keep the prefix free of a locale segment.
 //!
 //! # Why no example entity
 //!
@@ -39,7 +41,8 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::snippet::module_ref;
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot};
 
 /// The records API, as a choice on the `brocanth create` menu.
 ///
@@ -62,6 +65,15 @@ impl Module for Records {
         )
         .category(Category::Routes)
         .asked_in("doors", "")
+        .adapts_to(
+            "middleware-csrf",
+            "AGENTS.md says how a fetch caller and a non-browser client get past the CSRF check",
+        )
+        .option(Opt::text(
+            "mount_at",
+            "/api",
+            "Where the records API answers. Every resource is under it.",
+        ))
         .krate(
             Dep::brocanth("brocanth-resource")
                 // The page-shaped surface and nothing else. `plugin` is the
@@ -75,16 +87,36 @@ impl Module for Records {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/resource/mod.rs", RESOURCE_RS);
         s.at(Slot::PluginsMod).line("pub mod resource;");
-        // The prefix is the application's decision, so it is written at the
-        // call and not inside `mount`. No `PagesRoutes` line: the list of
-        // resources is empty, so the table gains no route.
-        s.at(Slot::RouterMounts)
-            .line("    crate::plugins::resource::mount(routes, \"/api\")?;");
+        // The prefix is the application's decision, so it is read at the
+        // call from the module file and not fixed inside `mount`. No
+        // `PagesRoutes` line: the list of resources is empty, so the table
+        // gains no route.
+        s.at(Slot::RouterMounts).line(format!(
+            "    crate::plugins::resource::mount(routes, {})?;",
+            module_ref("resource", "mount_at")
+        ));
+        if project.has("middleware-csrf") {
+            s.at(Slot::AgentsSections).block(CSRF_AGENTS.to_string());
+        }
     }
 }
+
+/// What the generated `AGENTS.md` says when the CSRF check is on: a write
+/// under the records API is a POST, PATCH or DELETE, and the check
+/// refuses each one that carries no token.
+const CSRF_AGENTS: &str = "\n\
+    ## Records API and CSRF\n\
+    \n\
+    The CSRF check covers the records API under `mount_at` in\n\
+    `src/modules/resource.rs`. A browser form sends the hidden field. A\n\
+    `fetch` from a page sends the token in the `x-csrf-token` header: read\n\
+    it from `<meta name=\"csrf-token\">`, or from the CSRF cookie. A\n\
+    client that is not a browser (a mobile app, a script with a token)\n\
+    has no CSRF cookie: add the records prefix to `exempt` under `[csrf]`,\n\
+    and authenticate that client by its own token.\n";
 
 /// `src/plugins/resource/mod.rs`.
 const RESOURCE_RS: &str = r##"//! Typed CRUD routes over your tables, with the policy in the `WHERE` clause.
@@ -98,8 +130,9 @@ const RESOURCE_RS: &str = r##"//! Typed CRUD routes over your tables, with the p
 //! not compile), a data source and three conversions. That crate's own
 //! documentation has the worked example.
 //!
-//! `src/pages/mod.rs` calls [`mount`] at `/api`, so every route lands in the
-//! one table. A page and a resource that claim one path are a build error.
+//! `src/pages/mod.rs` calls [`mount`] at `mount_at` in
+//! `src/modules/resource.rs`, so every route lands in the one table. A page
+//! and a resource that claim one path are a build error.
 //!
 //! The three impls below make this project's `Ctx`, `Response` and `Error`
 //! the page triple `brocanth_resource::pages` is written against. A resource

@@ -446,7 +446,7 @@ fn a_post_without_the_csrf_token_changes_no_child() {
         ("post-0-pk", "1"),
         ("post-0-title", "Forged"),
     ];
-    let cookie = format!("csrf_token={TOKEN}");
+    let cookie = format!("__Host-csrf_token={TOKEN}");
 
     let refused = client.send(
         TestRequest::post("/admin/user/1")

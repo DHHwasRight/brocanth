@@ -108,7 +108,7 @@ impl Event {
         let data = self.data.replace("\r\n", "\n").replace('\r', "\n");
         for line in data.split('\n') {
             out.push_str("data:");
-            out.push_str(line);
+            out.push_str(&value(line));
             out.push('\n');
         }
         out.push('\n');
@@ -117,11 +117,23 @@ impl Event {
 }
 
 /// One single-line field. A line break in it is dropped, not obeyed.
-fn field(out: &mut String, name: &str, value: &str) {
+fn field(out: &mut String, name: &str, text: &str) {
     out.push_str(name);
     out.push(':');
-    out.extend(value.chars().filter(|c| !matches!(c, '\r' | '\n')));
+    let one_line: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+    out.push_str(&value(&one_line));
     out.push('\n');
+}
+
+/// A field's value as it goes after the colon. A client drops one space
+/// after the colon, so a value that starts with a space gets one more,
+/// and arrives as it was sent. Any other value is written as it is.
+fn value(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.starts_with(' ') {
+        std::borrow::Cow::Owned(format!(" {text}"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// A comment line: ignored by every client, and enough to keep a proxy from
@@ -317,6 +329,19 @@ mod tests {
 
     fn text(bytes: Vec<u8>) -> String {
         String::from_utf8(bytes).expect("utf-8")
+    }
+
+    #[test]
+    fn a_value_that_starts_with_a_space_keeps_it() {
+        // The client strips one space after the colon.
+        assert_eq!(
+            text(Event::new("  indented\n plain").encode()),
+            "data:   indented\ndata:  plain\n\n"
+        );
+        assert_eq!(
+            text(Event::new("x").with_event(" e").with_id(" 1").encode()),
+            "id:  1\nevent:  e\ndata:x\n\n"
+        );
     }
 
     #[test]
