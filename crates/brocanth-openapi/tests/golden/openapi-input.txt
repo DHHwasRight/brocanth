@@ -2153,12 +2153,27 @@ pub mod openapi {
         }
     }
 
+    /// The code `openapi` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: an `API` tab in the admin, with every operation; the admin
+        /// routes stay out of the document.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
     /// What src/modules/openapi.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -2166,11 +2181,12 @@ pub mod openapi {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
 
-// brocanth-digest: 3e949301d75e5f44
+// brocanth-digest: 903842010fa9d290
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2265,7 +2281,7 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::openapi::{Flag, Flags, Key, Module};
+use crate::plugins::shape::openapi::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -2280,6 +2296,13 @@ pub const MODULE: Module = Module {
     //   (Key::Title, Flag::As("title")),
     //   (Key::Title, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // An `API` tab in the admin, with every operation; the admin routes stay
+        // out of the document. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -2319,8 +2342,9 @@ version = "0.1.0"
 //! extension and what is left is the path, so this file answers
 //! `/openapi.json` and renaming it moves the document.
 //!
-//! The body was rendered once, at startup, by `src/plugins/openapi/mod.rs`.
-//! This page hands it out and does nothing else.
+//! The body was rendered once, at startup, by `src/plugins/openapi/mod.rs`,
+//! which puts it in the request context. This page hands it out and does
+//! nothing else.
 
 use crate::pages::{Ctx, Error, IntoResponse};
 
@@ -2329,12 +2353,17 @@ use crate::pages::{Ctx, Error, IntoResponse};
 /// `no-cache` rather than a long max-age: the document changes when this
 /// application is redeployed, and a client holding a stale one is the exact
 /// failure a derived document exists to prevent.
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let body = crate::plugins::openapi::json().ok_or_else(|| {
-        Error::internal("the openapi plugin is not registered, so there is no document to serve")
-    })?;
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let rendered = ctx
+        .provided::<crate::plugins::openapi::Rendered, _>()
+        .ok_or_else(|| {
+            Error::internal(
+                "the openapi plugin is not registered, so there is no document to serve\n\
+                 help: register crate::plugins::openapi::OpenApi in src/plugins/mod.rs",
+            )
+        })?;
     Ok((
-        body.to_string(),
+        rendered.json().to_string(),
         200,
         vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -2356,12 +2385,17 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 use crate::pages::{Ctx, Error, IntoResponse};
 
 /// GET `/openapi.yaml`.
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let body = crate::plugins::openapi::yaml().ok_or_else(|| {
-        Error::internal("the openapi plugin is not registered, so there is no document to serve")
-    })?;
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let rendered = ctx
+        .provided::<crate::plugins::openapi::Rendered, _>()
+        .ok_or_else(|| {
+            Error::internal(
+                "the openapi plugin is not registered, so there is no document to serve\n\
+                 help: register crate::plugins::openapi::OpenApi in src/plugins/mod.rs",
+            )
+        })?;
     Ok((
-        body.to_string(),
+        rendered.yaml().to_string(),
         200,
         vec![
             ("content-type".to_string(), "application/yaml".to_string()),
@@ -2401,9 +2435,11 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! })
 //! ```
 //!
-//! `/openapi.json` is hidden from the document it serves. The endpoint is a
-//! row of the table it describes, and an endpoint that describes itself is
-//! noise in every client somebody generates from this.
+//! `/openapi.json` and `/openapi.yaml` are hidden from the document they
+//! serve. Each endpoint is a row of the table it describes, and an endpoint
+//! that describes itself is noise in every client somebody generates from
+//! this. The routes another module mounts, such as an admin, are hidden
+//! too: the document is public, and they are not this API.
 //!
 //! # Why this is not `OpenApiPlugin`
 //!
@@ -2415,10 +2451,10 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! do still happen: an invalid document stops the build, and the document
 //! reaches `Services` for anything else that wants to read it.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::Verb;
 use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder};
 
@@ -2430,25 +2466,33 @@ use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder
 /// a 404 and hide it in the document.
 pub const ROUTE: &str = "/openapi.json";
 
+/// Where the YAML spelling is served: `src/pages/openapi.yaml.rs`.
+pub const YAML_ROUTE: &str = "/openapi.yaml";
+
 /// The rendered document, both ways round.
 ///
 /// Rendered once at `configure`, so a request costs a borrow rather than a
-/// walk of the whole structure. A `OnceLock` because the page that serves it
-/// is a plain function with no handle on this plugin.
-static RENDERED: OnceLock<(String, String)> = OnceLock::new();
-
-/// The document as JSON, or `None` when this plugin was never registered.
-pub fn json() -> Option<&'static str> {
-    RENDERED.get().map(|(json, _)| json.as_str())
+/// walk of the whole structure. In the request context, so the pages read
+/// this application's document and no process-wide copy.
+#[derive(Clone)]
+pub struct Rendered {
+    json: Arc<str>,
+    yaml: Arc<str>,
 }
 
-/// The document as YAML, or `None` when this plugin was never registered.
-///
-/// Served by `src/pages/openapi.yaml.rs`, which is the file beside the
-/// JSON one and reads this instead.
-pub fn yaml() -> Option<&'static str> {
-    RENDERED.get().map(|(_, yaml)| yaml.as_str())
+impl Rendered {
+    /// The document as JSON, served by `src/pages/openapi.json.rs`.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+
+    /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
+    pub fn yaml(&self) -> &str {
+        &self.yaml
+    }
 }
+
+impl ContextItem for Rendered {}
 
 /// What this plugin is built from.
 ///
@@ -2478,17 +2522,20 @@ pub struct OpenApi {
     /// Built at `configure` and not in `new`, because deriving a document can
     /// fail and `Plugin::new` cannot.
     served: Option<OpenApiPlugin>,
+    /// The two bodies, rendered at `configure`.
+    rendered: Option<Rendered>,
 }
 
 impl Plugin for OpenApi {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Rendered>;
     const NAME: &'static str = "openapi";
 
     fn new(config: Settings) -> Self {
         Self {
             settings: config,
             served: None,
+            rendered: None,
         }
     }
 
@@ -2503,7 +2550,8 @@ impl Plugin for OpenApi {
         })?;
         let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
-            .hide(ROUTE, Verb::Get);
+            .hide(ROUTE, Verb::Get)
+            .hide(YAML_ROUTE, Verb::Get);
 
         // What each page takes and gives. `pages!` read it off the handler
         // signatures, so the document says what the code does rather than
@@ -2532,12 +2580,11 @@ impl Plugin for OpenApi {
             });
         }
 
-        let document = spec.build().map_err(|e| {
-            PluginError::new(format!(
-                "[openapi] deriving the document: {e}\n\
-                 help: fix the route or the description it names in this file"
-            ))
-        })?;
+        // The error names the route or the description to fix, and ends
+        // with its own help line.
+        let document = spec
+            .build()
+            .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
 
         // The crate's own plugin, held rather than registered. Its
         // `configure` is what makes an invalid document a build failure
@@ -2545,10 +2592,10 @@ impl Plugin for OpenApi {
         // bodies once.
         let mut served = OpenApiPlugin::new(OpenApiConfig::new(document).json_route(ROUTE));
         served.configure(lc)?;
-        let _ = RENDERED.set((
-            served.body(Format::Json).to_string(),
-            served.body(Format::Yaml).to_string(),
-        ));
+        self.rendered = Some(Rendered {
+            json: served.body(Format::Json).into(),
+            yaml: served.body(Format::Yaml).into(),
+        });
         self.served = Some(served);
         Ok(())
     }
@@ -2559,6 +2606,14 @@ impl Plugin for OpenApi {
         match &mut self.served {
             Some(served) => served.register(lc),
             None => Ok(()),
+        }
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server takes a request, so the bodies
+        // are here by the time a request builds its context.
+        if let Some(rendered) = &self.rendered {
+            cx.insert(rendered.clone());
         }
     }
 }

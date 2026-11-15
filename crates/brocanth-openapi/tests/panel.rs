@@ -14,12 +14,15 @@
 
 use std::sync::Arc;
 
+use brocanth::plugin_api::Plugin as _;
 use brocanth::routing::{Router, RouterBuilder, Verb};
 use brocanth_admin::policy::{policy_fn, Principal, Request};
 use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Submission};
 use brocanth_openapi::admin::ApiPanel;
-use brocanth_openapi::{Document, Schema, SecurityScheme, SpecBuilder};
+use brocanth_openapi::{
+    Document, OpenApiConfig, OpenApiPlugin, Parameter, Schema, SecurityScheme, SpecBuilder,
+};
 use brocanth_test::Html;
 
 struct Operator;
@@ -164,6 +167,22 @@ fn a_path_parameter_the_router_implied_is_on_the_screen() {
 }
 
 #[test]
+fn a_path_level_parameter_is_on_each_operations_screen() {
+    let mut doc = blog_document();
+    let item = &mut doc
+        .paths
+        .iter_mut()
+        .find(|(path, _)| path == "/posts")
+        .expect("the /posts path")
+        .1;
+    item.parameters
+        .push(Parameter::query("tenant_hint", Schema::string()));
+    let page = get(&admin(&Arc::new(doc)), "/admin/api/op/post_posts");
+
+    page.assert_text("tenant_hint");
+}
+
+#[test]
 fn an_inherited_security_requirement_is_shown_as_inherited() {
     let page = get(&admin(&document()), "/admin/api/op/get_posts");
 
@@ -191,6 +210,23 @@ fn an_unknown_operation_and_a_post_are_both_the_admins_404() {
     assert_eq!(status(&a, "GET", "/admin/api/op/not_an_operation"), 404);
     assert_eq!(status(&a, "GET", "/admin/api/op"), 404);
     assert_eq!(status(&a, "POST", "/admin/api"), 404);
+}
+
+#[test]
+fn the_installed_tab_is_a_404_until_the_plugin_installs_its_document() {
+    let late = || {
+        Admin::new(
+            Arc::new(Fixture::blog()),
+            AdminConfig::new()
+                .discovering(Discovery::new().under("blog::models"))
+                .panel(ApiPanel::installed())
+                .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
+        )
+    };
+    assert_eq!(status(&late(), "GET", "/admin/api"), 404);
+
+    OpenApiPlugin::new(OpenApiConfig::new(blog_document())).install();
+    get(&late(), "/admin/api").assert_text("4 operations over 2 paths");
 }
 
 /// Prints the two screens, for a human who wants to see them.

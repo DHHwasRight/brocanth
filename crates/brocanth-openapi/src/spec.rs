@@ -50,7 +50,10 @@ use crate::schema::{NamedSchema, Schema, SchemaSource};
 #[non_exhaustive]
 pub enum SpecError {
     /// A template does not parse.
-    #[error("the route template `{template}` does not parse: {source}")]
+    #[error(
+        "the route template `{template}` does not parse: {source}\nhelp: write it as the router \
+         does, such as `/posts/{{id}}` or `/docs/{{*rest}}`"
+    )]
     Template {
         /// The rejected template.
         template: String,
@@ -61,7 +64,8 @@ pub enum SpecError {
 
     /// An annotation names a route that is not in the table.
     #[error(
-        "`{verb} {template}` was described, but no such route is registered{}",
+        "`{verb} {template}` was described, but no such route is registered{}\nhelp: describe \
+         a route the table has, or register the route before you describe it",
         crate::spec::did_you_mean(.suggestion)
     )]
     UnknownRoute {
@@ -74,7 +78,10 @@ pub enum SpecError {
     },
 
     /// The same route was added twice.
-    #[error("`{verb} {template}` is registered twice; every route appears exactly once")]
+    #[error(
+        "`{verb} {template}` is registered twice; every route appears exactly once\nhelp: remove \
+         one of the two registrations"
+    )]
     DuplicateRoute {
         /// The repeated verb.
         verb: Verb,
@@ -85,7 +92,8 @@ pub enum SpecError {
     /// Two operations want one `operationId`.
     #[error(
         "`{first}` and `{second}` both produce the operationId `{id}`; it must be unique across \
-         the document, because a client generator turns it into a method name"
+         the document, because a client generator turns it into a method name\nhelp: give one of \
+         them its own id with `.operation_id(..)` in its `.describe(..)`"
     )]
     DuplicateOperationId {
         /// The contested identifier.
@@ -99,7 +107,8 @@ pub enum SpecError {
     /// Two templates collapse onto one OpenAPI path key.
     #[error(
         "`{first}` and `{second}` are different routes but the same OpenAPI path; OpenAPI \
-         compares paths with their parameter names removed, so the two cannot both appear"
+         compares paths with their parameter names removed, so the two cannot both appear\nhelp: \
+         give the two routes the same parameter names, or change a literal segment of one"
     )]
     AmbiguousPaths {
         /// The first template.
@@ -111,7 +120,7 @@ pub enum SpecError {
     /// An annotation refines a path parameter the template does not have.
     #[error(
         "`{verb} {template}` describes the path parameter `{name}`, which the template does not \
-         declare{}",
+         declare{}\nhelp: name the parameter as the template does",
         crate::spec::did_you_mean(.suggestion)
     )]
     UnknownPathParameter {
@@ -424,6 +433,9 @@ pub trait DescribeOperation {
 struct RouteEntry {
     template: RouteTemplate,
     verb: Verb,
+    /// A HEAD the router derived from a GET. `build` applies the
+    /// [`HeadPolicy`] to it, so the policy holds in any builder order.
+    implied_head: bool,
 }
 
 /// Builds a [`Document`] from a route table and a set of annotations.
@@ -434,6 +446,7 @@ pub struct SpecBuilder {
     annotations: BTreeMap<(String, Verb), OperationSpec>,
     head_policy: HeadPolicy,
     id_style: OperationIdStyle,
+    hidden_under: Vec<String>,
     errors: Vec<SpecError>,
 }
 
@@ -450,6 +463,7 @@ impl SpecBuilder {
             annotations: BTreeMap::new(),
             head_policy: HeadPolicy::default(),
             id_style: OperationIdStyle::default(),
+            hidden_under: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -597,6 +611,7 @@ impl SpecBuilder {
             Ok(parsed) => self.routes.push(RouteEntry {
                 template: parsed,
                 verb,
+                implied_head: false,
             }),
             Err(source) => self.errors.push(SpecError::Template {
                 template: template.to_owned(),
@@ -609,7 +624,11 @@ impl SpecBuilder {
     /// Adds one route from an already parsed template.
     #[must_use]
     pub fn route_template(mut self, template: RouteTemplate, verb: Verb) -> Self {
-        self.routes.push(RouteEntry { template, verb });
+        self.routes.push(RouteEntry {
+            template,
+            verb,
+            implied_head: false,
+        });
         self
     }
 
@@ -623,13 +642,12 @@ impl SpecBuilder {
             let has_get = allow.contains(Verb::Get);
             for verb in allow.iter() {
                 // The router adds HEAD to every GET, as RFC 9110 requires.
-                // That one is the server's business, not the document's.
-                if verb == Verb::Head && has_get && self.head_policy == HeadPolicy::Skip {
-                    continue;
-                }
+                // That one is the server's business, not the document's,
+                // unless the policy says otherwise.
                 self.routes.push(RouteEntry {
                     template: template.clone(),
                     verb,
+                    implied_head: verb == Verb::Head && has_get,
                 });
             }
         }
@@ -665,6 +683,26 @@ impl SpecBuilder {
         self.describe(template, verb, OperationSpec::hidden)
     }
 
+    /// Hides every route at `prefix` or under it, without removing any
+    /// from the table.
+    ///
+    /// For routes a module mounts, such as an admin: they are in the
+    /// table, but they are not part of the API this document describes.
+    /// `/admin` hides `/admin` and `/admin/{*rest}`, not `/administrators`.
+    #[must_use]
+    pub fn hide_under(mut self, prefix: &str) -> Self {
+        let prefix = prefix.trim_end_matches('/');
+        self.hidden_under.push(openapi_path(prefix));
+        self
+    }
+
+    fn is_hidden_under(&self, path: &str) -> bool {
+        self.hidden_under.iter().any(|prefix| {
+            path.strip_prefix(prefix.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    }
+
     /// Derives the document.
     ///
     /// # Errors
@@ -675,6 +713,9 @@ impl SpecBuilder {
     pub fn build(mut self) -> Result<Document, SpecError> {
         if let Some(error) = self.errors.first() {
             return Err(error.clone());
+        }
+        if self.head_policy == HeadPolicy::Skip {
+            self.routes.retain(|entry| !entry.implied_head);
         }
 
         let mut seen: Vec<(String, Verb)> = Vec::new();
@@ -742,7 +783,7 @@ impl SpecBuilder {
                 .get(&(path.clone(), entry.verb))
                 .cloned()
                 .unwrap_or_default();
-            if annotation.hidden {
+            if annotation.hidden || self.is_hidden_under(&path) {
                 continue;
             }
 

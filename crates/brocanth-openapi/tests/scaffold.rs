@@ -37,3 +37,29 @@ fn the_document_lists_the_declared_bodies() {
 fn the_module_alone() {
     shape("openapi-flags", &["openapi"]);
 }
+
+/// With the admin: an `API` tab, and the admin's own routes hidden from
+/// the public document, beside the document's two endpoints.
+#[test]
+fn with_the_admin_the_document_has_a_tab_and_hides_the_admin() {
+    shape("openapi-admin", &["config", "admin", "openapi"]);
+    let files =
+        brocanth_cli::testing::generate("my-blog", &["config", "admin", "openapi"], MODULES)
+            .unwrap_or_else(|e| panic!("{e}"));
+    let file = |name: &str| {
+        files
+            .iter()
+            .find(|(path, _)| path.as_str() == name)
+            .map(|(_, text)| text.as_str())
+            .unwrap_or_else(|| panic!("{name} is written"))
+    };
+    let plugin = file("src/plugins/openapi/mod.rs");
+    assert!(plugin.contains(".hide(ROUTE, Verb::Get)"), "{plugin}");
+    assert!(plugin.contains(".hide(YAML_ROUTE, Verb::Get)"), "{plugin}");
+    assert!(
+        plugin.contains(".hide_under(crate::modules::admin::MODULE.mount_at)"),
+        "{plugin}"
+    );
+    assert!(plugin.contains("served.install();"), "{plugin}");
+    assert!(file("src/plugins/mod.rs").contains("ApiPanel::installed()"));
+}

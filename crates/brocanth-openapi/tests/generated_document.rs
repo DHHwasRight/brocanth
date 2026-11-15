@@ -247,6 +247,36 @@ fn an_implicit_head_is_left_out_unless_it_is_asked_for() {
 }
 
 #[test]
+fn hide_under_hides_a_prefix_and_what_is_below_it_only() {
+    let mut routes: RouterBuilder<&'static str> = Router::builder();
+    routes.route("/admin", Verb::Get, "a").unwrap();
+    routes.route("/admin/{*rest}", Verb::Post, "b").unwrap();
+    routes.route("/administrators", Verb::Get, "c").unwrap();
+    let router = routes.build().unwrap();
+    let document = SpecBuilder::new("Blog", "1.0.0")
+        .routes_from_router(&router)
+        .hide_under("/admin/")
+        .build()
+        .unwrap();
+    let paths: Vec<&str> = document.paths.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, vec!["/administrators"]);
+}
+
+#[test]
+fn the_head_policy_holds_when_it_is_set_after_the_routes() {
+    let with_head = SpecBuilder::new("Blog", "1.0.0")
+        .routes_from_router(&blog_router())
+        .head_policy(HeadPolicy::Include)
+        .build()
+        .unwrap();
+    assert!(with_head
+        .path("/posts")
+        .unwrap()
+        .operation(Verb::Head)
+        .is_some());
+}
+
+#[test]
 fn a_catch_all_becomes_an_ordinary_path_parameter() {
     let document = blog_document();
     let item = document
@@ -464,6 +494,11 @@ fn describing_a_route_that_is_not_registered_is_refused() {
         .build()
         .unwrap_err();
 
+    let message = error.to_string();
+    assert!(
+        message.contains("did you mean `/posts`?\nhelp: "),
+        "{message}"
+    );
     let SpecError::UnknownRoute { suggestion, .. } = error else {
         panic!("expected an unknown route");
     };
