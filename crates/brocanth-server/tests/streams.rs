@@ -367,6 +367,53 @@ async fn a_stream_that_ignores_finish_is_dropped_when_the_budget_runs_out() {
     stopped.expect("timed out").expect("the server task");
 }
 
+#[tokio::test]
+async fn after_the_budget_runs_out_no_connection_still_holds_the_handler() {
+    // What the generated `serve` needs: once `run` returns, the handler's
+    // clones (and the `Arc<App>` inside them) are gone, so the plugins can
+    // be stopped with sole ownership.
+    let held = Arc::new(());
+    let server = Server::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral port")
+        .drain_grace(Duration::from_millis(200));
+    let addr = server.local_addr().expect("local addr").to_string();
+    let stopper = server.stopper();
+    let in_handler = held.clone();
+    let task = tokio::spawn(async move {
+        server
+            .run(move |_: Request| {
+                let held = in_handler.clone();
+                async move {
+                    // A request that never finishes, holding its clone.
+                    std::future::pending::<()>().await;
+                    drop(held);
+                    Response::text(200, "never")
+                }
+            })
+            .await
+            .expect("the server ran");
+    });
+
+    let mut stream = request(&addr).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        Arc::strong_count(&held) > 2,
+        "the request did not reach the handler"
+    );
+    stopper.stop();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the budget expired")
+        .expect("the server task");
+    assert_eq!(
+        Arc::strong_count(&held),
+        1,
+        "a connection task outlived `run` and still holds the handler"
+    );
+    let _ = stream.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // The error path
 // ---------------------------------------------------------------------------
