@@ -473,6 +473,10 @@ fn answered(status: u16, headers: Vec<(String, String)>, body: CoreBody) -> Core
 }
 
 /// A core response with a status, a plain-text body and nothing else.
+///
+/// Only the tests build one now: the 501, 405 and 404 come from the core's
+/// `route`.
+#[cfg(test)]
 fn plain(status: u16, body: &'static str) -> CoreResponse {
     let mut out = CoreResponse::new(CoreBody::from(body));
     *out.status_mut() = http::StatusCode::from_u16(status).expect("a status this crate wrote");

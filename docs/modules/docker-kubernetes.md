@@ -13,7 +13,7 @@ The wizard calls it: *A Kubernetes deployment of the image*.
 | Part of | [`docker`](docker.md), off until you tick it |
 | Needs | [`observability-health`](observability-health.md): its liveness and readiness probes are `/up` and `/readyz` |
 | After | [`observability-health`](observability-health.md) |
-| Adapts to | none |
+| Adapts to | [`observability-metrics`](observability-metrics.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

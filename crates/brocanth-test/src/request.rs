@@ -397,10 +397,22 @@ mod tests {
     #[test]
     fn a_location_is_resolved_against_the_target_that_answered() {
         assert_eq!(resolve("/posts/7", "/x", None).as_deref(), Some("/x"));
-        assert_eq!(resolve("/posts/7", "edit", None).as_deref(), Some("/posts/edit"));
-        assert_eq!(resolve("/posts/7/", "edit", None).as_deref(), Some("/posts/7/edit"));
-        assert_eq!(resolve("/posts/7?a=1", "?page=2", None).as_deref(), Some("/posts/7?page=2"));
-        assert_eq!(resolve("/a/b/c", "../d?q=1#top", None).as_deref(), Some("/a/d?q=1"));
+        assert_eq!(
+            resolve("/posts/7", "edit", None).as_deref(),
+            Some("/posts/edit")
+        );
+        assert_eq!(
+            resolve("/posts/7/", "edit", None).as_deref(),
+            Some("/posts/7/edit")
+        );
+        assert_eq!(
+            resolve("/posts/7?a=1", "?page=2", None).as_deref(),
+            Some("/posts/7?page=2")
+        );
+        assert_eq!(
+            resolve("/a/b/c", "../d?q=1#top", None).as_deref(),
+            Some("/a/d?q=1")
+        );
         assert_eq!(
             resolve("/", "https://app.test/admin?x=1", Some("app.test")).as_deref(),
             Some("/admin?x=1")
@@ -410,7 +422,10 @@ mod tests {
     #[test]
     fn a_location_on_another_host_is_not_followed() {
         assert_eq!(resolve("/", "https://elsewhere.example/admin", None), None);
-        assert_eq!(resolve("/", "//elsewhere.example/admin", Some("app.test")), None);
+        assert_eq!(
+            resolve("/", "//elsewhere.example/admin", Some("app.test")),
+            None
+        );
     }
 
     #[test]
@@ -421,7 +436,9 @@ mod tests {
             ("Set-Cookie".into(), "a=; Max-Age=0".into()),
         ]);
         assert_eq!(jar.header().as_deref(), Some("session=abc"));
-        let next = TestRequest::get("/").header("cookie", "old=1").with_cookies(&jar);
+        let next = TestRequest::get("/")
+            .header("cookie", "old=1")
+            .with_cookies(&jar);
         assert_eq!(next.header_value("cookie"), Some("session=abc"));
     }
 

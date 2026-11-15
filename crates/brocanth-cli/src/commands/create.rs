@@ -1374,7 +1374,6 @@ fn agents_md(a: &Answers, built: &Built) -> String {
     // the house style is. Each module writes its own (`rsx` its views).
     let sections: String = built.slot(Slot::AgentsSections).collect();
 
-
     // The modules are the person's decisions. An agent that adds one in
     // silence made a choice that was not its own, so the brief says so,
     // and lists what the modules here recommend and the project lacks.
@@ -2649,7 +2648,10 @@ fn run() -> brocanth_command::anyhow::Result<()> {{
 "##,
         // The flags the modules declared, as arguments every command takes.
         run = if flags {
-            "    brocanth_command::main_with(brocanth_command::Context::boot(crate::app::APP)?, plugins::flag_args)"
+            "    brocanth_command::main_with(
+        brocanth_command::Context::boot(crate::app::APP)?,
+        plugins::flag_args,
+    )"
         } else {
             "    brocanth_command::main(brocanth_command::Context::boot(crate::app::APP)?)"
         },

@@ -48,7 +48,10 @@ impl Module for Docker {
         } else {
             "curl -sS"
         };
-        s.file("Dockerfile", fill(DOCKERFILE, project).replace("@CURL@", curl));
+        s.file(
+            "Dockerfile",
+            fill(DOCKERFILE, project).replace("@CURL@", curl),
+        );
         s.file(".dockerignore", DOCKERIGNORE.to_string());
     }
 }
@@ -276,10 +279,11 @@ mod tests {
         let project = Project::new(name, "Demo", on, &known);
         let mut s = Scaffold::new();
         module.contribute(&project, &mut s);
-        s.files()
+        let text = s
+            .files()
             .find(|(p, _)| *p == path)
-            .map(|(_, text)| text.to_string())
-            .expect("the module writes the file")
+            .map(|(_, text)| text.to_string());
+        text.expect("the module writes the file")
     }
 
     #[test]
@@ -290,7 +294,10 @@ mod tests {
         assert!(yaml.contains("app: blog-2"), "{yaml}");
         // The image keeps the binary's own name, and the env the app's.
         assert!(yaml.contains("image: blog_2:latest"), "{yaml}");
-        assert!(yaml.contains("BLOG_2_SERVER__SHUTDOWN_GRACE_SECS"), "{yaml}");
+        assert!(
+            yaml.contains("BLOG_2_SERVER__SHUTDOWN_GRACE_SECS"),
+            "{yaml}"
+        );
         assert!(!yaml.contains('@'), "a placeholder was left behind: {yaml}");
     }
 

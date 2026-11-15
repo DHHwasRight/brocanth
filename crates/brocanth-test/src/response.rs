@@ -45,11 +45,7 @@ impl TestResponse {
         Self::from_parts(&head, body, body_error)
     }
 
-    fn from_parts(
-        head: &http::response::Parts,
-        body: Vec<u8>,
-        body_error: Option<String>,
-    ) -> Self {
+    fn from_parts(head: &http::response::Parts, body: Vec<u8>, body_error: Option<String>) -> Self {
         let headers = head
             .headers
             .iter()

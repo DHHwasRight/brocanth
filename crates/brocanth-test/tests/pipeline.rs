@@ -492,8 +492,7 @@ fn a_followed_redirect_resolves_the_location_and_carries_the_cookie() {
     let page = table(&Feed::default()).send(TestRequest::post("/account/login").following());
     page.assert_ok();
     assert_eq!(page.redirect_chain(), ["/account/dashboard?tab=1"]);
-    page.html()
-        .assert_text("cookie session=abc query tab=1");
+    page.html().assert_text("cookie session=abc query tab=1");
 }
 
 #[test]

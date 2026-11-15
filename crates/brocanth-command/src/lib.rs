@@ -503,7 +503,10 @@ mod tests {
         let both = vars(&[("MY_BLOG_ENV", "production"), ("BROCANTH_ENV", "staging")]);
         assert_eq!(env_from("my-blog", both), "production");
         // `BROCANTH_ENV` stays as a fallback.
-        assert_eq!(env_from("my-blog", vars(&[("BROCANTH_ENV", "staging")])), "staging");
+        assert_eq!(
+            env_from("my-blog", vars(&[("BROCANTH_ENV", "staging")])),
+            "staging"
+        );
         assert_eq!(env_from("my-blog", vars(&[])), "development");
     }
 }

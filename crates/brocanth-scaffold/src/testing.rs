@@ -335,7 +335,10 @@ mod tests {
         let path = Path::new("g.txt");
         let newline = mismatch(path, "a\nb\n", "a\nb");
         assert!(newline.contains("newline at the end"), "{newline}");
-        assert!(newline.contains("4 bytes") && newline.contains("3 bytes"), "{newline}");
+        assert!(
+            newline.contains("4 bytes") && newline.contains("3 bytes"),
+            "{newline}"
+        );
         let crlf = mismatch(path, "a\nb\n", "a\r\nb\r\n");
         assert!(crlf.contains("CRLF"), "{crlf}");
         assert!(mismatch(path, "a\n", "b\n").contains("at line 1"));

@@ -13,7 +13,7 @@ The wizard calls it: *A container image*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | none |
+| Adapts to | [`observability-health`](observability-health.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

@@ -465,10 +465,49 @@ fn is_raw(name: &str) -> bool {
 /// the text on either side of one does not run together: `<td>a</td><td>b</td>`
 /// reads `a b`. Inline elements are not here, so `wo<b>rd</b>` stays `word`.
 const BREAKS: &[&str] = &[
-    "address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "dialog",
-    "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
-    "h4", "h5", "h6", "header", "hr", "legend", "li", "main", "nav", "ol", "option", "p", "pre",
-    "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "details",
+    "dialog",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "legend",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "option",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
 ];
 
 fn breaks_text(name: &str) -> bool {
@@ -864,7 +903,10 @@ mod tests {
     fn block_elements_keep_their_text_apart_and_inline_ones_do_not() {
         let page = Html::new("<table><tr><td>a</td><td>b</td></tr></table><p>wo<b>rd</b></p>");
         assert_eq!(page.text(), "a b word");
-        assert_eq!(Html::new("<li>one</li><li>two</li>line<br>break").text(), "one two line break");
+        assert_eq!(
+            Html::new("<li>one</li><li>two</li>line<br>break").text(),
+            "one two line break"
+        );
     }
 
     #[test]

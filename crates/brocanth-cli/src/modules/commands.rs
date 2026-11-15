@@ -2,10 +2,15 @@
 
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
-/// A `manage` binary whose subcommands are the project's own structs.
+/// A command line whose subcommands are the project's own structs.
 ///
-/// Also what makes a directory a project: it writes `brocanth.toml`, the
-/// marker the global binary walks up to find.
+/// It writes `serve`, `routes` and the AGENTS.md section on tasks. It does
+/// not write `brocanth.toml`: `create.rs` writes that marker for every
+/// project. Four things stay in `create.rs`, because each one is a choice
+/// between two whole shapes of a file that every project has, not a piece a
+/// module adds: `src/main.rs`, the `serve` task in `mise.toml`, the next
+/// steps `create` prints, and `src/commands/mod.rs`, which lists the
+/// `CommandsMod` lines of every module.
 pub struct Commands;
 
 impl Module for Commands {
@@ -25,12 +30,50 @@ impl Module for Commands {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        // `src/commands/mod.rs` and `serve` are still written by
-        // `create.rs`. Moving here next.
+        s.file("src/commands/serve.rs", SERVE_RS.to_string());
+        s.at(Slot::CommandsMod).line("pub mod serve;");
         s.file("src/commands/routes.rs", routes_rs(project));
         s.at(Slot::CommandsMod).line("pub mod routes;");
+        s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
+
+/// The AGENTS.md section on how to add a command.
+const AGENTS: &str = "\n## Tasks\n\n\
+A command is a `clap::Args` struct with `#[cmd]` on it, in its own file under\n\
+`src/commands/`, plus a `pub mod` line at the end of `src/commands/mod.rs`,\n\
+below the line that starts `// Your commands`. `brocanth add` rewrites the\n\
+lines above it and keeps yours. The command becomes a subcommand\n\
+automatically — registration happens at link time.\n\n\
+```\nbrocanth --help      # lists this project's commands too\nbrocanth serve\n```\n";
+
+/// `src/commands/serve.rs`: the one command a new project gets.
+///
+/// Written into the project rather than built into the framework, because the
+/// command line is the project's and tuning it should not mean forking
+/// anything.
+const SERVE_RS: &str = r#"//! `serve` -- the one command the scaffold wrote.
+//!
+//! It is ordinary project code: rename it, give it more flags, or delete it.
+//! The framework does not own this command line.
+
+use brocanth_command::{anyhow, clap, cmd, Command, Context};
+
+/// Serve the application over HTTP.
+#[cmd]
+#[derive(clap::Args)]
+pub struct Serve {
+    /// Address to bind.
+    #[arg(long, default_value_t = crate::app::default_addr())]
+    pub addr: String,
+}
+
+impl Command for Serve {
+    fn run(self, _ctx: &mut Context) -> anyhow::Result<()> {
+        crate::app::serve(&self.addr).map_err(anyhow::Error::msg)
+    }
+}
+"#;
 
 /// `src/commands/routes.rs`.
 ///
@@ -109,7 +152,13 @@ fn table() -> anyhow::Result<(Vec<&'static str>, Vec<Vec<String>>)> {
         })
         .collect();
     for (verb, pattern) in crate::pages::mounted_routes()? {
-        rows.push(vec![verb, pattern, MOUNTED.to_string(), "-".into(), "-".into()]);
+        rows.push(vec![
+            verb,
+            pattern,
+            MOUNTED.to_string(),
+            "-".into(),
+            "-".into(),
+        ]);
     }
     Ok((vec!["VERB", "PATTERN", "HANDLER", "TAKES", "GIVES"], rows))
 }"##;

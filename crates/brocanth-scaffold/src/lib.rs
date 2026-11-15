@@ -1837,7 +1837,10 @@ mod tests {
     fn a_toml_value_uses_toml_escapes_and_not_rust_debug() {
         assert_eq!(toml_string("a \"b\" \\ c"), r#""a \"b\" \\ c""#);
         // Debug would write `\u{200b}`, which TOML refuses.
-        assert_eq!(toml_string("zero\u{200b}width it's"), "\"zero\u{200b}width it's\"");
+        assert_eq!(
+            toml_string("zero\u{200b}width it's"),
+            "\"zero\u{200b}width it's\""
+        );
         assert_eq!(toml_string("bell\u{7}"), r#""bell\u0007""#);
         assert_eq!(toml_float(f64::NAN), "nan");
         assert_eq!(toml_float(f64::NEG_INFINITY), "-inf");
