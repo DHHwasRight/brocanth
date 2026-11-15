@@ -6,7 +6,7 @@
 use brocanth_admin::data::{DataError, Locked, Scope, Search};
 use brocanth_admin::model::Row;
 use brocanth_admin::query::{Direction, Sort};
-use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
+use brocanth_admin::row_policy::Dialect;
 use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition, LikeExpr};
 use brocanth_model::sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, Iterable, Order,

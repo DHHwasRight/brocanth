@@ -164,11 +164,27 @@ fn the_plugin_stamps_the_csrf_token_into_every_form_that_posts() {
     app.mount_routes::<AdminPlugin>("/admin")
         .expect("the routes");
     let client = TestClient::new(app);
-    let page = client.send(
-        TestRequest::get("/admin/post/1/edit").header("cookie", &format!("csrf_token={TOKEN}")),
-    );
+    let page = client.send(TestRequest::get("/admin/post/1/edit").header(
+        "cookie",
+        &format!("{}={TOKEN}", CsrfConfig::default().cookie),
+    ));
     assert_eq!(page.status(), 200);
     let html = page.html();
     let field = html.field("_csrf_token").expect("the token field");
-    assert_eq!(field.attr("value"), Some(TOKEN));
+    let sent = field.attr("value").expect("a value");
+    assert_eq!(unmask(sent), TOKEN, "the field carries the cookie's token");
+}
+
+/// The token inside a masked field: hex of a pad, then hex of the pad XOR
+/// the token (the CSRF hook masks the field per response).
+fn unmask(sent: &str) -> String {
+    let bytes: Vec<u8> = (0..sent.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&sent[i..i + 2], 16).expect("hex"))
+        .collect();
+    let (pad, masked) = bytes.split_at(bytes.len() / 2);
+    pad.iter()
+        .zip(masked)
+        .map(|(p, m)| format!("{:02x}", p ^ m))
+        .collect()
 }
